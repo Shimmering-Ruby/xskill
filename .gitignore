@@ -1,0 +1,38 @@
+# 数据文件（大量轨迹 md/json/meta/pkl）
+data/
+data_bak/
+
+# 生成的 skill 仓库（有自己的 git）
+skill/
+
+# 运行日志
+output/
+
+# 密钥
+.key
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 环境
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
