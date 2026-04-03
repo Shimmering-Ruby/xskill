@@ -229,63 +229,154 @@ def eval_llm_scoring(skill_dir: Path, llm_client, n_runs: int = 3, log_fn=None) 
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Tier 1: SWE-bench 沙箱 (占位)
+# Tier 1: 沙箱评测
 # ═══════════════════════════════════════════════════════════════════
 
-def eval_swe_sandbox(skill_dir: Path, instances: list[str], log_fn=None) -> dict:
+def eval_sandbox(
+    skill_dir: Path,
+    instances: list[str],
+    llm_config: dict,
+    sandbox_config: dict = None,
+    log_fn=None,
+) -> dict:
     """
-    SWE-bench 沙箱 A/B/C 测试
+    沙箱 A/B 评测。
 
-    需要: pip install swebench, Docker
-
-    TODO: Phase 2 实现
+    Args:
+        skill_dir: skill 目录
+        instances: SWE-bench instance_id 列表
+        llm_config: LLM 配置（传入容器供 agent 使用）
+        sandbox_config: 沙箱配置（n_trials, max_instances, timeout 等）
+        log_fn: 日志回调
     """
     _log = log_fn or (lambda *a: None)
-    _log("  🚧 SWE-bench 沙箱评估尚未实现, fallback LLM 打分")
-    return {"tier": "swe_sandbox", "eval_score": 0, "error": "not implemented", "instances": instances}
+
+    try:
+        from modules.sandbox import get_sandbox
+    except ImportError as e:
+        _log(f"  沙箱模块不可用: {e}", "eval")
+        return {"tier": "swe_sandbox", "eval_score": 0, "error": str(e)}
+
+    cfg = sandbox_config or {}
+    n_trials = cfg.get("n_trials", 10)
+    max_instances = cfg.get("max_instances", 5)
+    timeout = cfg.get("timeout_per_trial", 300)
+
+    # 限制 instance 数量
+    instances = instances[:max_instances]
+
+    try:
+        sandbox = get_sandbox("swe_smith", timeout=timeout)
+        cache_dir = Path.home() / ".cache" / "traj2skill" / "swe_smith" / "baselines"
+        result = sandbox.evaluate(
+            skill_dir=skill_dir,
+            instance_ids=instances,
+            llm_config=llm_config,
+            n_trials=n_trials,
+            baseline_cache_dir=cache_dir,
+            log_fn=log_fn,
+        )
+        return {
+            "tier": "swe_sandbox",
+            "eval_score": result.eval_score,
+            "baseline_pass_rate": result.baseline_pass_rate,
+            "skill_pass_rate": result.skill_pass_rate,
+            "delta": result.delta,
+            "n_tasks": len(result.ab_results),
+            "n_trials": n_trials,
+            "details": [
+                {"task_id": r.task_id,
+                 "baseline_pass@1": r.baseline_pass_at_1,
+                 "skill_pass@1": r.skill_pass_at_1}
+                for r in result.ab_results
+            ],
+        }
+    except Exception as e:
+        _log(f"  沙箱执行失败: {e}", "eval")
+        return {"tier": "swe_sandbox", "eval_score": 0, "error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════
 # 统一入口
 # ═══════════════════════════════════════════════════════════════════
 
-def run_eval(skill_dir: Path, llm_client, n_runs: int = 3, log_fn=None) -> dict:
+def run_eval(
+    skill_dir: Path,
+    llm_client,
+    n_runs: int = 3,
+    log_fn=None,
+    config: dict = None,
+    force_sandbox: bool = False,
+    force_no_sandbox: bool = False,
+) -> dict:
     """
     两层 eval:
-      source_trajs 有 ≥3 个 SWE-bench instance → Tier 1
-      否则 → Tier 2 LLM 打分
+      Tier 1: 沙箱 A/B（有 SWE-bench instance 且 sandbox enabled）
+      Tier 2: LLM 7 维打分（常态）
+
+    Args:
+        config: 完整配置（包含 llm 和 sandbox 段），供沙箱传入容器
+        force_sandbox: 强制走沙箱（即使 instance 不足）
+        force_no_sandbox: 强制跳过沙箱
     """
     _log = log_fn or (lambda *a: None)
+    config = config or {}
+    sandbox_cfg = config.get("sandbox", {})
+    sandbox_enabled = sandbox_cfg.get("enabled", True) and not force_no_sandbox
+    trigger_threshold = sandbox_cfg.get("trigger_threshold", 3)
 
-    # 检查是否有 SWE-bench instance
+    # 收集 SWE-bench instance_id
+    swe_instances = _collect_swe_instances(skill_dir)
+    _log(f"  🔍 SWE-bench instances 关联: {len(swe_instances)} 个")
+
+    # Tier 1: 沙箱评测
+    if sandbox_enabled and (len(swe_instances) >= trigger_threshold or force_sandbox):
+        if swe_instances:
+            llm_config = config.get("llm", {})
+            result = eval_sandbox(skill_dir, swe_instances, llm_config, sandbox_cfg, log_fn)
+            if result.get("eval_score", 0) > 0:
+                return result
+            _log("  ↪ 沙箱不可用, fallback LLM 打分")
+
+    # Tier 2: LLM 打分
+    return eval_llm_scoring(skill_dir, llm_client, n_runs, log_fn)
+
+
+def _collect_swe_instances(skill_dir: Path) -> list[str]:
+    """从 skill 的 .abstract 和关联轨迹中收集 SWE-bench instance_id"""
     abstract_path = skill_dir / ".abstract"
     swe_instances = []
-    if abstract_path.exists():
+
+    if not abstract_path.exists():
+        return swe_instances
+
+    try:
         abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
-        source_trajs = abstract.get("source_trajs", [])
-        # 从对应的 traj json 里提取 instance_id
-        for traj_ref in source_trajs:
-            for data_dir in (skill_dir.parent.parent / "data").iterdir():
-                if not data_dir.is_dir():
-                    continue
-                json_file = data_dir / f"{traj_ref}.json"
-                if json_file.exists():
+    except Exception:
+        return swe_instances
+
+    source_trajs = abstract.get("source_trajs", [])
+    data_dir = skill_dir.parent.parent / "data"
+
+    if not data_dir.exists():
+        return swe_instances
+
+    for traj_ref in source_trajs:
+        for d in data_dir.iterdir():
+            if not d.is_dir():
+                continue
+            json_file = d / f"{traj_ref}.json"
+            if json_file.exists():
+                try:
                     traj_json = json.loads(json_file.read_text(encoding="utf-8"))
                     iid = traj_json.get("raw_metadata", {}).get("instance_id", "")
                     if iid:
                         swe_instances.append(iid)
-                    break
+                except Exception:
+                    pass
+                break
 
-    swe_instances = list(set(swe_instances))
-    _log(f"  🔍 SWE-bench instances 关联: {len(swe_instances)} 个")
-
-    if len(swe_instances) >= 3:
-        result = eval_swe_sandbox(skill_dir, swe_instances, log_fn)
-        if result.get("eval_score", 0) > 0:
-            return result
-        _log("  ↪ SWE sandbox 不可用, fallback LLM 打分")
-
-    return eval_llm_scoring(skill_dir, llm_client, n_runs, log_fn)
+    return list(set(swe_instances))
 
 
 def should_merge(eval_result: dict, old_eval: dict = None, is_new: bool = True) -> bool:

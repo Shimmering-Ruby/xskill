@@ -383,7 +383,7 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False) -> dict
             log(f"评估 skill: {skill_name}", "eval")
 
             if llm:
-                result = run_eval(skill_path, llm, n_runs=3, log_fn=log)
+                result = run_eval(skill_path, llm, n_runs=3, log_fn=log, config=config)
             else:
                 result = {"tier": "none", "eval_score": 7.0, "note": "no llm, auto pass"}
             eval_results[skill_name] = result
@@ -535,7 +535,11 @@ def cmd_eval(args, config):
         return 1
 
     log = StreamLog()
-    result = run_eval(skill_path, llm, n_runs=args.n_runs, log_fn=log)
+    result = run_eval(
+        skill_path, llm, n_runs=args.n_runs, log_fn=log, config=config,
+        force_sandbox=getattr(args, 'sandbox', False),
+        force_no_sandbox=getattr(args, 'no_sandbox', False),
+    )
     print(f"\n  结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
     return 0
 
@@ -575,6 +579,8 @@ def main():
     p_eval = sub.add_parser("eval", help="手动触发 skill eval")
     p_eval.add_argument("--skill", required=True, help="skill 名称")
     p_eval.add_argument("--n-runs", type=int, default=3, help="LLM 打分次数")
+    p_eval.add_argument("--sandbox", action="store_true", help="强制使用沙箱评测")
+    p_eval.add_argument("--no-sandbox", action="store_true", help="跳过沙箱，只用 LLM 打分")
 
     # 全局参数
     parser.add_argument("--llm-base-url", help="覆盖 LLM base_url")
