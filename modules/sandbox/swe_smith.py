@@ -39,56 +39,83 @@ class SweSmithSandbox(Sandbox):
     # 数据加载
     # ═══════════════════════════════════════════════════════════════
 
-    def _load_dataset_index(self) -> dict:
-        """加载或构建 {instance_id → HF row} 索引"""
-        if self._dataset_index is not None:
-            return self._dataset_index
+    def _load_from_cache(self, instance_id: str) -> dict | None:
+        """从本地缓存读取单个 instance"""
+        cache_file = self._cache_dir / "instances" / f"{instance_id}.json"
+        if cache_file.exists():
+            return json.loads(cache_file.read_text(encoding="utf-8"))
+        return None
 
-        index_path = self._cache_dir / "instance_index.pkl"
-        if index_path.exists():
-            logger.info(f"从缓存加载 SWE-smith 索引: {index_path}")
-            with open(index_path, "rb") as f:
-                self._dataset_index = pickle.load(f)
-            return self._dataset_index
+    def _save_to_cache(self, instance_id: str, row: dict):
+        """缓存单个 instance 到本地"""
+        cache_dir = self._cache_dir / "instances"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{instance_id}.json"
+        cache_file.write_text(json.dumps(row, ensure_ascii=False), encoding="utf-8")
 
-        logger.info("首次加载 SWE-smith 数据集，构建索引...")
+    def _fetch_from_hf(self, target_ids: set[str]) -> dict[str, dict]:
+        """从 HuggingFace streaming 加载指定的 instance，找到就停"""
         from datasets import load_dataset
 
+        logger.info(f"从 HuggingFace streaming 搜索 {len(target_ids)} 个 instance...")
         ds = load_dataset("SWE-bench/SWE-smith", split="train", streaming=True)
-        index = {}
+        found = {}
         count = 0
         for row in ds:
-            index[row["instance_id"]] = {
-                "instance_id": row["instance_id"],
-                "problem_statement": row.get("problem_statement", ""),
-                "image_name": row.get("image_name", ""),
-                "repo": row.get("repo", ""),
-                "patch": row.get("patch", ""),
-                "FAIL_TO_PASS": row.get("FAIL_TO_PASS", "[]"),
-                "PASS_TO_PASS": row.get("PASS_TO_PASS", "[]"),
-            }
+            iid = row["instance_id"]
+            if iid in target_ids:
+                data = {
+                    "instance_id": iid,
+                    "problem_statement": row.get("problem_statement", ""),
+                    "image_name": row.get("image_name", ""),
+                    "repo": row.get("repo", ""),
+                    "patch": row.get("patch", ""),
+                    "FAIL_TO_PASS": row.get("FAIL_TO_PASS", "[]"),
+                    "PASS_TO_PASS": row.get("PASS_TO_PASS", "[]"),
+                }
+                found[iid] = data
+                self._save_to_cache(iid, data)
+                logger.info(f"  找到: {iid} ({len(found)}/{len(target_ids)})")
+                if len(found) == len(target_ids):
+                    break
             count += 1
-            if count % 5000 == 0:
-                logger.info(f"  已加载 {count} 条...")
+            if count % 10000 == 0:
+                logger.info(f"  已扫描 {count} 条...")
 
-        logger.info(f"SWE-smith 索引构建完成: {count} 条")
-        with open(index_path, "wb") as f:
-            pickle.dump(index, f)
+        if len(found) < len(target_ids):
+            missing = target_ids - set(found.keys())
+            logger.warning(f"未找到 {len(missing)} 个 instance: {list(missing)[:5]}")
 
-        self._dataset_index = index
-        return index
+        return found
 
     def load_tasks(self, instance_ids: list[str]) -> list[TaskSpec]:
-        """从索引中加载 TaskSpec"""
-        index = self._load_dataset_index()
+        """加载 TaskSpec，优先读缓存，缺的从 HF streaming 补"""
         tasks = []
-        for iid in instance_ids:
-            if iid not in index:
-                logger.warning(f"instance_id 不在 SWE-smith 中: {iid}")
-                continue
-            row = index[iid]
+        need_fetch = set()
 
-            # FAIL_TO_PASS 可能是 JSON 字符串或 list
+        # 先查缓存
+        cached_rows = {}
+        for iid in instance_ids:
+            row = self._load_from_cache(iid)
+            if row:
+                cached_rows[iid] = row
+            else:
+                need_fetch.add(iid)
+
+        if cached_rows:
+            logger.info(f"缓存命中 {len(cached_rows)} 个 instance")
+
+        # 缺的从 HF 拉
+        if need_fetch:
+            fetched = self._fetch_from_hf(need_fetch)
+            cached_rows.update(fetched)
+
+        # 构建 TaskSpec
+        for iid in instance_ids:
+            if iid not in cached_rows:
+                continue
+            row = cached_rows[iid]
+
             fail_to_pass = row.get("FAIL_TO_PASS", "[]")
             if isinstance(fail_to_pass, str):
                 try:
