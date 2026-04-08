@@ -207,7 +207,7 @@ def cmd_batch(args, config):
 def cmd_init(args, config):
     from traj2skill.git_lock import ensure_repo
 
-    skill_dir = get_skill_dir()
+    skill_dir = Path(args.path) if getattr(args, 'path', None) else get_skill_dir()
     ensure_repo(str(skill_dir))
     print(f"skill repo initialized: {skill_dir}")
     return 0
@@ -573,7 +573,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch.add_argument("--dry-run", action="store_true")
 
     # --- init ---
-    sub.add_parser("init", help="Initialize skill git repo")
+    p_init = sub.add_parser("init", help="Initialize skill git repo")
+    p_init.add_argument("path", nargs="?", help="skill repo path (default: --skill-dir)")
 
     # --- status ---
     sub.add_parser("status", help="Show skill repo status")
