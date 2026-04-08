@@ -17,9 +17,14 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+*.egg
 dist/
 build/
 .eggs/
+*.so
+
+# pip editable install
+src/*.egg-info/
 
 # 环境
 .env

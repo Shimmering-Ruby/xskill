@@ -2,44 +2,59 @@
 
 从 AI Agent 执行轨迹中自动蒸馏可复用的 Skill。
 
-## 架构
-
-```
-轨迹 (.md) → LLM 提取 meta → 向量索引 → Skill Agent 分析 → 生成 skill.md → LLM eval → 合入
-```
-
-### 核心模块
-
-| 文件 | 职责 |
-|------|------|
-| `traj2skill.py` | 主入口，6 个子命令（process/batch/init/reindex/status/eval） |
-| `index.py` | 轨迹索引构建（增量，并发 LLM 提取 meta + embedding） |
-| `search.py` | 轨迹检索（向量相似度） |
-| `modules/llm_client.py` | LLM + Embedding 客户端（ARK/OpenAI 兼容） |
-| `modules/skill_tools.py` | Skill Agent 的 6 个工具函数 |
-| `modules/skill_eval.py` | 两层评估：LLM 7 维打分（SWE-bench 沙箱占位） |
-| `modules/git_lock.py` | 文件锁 + git 版本管理 |
-
-### 数据流
-
-```
-data/{dataset}/traj_XXXX.md       ← 原始轨迹
-data/{dataset}/traj_XXXX.md.meta  ← LLM 提取的结构化 meta（增量）
-data/{dataset}/index.pkl          ← 向量索引（增量）
-skill/{skill_name}/skill.md       ← 蒸馏出的 skill
-skill/{skill_name}/.abstract      ← 自动生成的摘要 + eval 结果
-skill/.skill_index.pkl            ← skill 向量索引
-```
-
-## 使用
-
-### 前置
+## 安装
 
 ```bash
-pip3.11 install -r requirements.txt
+pip install -e .
 ```
 
-配置 `config.yaml`（参考 `.key` 格式）：
+## CLI: `t2s`
+
+```bash
+# 轨迹入库
+t2s index /path/to/trajectories                    # 索引指定目录
+t2s index --dataset swe_smith_dataset              # 索引 data/ 下的数据集
+t2s index --all                                    # 索引全部数据集
+
+# 轨迹检索
+t2s search /path/to/trajectories --query "Django 表单"
+t2s search --dataset swe_smith_dataset --traj data/.../traj_0042.md
+
+# Skill 生成
+t2s init                                           # 初始化 skill 仓库
+t2s process /path/to/traj_0042.md                  # 处理单条轨迹
+t2s batch /path/to/trajectories --max 10           # 批量处理
+
+# Skill 评测
+t2s eval --skill fix_xxx                           # LLM 打分
+t2s eval --skill fix_xxx --sandbox                 # 沙箱 A/B 评测
+
+# Skill 版本管理
+t2s skill list                                     # 列出所有 skill
+t2s skill show fix_xxx                             # 查看详情
+t2s skill log fix_xxx                              # 版本历史
+t2s skill diff fix_xxx                             # 版本差异
+t2s skill rollback fix_xxx                         # 回滚
+t2s skill freeze fix_xxx                           # 冻结
+t2s skill export fix_xxx -o /path/output           # 导出
+
+# 调试 / 查看
+t2s status                                         # skill 仓库状态
+t2s show --skill fix_xxx                           # 打印 skill 详情
+t2s show --traj /path/to/traj_0042.md              # 打印轨迹 meta
+t2s search-skill --query "xxx"                     # 检索已有 skill
+t2s validate /path/to/trajectories                 # 校验轨迹格式
+
+# 全局选项
+t2s --debug ...                                    # 详细日志
+t2s --config path.yaml                             # 指定配置文件
+t2s --skill-dir /path                              # 覆盖 skill 目录
+t2s --traj-dir /path                               # 覆盖轨迹目录
+```
+
+## 配置
+
+`config.yaml`:
 
 ```yaml
 llm:
@@ -52,71 +67,40 @@ embedding:
   model: "doubao-embedding-vision-251215"
   api_key: "your-key"
   dim: 0
+
+sandbox:
+  enabled: true
+  max_instances: 5
+  n_trials: 10
+  timeout_per_trial: 300
 ```
 
-### 索引轨迹
+也可通过环境变量配置：
 
 ```bash
-# 索引单个数据集
-python3.11 index.py --dataset swe_smith_dataset
-
-# 索引全部数据集
-python3.11 index.py --all
-
-# 调整并发数
-python3.11 index.py --all --concurrency 20
+export T2S_TRAJ_DIR=/path/to/trajectories
+export T2S_SKILL_DIR=/path/to/skills
+export T2S_CONFIG=/path/to/config.yaml
 ```
 
-### 检索轨迹
-
-```bash
-# 自然语言查询
-python3.11 search.py --dataset swe_smith_dataset --query "修复 Django 表单验证"
-
-# 用轨迹作为查询
-python3.11 search.py --dataset swe_smith_dataset --traj data/swe_smith_dataset/traj_0042.md
-```
-
-### Skill 生成
-
-```bash
-# 初始化 skill 仓库
-python3.11 traj2skill.py init
-
-# 处理单条轨迹
-python3.11 traj2skill.py process --traj data/swe_smith_dataset/traj_0042.md
-
-# 批量处理
-python3.11 traj2skill.py batch --dataset swe_smith_dataset --max 10
-
-# 查看状态
-python3.11 traj2skill.py status
-
-# 手动 eval
-python3.11 traj2skill.py eval --skill fix_orm_query --n-runs 5
-```
-
-### Skill 生成流程
+## 包结构
 
 ```
-1. 读取轨迹 + meta
-2. 获取文件锁
-3. 启动 agno Agent（流式输出思考过程）
-   - search_skills → 检索已有 skill
-   - search_similar_trajs → 检索相似轨迹
-   - 决策：创建新 skill / 更新已有 / 跳过
-   - create_skill + write_file → 写入 skill.md
-4. 检测变更，commit
-5. LLM 7 维评估（trigger_precision, step_actionability, granularity, generalizability, pitfall_quality, faithfulness, structural_quality）
-6. eval ≥ 6.0 → 生成 abstract + 重建索引
-7. eval < 6.0 → revert
-8. 释放锁
+src/traj2skill/
+├── cli.py              # 统一 CLI 入口 (t2s)
+├── config.py           # 路径管理 + 配置加载
+├── index.py            # 轨迹索引（增量）
+├── search.py           # 轨迹检索
+├── process.py          # Skill 生成流程
+├── agent.py            # agno Agent（SYSTEM_PROMPT + 流式执行）
+├── log.py              # StreamLog
+├── llm_client.py       # LLM + Embedding 客户端
+├── git_lock.py         # 文件锁 + git 版本管理
+├── skill_tools.py      # Agent 工具函数
+├── skill_eval.py       # 多维评价 + 沙箱评测
+├── skill_manager.py    # Skill 版本管理
+└── sandbox/            # 可扩展沙箱框架
+    ├── base.py         # 抽象基类
+    ├── registry.py     # 沙箱注册表
+    └── swe_smith.py    # SWE-smith 实现
 ```
-
-## 设计决策
-
-- **增量索引**：meta 提取和 embedding 都支持断点续跑，单条失败不影响全局
-- **meta 质量校验**：intent/summary/tags 必须非空且有实质内容，不合格自动重提
-- **文件锁而非 git 分支锁**：`.lock` 文件写 PID，atexit/signal 自动清理，死进程检测
-- **eval 后才生成摘要**：agent 只写 skill.md，abstract 和索引在 eval 通过后由系统自动生成
-- **无 TF-IDF fallback**：embedding API 不可用直接报错，不做隐性降级
