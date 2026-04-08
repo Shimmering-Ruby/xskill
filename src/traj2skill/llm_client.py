@@ -1,0 +1,205 @@
+"""
+llm_client.py — LLM 和 Embedding 统一客户端
+═════════════════════════════════════════════
+支持任意 OpenAI 兼容 API (vLLM, Ollama, Together, DeepSeek, 硅基流动, etc.)
+LLM 和 Embedding 分别配置 base_url / model / api_key
+
+用法:
+  from traj2skill.llm_client import LLMClient, EmbedClient
+
+  llm = LLMClient.from_config(config["llm"])
+  text = llm.chat("分析这条轨迹...")
+
+  embed = EmbedClient.from_config(config["embedding"])
+  vec = embed.encode("some text")       # → np.ndarray (dim,)
+  vecs = embed.encode_batch(["a","b"])   # → np.ndarray (n, dim)
+  print(embed.dim)                       # 自动探测的维度
+"""
+
+import os, json, logging, time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# LLM Client (chat completion)
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class LLMClient:
+    base_url: str
+    model: str
+    api_key: str
+    max_tokens: int = 1500
+    temperature: float = 0.0
+    _client: object = field(default=None, repr=False)
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> "LLMClient":
+        base_url = cfg.get("base_url", "").rstrip("/")
+        model = cfg.get("model", "")
+        api_key = (
+            cfg.get("api_key", "")
+            or os.environ.get("LLM_API_KEY", "")
+            or os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+        if not base_url or not model:
+            raise ValueError("llm.base_url 和 llm.model 必须配置")
+        return cls(base_url=base_url, model=model, api_key=api_key)
+
+    def _get_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key or "no-key",
+            )
+        return self._client
+
+    def chat(self, prompt: str, system: str = "") -> str:
+        """单轮对话，返回文本"""
+        client = self._get_client()
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            resp = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            logger.error(f"LLM 调用失败: {e}")
+            raise
+
+    def __repr__(self):
+        return f"LLMClient(base_url={self.base_url}, model={self.model})"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Embedding Client
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class EmbedClient:
+    base_url: str
+    model: str
+    api_key: str
+    dim: int = 0  # 0 = 未探测
+    _client: object = field(default=None, repr=False)
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> "EmbedClient":
+        base_url = cfg.get("base_url", "").rstrip("/")
+        model = cfg.get("model", "")
+        api_key = (
+            cfg.get("api_key", "")
+            or os.environ.get("EMBED_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", "")
+        )
+        dim = cfg.get("dim", 0)
+        if not base_url or not model:
+            raise ValueError("embedding.base_url 和 embedding.model 必须配置")
+        inst = cls(base_url=base_url, model=model, api_key=api_key, dim=dim)
+        return inst
+
+    def _get_session(self):
+        if self._client is None:
+            import httpx
+            self._client = httpx.Client(timeout=60)
+        return self._client
+
+    def _call_api_single(self, text: str) -> list[float]:
+        """调用 ARK multimodal embedding 接口（单条）"""
+        session = self._get_session()
+        url = f"{self.base_url}/embeddings/multimodal"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        body = {"model": self.model, "input": [{"type": "text", "text": text}]}
+        resp = session.post(url, json=body, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["data"]["embedding"]
+
+    def probe_dim(self) -> int:
+        """发送测试文本，探测 embedding 维度"""
+        if self.dim > 0:
+            return self.dim
+
+        logger.info(f"探测 embedding 维度: {self.model} @ {self.base_url}")
+        vec = self._call_api_single("hello")
+        self.dim = len(vec)
+        logger.info(f"探测完成: dim={self.dim}")
+        return self.dim
+
+    def encode(self, text: str) -> np.ndarray:
+        """单条文本 → 向量"""
+        vec = np.array(self._call_api_single(text), dtype=np.float32)
+        if self.dim == 0:
+            self.dim = len(vec)
+        return vec
+
+    def encode_batch(self, texts: list[str]) -> np.ndarray:
+        """批量文本 → (n, dim) 矩阵，逐条调用 multimodal 端点"""
+        from tqdm import tqdm
+        all_vecs = []
+
+        for i, text in enumerate(tqdm(texts, desc="embedding", unit="条")):
+            try:
+                vec = np.array(self._call_api_single(text), dtype=np.float32)
+                all_vecs.append(vec)
+            except Exception as e:
+                logger.error(f"Embedding 失败 (第 {i} 条): {e}")
+                raise
+
+            if (i + 1) % 10 == 0:
+                time.sleep(0.1)  # 简单限速
+
+        result = np.stack(all_vecs)
+        if self.dim == 0:
+            self.dim = result.shape[1]
+        return result
+
+    def __repr__(self):
+        return f"EmbedClient(base_url={self.base_url}, model={self.model}, dim={self.dim})"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 工厂函数
+# ═══════════════════════════════════════════════════════════════════
+
+def create_embed_client(config: dict) -> "EmbedClient":
+    """根据配置创建 embedding 客户端，未配置或不可用时直接报错"""
+    embed_cfg = config.get("embedding", {})
+
+    if not embed_cfg.get("base_url") or not embed_cfg.get("model"):
+        raise ValueError("embedding.base_url 和 embedding.model 必须配置")
+
+    client = EmbedClient.from_config(embed_cfg)
+    client.probe_dim()
+    logger.info(f"Embedding: {client}")
+    return client
+
+
+def create_llm_client(config: dict) -> "LLMClient | None":
+    """根据配置创建 LLM 客户端，未配置返回 None"""
+    llm_cfg = config.get("llm", {})
+    if llm_cfg.get("base_url") and llm_cfg.get("model"):
+        try:
+            client = LLMClient.from_config(llm_cfg)
+            logger.info(f"LLM: {client}")
+            return client
+        except Exception as e:
+            logger.warning(f"LLM 初始化失败: {e}")
+            return None
+    return None

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traj2skill"
+version = "0.2.0"
+description = "从 AI Agent 执行轨迹自动蒸馏可复用 Skill"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "datasets>=2.14",
+    "huggingface-hub>=0.17",
+    "openai>=1.0",
+    "agno",
+    "tqdm",
+    "httpx",
+]
+
+[project.scripts]
+t2s = "traj2skill.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
