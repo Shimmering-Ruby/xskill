@@ -17,6 +17,9 @@ dependencies = [
     "agno",
     "tqdm",
     "httpx",
+    "fastapi",
+    "uvicorn",
+    "sse-starlette",
 ]
 
 [project.scripts]

@@ -468,6 +468,14 @@ def cmd_show(args, config):
     return 1
 
 
+def cmd_serve(args, config):
+    import uvicorn
+    from traj2skill.server import create_app
+    app = create_app()
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
 def cmd_validate(args, config):
     """Validate trajectory directory structure"""
     path = Path(args.path) if args.path else get_traj_dir()
@@ -608,6 +616,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_show.add_argument("--skill", type=str, help="skill name")
     p_show.add_argument("--traj", type=str, help="trajectory .md file path")
 
+    # --- serve ---
+    p_serve = sub.add_parser("serve", help="Start HTTP API server")
+    p_serve.add_argument("--host", default="0.0.0.0")
+    p_serve.add_argument("--port", type=int, default=8000)
+
     # --- validate ---
     p_validate = sub.add_parser("validate", help="Validate trajectory directory")
     p_validate.add_argument("path", nargs="?", type=str, help="trajectory directory path")
@@ -674,6 +687,7 @@ def main():
         "reindex": cmd_reindex,
         "eval": cmd_eval,
         "skill": cmd_skill,
+        "serve": cmd_serve,
         "show": cmd_show,
         "validate": cmd_validate,
     }
