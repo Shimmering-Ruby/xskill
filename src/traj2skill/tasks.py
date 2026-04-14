@@ -247,6 +247,7 @@ async def api_process(req: ProcessRequest):
                 config=config,
                 dry_run=req.dry_run,
                 skill_dir=skill_dir,
+                log_fn=log_fn,
             )
 
             _push(queue, "log", {

@@ -469,9 +469,14 @@ def cmd_show(args, config):
 
 
 def cmd_serve(args, config):
+    import os
     import uvicorn
+    if getattr(args, "no_ui", False):
+        os.environ["T2S_NO_UI"] = "1"
     from traj2skill.server import create_app
     app = create_app()
+    if not getattr(args, "no_ui", False):
+        print(f"UI at http://{args.host}:{args.port}/")
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
@@ -620,6 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", help="Start HTTP API server")
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument("--no-ui", action="store_true", help="disable built-in web UI")
 
     # --- validate ---
     p_validate = sub.add_parser("validate", help="Validate trajectory directory")

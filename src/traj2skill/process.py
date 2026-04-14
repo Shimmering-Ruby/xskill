@@ -25,9 +25,24 @@ logger = logging.getLogger("traj2skill")
 
 
 def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
-                 skill_dir: Path | None = None, data_dir: Path | None = None) -> dict:
-    """处理一条轨迹的完整流程"""
+                 skill_dir: Path | None = None, data_dir: Path | None = None,
+                 log_fn=None) -> dict:
+    """处理一条轨迹的完整流程。
+
+    *log_fn*: optional callable ``(msg, tag)`` — when provided, every log
+    call is also forwarded to it (so SSE endpoints can stream intermediate
+    events, not just the final result).
+    """
     log = StreamLog(verbose=True)
+    if log_fn is not None:
+        class _TeeLog(StreamLog):
+            def __call__(self, msg: str, tag: str = "info"):
+                super().__call__(msg, tag)
+                try:
+                    log_fn(msg, tag)
+                except Exception:
+                    pass
+        log = _TeeLog(verbose=True)
     traj_path = Path(traj_md_path)
     skill_dir = skill_dir or get_skill_dir()
     data_dir = data_dir or get_traj_dir()
