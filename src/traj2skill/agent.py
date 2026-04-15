@@ -306,7 +306,7 @@ def run_agent_agno(new_traj_md: str, new_traj_meta: dict, config: dict, log: Str
     base_cfg = config.get("llm", {}) or {}
     override_cfg = config.get("llm_skill", {}) or {}
     llm_cfg = {**base_cfg, **{k: v for k, v in override_cfg.items() if v}}
-    model = OpenAIChat(
+    model_kwargs = dict(
         id=llm_cfg.get("model", "gpt-4o"),
         base_url=llm_cfg.get("base_url", ""),
         api_key=llm_cfg.get("api_key") or os.environ.get("LLM_API_KEY", ""),
@@ -318,6 +318,23 @@ def run_agent_agno(new_traj_md: str, new_traj_meta: dict, config: dict, log: Str
             "model": "assistant",
         },
     )
+    # T2S_SSL_VERIFY=false 时 agno 内部的 openai client 也要跳过证书验证
+    from traj2skill.llm_client import _ssl_verify
+    if not _ssl_verify():
+        import httpx
+        try:
+            model_kwargs["http_client"]       = httpx.Client(verify=False)
+            model_kwargs["async_http_client"] = httpx.AsyncClient(verify=False)
+            model = OpenAIChat(**model_kwargs)
+            log.step("T2S_SSL_VERIFY=false → Agent OpenAI client 证书验证已关闭")
+        except TypeError:
+            # 老版 agno 不认这俩 kwarg → 回退到默认构造，仅依赖 SSL_CERT_FILE env
+            log.step("agno OpenAIChat 不支持 http_client kwarg，需要 export SSL_CERT_FILE=/path/to/ca.pem")
+            for k in ("http_client", "async_http_client"):
+                model_kwargs.pop(k, None)
+            model = OpenAIChat(**model_kwargs)
+    else:
+        model = OpenAIChat(**model_kwargs)
 
     # Surface high-signal meta fields explicitly so the LLM sees them without
     # having to parse JSON. Keep the raw JSON too for anything we missed.
