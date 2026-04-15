@@ -183,14 +183,39 @@ function Prose({ text = "" }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DIMENSIONS = [
-  ["trigger_precision", "触发条件准确 — 描述何时应使用此 skill，避免误命中"],
-  ["step_actionability", "步骤可执行性 — 每步都具体到工具与操作"],
-  ["granularity", "粒度合理 — subgoal 数量与边界合理"],
-  ["generalizability", "可泛化 — 能覆盖同类问题而非单条轨迹"],
-  ["pitfall_quality", "陷阱质量 — 从失败轨迹提炼出有价值的 pitfalls"],
-  ["faithfulness", "忠实性 — 与实际轨迹证据一致，未臆造"],
-  ["structural_quality", "结构质量 — trigger/steps/pitfalls 段落完整清晰"],
+  [
+    "description_precision",
+    "Description 精度 — frontmatter.description 是否列出典型用户表述 + 工具依赖，且边界清晰（不误触）",
+  ],
+  ["step_actionability", "步骤可执行性 — 每步都具体到工具、命令、文件路径与函数名"],
+  ["granularity", "粒度合理 — 覆盖一类相似问题（3-5 个场景），既不过粗也不过细"],
+  ["generalizability", "可泛化 — 模式可迁移到同类项目，不硬编码特定路径/库名"],
+  [
+    "warning_coverage",
+    "Warning 覆盖度 — 关键 step 都有内联 `> ⚠️` 警告，且引用轨迹证据（N/M trajs）",
+  ],
+  ["faithfulness", "忠实性 — 步骤与源轨迹一致，未臆造不存在的操作"],
+  [
+    "structural_quality",
+    "结构质量 — frontmatter 完整（name/description/compatibility/metadata）、`##` 阶段分节、步骤编号",
+  ],
 ];
+
+// Read legacy score keys as a fallback, since skills migrated or written
+// before the v2 rename still carry `trigger_precision` / `pitfall_quality`
+// under metadata.eval.scores.
+const LEGACY_DIMENSION_ALIASES = {
+  description_precision: "trigger_precision",
+  warning_coverage: "pitfall_quality",
+};
+
+function readDim(scores, dim) {
+  if (!scores) return undefined;
+  if (scores[dim] != null) return scores[dim];
+  const legacy = LEGACY_DIMENSION_ALIASES[dim];
+  if (legacy && scores[legacy] != null) return scores[legacy];
+  return undefined;
+}
 
 function scoreTier(score) {
   if (typeof score !== "number") return null;
@@ -257,7 +282,7 @@ function DimensionBars({ scores }) {
   return (
     <div className="space-y-2">
       {DIMENSIONS.map(([dim, tip]) => {
-        const v = scores[dim];
+        const v = readDim(scores, dim);
         const hasScore = typeof v === "number";
         const pct = hasScore ? Math.max(0, Math.min(100, (v / 10) * 100)) : 0;
         return (
@@ -487,11 +512,19 @@ export default function PageEval({ desc }) {
 
   const stop = () => abortRef.current?.abort();
 
+  // v2 shape: detail.metadata.eval.{scores,eval_score,tier,runs}
+  // Legacy shape: detail.eval.* and detail.abstract.eval_result.*
+  const detailEval =
+    detail?.metadata?.eval || detail?.eval || detail?.abstract?.eval_result || null;
+  const detailTags =
+    detail?.metadata?.tags || detail?.abstract?.tags || [];
+  const detailBody =
+    detail?.skill_md_body || detail?.skill_md || "";
   const finalScores =
-    evalResult?.scores || detail?.eval?.scores || null;
+    evalResult?.scores || detailEval?.scores || null;
   const finalMedian =
     (typeof evalResult?.eval_score === "number" && evalResult.eval_score) ||
-    (typeof detail?.eval?.eval_score === "number" && detail.eval.eval_score) ||
+    (typeof detailEval?.eval_score === "number" && detailEval.eval_score) ||
     null;
   const finalTier = scoreTier(finalMedian);
 
@@ -581,9 +614,9 @@ export default function PageEval({ desc }) {
                 <div className="font-mono text-[15px] font-semibold text-gray-900">
                   {selected}
                 </div>
-                {detail?.abstract?.tags?.length > 0 && (
+                {detailTags.length > 0 && (
                   <div className="flex items-center gap-1 flex-wrap">
-                    {detail.abstract.tags.slice(0, 6).map((t) => (
+                    {detailTags.slice(0, 6).map((t) => (
                       <span
                         key={t}
                         className="font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-gray-50 border border-gray-200 text-gray-600"
@@ -594,13 +627,13 @@ export default function PageEval({ desc }) {
                   </div>
                 )}
                 <div className="flex-1" />
-                {typeof detail?.eval?.eval_score === "number" && (
+                {typeof detailEval?.eval_score === "number" && (
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] text-gray-400 font-mono">
                       score
                     </span>
-                    <ScorePill score={detail.eval.eval_score} />
-                    <TierBadge tier={scoreTier(detail.eval.eval_score)} />
+                    <ScorePill score={detailEval.eval_score} />
+                    <TierBadge tier={scoreTier(detailEval.eval_score)} />
                   </div>
                 )}
               </div>
@@ -685,9 +718,36 @@ export default function PageEval({ desc }) {
                     </div>
                   )}
                   {!detailLoading && detail && !detail.error && (
-                    <div className="rounded-md border border-gray-100 bg-gray-50/50 p-4 max-h-[620px] overflow-auto">
-                      <Prose text={detail.skill_md || "(empty)"} />
-                    </div>
+                    <>
+                      <details className="mb-3 rounded-md border border-gray-200 bg-gray-50">
+                        <summary className="cursor-pointer select-none text-[11px] font-mono text-gray-600 px-3 py-1.5 hover:text-gray-900">
+                          frontmatter
+                        </summary>
+                        <pre
+                          className="font-mono text-[11px] rounded-b-md p-3 overflow-x-auto whitespace-pre-wrap break-all"
+                          style={{
+                            background: "#1e1e2e",
+                            color: "#cdd6f4",
+                            lineHeight: 1.55,
+                          }}
+                        >
+                          {JSON.stringify(
+                            {
+                              description: detail.description,
+                              ...(detail.compatibility
+                                ? { compatibility: detail.compatibility }
+                                : {}),
+                              metadata: detail.metadata || {},
+                            },
+                            null,
+                            2
+                          )}
+                        </pre>
+                      </details>
+                      <div className="rounded-md border border-gray-100 bg-gray-50/50 p-4 max-h-[620px] overflow-auto">
+                        <Prose text={detailBody || "(empty)"} />
+                      </div>
+                    </>
                   )}
                 </div>
               )}
