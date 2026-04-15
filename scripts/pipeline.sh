@@ -34,9 +34,13 @@
 #
 #  httpx >= 0.24 / openai SDK 默认 trust_env=True，会自动读这些变量。
 # -----------------------------------------------------------------------------
+# NO_PROXY 只豁免 loopback；不要在默认值里写 .volces.com / .bytedance.com ——
+# 如果你在字节内网想直连不走代理，自己覆盖 NO_PROXY=.volces.com,... 即可。
+# 写死这种内网域名的反面效果：外网用户设了 HTTPS_PROXY 以为能走，结果被
+# NO_PROXY 默认里的 .volces.com 反掉，连不上 ARK 报 DNS 错。
 : "${HTTP_PROXY:=}"
 : "${HTTPS_PROXY:=}"
-: "${NO_PROXY:=localhost,127.0.0.1,.volces.com,.bytedance.com}"
+: "${NO_PROXY:=localhost,127.0.0.1}"
 : "${http_proxy:=$HTTP_PROXY}"
 : "${https_proxy:=$HTTPS_PROXY}"
 : "${no_proxy:=$NO_PROXY}"
