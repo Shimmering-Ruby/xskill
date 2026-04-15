@@ -38,6 +38,56 @@ def _slugify(name: str) -> str:
     return name.strip().lower().replace("_", "-").replace(" ", "-")
 
 
+def _sanitize_frontmatter_dates(fm: dict) -> dict:
+    """不让 LLM 写的日期字段污染 frontmatter。
+    - created: 必须是合法 ISO date 且 ≤ 今天；否则替换成今天（保留历史 created 优先）
+    - last_updated: 一律覆盖成当前时间
+    返回被修改过的 fm（同对象）。
+    """
+    meta = fm.setdefault("metadata", {})
+    today = date.today()
+    created = str(meta.get("created", "")).strip()
+    valid_created = False
+    try:
+        parsed = date.fromisoformat(created[:10]) if created else None
+        if parsed and parsed <= today:
+            valid_created = True
+    except (ValueError, TypeError):
+        pass
+    if not valid_created:
+        meta["created"] = today.isoformat()
+    meta["last_updated"] = datetime.now().isoformat(timespec="seconds")
+    return fm
+
+
+import re as _re
+_WARNING_FRACTION_RE = _re.compile(r"(\d+)\s*/\s*(\d+)\s*条(失败)?轨迹")
+
+
+def _sanitize_warning_fractions(body: str, source_trajs_count: int) -> tuple[str, int]:
+    """修掉 warning 里编造的 N/M 分子分母。
+
+    LLM 经常写 "3/7 条轨迹表明..."，但 M 根本超过实际 source_trajs 数量 ——
+    这是纯幻觉。规则：如果 M > source_trajs_count，或 N > M，就把整个 "N/M 条轨迹"
+    替换成 "源轨迹"，让 warning 只剩"见 traj_XXXX"这种可核对的引用。
+
+    返回 (新 body, 替换次数)。
+    """
+    count = 0
+
+    def _replace(m: _re.Match) -> str:
+        nonlocal count
+        n, total = int(m.group(1)), int(m.group(2))
+        fail_word = m.group(3) or ""
+        # M 必须 ≤ 实际 source_trajs 总数；N 必须 ≤ M 且 ≥ 1
+        if total > source_trajs_count or n > total or n < 1 or total < 1:
+            count += 1
+            return f"源{fail_word}轨迹中"
+        return m.group(0)
+
+    return _WARNING_FRACTION_RE.sub(_replace, body), count
+
+
 def _read_skill_md(skill_path: Path) -> tuple[dict, str, Path]:
     """Return (frontmatter_dict, body, path_of_SKILL.md). Supports legacy
     lowercase `skill.md` as a fallback read path (writes always go to
@@ -331,6 +381,18 @@ def write_file(path: str, content: str) -> str:
         return f"error: writes restricted to ./skill/ (tried: {path})"
 
     p.parent.mkdir(parents=True, exist_ok=True)
+    # 如果写的是 SKILL.md，强制消毒 frontmatter 日期 + warning 里编造的 N/M
+    if p.name == "SKILL.md":
+        try:
+            fm, body = fm_parse(content)
+            _sanitize_frontmatter_dates(fm)
+            source_count = len((fm.get("metadata", {}) or {}).get("source_trajs") or [])
+            body, frac_replaced = _sanitize_warning_fractions(body, source_count)
+            if frac_replaced:
+                logger.info(f"warning 里编造的 N/M 已替换 {frac_replaced} 处（source_trajs={source_count}）")
+            content = fm_serialize(fm, body)
+        except Exception as e:
+            logger.warning(f"skill.md frontmatter 消毒失败，原样写入: {e}")
     p.write_text(content, encoding="utf-8")
     logger.info(f"✏️  wrote: {p} ({len(content)} bytes)")
     return f"wrote: {p} ({len(content)} chars)"
@@ -390,7 +452,7 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
     if changed_trajs:
         meta["version"] = int(meta.get("version", 0)) + 1
 
-    meta["last_updated"] = datetime.now().isoformat(timespec="seconds")
+    _sanitize_frontmatter_dates(fm)  # 兜底：覆盖未来日期 / 不合法 created
 
     # LLM-generated 2-sentence summary (for embeddings)
     if llm:

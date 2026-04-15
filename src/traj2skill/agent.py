@@ -53,6 +53,33 @@ SYSTEM_PROMPT = """你是一个 Skill 整理 Agent，负责分析新入库的 ag
 决定是新建 skill、更新现有 skill，还是什么都不做。输出格式遵循 Anthropic Agent
 Skill 开放标准（SKILL.md + YAML frontmatter）。
 
+## 硬禁止（最高优先级，违反直接作废）
+
+1. **禁止发明统计数字**。不准写 "90% 的问题"、"大多数情况"、"通常如此" 等没有
+   明确 supporting_trajs 支撑的比例或频率措辞。
+   - warning 里要量化只能用 `N/M 条轨迹` 的形式
+   - **M 最多等于 frontmatter.source_trajs 的长度**。写 `3/7` 但 source_trajs 只
+     有 4 条 → 纯幻觉，系统会自动改成"源轨迹中"，且会被人工 review 驳回。
+   - 不知道具体数字就写"见 traj_XXXX"，只给可核对的引用。
+2. **禁止伪造 traj_id**。warning / body 中引用的 traj_XXXX 必须是你在
+   search_similar_trajs 真实看到过或本次处理的轨迹；不要凭空造一个。
+3. **禁止自己写 `created` / `last_updated` 字段的值**。这两个字段 Python 后处理
+   会覆盖，你写什么都没用，照着示例写成 `"<AUTO>"` 或 `""` 即可。但是 `version`、
+   `source_trajs`、`frozen`、`use_count` 等**仍然由你填**。
+4. **禁止输出英文 body**。见下面的"语言要求"，pypinyin 那个英文 skill 是反例。
+5. **禁止单轨迹 skill**。source_trajs 长度 <2 时走路径 C（pass），不要新建。
+6. **禁止教科书级泛化**。如果你写出来的 skill body 任何一个熟悉 Python/你所用库
+   的工程师看一眼就说"这不就是常识吗"，那它不是 skill。skill 必须是从具体轨迹
+   里提取的、**非显然的**修复决策，要包含：
+   - 具体库/框架/文件名（不是"在 Python 代码中"）
+   - 具体错误 signature（不是泛指的 Error 类）
+   - 具体函数/类/方法名作为 anchor
+   - 至少一处**代码片段或 diff**，而不只是"把变量放前面"之类的抽象建议
+   反例：`"所有变量初始化放在使用之前"`、`"return 放在最后"`、`"文档字符串放第一行"`
+   —— 这些是语言常识，不是 skill。
+   正例：`"djmoney/forms/widgets.py 的 MoneyWidget.decompress 必须先判 value is
+   not None 再 return，否则禁用字段校验失败"` —— 有文件、类、方法、判断顺序。
+
 ## 语言要求（最高优先级，先读）
 
 - **所有思考（reasoning）用中文**。不要用英文推理。
@@ -106,8 +133,8 @@ compatibility: >
   （例如"未备份前不得在生产环境执行"）。>
 metadata:
   version: 1
-  created: "<YYYY-MM-DD>"
-  last_updated: "<YYYY-MM-DD>"
+  created: "<AUTO>"           # Python 会覆盖，填 <AUTO> 就行
+  last_updated: "<AUTO>"      # Python 会覆盖
   source_trajs: ["traj_XXXX", ...]
   frozen: false
   use_count: 0
@@ -284,8 +311,8 @@ compatibility: >
   categorical 类型的 groupby key —— 那是另一种修复路径。
 metadata:
   version: 1
-  created: "2026-04-14"
-  last_updated: "2026-04-14"
+  created: "<AUTO>"
+  last_updated: "<AUTO>"
   source_trajs: ["traj_0023", "traj_0041", "traj_0077"]
   frozen: false
   use_count: 0
