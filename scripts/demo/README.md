@@ -1,6 +1,6 @@
 # traj2skill 端到端演示包
 
-一键跑通 **index → batch → eval → skill list** 全流程，自带 10 条 SWE-smith 真实修复轨迹作为输入数据。
+一键跑通 **index → batch → eval → skill list** 全流程，自带 **300 条** SWE-smith 真实修复轨迹（只含原始 `.md` + `.json`，不含 meta / 向量索引）作为输入数据。
 
 ## 目录
 
@@ -10,7 +10,7 @@ scripts/demo/
 ├── pack_demo.sh           维护者脚本：从 data/swe_smith_dataset 生成 trajectories.zip
 ├── run_demo.sh            演示入口：解压 + 跑通主流水线（CLI）
 ├── serve_ui.sh            CLI 演示结束后一键起 Web UI
-└── trajectories.zip       10 条预打包轨迹（md + json + meta，约 160KB）
+└── trajectories.zip       300 条预打包轨迹（md + json，约 4.9MB；不含 meta / index.pkl）
 ```
 
 ## 快速开始
@@ -97,8 +97,15 @@ EMBED_MODEL="doubao-embedding-vision-251215" # 向量模型
 ## 重新打包轨迹（维护者）
 
 ```bash
-./scripts/demo/pack_demo.sh             # 默认打 10 条
-./scripts/demo/pack_demo.sh 20          # 改为 20 条
+./scripts/demo/pack_demo.sh             # 默认打包全部 300 条
+./scripts/demo/pack_demo.sh 20          # 只打前 20 条
+./scripts/demo/pack_demo.sh all         # 显式表示全部
 ```
 
-会从 `data/swe_smith_dataset/` 取前 N 条（需要同时存在 `.md` 和 `.json`），复制 `*.md / *.json / *.md.meta` 到临时目录后压成 zip。`index.pkl` 不打包——接收方运行时会重新生成，和他们用的 embedding 模型对齐。
+从 `data/swe_smith_dataset/` 取 N 条（需要同时存在 `.md` 和 `.json`），**只复制原始 `*.md` 和 `*.json`**到临时目录后压成 zip。
+
+**刻意不打包**：
+- `*.md.meta` — LLM 抽的结构化元数据，会随模型漂移；接收方首次 `t2s index` 时由他们自己的 LLM 重新生成
+- `index.pkl` — 向量索引，接收方首次 index 时用自己的 embedding 重建，和模型对齐
+
+这样 zip 里只含"原料"，和接收方的 LLM/embedding 完全解耦。
