@@ -116,24 +116,31 @@ def test_sanitize_fraction_blocks_numerator_greater_than_denominator():
 
 
 def test_sanitize_fraction_integration_via_write_file(tmp_path):
+    """fraction 消毒需要和 gate 配合：3 条真实 traj_NNNN → gate 放行 → 消毒生效"""
     from traj2skill import skill_tools
     from datetime import date
-    skill_tools._ctx["skill_dir"] = tmp_path
-    sk = tmp_path / "fix-x"
+    (tmp_path / "skill").mkdir()
+    (tmp_path / "data").mkdir()
+    skill_tools._ctx["skill_dir"] = tmp_path / "skill"
+    skill_tools._ctx["data_dir"] = tmp_path / "data"
+    for tid in ("traj_0001", "traj_0002", "traj_0003"):
+        (tmp_path / "data" / f"{tid}.md").write_text("# stub", encoding="utf-8")
+    sk = tmp_path / "skill" / "fix-x"
     sk.mkdir()
     content = f"""---
 name: fix-x
 description: test
 metadata:
   created: "{date.today().isoformat()}"
-  source_trajs: [traj_a, traj_b]
+  source_trajs: [traj_0001, traj_0002, traj_0003]
 ---
 
 # body
 
+## stage
 1. step one
    > ⚠️ 3/9 条失败轨迹做了错事
 """
     skill_tools.write_file(str(sk / "SKILL.md"), content)
     text = (sk / "SKILL.md").read_text()
-    assert "3/9" not in text, "source_trajs=2，M=9 属于编造，必须被替换"
+    assert "3/9" not in text, "source_trajs=3，M=9 属于编造，必须被替换"
