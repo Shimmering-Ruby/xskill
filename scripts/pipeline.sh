@@ -221,9 +221,13 @@ if ! command -v t2s >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -d "$REPO_ROOT/data" ]; then
-    echo -e "${C_WARN}⚠ 仓库的 data/ 不存在，没有可复用的数据集${C_OFF}"
+# 仓库根的 data/ 只是"方便多数据集切换时自动软链"的可选源；
+# 如果 workspace 里已经有对应 dataset（比如 run_demo.sh 解压好的），就没啥可警告的。
+if [ ! -d "$REPO_ROOT/data" ] && [ ! -d "$WORKSPACE/data/$DATASET" ]; then
+    echo -e "${C_WARN}⚠ 仓库的 data/ 和 workspace 里都没有 $DATASET${C_OFF}"
     echo "  先跑一次 python -m traj2skill.download_data --mode sample 下载数据"
+elif [ ! -d "$REPO_ROOT/data" ]; then
+    echo -e "${C_DIM}  仓库的 data/ 不存在（gitignored），继续用 workspace 里的 $DATASET${C_OFF}"
 fi
 
 # ── 准备 workspace ──────────────────────────────────────────────────────
