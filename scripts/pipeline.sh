@@ -33,6 +33,10 @@
 #      HTTPS_PROXY=http://127.0.0.1:7890 ./scripts/pipeline.sh
 #
 #  httpx >= 0.24 / openai SDK 默认 trust_env=True，会自动读这些变量。
+#
+#  代理做 MITM（证书链里有自签名 CA）时，会抛 CERTIFICATE_VERIFY_FAILED：
+#      T2S_SSL_VERIFY=false ./scripts/pipeline.sh          # 图省事：关掉验证
+#      SSL_CERT_FILE=/path/to/proxy-ca.pem ./scripts/...   # 更安全：信任代理 CA
 # -----------------------------------------------------------------------------
 # NO_PROXY 只豁免 loopback；不要在默认值里写 .volces.com / .bytedance.com ——
 # 如果你在字节内网想直连不走代理，自己覆盖 NO_PROXY=.volces.com,... 即可。

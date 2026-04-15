@@ -24,6 +24,15 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _ssl_verify() -> bool:
+    """T2S_SSL_VERIFY=false / 0 / no / off → 不校验 SSL 证书。
+    场景：企业代理做 MITM，用自签名 CA 重签上游证书，httpx 默认 verify 会抛
+    CERTIFICATE_VERIFY_FAILED。更安全的方式是 export SSL_CERT_FILE=/path/to/ca.pem
+    让 httpx 信任代理 CA；想快速 demo 可以直接关掉。"""
+    v = os.environ.get("T2S_SSL_VERIFY", "").lower()
+    return v not in ("false", "0", "no", "off")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # LLM Client (chat completion)
 # ═══════════════════════════════════════════════════════════════════
@@ -54,10 +63,12 @@ class LLMClient:
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
-            self._client = OpenAI(
-                base_url=self.base_url,
-                api_key=self.api_key or "no-key",
-            )
+            kwargs = {"base_url": self.base_url, "api_key": self.api_key or "no-key"}
+            if not _ssl_verify():
+                import httpx
+                kwargs["http_client"] = httpx.Client(verify=False)
+                logger.warning("T2S_SSL_VERIFY=false → LLM HTTPS 证书验证已关闭")
+            self._client = OpenAI(**kwargs)
         return self._client
 
     def chat(self, prompt: str, system: str = "") -> str:
@@ -114,7 +125,10 @@ class EmbedClient:
     def _get_session(self):
         if self._client is None:
             import httpx
-            self._client = httpx.Client(timeout=60)
+            verify = _ssl_verify()
+            self._client = httpx.Client(timeout=60, verify=verify)
+            if not verify:
+                logger.warning("T2S_SSL_VERIFY=false → Embedding HTTPS 证书验证已关闭")
         return self._client
 
     def _call_api_single(self, text: str) -> list[float]:
