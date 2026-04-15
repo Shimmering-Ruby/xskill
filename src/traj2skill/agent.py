@@ -8,8 +8,42 @@ open standard. No separate .abstract file: all structured metadata lives in
 frontmatter.metadata.
 """
 
-import json, os
+import json, os, inspect
 from traj2skill.log import StreamLog
+
+
+def _inject_verify_off_if_requested(model_cls, model_kwargs: dict, log: StreamLog) -> None:
+    """如果 T2S_SSL_VERIFY=false，就把 verify=False 的 httpx client 塞进 model_kwargs。
+
+    agno 不同版本接受的 kwarg 名不一致（观察到：http_client / client / async_client /
+    async_http_client）。用 inspect.signature 只传实际接受的那几个，避免 TypeError。
+    """
+    from traj2skill.llm_client import _ssl_verify
+    if _ssl_verify():
+        return
+    import httpx
+    try:
+        accepted = set(inspect.signature(model_cls.__init__).parameters.keys())
+    except (TypeError, ValueError):
+        accepted = set()
+    sync_client  = httpx.Client(verify=False)
+    async_client = httpx.AsyncClient(verify=False)
+    injected = []
+    for name in ("http_client", "client"):
+        if name in accepted:
+            model_kwargs[name] = sync_client
+            injected.append(name)
+            break
+    for name in ("async_client", "async_http_client"):
+        if name in accepted:
+            model_kwargs[name] = async_client
+            injected.append(name)
+            break
+    if injected:
+        log(f"T2S_SSL_VERIFY=false → Agent {model_cls.__name__} 注入 {'+'.join(injected)} (verify=False)", "step")
+    else:
+        log(f"T2S_SSL_VERIFY=false 但 {model_cls.__name__} 不接受 http_client kwarg，"
+            "改用 SSL_CERT_FILE=/path/to/ca.pem", "error")
 
 # ===================================================================
 # Agent System Prompt (v2: SKILL.md + YAML frontmatter)
@@ -318,23 +352,11 @@ def run_agent_agno(new_traj_md: str, new_traj_meta: dict, config: dict, log: Str
             "model": "assistant",
         },
     )
-    # T2S_SSL_VERIFY=false 时 agno 内部的 openai client 也要跳过证书验证
-    from traj2skill.llm_client import _ssl_verify
-    if not _ssl_verify():
-        import httpx
-        try:
-            model_kwargs["http_client"]       = httpx.Client(verify=False)
-            model_kwargs["async_http_client"] = httpx.AsyncClient(verify=False)
-            model = OpenAIChat(**model_kwargs)
-            log.step("T2S_SSL_VERIFY=false → Agent OpenAI client 证书验证已关闭")
-        except TypeError:
-            # 老版 agno 不认这俩 kwarg → 回退到默认构造，仅依赖 SSL_CERT_FILE env
-            log.step("agno OpenAIChat 不支持 http_client kwarg，需要 export SSL_CERT_FILE=/path/to/ca.pem")
-            for k in ("http_client", "async_http_client"):
-                model_kwargs.pop(k, None)
-            model = OpenAIChat(**model_kwargs)
-    else:
-        model = OpenAIChat(**model_kwargs)
+    # T2S_SSL_VERIFY=false 时 agno 内部的 openai client 也要跳过证书验证。
+    # agno 各版本 kwarg 名不一致（http_client / client，async_client / async_http_client），
+    # 用 inspect 检查实际接受的参数，只传能认的那几个。
+    _inject_verify_off_if_requested(OpenAIChat, model_kwargs, log)
+    model = OpenAIChat(**model_kwargs)
 
     # Surface high-signal meta fields explicitly so the LLM sees them without
     # having to parse JSON. Keep the raw JSON too for anything we missed.
