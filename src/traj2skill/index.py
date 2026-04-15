@@ -41,7 +41,20 @@ EXTRACT_PROMPT = """你是一名资深 AI Agent 轨迹分析师。你将收到�
 你的任务是从中提取高密度结构化知识，用于后续的相似轨迹检索和经验复用。
 
 ━━ 输出要求 ━━
-严格使用以下 XML 标签包裹输出，标签之外不得有任何文字。每个字段都是必填的。
+严格使用以下 XML 标签包裹输出，标签之外不得有任何文字。
+
+必须产出的字段（required）：
+  - <intent>
+  - <summary>
+  - <blockers>
+  - <success>
+  - <tags>
+
+可选字段（optional）：
+  - <shortest_path>：仅当轨迹**明确成功**，且你对"最短必要路径"有高置信度时才填写。
+    若任务失败、中断、或你无法自信地还原最小步骤序列——请输出空标签 <shortest_path></shortest_path>，**不要编造**。
+
+注意：不要输出 <subgoals> 标签。子目标将在多轨迹聚合阶段从多条轨迹的交集中派生，不在单轨迹提取环节产出。
 
 <intent>
 用户要完成的核心任务。写清楚"对什么对象做什么操作、期望达到什么效果"。
@@ -76,21 +89,18 @@ agent 执行过程中遇到的卡点、弯路和失败尝试。每条格式为"[
 </blockers>
 
 <shortest_path>
-假设已经完全知道正确答案和最佳路径，完成此任务的最精简操作序列。
-去掉所有探索、试错、验证步骤，只保留"最短必要路径"。
-格式为编号列表，每步一个具体操作。
-不超过 120 字。
-示例：
+【可选字段】仅在以下两个条件**同时满足**时才填写内容：
+  (a) 轨迹最终成功（success=true），并且
+  (b) 你对"完成此任务所需的最短必要步骤序列"有高置信度。
+若轨迹失败、中途放弃、或你不确定最短路径——请输出空标签：<shortest_path></shortest_path>
+绝对不要为了"把字段填上"而编造步骤，失败轨迹的 shortest_path 宁可为空也不要虚构。
+
+填写时的要求：去掉所有探索、试错、验证步骤，只保留"最短必要路径"，格式为编号列表，每步一个具体操作，不超过 120 字。
+示例（高置信度时）：
 1. 打开 djmoney/forms/widgets.py
 2. 将 decompress 方法中第 26 行的 return 语句移到条件判断之后
 3. 提交修改
 </shortest_path>
-
-<subgoals>
-将轨迹按 agent 的实际执行阶段拆分为子目标。每个 subgoal 是一组服务于同一目的的连续操作。
-写清楚每阶段：做了什么、用了什么关键工具/命令、产出/结论是什么。
-<subgoal>阶段描述</subgoal>
-</subgoals>
 
 <success>true 或 false（agent 是否最终完成了用户的核心任务）</success>
 
@@ -129,11 +139,14 @@ def parse_meta(xml_text: str) -> dict:
 
     summary = _extract("summary", xml_text)
     intent = _extract("intent", xml_text)
-    shortest_path = _extract("shortest_path", xml_text)
+    # shortest_path 为可选字段：缺失或空都合法，默认空串
+    shortest_path = _extract("shortest_path", xml_text)  # _extract 已在缺失时返回 ""
     success_str = _extract("success", xml_text).lower()
     success = True if "true" in success_str else (False if "false" in success_str else None)
     blockers = _extract_list("blocker", xml_text)
-    subgoals = _extract_list("subgoal", xml_text)
+    # subgoals 不再从单轨迹提取；保留 key 以便下游兼容，但始终为空列表
+    # （即便上游 LLM 误输出了 <subgoal>，也统一丢弃，避免污染单轨迹索引）
+    subgoals: list[str] = []
     tags = _extract_list("tag", xml_text)
 
     return {
@@ -149,7 +162,12 @@ def parse_meta(xml_text: str) -> dict:
 
 
 def validate_meta(meta: dict) -> bool:
-    """校验 meta 质量：intent、summary 必须非空且有实质内容，tags 至少 1 个"""
+    """校验 meta 质量：intent、summary 必须非空且有实质内容，tags 至少 1 个。
+
+    注意：subgoals 与 shortest_path 不参与校验。
+      - subgoals 已从单轨迹提取中移除（将在多轨迹聚合阶段派生），始终为 []
+      - shortest_path 为可选字段，失败轨迹或低置信度下为 ""
+    """
     intent = meta.get("intent", "")
     summary = meta.get("summary", "")
     tags = meta.get("tags", [])
@@ -163,7 +181,12 @@ def validate_meta(meta: dict) -> bool:
 
 
 def meta_to_index_text(meta: dict) -> str:
-    """将 meta 组合成用于向量化的文本"""
+    """将 meta 组合成用于向量化的文本
+
+    字段选取原则：主信号为 intent / summary / tags；
+    shortest_path 仅在非空时纳入（单轨迹提取大多为空）；
+    subgoals 不再纳入（始终为空，浪费 embedding 输入）。
+    """
     parts = []
     if meta.get("intent"):
         parts.append(f"intent: {meta['intent']}")
@@ -171,10 +194,9 @@ def meta_to_index_text(meta: dict) -> str:
         parts.append(f"summary: {meta['summary']}")
     if meta.get("blockers"):
         parts.append("blockers: " + "; ".join(meta["blockers"]))
-    if meta.get("shortest_path"):
-        parts.append(f"shortest_path: {meta['shortest_path']}")
-    if meta.get("subgoals"):
-        parts.append("subgoals: " + " -> ".join(meta["subgoals"]))
+    sp = meta.get("shortest_path") or ""
+    if sp.strip():
+        parts.append(f"shortest_path: {sp}")
     if meta.get("tags"):
         parts.append("tags: " + ", ".join(meta["tags"]))
     return " | ".join(parts)
@@ -191,19 +213,8 @@ def extract_meta_rule(traj_md: str, traj_json: dict) -> dict:
     success = traj_json.get("success")
     category = traj_json.get("category", "")
 
-    tool_calls = traj_json.get("tool_calls", [])
-    subgoals = []
-    if tool_calls:
-        current_group = []
-        for tc in tool_calls:
-            tool = tc.get("tool", "?")
-            current_group.append(tool)
-            if any(kw in tool.lower() for kw in ["write", "finish", "edit", "save"]) or len(current_group) >= 3:
-                subgoals.append(" -> ".join(current_group))
-                current_group = []
-        if current_group:
-            subgoals.append(" -> ".join(current_group))
-
+    # subgoals 已从单轨迹提取中移除（Stage B：将在多轨迹聚合阶段派生）
+    # 规则兜底也统一返回空列表，保持与 LLM 路径一致
     summary = query[:50] if query else "unknown task"
     tags = [category] if category else []
     tags.extend(tool_names[:3])
@@ -211,7 +222,9 @@ def extract_meta_rule(traj_md: str, traj_json: dict) -> dict:
     return {
         "summary": summary,
         "intent": query[:20] if query else "",
-        "subgoals": subgoals,
+        "subgoals": [],
+        "shortest_path": "",
+        "blockers": [],
         "success": success,
         "tags": list(dict.fromkeys(tags)),
         "raw_xml": "(rule-based, no LLM)",
@@ -398,13 +411,25 @@ def index_dataset(dataset_dir: Path, llm: LLMClient | None,
     print(f"  并发: {concurrency}")
     print(f"{'---'*17}")
 
-    # -- Step 1: 增量提取 meta --
-    if not reindex:
-        # 分三类：合格跳过 / 不合格重提 / 无 meta 新提
-        todo = []
-        skipped = 0
-        reextract = 0
+    # -- Step 1: meta 提取 --
+    # reindex=True:  强制全部重抽（删除所有现有 .meta，全量重提）
+    # reindex=False: 增量（合格跳过 / 不合格重提 / 无 meta 新提）
+    todo = []
+    skipped = 0
+    reextract = 0
 
+    if reindex:
+        # 强制全部重抽：删除所有现有 .meta
+        for md_file in md_files:
+            meta_path = md_file.parent / f"{md_file.name}.meta"
+            if meta_path.exists():
+                try:
+                    meta_path.unlink()
+                except Exception:
+                    pass
+            todo.append(md_file)
+        print(f"  --reindex: 删除所有 {len(md_files)} 条旧 meta，全量重新提取")
+    else:
         for md_file in md_files:
             meta_path = md_file.parent / f"{md_file.name}.meta"
             if meta_path.exists():
@@ -414,7 +439,6 @@ def index_dataset(dataset_dir: Path, llm: LLMClient | None,
                         skipped += 1
                         continue
                     else:
-                        # 不合格，删掉重提
                         meta_path.unlink()
                         todo.append(md_file)
                         reextract += 1
@@ -428,36 +452,36 @@ def index_dataset(dataset_dir: Path, llm: LLMClient | None,
         if reextract:
             print(f"  {reextract} 条 meta 不合格，将重新提取")
 
-        if dry_run:
-            for md_file in todo[:3]:
-                traj_md = md_file.read_text(encoding="utf-8")
-                prompt = EXTRACT_PROMPT.format(traj_md=traj_md[:3000])
-                print(f"\n  [dry-run] {md_file.name}")
-                print(f"  prompt 长度: {len(prompt)} 字符")
-            if len(todo) > 3:
-                print(f"  ... (省略剩余 {len(todo)-3} 条)")
-            print(f"\n  [dry-run] 完成，未实际调用")
-            return
+    if dry_run:
+        for md_file in todo[:3]:
+            traj_md = md_file.read_text(encoding="utf-8")
+            prompt = EXTRACT_PROMPT.format(traj_md=traj_md[:3000])
+            print(f"\n  [dry-run] {md_file.name}")
+            print(f"  prompt 长度: {len(prompt)} 字符")
+        if len(todo) > 3:
+            print(f"  ... (省略剩余 {len(todo)-3} 条)")
+        print(f"\n  [dry-run] 完成，未实际调用")
+        return
 
-        extracted = 0
-        failed = 0
-        if todo:
-            with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                futures = {pool.submit(_process_one_meta, f, llm): f for f in todo}
-                with tqdm(total=len(todo), desc="meta提取", unit="条") as pbar:
-                    for future in as_completed(futures):
-                        try:
-                            future.result()
-                            extracted += 1
-                        except Exception as e:
-                            failed += 1
-                            md_file = futures[future]
-                            logger.error(f"处理失败 ({md_file.name}): {e}")
-                        pbar.update(1)
+    extracted = 0
+    failed = 0
+    if todo:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {pool.submit(_process_one_meta, f, llm): f for f in todo}
+            with tqdm(total=len(todo), desc="meta提取", unit="条") as pbar:
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                        extracted += 1
+                    except Exception as e:
+                        failed += 1
+                        md_file = futures[future]
+                        logger.error(f"处理失败 ({md_file.name}): {e}")
+                    pbar.update(1)
 
-        print(f"  meta 提取: {extracted} 新增, {skipped} 已存在" +
-              (f", {reextract} 重提" if reextract else "") +
-              (f", {failed} 失败" if failed else ""))
+    print(f"  meta 提取: {extracted} 新增, {skipped} 已存在" +
+          (f", {reextract} 重提" if reextract else "") +
+          (f", {failed} 失败" if failed else ""))
 
     # -- Step 2: 增量构建向量索引 --
     index_path = build_vector_index_incremental(dataset_dir, embed_client, force=reindex)

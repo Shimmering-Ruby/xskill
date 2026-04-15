@@ -130,11 +130,15 @@ class Sandbox(ABC):
         """
         _log = log_fn or (lambda *a: None)
 
-        # 读 skill.md
-        skill_md_path = skill_dir / "skill.md"
+        # 读 SKILL.md (v2 uppercase; fall back to legacy skill.md)
+        skill_md_path = skill_dir / "SKILL.md"
         if not skill_md_path.exists():
-            return SandboxResult(sandbox_type=self.name, eval_score=0.0,
-                                 metadata={"error": "skill.md not found"})
+            legacy = skill_dir / "skill.md"
+            if legacy.exists():
+                skill_md_path = legacy
+            else:
+                return SandboxResult(sandbox_type=self.name, eval_score=0.0,
+                                     metadata={"error": "SKILL.md not found"})
         skill_md = skill_md_path.read_text(encoding="utf-8")
 
         # 加载题目

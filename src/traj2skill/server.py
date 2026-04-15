@@ -90,9 +90,10 @@ class SkillListResponse(BaseModel):
 
 class SkillDetailResponse(BaseModel):
     name: str
-    skill_md: str = ""
-    abstract: dict = {}
-    eval: dict = {}
+    description: str = ""
+    metadata: dict = {}
+    skill_md_body: str = ""    # body AFTER the frontmatter
+    skill_md_raw: str = ""     # full raw SKILL.md including frontmatter
     files: list[str] = []
 
 
@@ -200,7 +201,7 @@ async def api_list_skills():
 
 @router.get("/skills/{name}", response_model=SkillDetailResponse)
 async def api_show_skill(name: str):
-    """Show skill details including skill.md, abstract, and eval info."""
+    """Show skill details: description, metadata, and raw SKILL.md body."""
     try:
         result = show_skill(_skill_dir, name)
         if "error" in result:

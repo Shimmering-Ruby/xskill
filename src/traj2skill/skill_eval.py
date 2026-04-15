@@ -10,139 +10,134 @@ from pathlib import Path
 
 logger = logging.getLogger("skill_eval")
 
-SCORING_PROMPT = """你是一名严格的 AI Agent Skill 质量评审官。你的职责是判断一个 skill 是否达到生产可用标准。
-你必须像审核生产代码一样严格——宁可打低分让 skill 被拒绝重写，也不要放过质量不达标的 skill。
+# ─────────────────────────────────────────────────────────────────────────────
+# v2 format evaluation dimensions
+# ─────────────────────────────────────────────────────────────────────────────
+# description_precision  ← renamed from trigger_precision (v1)
+# warning_coverage       ← renamed from pitfall_quality    (v1)
+DIMENSIONS = [
+    "description_precision",
+    "step_actionability",
+    "granularity",
+    "generalizability",
+    "warning_coverage",
+    "faithfulness",
+    "structural_quality",
+]
 
-━━ 评审材料 ━━
+# Old→new name aliases. Kept for two reasons:
+#  1) Parsing LLM output that was produced by the legacy prompt
+#  2) Reading legacy .abstract.eval_result.scores in migration
+LEGACY_ALIASES = {
+    "trigger_precision": "description_precision",
+    "pitfall_quality": "warning_coverage",
+}
 
-## Skill 内容
+
+SCORING_PROMPT = """你正在评估 SKILL.md 的质量。SKILL.md 是一个面向 agent 运行时的技能文档，由 YAML frontmatter + markdown body 组成。
+
+格式要点（用于评分）：
+- frontmatter: name, description, compatibility, metadata
+- description 是 agent 路由的主信号：应 pushy 地列出典型用户表述 + 工具依赖
+- body: 按执行阶段用 `## <stage-name>` 分节，不应有 `## trigger` 或 `## pitfalls`
+- warnings 内联为 `> ⚠️ ...` 出现在相应 step 下，应引用轨迹证据（如 "3/7 failure trajectories showed..."）
+
+SKILL.md 内容：
 {skill_md}
 
-## 该 skill 关联的原始轨迹（供交叉验证）
+该 skill 关联的原始轨迹（供交叉验证 faithfulness / warning_coverage 的证据）：
 {sample_traj_md}
 
-━━ 评分维度 ━━
+请从以下 7 维独立打分（1-10），每维用独立 XML 标签包裹一个 1-10 的整数:
 
-请从以下 7 个维度独立评分（1-10 分），并在每个标签内先写一句话评语再写分数，格式为"评语|分数"。
-你必须严格对照下面每个分数的特征描述来打分，不允许跳档或模糊处理。
+<description_precision>X</description_precision>
+<step_actionability>X</step_actionability>
+<granularity>X</granularity>
+<generalizability>X</generalizability>
+<warning_coverage>X</warning_coverage>
+<faithfulness>X</faithfulness>
+<structural_quality>X</structural_quality>
 
-<trigger_precision>评语|X</trigger_precision>
-触发条件（trigger）的精度。逐分标准：
-- 1分：没有 trigger 部分，或 trigger 是空话（如"当遇到问题时"）
-- 2分：trigger 存在但完全无法区分场景（如"修复 Python bug"）
-- 3分：trigger 指向了一个大的技术领域但没有任何场景限定（如"Django 表单相关问题"）
-- 4分：trigger 提到了具体模块但场景描述模糊，可能误触（如"MoneyWidget 的问题"）
-- 5分：trigger 描述了一个具体场景但缺少关键限定条件（如只说了"验证失败"但没说触发条件）
-- 6分：trigger 场景清晰，但正向和反向边界不够明确，偶尔会误触
-- 7分：trigger 场景清晰且有一个明确的限定条件，误触概率低
-- 8分：trigger 有两个以上限定条件，精确圈定了适用范围
-- 9分：trigger 精确到了错误模式级别（如"方法中存在提前 return 导致后续逻辑不可达"），几乎不会误触
-- 10分：trigger 同时描述了正向匹配条件和反向排除条件，精度无可挑剔
-
-<step_actionability>评语|X</step_actionability>
-步骤的可执行性——一个从未见过此问题的 agent 拿到这个 skill，能否不靠猜测直接执行？逐分标准：
-- 1分：没有 steps 部分，或 steps 只有一句"修复这个问题"
-- 2分：steps 是纯自然语言叙述，没有任何具体操作（如"理解代码然后修改"）
-- 3分：steps 有方向但无具体操作（如"找到相关文件，修复 bug"）
-- 4分：steps 提到了文件名或模块名，但具体改什么、怎么改不清楚
-- 5分：steps 有文件定位+笼统修改描述，agent 需要自己判断改哪里
-- 6分：大部分步骤具体，但有 2-3 步需要 agent 自行推断
-- 7分：大部分步骤具体到工具+操作，仅 1 步需要 agent 判断
-- 8分：每步都指明了工具/命令和操作对象，agent 基本可以机械执行
-- 9分：每步都有工具+操作+预期结果，agent 可以验证每步是否正确
-- 10分：步骤精确到了行号/函数名/具体代码变更，完全可机械执行且可验证
-
-<granularity>评语|X</granularity>
-粒度是否合理——这个 skill 的范围是否恰到好处？逐分标准：
-- 1分：粒度完全不合理（如一个 skill 试图覆盖"所有编程问题"）
-- 2分：粒度极粗，覆盖了一整个技术栈（如"Django 开发"）
-- 3分：粒度过粗，覆盖了一个大的问题类别（如"所有表单验证问题"）
-- 4分：粒度偏粗，覆盖范围过大导致 steps 只能写得很泛
-- 5分：粒度偏细，只适用于一个特定项目的特定文件，但问题模式本身有一定通用性
-- 6分：粒度基本合理，覆盖一类问题，但边界有些模糊
-- 7分：粒度合理，能复用于 3-5 个相似场景
-- 8分：粒度恰当，问题类别定义清晰，既不过细也不过粗
-- 9分：粒度精准，能覆盖一类明确的任务模式，且能预见其适用边界
-- 10分：粒度完美，skill 自带清晰的适用/不适用说明
-
-<generalizability>评语|X</generalizability>
-通用性——这个 skill 能否迁移到同类但不完全相同的场景？逐分标准：
-- 1分：完全是一条特定轨迹的逐步复述，没有任何抽象
-- 2分：绑定了特定项目的文件路径和变量名，换个项目完全不适用
-- 3分：核心逻辑绑定了特定实现细节，仅"同一个库的同一个 bug"能用
-- 4分：有一点抽象但大部分步骤仍硬编码了具体细节
-- 5分：核心修复思路可迁移，但步骤描述仍依赖具体文件名/类名
-- 6分：步骤中混合了通用逻辑和特定细节，需要适配才能用于其他场景
-- 7分：核心判断逻辑已抽象（如"检查是否存在提前 return"），硬编码细节较少
-- 8分：步骤以通用模式描述为主，仅在示例中提及具体文件名
-- 9分：完全以通用问题模式描述，不依赖任何特定项目细节
-- 10分：不仅通用，还提供了不同场景下的变体处理建议
-
-<pitfall_quality>评语|X</pitfall_quality>
-Pitfalls（踩坑提醒）的质量。逐分标准：
-- 1分：没有 pitfalls 部分
-- 2分：pitfalls 存在但是废话（如"注意不要写错代码"）
-- 3分：pitfalls 只是重复了 steps 里的内容，没有额外信息
-- 4分：pitfalls 描述了一个显而易见的问题，没有实战价值
-- 5分：pitfalls 提到了一个真实的坑，但没有说清楚如何规避
-- 6分：pitfalls 描述了具体的错误模式，但缺少规避方法
-- 7分：pitfalls 有错误模式+规避方法，但只来自一条轨迹的经验
-- 8分：pitfalls 综合了多条轨迹的经验，有具体的错误模式和规避方式
-- 9分：pitfalls 不仅有错误模式+规避方式，还解释了为什么容易犯这个错
-- 10分：pitfalls 是从多次真实失败中提炼的系统性经验，包含错误模式、根因、规避方式和验证方法
-
-<faithfulness>评语|X</faithfulness>
-忠实度——skill 内容是否忠实于原始轨迹？逐分标准：
-- 1分：skill 内容与轨迹完全无关或严重矛盾
-- 2分：skill 的核心结论与轨迹矛盾（如轨迹失败了但 skill 写成成功的方案）
-- 3分：skill 编造了轨迹中不存在的操作步骤或工具调用
-- 4分：skill 的根因分析与轨迹中实际发现的不一致
-- 5分：大体忠实但有 1-2 处过度推断（轨迹中未明确的被写成了确定结论）
-- 6分：基本忠实，但有小的细节偏差（如文件路径写错、工具名不准确）
-- 7分：忠实于轨迹，偶有合理推断但未标注为推断
-- 8分：每个事实性声明都能在轨迹中找到依据
-- 9分：完全忠实，且正确区分了"轨迹中明确的"和"推断的"内容
-- 10分：完全忠实，无任何偏差，关键结论都标注了轨迹中的依据位置
-
-<structural_quality>评语|X</structural_quality>
-结构质量——格式是否规范、逻辑是否通顺？逐分标准：
-- 1分：结构严重残缺，缺少两个以上必要部分
-- 2分：只有 trigger 或只有 steps，其他部分缺失
-- 3分：三段都有但内容极度简略（每段不到一句话）
-- 4分：结构完整但逻辑混乱，步骤间有矛盾或顺序不对
-- 5分：结构完整，逻辑基本通顺，但有冗余或重复内容
-- 6分：结构完整，逻辑通顺，但步骤划分不够清晰
-- 7分：trigger/steps/pitfalls 三段齐全，逻辑连贯，无明显问题
-- 8分：结构清晰，步骤按阶段划分合理，无冗余无矛盾
-- 9分：结构优秀，每个 subgoal 内聚且有明确的输入输出
-- 10分：结构完美，可直接作为 agent 执行指令使用，无需任何人工调整
+评分标准细节：
+- description_precision（frontmatter `description` 的精度）:
+  1分 = 描述空洞，只写 "fix xxx 问题"，无典型表述，无工具依赖
+  4分 = 写了一段话但没有列出用户可能的触发表述
+  7分 = 列出 2-3 种典型表述 + 边界较清晰
+  10分 = 列出 ≥3 种用户触发表述、工具依赖明确、边界清晰（什么场景用 / 什么场景不用）
+- step_actionability（body 中步骤的可执行性）:
+  1分 = 只有自然语言 ("检查一下")
+  4分 = 有方向但无具体命令或路径
+  7分 = 大部分步骤有具体工具+操作，少数需 agent 推断
+  10分 = 精确到文件名:行号、函数名、命令参数，agent 可直接机械执行
+- granularity:
+  1分 = 覆盖"所有问题"或只覆盖当前这条轨迹
+  4分 = 粒度偏粗/偏细，边界模糊
+  7分 = 恰好覆盖一类相似问题
+  10分 = 精确到 3-5 个相似场景，自带适用/不适用边界说明
+- generalizability:
+  1分 = 完全硬编码特定项目路径/库名
+  4分 = 有抽象但大部分硬编码
+  7分 = 核心逻辑已抽象，仅示例中提及具体项目
+  10分 = 模式通用，可迁移到同类项目，且附变体处理建议
+- warning_coverage（内联 `> ⚠️` 的证据覆盖度）:
+  1分 = 无 `> ⚠️` 或 warning 全是 "记得备份" 式泛泛之谈
+  4分 = 有 warning 但未引用轨迹证据
+  7分 = 关键 step 大多有 warning，部分引用轨迹证据
+  10分 = 关键 step 都有 `> ⚠️` 且引用轨迹证据 (N/M trajs) + 规避方法 + 根因
+- faithfulness:
+  1分 = 步骤与源轨迹矛盾或凭空发明
+  4分 = 大体忠实但有过度推断
+  7分 = 每条事实性声明都能在轨迹中找到依据
+  10分 = 完全忠实，且正确区分"轨迹中明确的"和"推断的"内容
+- structural_quality:
+  1分 = frontmatter 缺失 / body 无 `##` 分节 / 步骤未编号
+  4分 = frontmatter 部分字段缺失，分节不清
+  7分 = frontmatter 完整、有阶段分节、步骤编号
+  10分 = frontmatter 完整（name + description + compatibility + metadata）、阶段 `##` 分节清晰、步骤连续编号、代码块格式正确
 
 ━━ 输出格式 ━━
-严格输出 7 个 XML 标签，每个标签内容为"一句话评语|分数"，不要输出其他内容。"""
+严格输出上述 7 个 XML 标签，每个标签内容为一个 1-10 的整数，不要输出其他内容。"""
 
 
 def _parse_scores(text: str) -> dict:
-    dims = {}
-    for dim in ["trigger_precision", "step_actionability", "granularity",
-                "generalizability", "pitfall_quality", "faithfulness", "structural_quality"]:
+    """Parse 7-dim scores from LLM output.
+
+    Accepts both the current v2 tag names and the legacy v1 ones
+    (``trigger_precision`` / ``pitfall_quality``). New names win if both appear.
+    """
+    dims: dict = {}
+
+    # Accept any dimension name we know about (current or legacy alias)
+    wanted = list(DIMENSIONS) + list(LEGACY_ALIASES.keys())
+
+    for dim in wanted:
         m = re.search(rf'<{dim}>(.*?)</{dim}>', text, re.DOTALL)
-        if m:
-            content = m.group(1).strip()
-            # 解析 "评语|分数" 格式
-            parts = content.rsplit('|', 1)
-            if len(parts) == 2:
-                try:
-                    dims[dim] = min(max(int(parts[1].strip()), 1), 10)
-                except ValueError:
-                    # 尝试从内容中提取数字
-                    nums = re.findall(r'\d+', parts[1])
-                    if nums:
-                        dims[dim] = min(max(int(nums[0]), 1), 10)
-            else:
-                # fallback: 只有数字
-                nums = re.findall(r'\d+', content)
+        if not m:
+            continue
+        content = m.group(1).strip()
+        # New prompt: content is just an integer. Legacy prompt was "评语|分数".
+        parts = content.rsplit('|', 1)
+        value: int | None = None
+        if len(parts) == 2:
+            try:
+                value = min(max(int(parts[1].strip()), 1), 10)
+            except ValueError:
+                nums = re.findall(r'\d+', parts[1])
                 if nums:
-                    dims[dim] = min(max(int(nums[-1]), 1), 10)
+                    value = min(max(int(nums[0]), 1), 10)
+        else:
+            nums = re.findall(r'\d+', content)
+            if nums:
+                value = min(max(int(nums[-1]), 1), 10)
+
+        if value is None:
+            continue
+
+        # Canonicalize legacy names, but don't overwrite if new already present.
+        canonical = LEGACY_ALIASES.get(dim, dim)
+        if canonical not in dims:
+            dims[canonical] = value
+
     return dims
 
 
@@ -159,18 +154,31 @@ def eval_llm_scoring(skill_dir: Path, llm_client, n_runs: int = 3, log_fn=None) 
     """
     _log = log_fn or (lambda *a: None)
 
-    # 读 skill.md
-    skill_md_path = skill_dir / "skill.md"
+    # 读 SKILL.md（v2 uppercase；回退到 legacy skill.md）
+    skill_md_path = skill_dir / "SKILL.md"
     if not skill_md_path.exists():
-        return {"tier": "llm", "eval_score": 0, "error": "skill.md not found"}
+        legacy = skill_dir / "skill.md"
+        if legacy.exists():
+            skill_md_path = legacy
+        else:
+            return {"tier": "llm", "eval_score": 0, "error": "SKILL.md not found"}
     skill_md = skill_md_path.read_text(encoding="utf-8")
 
-    # 读一条关联轨迹作示例
-    abstract_path = skill_dir / ".abstract"
-    sample_traj = "(无关联轨迹)"
-    if abstract_path.exists():
-        abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
-        source_trajs = abstract.get("source_trajs", [])
+    # 读一条关联轨迹作示例 — 从 frontmatter.metadata.source_trajs
+    from traj2skill.frontmatter import parse as fm_parse
+    fm, _body = fm_parse(skill_md)
+    sample_traj = "(no linked trajectory)"
+    source_trajs = (fm.get("metadata", {}) or {}).get("source_trajs", []) or []
+    # legacy fallback: read .abstract if frontmatter has no source_trajs
+    if not source_trajs:
+        abstract_path = skill_dir / ".abstract"
+        if abstract_path.exists():
+            try:
+                abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
+                source_trajs = abstract.get("source_trajs", []) or []
+            except Exception:
+                pass
+    if source_trajs:
         # 尝试找到对应的 traj md
         for traj_ref in source_trajs[:1]:
             # traj_ref 可能是 "traj_0023" 或完整路径
@@ -210,10 +218,8 @@ def eval_llm_scoring(skill_dir: Path, llm_client, n_runs: int = 3, log_fn=None) 
         return {"tier": "llm", "eval_score": 0, "error": "all runs failed", "runs": 0}
 
     # 取中位数
-    all_dims = ["trigger_precision", "step_actionability", "granularity",
-                "generalizability", "pitfall_quality", "faithfulness", "structural_quality"]
     final_scores = {}
-    for dim in all_dims:
+    for dim in DIMENSIONS:
         values = [r[dim] for r in all_runs if dim in r]
         final_scores[dim] = statistics.median(values) if values else 0
 
@@ -343,19 +349,28 @@ def run_eval(
 
 
 def _collect_swe_instances(skill_dir: Path) -> list[str]:
-    """从 skill 的 .abstract 和关联轨迹中收集 SWE-bench instance_id"""
-    abstract_path = skill_dir / ".abstract"
-    swe_instances = []
+    """Collect SWE-bench instance_ids from SKILL.md frontmatter.source_trajs
+    (with legacy .abstract fallback) by resolving each traj_id to its JSON."""
+    from traj2skill.frontmatter import parse as fm_parse
+    swe_instances: list[str] = []
 
-    if not abstract_path.exists():
-        return swe_instances
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        skill_md = skill_dir / "skill.md"
 
-    try:
-        abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
-    except Exception:
-        return swe_instances
+    source_trajs: list[str] = []
+    if skill_md.exists():
+        fm, _body = fm_parse(skill_md.read_text(encoding="utf-8"))
+        source_trajs = (fm.get("metadata", {}) or {}).get("source_trajs", []) or []
 
-    source_trajs = abstract.get("source_trajs", [])
+    if not source_trajs:
+        abstract_path = skill_dir / ".abstract"
+        if abstract_path.exists():
+            try:
+                abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
+                source_trajs = abstract.get("source_trajs", []) or []
+            except Exception:
+                source_trajs = []
     data_dir = skill_dir.parent.parent / "data"
 
     if not data_dir.exists():

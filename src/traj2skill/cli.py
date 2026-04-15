@@ -242,20 +242,12 @@ def cmd_status(args, config):
     skills = [d for d in skill_dir.iterdir()
               if d.is_dir() and not d.name.startswith(".")]
     print(f"  skill count: {len(skills)}")
-    for d in sorted(skills):
-        ap = d / ".abstract"
-        if ap.exists():
-            try:
-                abstract = json.loads(ap.read_text(encoding="utf-8"))
-                score = abstract.get("eval_result", {}).get("eval_score", "?")
-                ver = abstract.get("version", "?")
-                frozen = " [FROZEN]" if abstract.get("frozen") else ""
-                print(f"    {d.name}  v{ver}  score={score}  "
-                      f"tags={abstract.get('tags', [])}{frozen}")
-            except (json.JSONDecodeError, Exception):
-                print(f"    {d.name}  (bad .abstract)")
-        else:
-            print(f"    {d.name}  (no .abstract)")
+    from traj2skill.skill_manager import list_skills as _list_skills
+    for s in _list_skills(skill_dir):
+        frozen = " [FROZEN]" if s["frozen"] else ""
+        score = s["eval_score"] if s["eval_score"] is not None else "?"
+        print(f"    {s['name']}  v{s['version']}  score={score}  "
+              f"tags={s['tags']}{frozen}")
 
     index_path = skill_dir / ".skill_index.pkl"
     print(f"  vector index: {'exists' if index_path.exists() else 'missing'}")
@@ -270,22 +262,25 @@ def cmd_eval(args, config):
     skill_dir = get_skill_dir()
 
     if getattr(args, 'list', False):
-        # list eval history for all skills
+        # list eval history for all skills (reads SKILL.md frontmatter.metadata.eval)
+        from traj2skill.frontmatter import parse as fm_parse
         for d in sorted(skill_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("."):
                 continue
-            ap = d / ".abstract"
-            if ap.exists():
-                try:
-                    abstract = json.loads(ap.read_text(encoding="utf-8"))
-                    er = abstract.get("eval_result", {})
-                    score = er.get("eval_score", "?")
-                    tier = er.get("tier", "?")
-                    print(f"  {d.name}  tier={tier}  score={score}")
-                except (json.JSONDecodeError, Exception):
-                    print(f"  {d.name}  (no eval)")
-            else:
-                print(f"  {d.name}  (no abstract)")
+            skill_md = d / "SKILL.md"
+            if not skill_md.exists():
+                skill_md = d / "skill.md"
+            if not skill_md.exists():
+                print(f"  {d.name}  (no SKILL.md)")
+                continue
+            try:
+                fm, _body = fm_parse(skill_md.read_text(encoding="utf-8"))
+                er = (fm.get("metadata", {}) or {}).get("eval", {}) or {}
+                score = er.get("eval_score", er.get("score", "?"))
+                tier = er.get("tier", "?")
+                print(f"  {d.name}  tier={tier}  score={score}")
+            except Exception:
+                print(f"  {d.name}  (parse error)")
         return 0
 
     if not args.skill:
@@ -342,11 +337,11 @@ def cmd_skill(args, config):
             print(f"  {info['error']}")
             return 1
         print(f"\n=== {info['name']} ===")
-        print(f"\n--- skill.md ---\n{info['skill_md']}")
-        if info.get("abstract"):
-            print(f"\n--- abstract ---\n{json.dumps(info['abstract'], ensure_ascii=False, indent=2)}")
-        if info.get("eval"):
-            print(f"\n--- eval ---\n{json.dumps(info['eval'], ensure_ascii=False, indent=2)}")
+        if info.get("description"):
+            print(f"\n--- description ---\n{info['description']}")
+        print(f"\n--- SKILL.md body ---\n{info.get('skill_md_body', '')}")
+        if info.get("metadata"):
+            print(f"\n--- metadata ---\n{json.dumps(info['metadata'], ensure_ascii=False, indent=2, default=str)}")
         return 0
 
     elif action == "log":
@@ -413,6 +408,115 @@ def cmd_skill(args, config):
             return 1
         return 0
 
+    elif action == "migrate":
+        from traj2skill.migrate import migrate_skill, migrate_all, is_legacy_skill
+        from traj2skill.llm_client import create_llm_client
+        llm = None
+        try:
+            llm = create_llm_client(config)
+        except Exception:
+            llm = None
+
+        migrate_all_flag = getattr(args, "all", False)
+        if migrate_all_flag:
+            results = migrate_all(skill_dir, llm=llm)
+            if not results:
+                print("  (no legacy skills found)")
+                return 0
+            for r in results:
+                ok = "ok" if r.get("ok") else "skip"
+                print(f"  [{ok}] {r['name']}  -> {r.get('skill_md_path', r.get('note',''))}")
+            return 0
+
+        if not args.name:
+            print("skill name required (or --all)")
+            return 1
+
+        skill_path = skill_dir / args.name
+        if not skill_path.is_dir():
+            print(f"  skill not found: {args.name}")
+            return 1
+        if not is_legacy_skill(skill_path):
+            print(f"  {args.name} is not a legacy skill (no skill.md or SKILL.md already present)")
+            return 0
+        from traj2skill.git_lock import commit_changes
+        res = migrate_skill(skill_path, llm=llm)
+        if res.get("ok"):
+            commit_changes(str(skill_dir), f"migrate: v1→v2 format for {args.name}")
+            print(f"  migrated: {res['skill_md_path']}")
+            return 0
+        print(f"  migrate failed: {res.get('note')}")
+        return 1
+
+    elif action == "promote":
+        from traj2skill.candidates import promote_ready_candidates
+        threshold = getattr(args, "threshold", None) or 3
+        targets: list[Path]
+        if getattr(args, "all", False):
+            targets = [d for d in sorted(skill_dir.iterdir())
+                       if d.is_dir() and not d.name.startswith(".")]
+        else:
+            if not args.name:
+                print("--skill NAME or --all required")
+                return 1
+            target = skill_dir / args.name
+            if not target.is_dir():
+                print(f"  skill not found: {args.name}")
+                return 1
+            targets = [target]
+
+        total = 0
+        for t in targets:
+            if not (t / ".candidates.yml").exists():
+                continue
+            try:
+                promoted = promote_ready_candidates(t, threshold=threshold)
+            except Exception as e:
+                print(f"  [err] {t.name}: {e}")
+                continue
+            if promoted:
+                total += len(promoted)
+                print(f"  [{t.name}] promoted {len(promoted)} candidate(s):")
+                for c in promoted:
+                    n = len(c.get("supporting_trajs", []) or [])
+                    print(f"     - [{c.get('type','step')}] "
+                          f"{(c.get('pattern','') or '')[:80]}  ({n} trajs)")
+            else:
+                print(f"  [{t.name}] nothing ready (threshold={threshold})")
+        print(f"  total promoted: {total}")
+        return 0
+
+    elif action == "archive-stale":
+        from traj2skill.candidates import archive_stale
+        days = getattr(args, "days", None) or 60
+        threshold = getattr(args, "threshold", None) or 3
+        targets = [d for d in sorted(skill_dir.iterdir())
+                   if d.is_dir() and not d.name.startswith(".")]
+        if args.name:
+            # narrow to a single skill if name was provided
+            targets = [t for t in targets if t.name == args.name]
+
+        total = 0
+        for t in targets:
+            if not (t / ".candidates.yml").exists():
+                continue
+            try:
+                archived = archive_stale(t, days=days, threshold=threshold)
+            except Exception as e:
+                print(f"  [err] {t.name}: {e}")
+                continue
+            if archived:
+                total += len(archived)
+                print(f"  [{t.name}] archived {len(archived)} stale candidate(s) "
+                      f"→ references/stale_candidates.md")
+                for c in archived:
+                    print(f"     - [{c.get('type','step')}] "
+                          f"{(c.get('pattern','') or '')[:80]}")
+            else:
+                print(f"  [{t.name}] no stale candidates")
+        print(f"  total archived: {total}")
+        return 0
+
     elif action == "import":
         source = args.source if hasattr(args, 'source') and args.source else args.name
         if not source:
@@ -441,12 +545,7 @@ def cmd_show(args, config):
             print(f"  {info['error']}")
             return 1
         print(f"\n=== {info['name']} ===")
-        print(f"\n{info['skill_md']}")
-        if info.get("abstract"):
-            print(f"\n--- abstract ---")
-            for k, v in info["abstract"].items():
-                if k != "eval_result":
-                    print(f"  {k}: {v}")
+        print(f"\n{info.get('skill_md_raw', '')}")
         return 0
 
     if args.traj:
@@ -607,7 +706,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_skill = sub.add_parser("skill", help="Skill version management")
     p_skill.add_argument("skill_action", choices=[
         "list", "show", "log", "diff", "rollback",
-        "freeze", "unfreeze", "delete", "export", "import",
+        "freeze", "unfreeze", "delete", "export", "import", "migrate",
+        "promote", "archive-stale",
     ], help="action")
     p_skill.add_argument("name", nargs="?", type=str, help="skill name")
     p_skill.add_argument("v1", nargs="?", type=str, help="version 1 (for diff)")
@@ -615,6 +715,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_skill.add_argument("--version", type=str, help="target version (for rollback)")
     p_skill.add_argument("-o", "--output", type=str, help="output path (for export)")
     p_skill.add_argument("--source", type=str, help="source path (for import)")
+    p_skill.add_argument("--all", action="store_true",
+                         help="apply to all skills (for migrate / promote)")
+    p_skill.add_argument("--skill", dest="name", type=str,
+                         help="skill name (alias for positional, for promote)")
+    p_skill.add_argument("--threshold", type=int, default=3,
+                         help="supporter threshold (for promote / archive-stale)")
+    p_skill.add_argument("--days", type=int, default=60,
+                         help="staleness age in days (for archive-stale)")
 
     # --- show ---
     p_show = sub.add_parser("show", help="Show skill or trajectory details")

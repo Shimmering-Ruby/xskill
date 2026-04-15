@@ -17,9 +17,11 @@ from traj2skill.git_lock import (
 )
 from traj2skill.skill_eval import run_eval, should_merge
 from traj2skill.skill_tools import (
-    init_context, update_abstract, rebuild_skill_index,
+    init_context, update_frontmatter_metadata, rebuild_skill_index,
 )
+from traj2skill.frontmatter import parse as fm_parse, serialize as fm_serialize
 from traj2skill.agent import run_agent
+from traj2skill.candidates import promote_ready_candidates
 
 logger = logging.getLogger("traj2skill")
 
@@ -73,7 +75,10 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
     log(f"Meta: success={traj_meta.get('success')}, tools={traj_meta.get('tool_names', [])}", "step")
 
     # -- 2. 初始化上下文 --
-    llm = create_llm_client(config)
+    # 注意：agent + eval 走 role="skill"（可能是大模型），
+    # skill_tools 里的 search_skills / update_frontmatter_metadata 等
+    # 也用这个 llm；若只想让 metadata summary 用 mini，可再细分。
+    llm = create_llm_client(config, role="skill")
     embed = create_embed_client(config)
     init_context(skill_dir, data_dir, llm, embed, config)
 
@@ -98,6 +103,88 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
             log.save(output_dir / f"dryrun_{traj_name}.log.json")
             return {"action": "dry_run", "agent_result": agent_result}
 
+        # -- 4a. 共识性硬护栏（path B 新建校验）--
+        # agent 应该只用多轨迹共识 pattern 建新 skill，单轨迹独有的 pattern
+        # 走 add_candidate。此处扫描新建的 SKILL.md（git status 标为 untracked /
+        # added）做最小检验：frontmatter.metadata.source_trajs 若 < 2 条 →
+        # 违反路径 B 硬程序 → 清理该 skill 目录，避免污染 git。
+        _, status_out, _ = run_git(["status", "--porcelain", "-u"], cwd=str(skill_dir))
+        consensus_threshold = int(
+            config.get("candidates", {}).get("min_source_trajs", 2)
+        )
+        violated = []
+        for line in status_out.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # "?? name/SKILL.md" 或 "A  name/SKILL.md" 都视为新建
+            mark = line[:2].strip()
+            fpath = line[3:].strip().split(" -> ")[-1]
+            if "SKILL.md" not in fpath:
+                continue
+            if mark not in ("??", "A", "AM"):  # 只管新增/新文件
+                continue
+            skill_name = fpath.split("/")[0]
+            if not skill_name or skill_name.startswith("."):
+                continue
+            skill_md_path = skill_dir / skill_name / "SKILL.md"
+            if not skill_md_path.exists():
+                continue
+            try:
+                fm, _body = fm_parse(skill_md_path.read_text(encoding="utf-8"))
+                src = fm.get("metadata", {}).get("source_trajs", []) or []
+                src = [s for s in src if s]  # drop empty
+                if len(src) < consensus_threshold:
+                    violated.append((skill_name, len(src)))
+            except Exception as e:
+                log(f"skip consensus check for {skill_name}: {e}", "error")
+
+        if violated:
+            for name, nsrc in violated:
+                log(
+                    f"path B 硬程序违规: 新建 {name} 只有 {nsrc} 条 source_traj "
+                    f"(需 ≥{consensus_threshold})，清理该 skill 目录",
+                    "error",
+                )
+                # 清理 agent 刚创建的违规目录
+                sdir = skill_dir / name
+                if sdir.exists():
+                    import shutil
+                    try:
+                        shutil.rmtree(sdir)
+                    except Exception as e:
+                        log(f"  cleanup failed: {e}", "error")
+            # 如果清理后没别的变更，整体判 insufficient-signal
+            if not has_changes(str(skill_dir)):
+                release_lock(str(skill_dir))
+                return {
+                    "action": "rejected",
+                    "reason": "insufficient_consensus",
+                    "violated": [{"skill": n, "source_trajs": c} for n, c in violated],
+                }
+
+        # -- 4b. Promote any candidates that reached threshold.
+        # The agent may have called add_candidate on one or more skills; scan
+        # every skill dir with a .candidates.yml and flush ripe ones into
+        # SKILL.md BEFORE we commit, so everything lands in the same commit.
+        threshold = int(config.get("candidates", {}).get("threshold", 3))
+        promoted_total = 0
+        for d in sorted(skill_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            if not (d / ".candidates.yml").exists():
+                continue
+            try:
+                promoted = promote_ready_candidates(d, threshold=threshold)
+            except Exception as e:
+                log(f"promote failed for {d.name}: {e}", "error")
+                continue
+            if promoted:
+                promoted_total += len(promoted)
+                log(f"promoted {len(promoted)} candidates for {d.name}", "decision")
+        if promoted_total:
+            log(f"total promoted: {promoted_total}", "decision")
+
         # -- 5. 检查变更 --
         if not has_changes(str(skill_dir)):
             log("Agent 决定: 不需要修改 skill", "decision")
@@ -117,7 +204,8 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
             path_parts = fpath.split("/")
             if path_parts[0] and not path_parts[0].startswith("."):
                 changed_skills.add(path_parts[0])
-                if "skill.md" in fpath:
+                # v2 uses SKILL.md; still accept legacy skill.md for in-flight migrations
+                if "SKILL.md" in fpath or "skill.md" in fpath:
                     has_skill_md_change = True
 
         # -- 7. Commit --
@@ -130,11 +218,11 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
 
         log(f"变更的 skill: {changed_skills}", "decision")
 
-        # 如果只是更新了 .abstract（没有 skill.md 新建/修改），跳过 eval
+        # 仅 metadata/其他文件改动（SKILL.md body 未变），跳过 eval
         if not has_skill_md_change:
-            log("仅更新 abstract，跳过 eval", "decision")
+            log("仅更新 metadata，跳过 eval", "decision")
             release_lock(str(skill_dir))
-            return {"action": "updated_abstract", "skills": list(changed_skills)}
+            return {"action": "updated_metadata", "skills": list(changed_skills)}
 
         # -- 8. Eval --
         eval_results = {}
@@ -160,17 +248,31 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
                 log(f"{skill_name} 未通过 eval (score={er.get('eval_score', 0)})", "eval")
 
         if all_pass and eval_results:
-            # -- 10. 合入后：生成摘要 + 重建索引 --
+            # -- 10. 合入后：写回 metadata (summary + eval) + 重建索引 --
             for skill_name in changed_skills:
-                log(f"生成摘要: {skill_name}", "step")
-                abstract_result = update_abstract(skill_name, source_trajs=[traj_name])
-                # 写入 eval 结果
-                abstract_path = skill_dir / skill_name / ".abstract"
-                if abstract_path.exists():
-                    abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
-                    abstract["eval_result"] = eval_results.get(skill_name, {})
-                    abstract_path.write_text(json.dumps(abstract, ensure_ascii=False, indent=2), encoding="utf-8")
-            commit_changes(str(skill_dir), f"skill: abstract + eval for {', '.join(changed_skills)}")
+                log(f"更新 frontmatter metadata: {skill_name}", "step")
+                update_frontmatter_metadata(skill_name, source_trajs=[traj_name])
+
+                # 写入 eval 结果到 frontmatter.metadata.eval
+                skill_md_path = skill_dir / skill_name / "SKILL.md"
+                if skill_md_path.exists():
+                    text = skill_md_path.read_text(encoding="utf-8")
+                    fm, body = fm_parse(text)
+                    meta = fm.setdefault("metadata", {})
+                    eval_entry = dict(eval_results.get(skill_name, {}) or {})
+                    eval_entry["last_eval"] = datetime.now().isoformat(timespec="seconds")
+                    meta["eval"] = eval_entry
+                    skill_md_path.write_text(fm_serialize(fm, body), encoding="utf-8")
+
+                # Remove any stale .abstract that might have been created before.
+                legacy_abstract = skill_dir / skill_name / ".abstract"
+                if legacy_abstract.exists():
+                    try:
+                        legacy_abstract.unlink()
+                    except Exception:
+                        pass
+
+            commit_changes(str(skill_dir), f"skill: metadata + eval for {', '.join(changed_skills)}")
             log("重建索引", "step")
             rebuild_skill_index()
             log("完成", "ok")

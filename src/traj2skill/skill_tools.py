@@ -1,17 +1,21 @@
 """
-skill_tools.py — Skill Agent 的工具函数
-══════════════════════════════════════════
-用 agno @tool 装饰器注册，给 skill 生成 agent 使用。
+skill_tools.py — Tools exposed to the Skill curation Agent
+══════════════════════════════════════════════════════════════
+Agno-compatible tool functions. All skill files follow the v2 schema
+(SKILL.md with YAML frontmatter); no more separate .abstract file.
 """
 
-import json, os, re, pickle, logging
+import json, os, pickle, logging
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
 
+from traj2skill.frontmatter import parse as fm_parse, serialize as fm_serialize
+
 logger = logging.getLogger("skill_tools")
 
-# 全局上下文 — 在 traj2skill.py 中初始化
+# Global context — initialized by process.py / server.py / cli.py
 _ctx = {
     "skill_dir": None,     # Path: ./skill
     "data_dir": None,      # Path: ./data
@@ -29,28 +33,47 @@ def init_context(skill_dir, data_dir, llm_client, embed_client, config):
     _ctx["config"] = config
 
 
+def _slugify(name: str) -> str:
+    """Normalize a skill name to the slug form used in frontmatter.name."""
+    return name.strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def _read_skill_md(skill_path: Path) -> tuple[dict, str, Path]:
+    """Return (frontmatter_dict, body, path_of_SKILL.md). Supports legacy
+    lowercase `skill.md` as a fallback read path (writes always go to
+    SKILL.md)."""
+    upper = skill_path / "SKILL.md"
+    lower = skill_path / "skill.md"
+    if upper.exists():
+        fm, body = fm_parse(upper.read_text(encoding="utf-8"))
+        return fm, body, upper
+    if lower.exists():
+        fm, body = fm_parse(lower.read_text(encoding="utf-8"))
+        return fm, body, lower
+    return {}, "", upper
+
+
 # ═══════════════════════════════════════════════════════════════════
-# 检索类工具
+# Read tools
 # ═══════════════════════════════════════════════════════════════════
 
 def search_similar_trajs(query: str, top_k: int = 5, filter: str = "all") -> str:
     """
-    检索相似的历史轨迹。
+    Search historical trajectories for semantic matches.
 
     Args:
-        query: 自然语言查询，描述你要找的轨迹类型
-        top_k: 返回结果数量，默认 5
-        filter: 过滤条件 "all" | "success" | "failure"
+        query: natural-language description of the trajectory type you want
+        top_k: number of results (default 5)
+        filter: "all" | "success" | "failure"
 
     Returns:
-        JSON 字符串，包含匹配的轨迹列表，每条有 traj_id, similarity, meta 摘要, md 文件路径
+        JSON string: list of {traj_id, similarity, meta (summary), md_path, dataset}
     """
     from traj2skill.search import search as do_search
     data_dir = _ctx["data_dir"]
     config = _ctx["config"]
 
     results = []
-    # 在所有数据集上搜索
     for d in sorted(data_dir.iterdir()):
         if not d.is_dir() or d.name == "raw":
             continue
@@ -59,37 +82,31 @@ def search_similar_trajs(query: str, top_k: int = 5, filter: str = "all") -> str
             continue
         try:
             hits = do_search(d, query, top_k=top_k, min_similarity=0.1,
-                            success_filter=filter, config=config)
+                             success_filter=filter, config=config)
             for h in hits:
                 h["dataset"] = d.name
-                h.pop("traj_json", None)  # 太大了不传
+                h.pop("traj_json", None)
             results.extend(hits)
         except Exception as e:
-            logger.warning(f"搜索 {d.name} 失败: {e}")
+            logger.warning(f"search failed on {d.name}: {e}")
 
-    # 全局排序取 top_k
     results.sort(key=lambda x: x.get("similarity", 0), reverse=True)
     results = results[:top_k]
-
     return json.dumps(results, ensure_ascii=False, indent=2, default=str)
 
 
 def search_skills(query: str, top_k: int = 5) -> str:
     """
-    检索已有的 skill。通过 ./skill/*/.abstract 的向量索引检索。
-
-    Args:
-        query: 自然语言查询，描述你要找的 skill 类型
-        top_k: 返回数量
+    Search existing skills via the frontmatter-based vector index.
 
     Returns:
-        JSON 字符串，包含匹配的 skill 列表，每条有 skill_name, similarity, abstract 摘要
+        JSON list, each item: {skill_name, similarity, description, tags, version}
     """
     skill_dir = _ctx["skill_dir"]
     index_path = skill_dir / ".skill_index.pkl"
 
     if not index_path.exists():
-        return json.dumps({"results": [], "message": "skill 索引为空，尚无已有 skill"})
+        return json.dumps({"results": [], "message": "skill index empty"})
 
     with open(index_path, "rb") as f:
         index_data = pickle.load(f)
@@ -97,7 +114,6 @@ def search_skills(query: str, top_k: int = 5) -> str:
     embed_client = _ctx["embed_client"]
     embeddings = index_data["embeddings"]
     skill_names = index_data["skill_names"]
-    # 编码查询
     query_emb = embed_client.encode(query)
     norm = np.linalg.norm(query_emb)
     if norm > 0:
@@ -109,228 +125,345 @@ def search_skills(query: str, top_k: int = 5) -> str:
     results = []
     for idx, sim in ranked[:top_k]:
         name = skill_names[idx]
-        abstract_path = skill_dir / name / ".abstract"
-        abstract = {}
-        if abstract_path.exists():
-            abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
-
+        skill_path = skill_dir / name
+        fm, _body, _ = _read_skill_md(skill_path)
+        meta = fm.get("metadata", {}) or {}
         results.append({
             "skill_name": name,
             "similarity": round(float(sim), 4),
-            "summary": abstract.get("summary", ""),
-            "trigger": abstract.get("trigger", ""),
-            "tags": abstract.get("tags", []),
-            "version": abstract.get("version", 0),
+            "description": (fm.get("description") or "").strip(),
+            "tags": meta.get("tags", []),
+            "version": meta.get("version", 0),
         })
 
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
 def read_file(path: str) -> str:
-    """
-    读取文件内容。可以读取轨迹 md、skill md、任意项目文件。
-
-    Args:
-        path: 文件路径 (相对于项目根目录或绝对路径)
-
-    Returns:
-        文件内容字符串
-    """
+    """Read an arbitrary file under the project root."""
     p = Path(path)
-    # 安全检查: 只允许读取项目目录下的文件
     root = _ctx["skill_dir"].parent
     try:
         p.resolve().relative_to(root.resolve())
     except ValueError:
-        return f"错误: 不允许读取项目目录外的文件 ({path})"
+        return f"error: outside project root ({path})"
 
     if not p.exists():
-        return f"错误: 文件不存在 ({path})"
+        return f"error: file not found ({path})"
 
     try:
         content = p.read_text(encoding="utf-8")
         if len(content) > 10000:
-            return content[:10000] + f"\n\n... (截断, 原文 {len(content)} 字符)"
+            return content[:10000] + f"\n\n... (truncated, full length {len(content)} chars)"
         return content
     except Exception as e:
-        return f"错误: 读取失败 ({e})"
+        return f"error: read failed ({e})"
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 写入类工具
+# Write tools
 # ═══════════════════════════════════════════════════════════════════
+
+SKILL_MD_STUB = """---
+name: {slug}
+description: |
+  (placeholder — the agent will fill this with a 2-5 sentence router-ready
+  description including likely user phrasings and required tools.)
+compatibility: |
+  (placeholder — required environment, versions, and any NO-GO conditions.)
+metadata:
+  version: 1
+  created: "{today}"
+  last_updated: "{today}"
+  source_trajs: []
+  frozen: false
+  use_count: 0
+---
+
+# {title}
+
+(Write body here. Use `## <stage-name>` phase-based headers. Inline warnings as
+`> ⚠️` blockquotes directly under the step that needs them, citing trajectory
+evidence.)
+"""
+
 
 def create_skill(skill_name: str) -> str:
     """
-    创建新的 skill 目录。
+    Scaffold a new skill directory in the v2 layout.
+
+    Creates:
+        ./skill/<name>/SKILL.md          (stub frontmatter + placeholder body)
+        ./skill/<name>/scripts/.gitkeep
+        ./skill/<name>/references/.gitkeep
 
     Args:
-        skill_name: skill 名称 (英文, 下划线分隔, 如 "fix_orm_n_plus_one")
+        skill_name: slug (lowercase dashes, e.g. "fix-orm-n-plus-one")
 
     Returns:
-        创建结果和路径
+        Status message; the agent should overwrite SKILL.md via write_file.
     """
     skill_dir = _ctx["skill_dir"]
-    target = skill_dir / skill_name
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
 
     if target.exists():
-        return f"skill 目录已存在: {target}，请使用 write_file 直接修改"
+        return f"skill directory already exists: {target}. Use write_file to overwrite SKILL.md."
 
     target.mkdir(parents=True)
-    logger.info(f"📁 创建 skill 目录: {target}")
-    return f"已创建: {target}\n请接下来用 write_file 写入 skill.md"
+    (target / "scripts").mkdir()
+    (target / "references").mkdir()
+    (target / "scripts" / ".gitkeep").write_text("", encoding="utf-8")
+    (target / "references" / ".gitkeep").write_text("", encoding="utf-8")
+
+    today = date.today().isoformat()
+    title = slug.replace("-", " ").capitalize()
+    skill_md = SKILL_MD_STUB.format(slug=slug, today=today, title=title)
+    (target / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    logger.info(f"📁 created skill scaffold: {target}")
+    return (f"created: {target}\n"
+            f"files: SKILL.md (stub), scripts/.gitkeep, references/.gitkeep\n"
+            f"Next: overwrite {target}/SKILL.md with your full v2 content via write_file.")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Candidate buffer tools (agent-facing)
+# ═══════════════════════════════════════════════════════════════════
+
+def add_candidate(skill_name: str, pattern: str, pattern_type: str,
+                  traj_id: str, attach_to: str = "") -> str:
+    """
+    Add a proposed pattern to the skill's .candidates.yml buffer. If a
+    fuzzy-matching pattern already exists, merges the traj_id into its
+    supporters list (de-duplicated). Otherwise creates a new candidate.
+
+    Args:
+        skill_name: slug of the target skill (must already exist)
+        pattern: the pattern text (concrete, evidence-style)
+        pattern_type: one of "step" | "warning" | "decision_branch"
+        traj_id: the trajectory id (e.g. "traj_0023") contributing this signal
+        attach_to: SKILL.md stage-header section to attach to (for warnings
+                   and branches). Empty means "end of body".
+
+    Returns:
+        Human-readable status including the current supporter count.
+    """
+    from traj2skill import candidates as C
+
+    skill_dir = _ctx["skill_dir"]
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if not target.exists():
+        # try non-slug name as fallback
+        target = skill_dir / skill_name
+    if not target.exists():
+        return f"error: skill directory not found ({skill_name})"
+
+    ptype = (pattern_type or "step").strip().lower()
+    if ptype not in ("step", "warning", "decision_branch"):
+        return (f"error: pattern_type must be one of step|warning|decision_branch "
+                f"(got '{pattern_type}')")
+
+    data = C.load_candidates(target)
+    data, was_new = C.add_or_merge(
+        data, pattern, ptype, traj_id,
+        attach_to=attach_to or None,
+    )
+    C.save_candidates(target, data)
+
+    # Look up the current supporter count for this pattern to report back.
+    count = 0
+    promoted = False
+    for c in data.get("candidates", []):
+        if C._fuzzy_equal(c.get("pattern", ""), pattern):
+            count = len(c.get("supporting_trajs", []) or [])
+            promoted = bool(c.get("promoted"))
+            break
+
+    verb = "new candidate" if was_new else "merged into existing candidate"
+    tail = " [already PROMOTED]" if promoted else ""
+    return (f"{verb} for skill '{slug}': '{pattern[:80]}' "
+            f"type={ptype} supporters={count}{tail}")
+
+
+def list_candidates(skill_name: str) -> str:
+    """
+    List candidates in the skill's .candidates.yml buffer.
+
+    Returns a compact human-readable listing; the agent should read this
+    before calling ``add_candidate`` to avoid duplicate proposals.
+    """
+    from traj2skill import candidates as C
+
+    skill_dir = _ctx["skill_dir"]
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if not target.exists():
+        target = skill_dir / skill_name
+    if not target.exists():
+        return f"error: skill directory not found ({skill_name})"
+
+    data = C.load_candidates(target)
+    cands = data.get("candidates", []) or []
+    if not cands:
+        return f"(no candidates in buffer for '{slug}')"
+
+    lines = [f"candidates for '{slug}' ({len(cands)} total):"]
+    for c in cands:
+        tag = "[PROMOTED]" if c.get("promoted") else "[PENDING] "
+        n = len(c.get("supporting_trajs", []) or [])
+        lines.append(
+            f"  {tag} ({n}) [{c.get('type','step')}] "
+            f"{(c.get('pattern','') or '')[:100]}"
+        )
+    return "\n".join(lines)
 
 
 def write_file(path: str, content: str) -> str:
-    """
-    写入或修改文件。只允许写入 ./skill/ 目录下的文件。
-
-    Args:
-        path: 文件路径 (相对于项目根目录)
-        content: 文件内容
-
-    Returns:
-        写入结果
-    """
+    """Write or overwrite a file under ./skill/ only."""
     p = Path(path)
     skill_dir = _ctx["skill_dir"]
 
-    # 安全检查: 只允许写 skill 目录
     try:
         p.resolve().relative_to(skill_dir.resolve())
     except ValueError:
-        return f"错误: 只允许写入 ./skill/ 目录下的文件 (尝试写入: {path})"
+        return f"error: writes restricted to ./skill/ (tried: {path})"
 
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-    logger.info(f"✏️  写入: {p} ({len(content)} bytes)")
-    return f"已写入: {p} ({len(content)} 字符)"
+    logger.info(f"✏️  wrote: {p} ({len(content)} bytes)")
+    return f"wrote: {p} ({len(content)} chars)"
 
 
-ABSTRACT_PROMPT = """分析以下 skill 目录的内容，生成一个结构化的摘要。
+# ═══════════════════════════════════════════════════════════════════
+# Frontmatter metadata update (post-eval bookkeeping)
+# ═══════════════════════════════════════════════════════════════════
 
-## skill 目录中的文件
-{file_listing}
+SUMMARY_PROMPT = """Summarize the following SKILL.md in exactly 2 sentences
+(max 50 words total). Focus on what problem it solves and the core decision
+point. No preamble. Output the 2 sentences only.
 
-## skill.md 内容
+---
 {skill_md}
-
-请严格按以下 JSON 格式返回，不要输出其他内容:
-```json
-{{
-  "summary": "一句话概括 (30字以内)",
-  "trigger": "适用场景描述 (1~2句)",
-  "subgoals": ["子目标1", "子目标2", ...],
-  "tags": ["tag1", "tag2", "tag3"],
-  "tools_used": ["tool1", "tool2"]
-}}
-```"""
+---"""
 
 
-def update_abstract(skill_name: str, source_trajs: list[str] = None) -> str:
+def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None = None) -> str:
     """
-    重新生成 skill 的 .abstract 文件 (调用 LLM 总结)。
+    Update frontmatter.metadata on a skill's SKILL.md:
+      - bump version if source_trajs changed
+      - union-append new source_trajs
+      - set last_updated = now
+      - refresh metadata.summary via LLM (for better vector embeddings)
+      - delete any legacy .abstract file lying around
 
-    Args:
-        skill_name: skill 名称
-        source_trajs: 关联的轨迹 ID 列表 (如 ["traj_0023", "traj_0045"])
+    Body is preserved byte-exact.
 
     Returns:
-        生成的 abstract 内容
+        JSON blob of the new metadata, or an error message.
     """
     skill_dir = _ctx["skill_dir"]
     llm = _ctx["llm_client"]
+    slug = _slugify(skill_name)
     target = skill_dir / skill_name
-
     if not target.exists():
-        return f"错误: skill 目录不存在 ({target})"
+        # try slug variant
+        target = skill_dir / slug
+    if not target.exists():
+        return f"error: skill directory not found ({skill_name})"
 
-    # 列出文件
-    files = []
-    for f in sorted(target.rglob("*")):
-        if f.is_file() and f.name != ".abstract":
-            files.append(str(f.relative_to(target)))
+    fm, body, path = _read_skill_md(target)
+    meta = fm.setdefault("metadata", {})
 
-    # 读 skill.md
-    skill_md_path = target / "skill.md"
-    skill_md = skill_md_path.read_text(encoding="utf-8") if skill_md_path.exists() else "(skill.md 不存在)"
+    # source_trajs union
+    existing_trajs = list(meta.get("source_trajs") or [])
+    new_trajs = list(source_trajs or [])
+    changed_trajs = False
+    for t in new_trajs:
+        if t not in existing_trajs:
+            existing_trajs.append(t)
+            changed_trajs = True
+    meta["source_trajs"] = existing_trajs
 
-    # 读旧 abstract 拿 version
-    abstract_path = target / ".abstract"
-    old_version = 0
-    old_eval = {}
-    if abstract_path.exists():
-        old = json.loads(abstract_path.read_text(encoding="utf-8"))
-        old_version = old.get("version", 0)
-        old_eval = old.get("eval_result", {})
+    # version bump only if source_trajs actually changed
+    if changed_trajs:
+        meta["version"] = int(meta.get("version", 0)) + 1
 
-    # 调 LLM
-    prompt = ABSTRACT_PROMPT.format(
-        file_listing="\n".join(f"- {f}" for f in files),
-        skill_md=skill_md[:4000],
-    )
+    meta["last_updated"] = datetime.now().isoformat(timespec="seconds")
 
-    max_retries = 3
-    abstract_data = None
-    for attempt in range(max_retries):
+    # LLM-generated 2-sentence summary (for embeddings)
+    if llm:
+        skill_text = (fm.get("description", "") + "\n\n" + body)[:4000]
         try:
-            resp = llm.chat(prompt)
-            # 提取 JSON
-            json_match = re.search(r'\{.*\}', resp, re.DOTALL)
-            if json_match:
-                abstract_data = json.loads(json_match.group())
-                break
+            summary = llm.chat(SUMMARY_PROMPT.format(skill_md=skill_text)).strip()
+            # keep short
+            if summary:
+                meta["summary"] = summary[:400]
         except Exception as e:
-            logger.warning(f".abstract 生成 attempt {attempt+1} 失败: {e}")
+            logger.warning(f"summary generation failed for {skill_name}: {e}")
 
-    if not abstract_data:
-        return "错误: LLM 生成 .abstract 失败 (已重试 3 次)"
+    # write back
+    new_text = fm_serialize(fm, body)
+    # Always land in SKILL.md (uppercase). If read came from legacy skill.md,
+    # migrate-on-touch.
+    upper = target / "SKILL.md"
+    upper.write_text(new_text, encoding="utf-8")
+    if path.name == "skill.md" and path.exists():
+        try:
+            path.unlink()
+            logger.info(f"removed legacy {path}")
+        except Exception:
+            pass
 
-    # 补充字段
-    abstract_data["skill_name"] = skill_name
-    abstract_data["files"] = files
-    abstract_data["version"] = old_version + 1
-    abstract_data["source_trajs"] = source_trajs or []
-    abstract_data["eval_result"] = old_eval  # 保留旧 eval, 新 eval 在 commit 后跑
-    from datetime import datetime
-    abstract_data["last_updated"] = datetime.now().isoformat()
+    # delete legacy .abstract if present
+    old_abstract = target / ".abstract"
+    if old_abstract.exists():
+        try:
+            old_abstract.unlink()
+            logger.info(f"removed legacy .abstract for {skill_name}")
+        except Exception:
+            pass
 
-    abstract_path.write_text(json.dumps(abstract_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info(f"📋 .abstract 已更新: {abstract_path} (v{abstract_data['version']})")
+    logger.info(f"📋 frontmatter updated: {upper} (v{meta.get('version')})")
+    return json.dumps(meta, ensure_ascii=False, indent=2, default=str)
 
-    return json.dumps(abstract_data, ensure_ascii=False, indent=2)
+
+# Back-compat shim for any external caller that still imports update_abstract.
+# Emits a deprecation warning once. Remove once callers are migrated.
+def update_abstract(skill_name: str, source_trajs=None) -> str:
+    logger.warning("update_abstract() is deprecated; use update_frontmatter_metadata()")
+    return update_frontmatter_metadata(skill_name, source_trajs)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Skill 索引重建
+# Skill index rebuild
 # ═══════════════════════════════════════════════════════════════════
 
 def rebuild_skill_index():
-    """重建 ./skill/.skill_index.pkl"""
+    """Rebuild ./skill/.skill_index.pkl from frontmatter description+summary+tags."""
     skill_dir = _ctx["skill_dir"]
     embed_client = _ctx["embed_client"]
 
-    abstracts = []
+    entries = []
     for d in sorted(skill_dir.iterdir()):
         if not d.is_dir() or d.name.startswith("."):
             continue
-        ap = d / ".abstract"
-        if ap.exists():
-            data = json.loads(ap.read_text(encoding="utf-8"))
-            text = " | ".join(filter(None, [
-                f"summary: {data.get('summary', '')}",
-                f"trigger: {data.get('trigger', '')}",
-                f"tags: {', '.join(data.get('tags', []))}",
-                f"subgoals: {' → '.join(data.get('subgoals', []))}",
-            ]))
-            abstracts.append((d.name, text, data))
+        fm, _body, _path = _read_skill_md(d)
+        if not fm:
+            continue
+        meta = fm.get("metadata", {}) or {}
+        description = (fm.get("description") or "").strip()
+        summary = (meta.get("summary") or "").strip()
+        tags = meta.get("tags", []) or []
+        text = f"{description} | tags: {', '.join(tags)} | {summary}".strip()
+        entries.append((d.name, text))
 
-    if not abstracts:
-        logger.info("无 skill 可索引")
+    if not entries:
+        logger.info("no skills to index")
         return
 
-    names, texts, _ = zip(*abstracts)
-
+    names, texts = zip(*entries)
     embeddings = embed_client.encode_batch(list(texts))
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1
@@ -347,4 +480,4 @@ def rebuild_skill_index():
     with open(index_path, "wb") as f:
         pickle.dump(index_data, f)
 
-    logger.info(f"🔄 skill 索引重建: {len(names)} 条 → {index_path}")
+    logger.info(f"🔄 skill index rebuilt: {len(names)} entries → {index_path}")

@@ -191,15 +191,36 @@ def create_embed_client(config: dict) -> "EmbedClient":
     return client
 
 
-def create_llm_client(config: dict) -> "LLMClient | None":
-    """根据配置创建 LLM 客户端，未配置返回 None"""
-    llm_cfg = config.get("llm", {})
-    if llm_cfg.get("base_url") and llm_cfg.get("model"):
+def create_llm_client(config: dict, role: str = "default") -> "LLMClient | None":
+    """根据配置创建 LLM 客户端，未配置返回 None。
+
+    role:
+      "default" / "index" — 用 config["llm"]（轻量用途：轨迹 meta 抽取、检索等）
+      "skill" / "eval"    — 优先用 config["llm_skill"] 覆盖，缺省字段从 config["llm"]
+                            继承（给 agent 生成 skill + LLM 打分用，质量敏感）
+
+    例：
+      llm:
+        base_url: "..."
+        model: "doubao-seed-2-0-mini-260215"   # 所有默认走这个
+        api_key: "..."
+      llm_skill:
+        model: "doubao-seed-2-0-pro-260215"    # agent + eval 换大模型
+        # base_url / api_key 缺省 → 继承 llm.*
+    """
+    base_cfg = config.get("llm", {}) or {}
+    if role in ("skill", "eval"):
+        override_cfg = config.get("llm_skill", {}) or {}
+        merged = {**base_cfg, **{k: v for k, v in override_cfg.items() if v}}
+    else:
+        merged = base_cfg
+
+    if merged.get("base_url") and merged.get("model"):
         try:
-            client = LLMClient.from_config(llm_cfg)
-            logger.info(f"LLM: {client}")
+            client = LLMClient.from_config(merged)
+            logger.info(f"LLM[{role}]: {client}")
             return client
         except Exception as e:
-            logger.warning(f"LLM 初始化失败: {e}")
+            logger.warning(f"LLM[{role}] 初始化失败: {e}")
             return None
     return None
