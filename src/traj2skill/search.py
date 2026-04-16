@@ -118,6 +118,48 @@ def search(
     return results
 
 
+def search_all(
+    query_text: str,
+    top_k: int = 5,
+    min_similarity: float = 0.0,
+    success_filter: str = "all",
+    config: dict = None,
+) -> list[dict]:
+    """跨所有注册目录搜索，合并结果按相似度排序。
+
+    遍历 registry 中每个含 index.pkl 的目录，分别调 search()，
+    合并后按 similarity 降序截取 top_k。
+    """
+    from traj2skill.registry import all_index_paths
+
+    merged: list[dict] = []
+    paths = all_index_paths()
+    if not paths:
+        logger.warning("search_all: no registered directories with index.pkl")
+        return []
+
+    for dir_path in paths:
+        try:
+            results = search(
+                dir_path,
+                query_text,
+                top_k=top_k,
+                min_similarity=min_similarity,
+                success_filter=success_filter,
+                config=config,
+            )
+            for r in results:
+                r["dataset_dir"] = str(dir_path)
+            merged.extend(results)
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            logger.warning("search_all: skip %s: %s", dir_path, e)
+
+    merged.sort(key=lambda x: x["similarity"], reverse=True)
+    return merged[:top_k]
+
+
 def search_for_pipeline(
     dataset_dir: Path,
     query_traj_md: str,

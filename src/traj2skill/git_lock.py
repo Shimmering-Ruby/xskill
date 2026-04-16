@@ -58,6 +58,10 @@ def ensure_repo(skill_dir: str):
         run_git(["config", "user.email", "traj2skill@local"], cwd=skill_dir)
         run_git(["config", "user.name", "traj2skill"], cwd=skill_dir)
         (p / ".gitkeep").touch()
+        (p / ".gitignore").write_text(
+            "# canary runtime data — NOT versioned\n.ux_scores.jsonl\n.lock\n",
+            encoding="utf-8",
+        )
         run_git(["add", "."], cwd=skill_dir)
         run_git(["commit", "-m", "init skill repo"], cwd=skill_dir)
         logger.info(f"初始化 skill git 仓库: {skill_dir}")

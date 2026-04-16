@@ -25,6 +25,33 @@ async function jpost(path, body) {
   return r.json();
 }
 
+// ---- Chat ----
+export function chatMessage(message, traj_id) {
+  return jpost("/api/v1/chat", { message, traj_id });
+}
+
+export function chatMessageStream(message, { traj_id, session_id } = {}, { onEvent, signal } = {}) {
+  return sseStream("/api/v1/chat/stream", { message, traj_id, session_id }, { onEvent, signal });
+}
+
+export function archiveChat({ messages, skill_name, side, sha, traj_id }) {
+  return jpost("/api/v1/chat/archive", { messages, skill_name, side, sha, traj_id });
+}
+
+// ---- Canary ----
+export function getCanaryOverview() {
+  return jget("/api/v1/canary/overview");
+}
+
+export function getSkillCanary(name) {
+  return jget(`/api/v1/skills/${encodeURIComponent(name)}/canary`);
+}
+
+export function getSkillCandidates(name) {
+  return jget(`/api/v1/skills/${encodeURIComponent(name)}/candidates`);
+}
+
+// ---- Health ----
 export function getHealth() {
   return jget("/api/v1/health");
 }
@@ -87,6 +114,38 @@ export function evalSkill(
  * Returns a Promise that resolves when the stream is fully consumed or
  * rejects if fetch itself fails (network / abort).
  */
+// ---- Registry ----
+export function listRegistryDirs() {
+  return jget("/api/v1/registry/dirs");
+}
+
+// ---- Trajectories list ----
+export function listTrajectories() {
+  return jget("/api/v1/trajectories/list");
+}
+
+// ---- Watcher ----
+export function getWatcherStatus() {
+  return jget("/api/v1/watcher/status");
+}
+
+// ---- Trajectory content ----
+export function getTrajectoryContent(path) {
+  return jget(`/api/v1/trajectories/content?path=${encodeURIComponent(path)}`);
+}
+
+// ---- Trajectory process logs ----
+export function getTrajectoryLogs(filename, dir) {
+  let url = `/api/v1/trajectories/logs?filename=${encodeURIComponent(filename)}`;
+  if (dir) url += `&dir=${encodeURIComponent(dir)}`;
+  return jget(url);
+}
+
+// ---- Skill resolve ----
+export function resolveSkill({ query, accept_staging = true }) {
+  return jpost("/api/v1/skills/resolve", { query, accept_staging });
+}
+
 export async function sseStream(path, body, { onEvent, signal } = {}) {
   const emit = (type, data) => {
     try {

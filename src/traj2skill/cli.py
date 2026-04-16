@@ -567,6 +567,74 @@ def cmd_show(args, config):
     return 1
 
 
+def cmd_watch(args, config):
+    import time as _time
+    from traj2skill.watcher import DirectoryWatcher
+    from traj2skill.registry import list_watch_dirs
+    from traj2skill.llm_client import create_llm_client, create_embed_client
+
+    dirs = list_watch_dirs()
+    if not dirs:
+        print("No directories registered. Use: t2s registry add <path>")
+        return 1
+
+    llm = None if getattr(args, "no_llm", False) else create_llm_client(config)
+    embed = create_embed_client(config)
+    interval = getattr(args, "interval", 30)
+    skill_dir = get_skill_dir()
+
+    watcher = DirectoryWatcher(
+        llm=llm, embed_client=embed, config=config,
+        skill_dir=skill_dir, poll_interval=interval,
+    )
+    print(f"Watching {len(dirs)} directories (poll every {interval}s). Ctrl-C to stop.")
+    for d in dirs:
+        print(f"  {d['path']}")
+    watcher.start()
+    try:
+        while True:
+            _time.sleep(1)
+    except KeyboardInterrupt:
+        watcher.stop()
+        print("\nStopped.")
+    return 0
+
+
+def cmd_registry(args, config):
+    from traj2skill.registry import register_dir, unregister_dir, list_watch_dirs
+
+    action = args.registry_action
+    if action == "add":
+        if not args.path:
+            print("Error: path is required for 'add'")
+            return 1
+        dir_path = Path(args.path).resolve()
+        if not dir_path.is_dir():
+            print(f"Not a directory: {dir_path}")
+            return 1
+        wid = register_dir(dir_path, label=args.label)
+        print(f"Registered: {dir_path} (id={wid})")
+        return 0
+    elif action == "remove":
+        if not args.path:
+            print("Error: path is required for 'remove'")
+            return 1
+        ok = unregister_dir(Path(args.path).resolve())
+        print("Removed." if ok else "Not found.")
+        return 0 if ok else 1
+    elif action == "list":
+        dirs = list_watch_dirs()
+        if not dirs:
+            print("  (no registered directories)")
+            return 0
+        for d in dirs:
+            auto = "auto" if d["auto_index"] else "manual"
+            print(f"  [{d['id']}] {d['path']}  label={d['label']!r}  "
+                  f"{auto}  trajs={d['traj_count']}  indexed={d['indexed_count']}")
+        return 0
+    return 1
+
+
 def cmd_serve(args, config):
     import os
     import uvicorn
@@ -739,6 +807,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate = sub.add_parser("validate", help="Validate trajectory directory")
     p_validate.add_argument("path", nargs="?", type=str, help="trajectory directory path")
 
+    # --- watch ---
+    p_watch = sub.add_parser("watch", help="Watch registered directories for new trajectories")
+    p_watch.add_argument("--interval", type=int, default=30,
+                         help="poll interval in seconds (default 30)")
+    p_watch.add_argument("--no-llm", action="store_true",
+                         help="disable LLM for meta extraction")
+
+    # --- registry ---
+    p_reg = sub.add_parser("registry", help="Manage watched directories")
+    p_reg.add_argument("registry_action", choices=["add", "remove", "list"],
+                       help="action")
+    p_reg.add_argument("path", nargs="?", type=str,
+                       help="directory path (for add/remove)")
+    p_reg.add_argument("--label", type=str, default="",
+                       help="human-friendly label (for add)")
+
     return parser
 
 
@@ -801,6 +885,8 @@ def main():
         "reindex": cmd_reindex,
         "eval": cmd_eval,
         "skill": cmd_skill,
+        "registry": cmd_registry,
+        "watch": cmd_watch,
         "serve": cmd_serve,
         "show": cmd_show,
         "validate": cmd_validate,

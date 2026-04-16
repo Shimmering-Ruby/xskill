@@ -123,6 +123,8 @@ def _validate_skill_md_gate(fm: dict, body: str, data_dir: Path | None = None) -
     has_warning = "> ⚠️" in (body or "")
     unique_count = len(set(source_trajs))
     if (has_stage_headers or has_warning) and unique_count < MIN_SOURCE_TRAJS_FOR_BODY:
+        # Don't delete the scaffold — agent may still use add_candidate to this skill_name.
+        # Just reject the SKILL.md write. The empty dir with .candidates.yml is valid.
         return (
             f"SKILL.md body 有实质内容（阶段标题 / warning blockquote）但 "
             f"source_trajs 去重后只有 {unique_count} 条 < {MIN_SOURCE_TRAJS_FOR_BODY}。"

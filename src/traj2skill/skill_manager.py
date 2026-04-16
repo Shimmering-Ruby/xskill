@@ -71,6 +71,9 @@ def list_skills(skill_dir: Path) -> list[dict]:
     for d in sorted(skill_dir.iterdir()):
         if not d.is_dir() or d.name.startswith("."):
             continue
+        # Skip scaffold dirs without SKILL.md (gate-rejected, only have .candidates.yml)
+        if not (d / "SKILL.md").is_file() and not (d / "skill.md").is_file():
+            continue
 
         fm, _body, _p = _load_skill(d)
         meta = fm.get("metadata", {}) or {}

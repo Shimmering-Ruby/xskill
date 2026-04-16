@@ -97,6 +97,14 @@ def resolve_traj_path(path_or_dataset: str) -> Path:
     return get_traj_dir() / path_or_dataset
 
 
+def get_registry_dir() -> Path:
+    """注册表目录: T2S_REGISTRY_DIR > ~/.traj2skill/"""
+    env = os.environ.get("T2S_REGISTRY_DIR")
+    if env:
+        return Path(env)
+    return Path.home() / ".traj2skill"
+
+
 def is_debug() -> bool:
     return _overrides.get("debug", False)
 

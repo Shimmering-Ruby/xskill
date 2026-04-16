@@ -63,10 +63,10 @@ class LLMClient:
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
-            kwargs = {"base_url": self.base_url, "api_key": self.api_key or "no-key"}
+            kwargs = {"base_url": self.base_url, "api_key": self.api_key or "no-key", "timeout": 60.0}
             if not _ssl_verify():
                 import httpx
-                kwargs["http_client"] = httpx.Client(verify=False)
+                kwargs["http_client"] = httpx.Client(verify=False, timeout=60.0)
                 logger.warning("T2S_SSL_VERIFY=false → LLM HTTPS 证书验证已关闭")
             self._client = OpenAI(**kwargs)
         return self._client
@@ -89,6 +89,37 @@ class LLMClient:
             return resp.choices[0].message.content
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
+            raise
+
+    def chat_stream(self, prompt: str, system: str = ""):
+        """单轮对话，流式返回文本 chunk。
+
+        Yields str chunks as they arrive from the OpenAI streaming API.
+        Usage::
+
+            for chunk in llm.chat_stream("hello"):
+                print(chunk, end="")
+        """
+        client = self._get_client()
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            stream = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield delta.content
+        except Exception as e:
+            logger.error(f"LLM 流式调用失败: {e}")
             raise
 
     def __repr__(self):

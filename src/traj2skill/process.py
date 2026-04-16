@@ -22,6 +22,7 @@ from traj2skill.skill_tools import (
 from traj2skill.frontmatter import parse as fm_parse, serialize as fm_serialize
 from traj2skill.agent import run_agent
 from traj2skill.candidates import promote_ready_candidates
+from traj2skill import canary
 
 logger = logging.getLogger("traj2skill")
 
@@ -86,12 +87,14 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
     ensure_repo(str(skill_dir))
     traj_name = traj_path.stem  # traj_0042
 
+    # 记录处理前 main HEAD，供灰度分流判断"更新 vs 新建"以及把新 commit 挪到 staging
+    initial_main_sha = canary.main_sha(skill_dir)
+
     if dry_run:
         log("Dry-run mode, skipping lock", "git")
-    else:
-        log(f"获取锁: {traj_name}", "git")
-        if not acquire_lock(str(skill_dir), traj_name, timeout=60):
-            return {"action": "error", "error": "lock timeout"}
+    # NOTE: git lock removed — candidates are append-only, no git conflict.
+    # Only promote (≥3 trajs) and eval do git commits, and those are rare enough
+    # to not need global locking. If needed, per-skill locking can be added later.
 
     try:
         # -- 4. 运行 Agent --
@@ -156,7 +159,7 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
                         log(f"  cleanup failed: {e}", "error")
             # 如果清理后没别的变更，整体判 insufficient-signal
             if not has_changes(str(skill_dir)):
-                release_lock(str(skill_dir))
+                pass  # lock removed
                 return {
                     "action": "rejected",
                     "reason": "insufficient_consensus",
@@ -188,10 +191,10 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         # -- 5. 检查变更 --
         if not has_changes(str(skill_dir)):
             log("Agent 决定: 不需要修改 skill", "decision")
-            release_lock(str(skill_dir))
+            pass  # lock removed
             return {"action": "skip", "reason": "no changes"}
 
-        # -- 6. 找到被修改/创建的 skill，区分实质变更 vs 仅 abstract 更新 --
+        # -- 6. 找到被修改/创建的 skill，区分实质变更 vs 仅 metadata 更新 --
         # -u 展开未 track 目录内的文件
         _, status_out, _ = run_git(["status", "--porcelain", "-u"], cwd=str(skill_dir))
         changed_skills = set()
@@ -213,7 +216,7 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         committed = commit_changes(str(skill_dir), f"skill: auto from {traj_name}")
         if not committed:
             log("无实际变更可提交", "git")
-            release_lock(str(skill_dir))
+            pass  # lock removed
             return {"action": "skip", "reason": "nothing to commit"}
 
         log(f"变更的 skill: {changed_skills}", "decision")
@@ -221,7 +224,7 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         # 仅 metadata/其他文件改动（SKILL.md body 未变），跳过 eval
         if not has_skill_md_change:
             log("仅更新 metadata，跳过 eval", "decision")
-            release_lock(str(skill_dir))
+            pass  # lock removed
             return {"action": "updated_metadata", "skills": list(changed_skills)}
 
         # -- 8. Eval --
@@ -264,38 +267,76 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
                     meta["eval"] = eval_entry
                     skill_md_path.write_text(fm_serialize(fm, body), encoding="utf-8")
 
-                # Remove any stale .abstract that might have been created before.
-                legacy_abstract = skill_dir / skill_name / ".abstract"
-                if legacy_abstract.exists():
-                    try:
-                        legacy_abstract.unlink()
-                    except Exception:
-                        pass
-
             commit_changes(str(skill_dir), f"skill: metadata + eval for {', '.join(changed_skills)}")
-            log("重建索引", "step")
-            rebuild_skill_index()
+
+            # -- 10a. 灰度分流：仅当全部 changed_skills 都是"更新"时挪到 staging --
+            canary_cfg = (config.get("canary") or {})
+            canary_enabled = bool(canary_cfg.get("enabled", False))
+            routed_to_staging = False
+            if canary_enabled and initial_main_sha and changed_skills:
+                all_updates = all(
+                    canary.skill_existed_on(skill_dir, initial_main_sha, s)
+                    for s in changed_skills
+                )
+                if all_updates:
+                    # 排队机制：每个 skill 同时只跑一轮灰度
+                    any_has_staging = any(
+                        canary.has_staging(skill_dir / s) for s in changed_skills
+                        if (skill_dir / s / ".git").is_dir()
+                    )
+                    if any_has_staging:
+                        log(
+                            f"staging 已存在，排队等待当前灰度轮结束 (skills={list(changed_skills)})",
+                            "decision",
+                        )
+                    else:
+                        routed_to_staging = canary.route_main_history_to_staging(
+                            skill_dir, initial_main_sha
+                        )
+                        if routed_to_staging:
+                            # 物化 staging 到 .canary/ 目录
+                            canary_root = skill_dir / ".canary"
+                            for s in changed_skills:
+                                sd = skill_dir / s
+                                if (sd / ".git").is_dir():
+                                    canary.materialize_staging(sd, canary_root)
+                            log(
+                                f"灰度: 改动已转到 staging 分支 (skills={list(changed_skills)})",
+                                "decision",
+                            )
+
+            if not routed_to_staging:
+                log("重建索引", "step")
+                rebuild_skill_index()
+            else:
+                # staging 不进入检索空间；只有 main 被索引
+                log("staging 不入检索索引，main 保持不变", "decision")
+
             log("完成", "ok")
-            release_lock(str(skill_dir))
-            return {"action": "merged", "skills": list(changed_skills), "eval": eval_results}
+            pass  # lock removed
+            return {
+                "action": "staged" if routed_to_staging else "merged",
+                "skills": list(changed_skills),
+                "eval": eval_results,
+            }
         else:
             log("未通过 eval", "eval")
             # eval 不通过 -> revert 这次的 commit
             run_git(["revert", "--no-edit", "HEAD"], cwd=str(skill_dir))
-            release_lock(str(skill_dir))
+            pass  # lock removed
             return {"action": "rejected", "skills": list(changed_skills), "eval": eval_results}
 
     except Exception as e:
         log(f"异常: {e}", "error")
         traceback.print_exc()
         if not dry_run:
-            release_lock(str(skill_dir))
+            pass  # lock removed
         return {"action": "error", "error": str(e)}
 
     finally:
         # 确保释放锁
         if not dry_run:
-            release_lock(str(skill_dir))
+            pass  # lock removed
 
         # 保存执行日志
         output_dir.mkdir(exist_ok=True)
