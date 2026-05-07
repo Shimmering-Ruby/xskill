@@ -22,6 +22,12 @@ dist/
 build/
 .eggs/
 *.so
+.pytest_cache/
+
+# 调试残渣（Playwright / 截图 / DOM 快照）
+.playwright-mcp/
+*-snapshot.yml
+*.png
 
 # DO commit the packaged web UI build output (needed for `t2s serve`)
 !src/traj2skill/web/dist/
