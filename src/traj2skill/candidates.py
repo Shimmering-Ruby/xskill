@@ -310,10 +310,19 @@ def _apply_candidate(body: str, cand: dict) -> str:
     return _insert_step(body, attach_to, pattern, supporters)
 
 
-def promote_ready_candidates(skill_dir: Path, threshold: int = 3) -> list[dict]:
-    """Promote all ready candidates for this skill into SKILL.md.
+def promote_ready_candidates(skill_dir: Path, threshold: int = 3,
+                              config: dict | None = None) -> list[dict]:
+    """Promote ready candidates by running an autonomous skill-edit agent.
 
-    Returns the list of candidate dicts that were just promoted.
+    The agent gets full tool access (read/write files, create scripts, etc.)
+    and decides on its own how to incorporate the candidates. We only provide:
+    - Which candidates reached threshold
+    - Their supporting trajectory IDs
+    - The skill directory path
+
+    After the agent finishes, we git-commit the result.
+
+    Returns the list of candidate dicts that were promoted.
     """
     skill_dir = Path(skill_dir)
     data = load_candidates(skill_dir)
@@ -321,27 +330,175 @@ def promote_ready_candidates(skill_dir: Path, threshold: int = 3) -> list[dict]:
     if not ready:
         return []
 
-    fm, body, path = _read_skill_md(skill_dir)
-    if not fm and not body:
-        logger.warning(f"no SKILL.md found at {skill_dir}; skipping promotion")
-        return []
+    # Run autonomous edit agent
+    try:
+        _run_skill_edit_agent(
+            skill_dir=skill_dir,
+            candidates=ready,
+            config=config or {},
+        )
+    except Exception as e:
+        logger.error("skill edit agent failed for %s: %s", skill_dir.name, e)
+        # Fallback to rule-based insertion
+        fm, body, _ = _read_skill_md(skill_dir)
+        if fm or body:
+            for cand in ready:
+                body = _apply_candidate(body, cand)
+            (skill_dir / "SKILL.md").write_text(fm_serialize(fm, body), encoding="utf-8")
+            logger.info("fell back to rule-based promotion for %s", skill_dir.name)
 
-    promoted: list[dict] = []
+    # Mark all as promoted
+    promoted = []
     for cand in ready:
-        try:
-            body = _apply_candidate(body, cand)
-            mark_promoted(data, cand.get("pattern", ""))
-            promoted.append(cand)
-        except Exception as e:
-            logger.warning(f"failed to promote candidate '{cand.get('pattern','')[:60]}': {e}")
+        mark_promoted(data, cand.get("pattern", ""))
+        promoted.append(cand)
 
-    if promoted:
-        upper = skill_dir / "SKILL.md"
-        upper.write_text(fm_serialize(fm, body), encoding="utf-8")
-        save_candidates(skill_dir, data)
-        logger.info(f"promoted {len(promoted)} candidate(s) in {skill_dir}")
-
+    save_candidates(skill_dir, data)
+    logger.info("promoted %d candidate(s) in %s", len(promoted), skill_dir.name)
     return promoted
+
+
+def _run_skill_edit_agent(skill_dir: Path, candidates: list[dict],
+                          config: dict) -> None:
+    """Launch an autonomous agent to edit a skill directory.
+
+    The agent has full read/write access to the skill directory and can:
+    - Read/write SKILL.md
+    - Create/edit scripts/* and references/*
+    - Read source trajectories
+    - Decide its own approach
+
+    Configurable via ``config["skill_edit_agent"]``:
+      - ``tool_call_limit`` (default 20) -- hard cap on agent actions
+      - ``timeout_seconds`` (default 600) -- wall-clock budget; on timeout we
+        keep partial writes and return without raising (so promotion still
+        marks candidates done — observed practice).
+      - ``read_file_max_bytes`` (default 15000) -- per-read truncation
+    """
+    import json as _json
+    import os
+    import threading
+    from agno.agent import Agent
+    from agno.models.openai.like import OpenAILike
+    from agno.tools import tool as _agno_tool
+
+    llm_cfg = config.get("llm", {})
+    if not llm_cfg.get("base_url") or not llm_cfg.get("model"):
+        raise ValueError("LLM not configured — cannot run skill edit agent")
+
+    agent_cfg = config.get("skill_edit_agent", {}) or {}
+    tool_call_limit = int(agent_cfg.get("tool_call_limit", 20))
+    timeout_seconds = int(agent_cfg.get("timeout_seconds", 600))
+    read_max_bytes = int(agent_cfg.get("read_file_max_bytes", 15000))
+
+    # ── Tools: full filesystem access within skill + data dirs ──
+
+    @_agno_tool(name="read_file", description="Read any file (trajectory, skill, script, etc).\nArgs:\n    path: file path")
+    def _read_file(path: str) -> str:
+        p = Path(path)
+        if not p.is_file():
+            return f"Error: not found: {path}"
+        try:
+            return p.read_text(encoding="utf-8")[:read_max_bytes]
+        except Exception as e:
+            return f"Error: {e}"
+
+    @_agno_tool(name="write_file", description="Write/overwrite a file in the skill directory.\nArgs:\n    path: file path\n    content: file content")
+    def _write_file(path: str, content: str) -> str:
+        p = Path(path)
+        # Security: only allow writes within the skill dir
+        try:
+            p.resolve().relative_to(skill_dir.resolve())
+        except ValueError:
+            return f"Error: can only write within {skill_dir}"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return f"Written {len(content)} bytes to {p}"
+
+    @_agno_tool(name="list_files", description="List files in a directory.\nArgs:\n    path: directory path")
+    def _list_files(path: str) -> str:
+        p = Path(path)
+        if not p.is_dir():
+            return f"Error: not a directory: {path}"
+        entries = sorted(p.iterdir())
+        return "\n".join(f"{'[dir] ' if e.is_dir() else ''}{e.name}" for e in entries) or "(empty)"
+
+    # ── Build user message with context ──
+
+    cand_info = []
+    for c in candidates:
+        cand_info.append({
+            "pattern": c.get("pattern", ""),
+            "type": c.get("type", "step"),
+            "attach_to": c.get("attach_to", ""),
+            "supporting_trajs": c.get("supporting_trajs", []),
+        })
+
+    # Find trajectory file paths
+    traj_dir = skill_dir.parent.parent / "data"
+    traj_paths = {}
+    for c in candidates:
+        for tid in c.get("supporting_trajs", []):
+            if tid not in traj_paths:
+                for p in traj_dir.rglob(f"{tid}.md"):
+                    traj_paths[tid] = str(p)
+                    break
+
+    user_msg = f"""你是一个从 agent 执行轨迹中抽取复用模式的 Skill 编辑 Agent。
+
+已有一个 skill 目录在 `{skill_dir}`，其中的 `.candidates.yml` 记录了从多条轨迹中提取的候选 pattern（步骤、警告、决策分支等）。以下 candidates 已经积累了足够多的独立轨迹支持，说明它们是跨轨迹的共性模式，而非单次偶然：
+
+{_json.dumps(cand_info, ensure_ascii=False, indent=2)}
+
+这些 candidates 对应的源轨迹文件路径如下，你可以用 read_file 查看完整的执行过程和上下文：
+{_json.dumps(traj_paths, ensure_ascii=False, indent=2)}
+
+你的目标是将这些共性模式合入到 skill 中，使其成为一份高质量的、可被其他 agent 直接加载使用的操作指南。具体来说：
+
+- 先用 list_files 和 read_file 了解 skill 当前结构和内容
+- 阅读你认为必要的源轨迹，理解每个 candidate 的实际执行上下文
+- 自行决定如何组织：可以修改 SKILL.md 的正文、新建 scripts/ 下的辅助脚本、补充 references/ 下的参考材料
+- 保持合理粒度——归纳共性而非堆砌细节，让消费者 agent 看完就能动手
+- 用中文撰写内容，代码、命令、路径保持英文原文
+
+完成所有编辑后说 done。"""
+
+    model = OpenAILike(
+        id=llm_cfg["model"],
+        api_key=llm_cfg.get("api_key") or os.environ.get("LLM_API_KEY", ""),
+        base_url=llm_cfg["base_url"],
+    )
+
+    agent = Agent(
+        model=model,
+        tools=[_read_file, _write_file, _list_files],
+        tool_call_limit=tool_call_limit,
+        markdown=True,
+    )
+
+    # Run inside a daemon thread with wall-clock timeout. agno's Agent.run is
+    # blocking and not cancellable, so on timeout we let the thread leak (it
+    # dies with the process) and keep whatever the agent already wrote.
+    err_box: dict = {"err": None}
+
+    def _runner():
+        try:
+            agent.run(user_msg, stream=False)
+        except BaseException as exc:  # noqa: BLE001 — record everything
+            err_box["err"] = exc
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout=timeout_seconds)
+    if t.is_alive():
+        logger.warning(
+            "skill edit agent timed out after %ds for %s; keeping partial writes",
+            timeout_seconds, skill_dir.name,
+        )
+        return
+    if err_box["err"] is not None:
+        raise err_box["err"]
+    logger.info("skill edit agent completed for %s", skill_dir.name)
 
 
 # ═══════════════════════════════════════════════════════════════════

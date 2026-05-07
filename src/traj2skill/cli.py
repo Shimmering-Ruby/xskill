@@ -450,6 +450,7 @@ def cmd_skill(args, config):
 
     elif action == "promote":
         from traj2skill.candidates import promote_ready_candidates
+        from traj2skill.git_lock import commit_changes, has_changes
         threshold = getattr(args, "threshold", None) or 3
         targets: list[Path]
         if getattr(args, "all", False):
@@ -466,16 +467,18 @@ def cmd_skill(args, config):
             targets = [target]
 
         total = 0
+        promoted_skills: list[str] = []
         for t in targets:
             if not (t / ".candidates.yml").exists():
                 continue
             try:
-                promoted = promote_ready_candidates(t, threshold=threshold)
+                promoted = promote_ready_candidates(t, threshold=threshold, config=config)
             except Exception as e:
                 print(f"  [err] {t.name}: {e}")
                 continue
             if promoted:
                 total += len(promoted)
+                promoted_skills.append(t.name)
                 print(f"  [{t.name}] promoted {len(promoted)} candidate(s):")
                 for c in promoted:
                     n = len(c.get("supporting_trajs", []) or [])
@@ -483,6 +486,10 @@ def cmd_skill(args, config):
                           f"{(c.get('pattern','') or '')[:80]}  ({n} trajs)")
             else:
                 print(f"  [{t.name}] nothing ready (threshold={threshold})")
+        if promoted_skills and has_changes(str(skill_dir)):
+            msg = f"promote: {', '.join(promoted_skills)}"
+            commit_changes(str(skill_dir), msg)
+            print(f"  committed: {msg}")
         print(f"  total promoted: {total}")
         return 0
 

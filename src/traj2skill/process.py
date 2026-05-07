@@ -178,7 +178,7 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
             if not (d / ".candidates.yml").exists():
                 continue
             try:
-                promoted = promote_ready_candidates(d, threshold=threshold)
+                promoted = promote_ready_candidates(d, threshold=threshold, config=config)
             except Exception as e:
                 log(f"promote failed for {d.name}: {e}", "error")
                 continue
