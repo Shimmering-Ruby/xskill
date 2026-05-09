@@ -1,0 +1,56 @@
+# t2s 配置模板 — 复制到 ~/.t2s/config.yaml，按需修改
+#
+# 安装后首次使用：
+#   mkdir -p ~/.t2s
+#   cp examples/config.yaml.example ~/.t2s/config.yaml
+#   # 编辑 llm.api_key / embedding.api_key
+#
+# 不读环境变量、不读 ~/.aikey；缺失字段直接抛 FileNotFoundError / KeyError。
+
+# ===== Skill 仓库 =====
+skill_dir: ~/.t2s/skill            # 全局唯一 skill repo（可改任意绝对路径）
+
+# ===== LLM（生成 / 评分 / chat 用）=====
+llm:
+  base_url: https://api.deepseek.com           # 或 dashscope / openai 兼容 endpoint
+  model:    deepseek-v4-flash
+  api_key:  PUT_YOUR_LLM_API_KEY_HERE
+
+# ===== Embedding（向量检索用）=====
+embedding:
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  model:    doubao-embedding-vision-251215
+  api_key:  PUT_YOUR_EMBEDDING_API_KEY_HERE
+  dim:      0                      # 0 = 自动探测
+
+# ===== L2 沙箱评估（SWE-bench docker 跑 A/B/C；单测 / 评估精度脚本用）=====
+sandbox:
+  enabled:           true
+  max_instances:     5              # 单次 eval 跑几个 instance
+  n_trials:          10             # 每 instance 重复次数（pass@1 的 N）
+  timeout_per_trial: 300            # 单 trial 墙钟超时（秒）
+  trigger_threshold: 3              # skill 至少关联 N 条 SWE instance 才触发
+
+# ===== Skill 候选门控（决定 .candidates.yml 中的 candidate 何时升 SKILL.md）=====
+candidates:
+  threshold:        3               # supporting_trajs ≥ N 才升级
+  stale_days:       60              # 超过 N 天仍不足 → 沉到 references/
+  min_source_trajs: 2               # 新建 skill 至少要 N 条 source_trajs
+
+# ===== Skill 编辑 Agent（PromotionAgent 子 agent 的上限）=====
+skill_edit_agent:
+  tool_call_limit:     20           # 单次 promote 最多调几次工具
+  timeout_seconds:     600          # 墙钟超时（保留已写入部分，不抛异常）
+  read_file_max_bytes: 15000        # read_file 单次截断字节数
+
+# ===== Canary（灰度发布：staging 分支按概率替换 main，
+#       两侧各 ≥ min_samples 条 UX 分后比较，胜出 merge / 落败 discard）=====
+canary:
+  enabled:       true
+  probability:   0.2                # 检索命中时以 p 概率走 staging
+  min_samples:   5                  # 两侧各 ≥ N 条 UX 分才判定
+  max_days_hold: 14                 # staging 最长存活；超时丢弃
+
+# ===== Watcher（serve 内置的目录轮询）=====
+watcher:
+  poll_interval: 30                 # 秒
