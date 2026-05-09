@@ -569,13 +569,6 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
     return json.dumps(meta, ensure_ascii=False, indent=2, default=str)
 
 
-# Back-compat shim for any external caller that still imports update_abstract.
-# Emits a deprecation warning once. Remove once callers are migrated.
-def update_abstract(skill_name: str, source_trajs=None) -> str:
-    logger.warning("update_abstract() is deprecated; use update_frontmatter_metadata()")
-    return update_frontmatter_metadata(skill_name, source_trajs)
-
-
 # ═══════════════════════════════════════════════════════════════════
 # Skill index rebuild
 # ═══════════════════════════════════════════════════════════════════

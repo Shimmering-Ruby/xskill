@@ -1,10 +1,13 @@
 """
-config.py — 路径管理 + 配置加载
-═══════════════════════════════════
-统一管理所有路径，优先级: CLI flag > 环境变量 > config.yaml > 默认值
+config.py — 全局路径与配置加载
+═════════════════════════════════════
+统一从 ~/.t2s/ 读取；无 cwd fallback、无环境变量 fallback、无 ~/.aikey fallback。
+缺失即抛异常。
 """
 
-import os, logging
+from __future__ import annotations
+
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -12,102 +15,116 @@ import yaml
 
 logger = logging.getLogger("t2s.config")
 
-# 全局配置单例
+# ─── 默认根路径 ─────────────────────────────────────────────────
+T2S_HOME = Path.home() / ".t2s"
+CONFIG_PATH = T2S_HOME / "config.yaml"
+REGISTRY_DB = T2S_HOME / "registry.db"
+CHAT_DB = T2S_HOME / "chat_sessions.db"
+LOGS_DIR = T2S_HOME / "logs"
+
 _config: dict = {}
-_overrides: dict = {}  # CLI flag 覆盖
+_overrides: dict = {}
 
 
 def set_overrides(**kwargs):
-    """CLI flag 设置覆盖值"""
+    """CLI flag 覆盖。仅 debug / quiet 两个保留。"""
     for k, v in kwargs.items():
         if v is not None:
             _overrides[k] = v
 
 
-def get_config_path() -> Path:
-    """配置文件路径"""
-    if "config" in _overrides:
-        return Path(_overrides["config"])
-    env = os.environ.get("T2S_CONFIG")
-    if env:
-        return Path(env)
-    return Path.cwd() / "config.yaml"
-
-
 def load_config(path: Optional[Path] = None) -> dict:
-    """加载配置文件"""
+    """加载 ~/.t2s/config.yaml；不存在直接抛 FileNotFoundError。"""
     global _config
-    cfg_path = path or get_config_path()
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            _config = yaml.safe_load(f) or {}
-    else:
-        _config = {}
+    cfg_path = Path(path) if path else CONFIG_PATH
+    if not cfg_path.exists():
+        raise FileNotFoundError(
+            f"t2s config not found: {cfg_path}\n"
+            f"Create it manually (see docs)."
+        )
+    with open(cfg_path) as f:
+        _config = yaml.safe_load(f) or {}
+    if not _config.get("llm", {}).get("api_key"):
+        raise KeyError(f"llm.api_key missing in {cfg_path}")
+    if not _config.get("embedding", {}).get("api_key"):
+        raise KeyError(f"embedding.api_key missing in {cfg_path}")
     return _config
 
 
 def get_config() -> dict:
-    """获取已加载的配置"""
     if not _config:
         load_config()
     return _config
 
 
-def get_traj_dir() -> Path:
-    """轨迹目录: --traj-dir > T2S_TRAJ_DIR > config.yaml traj_dir > cwd/data"""
-    if "traj_dir" in _overrides:
-        return Path(_overrides["traj_dir"])
-    env = os.environ.get("T2S_TRAJ_DIR")
-    if env:
-        return Path(env)
-    cfg = get_config()
-    if cfg.get("traj_dir"):
-        return Path(cfg["traj_dir"])
-    return Path.cwd() / "data"
-
-
 def get_skill_dir() -> Path:
-    """Skill 目录: --skill-dir > T2S_SKILL_DIR > config.yaml skill_dir > cwd/skill"""
-    if "skill_dir" in _overrides:
-        return Path(_overrides["skill_dir"])
-    env = os.environ.get("T2S_SKILL_DIR")
-    if env:
-        return Path(env)
+    """skill_dir: config.yaml 字段；默认 ~/.t2s/skill/"""
     cfg = get_config()
-    if cfg.get("skill_dir"):
-        return Path(cfg["skill_dir"])
-    return Path.cwd() / "skill"
+    raw = cfg.get("skill_dir") or str(T2S_HOME / "skill")
+    return Path(raw).expanduser()
 
 
-def get_output_dir() -> Path:
-    """日志输出目录"""
-    return Path.cwd() / "output"
+def get_logs_dir() -> Path:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    return LOGS_DIR
 
 
-def resolve_traj_path(path_or_dataset: str) -> Path:
-    """
-    解析轨迹路径参数：
-    - 绝对/相对路径直接返回
-    - --dataset name → get_traj_dir() / name
-    """
-    p = Path(path_or_dataset)
-    if p.is_absolute() or p.exists():
-        return p
-    # 可能是 dataset 名称
-    return get_traj_dir() / path_or_dataset
+def get_chat_archive_dir() -> Path:
+    """chat 归档轨迹基目录。serve 启动时会自动 register_dir 进 watcher。"""
+    p = T2S_HOME / "chat_archive"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
-def get_registry_dir() -> Path:
-    """注册表目录: T2S_REGISTRY_DIR > ~/.traj2skill/"""
-    env = os.environ.get("T2S_REGISTRY_DIR")
-    if env:
-        return Path(env)
-    return Path.home() / ".traj2skill"
+def get_traj_dir() -> Path:
+    """**已废弃**：dataset 应通过 ``t2s registry add <abs-path>`` 注册。
+
+    保留这个函数仅为给"无显式路径"的内部调用兜底——返回第一个已注册的 watch_dir，
+    或退回 chat_archive_dir。新代码不要用；改为通过 Registry / explicit path。"""
+    # 避免 import 循环
+    try:
+        from traj2skill.registry import list_watch_dirs
+        dirs = list_watch_dirs()
+        if dirs:
+            return Path(dirs[0]["path"])
+    except Exception:
+        pass
+    return get_chat_archive_dir()
 
 
+def get_registry_db_path() -> Path:
+    return REGISTRY_DB
+
+
+def get_chat_db_path() -> Path:
+    return CHAT_DB
+
+
+# ─── 调试 flag ──────────────────────────────────────────────────
 def is_debug() -> bool:
     return _overrides.get("debug", False)
 
 
 def is_quiet() -> bool:
     return _overrides.get("quiet", False)
+
+
+# ─── 兼容旧 API（仅为过渡期保留，下期清掉）───────────────────────
+def get_registry_dir() -> Path:
+    """旧 API。返回 T2S_HOME。新代码请用 get_registry_db_path。"""
+    return T2S_HOME
+
+
+
+
+def get_output_dir() -> Path:
+    """旧 API → 转 logs_dir"""
+    return get_logs_dir()
+
+
+def resolve_traj_path(path_or_dataset: str) -> Path:
+    """旧 API。新代码：直接用绝对路径。"""
+    p = Path(path_or_dataset).expanduser()
+    if not p.exists():
+        raise FileNotFoundError(f"trajectory path not found: {p}")
+    return p

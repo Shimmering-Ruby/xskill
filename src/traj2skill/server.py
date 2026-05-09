@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from traj2skill import __version__
-from traj2skill.config import load_config, get_skill_dir, get_traj_dir
+from traj2skill.config import load_config, get_skill_dir, get_chat_archive_dir
 from traj2skill.search import search as search_trajs, search_all as search_trajs_all
 from traj2skill.skill_manager import (
     list_skills,
@@ -53,7 +53,10 @@ logger = logging.getLogger("traj2skill.server")
 # ---------------------------------------------------------------------------
 _config = load_config()
 _skill_dir = get_skill_dir()
-_traj_dir = get_traj_dir()
+# chat 归档基目录（取代旧 _traj_dir 的"轨迹根目录"概念）
+# 真实数据集走 registry add 注册，不再依赖此变量
+_chat_archive_dir = get_chat_archive_dir()
+_traj_dir = _chat_archive_dir  # 兼容仍引用 _traj_dir 的代码路径
 _watcher_ref: dict = {}  # {"instance": DirectoryWatcher} — set in create_app startup
 _chat_agents: dict = {}   # session_id → Agno Agent instance
 
@@ -869,9 +872,8 @@ async def api_chat_archive(req: dict):
             lines.append(text)
             lines.append("")
 
-    # Write to chat archive directory
-    chat_traj_dir = Path(_traj_dir).parent / "trajectory" / "chat_app_demo"
-    chat_traj_dir.mkdir(parents=True, exist_ok=True)
+    # Write to chat archive directory (~/.t2s/chat_archive/)
+    chat_traj_dir = _chat_archive_dir
     md_path = chat_traj_dir / f"traj_{traj_id}.md"
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -1018,8 +1020,8 @@ async def api_chat_stream(req: dict):
         chat_agent = _chat_agents[session_id]
     else:
         from agno.db.sqlite import SqliteDb as _SqliteDb
-        from traj2skill.config import get_registry_dir
-        _db_path = str(get_registry_dir() / "chat_sessions.db")
+        from traj2skill.config import get_chat_db_path
+        _db_path = str(get_chat_db_path())
         _chat_db = _SqliteDb(db_file=_db_path)
 
         model = _OpenAILike(
@@ -1356,10 +1358,8 @@ def create_app() -> FastAPI:
         # Auto-register chat archive directory
         try:
             from traj2skill.registry import register_dir
-            chat_traj_dir = Path(_traj_dir).parent / "trajectory" / "chat_app_demo"
-            chat_traj_dir.mkdir(parents=True, exist_ok=True)
-            register_dir(chat_traj_dir, label="chat_archive")
-            logger.info("chat archive dir registered: %s", chat_traj_dir)
+            register_dir(_chat_archive_dir, label="chat_archive")
+            logger.info("chat archive dir registered: %s", _chat_archive_dir)
         except Exception:
             logger.warning("failed to register chat archive dir", exc_info=True)
 

@@ -44,7 +44,6 @@ logger = logging.getLogger("t2s.watcher")
 _ACTION_STATUS = {
     "merged": "in_skill",
     "staged": "staged",
-    "staging_queued": "staging_queued",
     "updated_metadata": "in_skill",
     "rejected": "rejected",
     "skip": "indexed",

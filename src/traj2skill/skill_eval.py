@@ -394,14 +394,9 @@ def _collect_swe_instances(skill_dir: Path) -> list[str]:
     return list(set(swe_instances))
 
 
-def should_merge(eval_result: dict, old_eval: dict = None, is_new: bool = True) -> bool:
-    """判断是否应该合入 main"""
-    score = eval_result.get("eval_score", 0)
+def should_merge(eval_result: dict, threshold: float = 6.0) -> bool:
+    """门控：eval_score ≥ threshold 即合入 main。
 
-    if is_new:
-        # 新建 skill: eval_score ≥ 6.0
-        return score >= 6.0
-    else:
-        # 修改 skill: 必须优于上版本
-        old_score = old_eval.get("eval_score", 0) if old_eval else 0
-        return score > old_score
+    历史还有 is_new=False 走相对比较的分支，但 process.process_traj 实际从未传过它，
+    全是 is_new=True 路径。已删，单签名。"""
+    return float(eval_result.get("eval_score", 0)) >= threshold

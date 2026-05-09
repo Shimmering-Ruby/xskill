@@ -104,66 +104,6 @@ def staging_created_at(skill_dir: Path) -> datetime | None:
     return datetime.fromisoformat(iso.strip())
 
 
-def promote_main_to_staging(skill_dir: Path, message: str) -> bool:
-    """把当前 main 上的未 commit 改动转到 staging 分支。
-
-    调用约定：调用时 working tree 处于 main 且有未 commit 改动（evaluate 通过）。
-    行为：
-      1. 丢弃 main 的未 commit 改动（stash + branch 切换 + pop）
-      2. 切到 staging 分支（若不存在则从 main 分叉），pop 改动并 commit
-      3. 切回 main
-
-    返回 True 当且仅当 staging 分支产生了新 commit。
-    """
-    cwd = str(skill_dir)
-
-    run_git(["add", "-A"], cwd=cwd)
-    code, out, _ = run_git(["diff", "--cached", "--name-only"], cwd=cwd)
-    if code != 0 or not out.strip():
-        logger.info(f"{skill_dir.name}: no staged changes, skip staging promotion")
-        return False
-
-    # 1. 把已 stage 的内容打包为 stash（keep index=False, include untracked via add above）
-    code, _, err = run_git(
-        ["stash", "push", "-m", f"canary-staging-{datetime.now().isoformat(timespec='seconds')}"],
-        cwd=cwd,
-    )
-    if code != 0:
-        logger.error(f"{skill_dir.name}: stash push failed: {err}")
-        return False
-
-    # 2. 切 / 建 staging
-    if has_staging(skill_dir):
-        code, _, err = run_git(["checkout", STAGING_BRANCH], cwd=cwd)
-    else:
-        code, _, err = run_git(["checkout", "-b", STAGING_BRANCH, "main"], cwd=cwd)
-    if code != 0:
-        logger.error(f"{skill_dir.name}: checkout staging failed: {err}")
-        run_git(["stash", "pop"], cwd=cwd)
-        return False
-
-    # 3. pop stash
-    code, _, err = run_git(["stash", "pop"], cwd=cwd)
-    if code != 0:
-        logger.error(f"{skill_dir.name}: stash pop on staging failed: {err}")
-        run_git(["checkout", "main"], cwd=cwd)
-        return False
-
-    # 4. commit
-    run_git(["add", "-A"], cwd=cwd)
-    code, _, err = run_git(["commit", "-m", message], cwd=cwd)
-    committed = code == 0
-    if not committed:
-        logger.warning(f"{skill_dir.name}: commit on staging failed: {err}")
-
-    # 5. 切回 main
-    run_git(["checkout", "main"], cwd=cwd)
-
-    if committed:
-        logger.info(f"{skill_dir.name}: promoted to staging ({message})")
-    return committed
-
-
 def route_main_history_to_staging(
     skill_dir: Path,
     initial_main_sha: str,
@@ -278,14 +218,6 @@ def materialize_staging(skill_dir: Path, canary_root: Path) -> Path | None:
     (out / "SKILL.md").write_text(body, encoding="utf-8")
     logger.info("%s: materialized staging to %s", skill_dir.name, out)
     return out
-
-
-def cleanup_canary(canary_root: Path, skill_name: str) -> None:
-    """删除物化目录。在 staging 晋升或丢弃后调用。"""
-    p = canary_root / skill_name
-    if p.is_dir():
-        shutil.rmtree(p)
-        logger.info("cleaned up canary dir: %s", p)
 
 
 # ═══════════════════════════════════════════════════════════════════

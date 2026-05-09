@@ -8,13 +8,10 @@ import json, logging, traceback
 from pathlib import Path
 from datetime import datetime
 
-from traj2skill.config import get_skill_dir, get_traj_dir, get_output_dir, get_config
+from traj2skill.config import get_skill_dir, get_logs_dir, get_config
 from traj2skill.log import StreamLog
 from traj2skill.llm_client import create_llm_client, create_embed_client
-from traj2skill.git_lock import (
-    ensure_repo, acquire_lock, release_lock, commit_changes,
-    has_changes, run_git,
-)
+from traj2skill.git_lock import ensure_repo, commit_changes, has_changes, run_git
 from traj2skill.skill_eval import run_eval, should_merge
 from traj2skill.skill_tools import (
     init_context, update_frontmatter_metadata, rebuild_skill_index,
@@ -48,8 +45,10 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         log = _TeeLog(verbose=True)
     traj_path = Path(traj_md_path)
     skill_dir = skill_dir or get_skill_dir()
-    data_dir = data_dir or get_traj_dir()
-    output_dir = get_output_dir()
+    # data_dir 仅供 agent 工具的 search_similar_trajs 找相似轨迹用；
+    # 默认用轨迹自身所在目录（registry 中注册的 watch_dir）
+    data_dir = data_dir or traj_path.parent
+    output_dir = get_logs_dir()
 
     print(f"\n{'='*55}")
     print(f"  traj2skill: {traj_path.name}")
@@ -159,7 +158,6 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
                         log(f"  cleanup failed: {e}", "error")
             # 如果清理后没别的变更，整体判 insufficient-signal
             if not has_changes(str(skill_dir)):
-                pass  # lock removed
                 return {
                     "action": "rejected",
                     "reason": "insufficient_consensus",
@@ -191,7 +189,6 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         # -- 5. 检查变更 --
         if not has_changes(str(skill_dir)):
             log("Agent 决定: 不需要修改 skill", "decision")
-            pass  # lock removed
             return {"action": "skip", "reason": "no changes"}
 
         # -- 6. 找到被修改/创建的 skill，区分实质变更 vs 仅 metadata 更新 --
@@ -216,7 +213,6 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         committed = commit_changes(str(skill_dir), f"skill: auto from {traj_name}")
         if not committed:
             log("无实际变更可提交", "git")
-            pass  # lock removed
             return {"action": "skip", "reason": "nothing to commit"}
 
         log(f"变更的 skill: {changed_skills}", "decision")
@@ -224,7 +220,6 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         # 仅 metadata/其他文件改动（SKILL.md body 未变），跳过 eval
         if not has_skill_md_change:
             log("仅更新 metadata，跳过 eval", "decision")
-            pass  # lock removed
             return {"action": "updated_metadata", "skills": list(changed_skills)}
 
         # -- 8. Eval --
@@ -246,7 +241,7 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
         # -- 9. 结果判断 --
         all_pass = True
         for skill_name, er in eval_results.items():
-            if not should_merge(er, is_new=True):
+            if not should_merge(er):
                 all_pass = False
                 log(f"{skill_name} 未通过 eval (score={er.get('eval_score', 0)})", "eval")
 
@@ -313,7 +308,6 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
                 log("staging 不入检索索引，main 保持不变", "decision")
 
             log("完成", "ok")
-            pass  # lock removed
             return {
                 "action": "staged" if routed_to_staging else "merged",
                 "skills": list(changed_skills),
@@ -323,21 +317,13 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
             log("未通过 eval", "eval")
             # eval 不通过 -> revert 这次的 commit
             run_git(["revert", "--no-edit", "HEAD"], cwd=str(skill_dir))
-            pass  # lock removed
             return {"action": "rejected", "skills": list(changed_skills), "eval": eval_results}
 
     except Exception as e:
         log(f"异常: {e}", "error")
         traceback.print_exc()
-        if not dry_run:
-            pass  # lock removed
         return {"action": "error", "error": str(e)}
 
     finally:
-        # 确保释放锁
-        if not dry_run:
-            pass  # lock removed
-
-        # 保存执行日志
         output_dir.mkdir(exist_ok=True)
         log.save(output_dir / f"t2s_{traj_path.stem}_{datetime.now().strftime('%H%M%S')}.log.json")

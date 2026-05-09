@@ -2,7 +2,7 @@
 registry.py -- SQLite 路径注册表
 ==================================
 
-管理 ``~/.traj2skill/registry.db``，**只存路径和状态**，不存内容。
+管理 ``~/.t2s/registry.db``，**只存路径和状态**，不存内容。
 
 两张表：
 
@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from traj2skill.config import get_registry_dir
+from traj2skill.config import get_registry_db_path
 
 logger = logging.getLogger("t2s.registry")
 
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS trajectories (
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """打开（或创建）注册表 DB。首次调用自动建表。"""
     if db_path is None:
-        db_path = get_registry_dir() / "registry.db"
+        db_path = get_registry_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
