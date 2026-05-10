@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  run_demo.sh —— traj2skill 端到端演示一键包
+#  run_demo.sh —— xskill 端到端演示一键包
 # =============================================================================
 #  这份脚本 + 同目录的 trajectories.zip 让你零配置跑完整个 pipeline：
 #  index → batch (LLM 蒸 skill) → eval → skill list → candidates。
@@ -20,10 +20,10 @@
 #      或跑完一次后编辑 $WORKSPACE/config.yaml。
 #
 #  流程：
-#      1. 确认 t2s 已安装（没有就在仓库根 pip install -e .）
+#      1. 确认 xskill 已安装（没有就在仓库根 pip install -e .）
 #      2. 解压 trajectories.zip → $WORKSPACE/data/swe_smith_demo/
 #      3. 调用 scripts/pipeline.sh 跑 5 阶段流水线
-#         （pipeline.sh 会写 config.yaml、t2s init、index、batch、eval、skill list）
+#         （pipeline.sh 会写 config.yaml、xskill init、index、batch、eval、skill list）
 # =============================================================================
 set -e
 
@@ -51,16 +51,16 @@ banner() { echo -e "${C_HEAD}━━━ $* ━━━${C_OFF}"; }
 [ -f "$PIPELINE" ] || { echo -e "${C_ERR}✗ 找不到 $PIPELINE${C_OFF}"; exit 1; }
 command -v unzip >/dev/null 2>&1 || { echo -e "${C_ERR}✗ 需要 unzip（apt install unzip）${C_OFF}"; exit 1; }
 
-# ── 1. 安装 t2s ─────────────────────────────────────────────────────────
-banner "1/3 确认 t2s 已安装"
-if ! command -v t2s >/dev/null 2>&1; then
+# ── 1. 安装 xskill ─────────────────────────────────────────────────────────
+banner "1/3 确认 xskill 已安装"
+if ! command -v xskill >/dev/null 2>&1; then
     if [ "${SKIP_INSTALL:-0}" = "1" ]; then
-        echo -e "${C_ERR}✗ SKIP_INSTALL=1 但 t2s 不在 PATH${C_OFF}"; exit 1
+        echo -e "${C_ERR}✗ SKIP_INSTALL=1 但 xskill 不在 PATH${C_OFF}"; exit 1
     fi
-    echo -e "${C_DIM}  未检测到 t2s，从 $REPO_ROOT 执行 pip install -e .${C_OFF}"
+    echo -e "${C_DIM}  未检测到 xskill，从 $REPO_ROOT 执行 pip install -e .${C_OFF}"
     ( cd "$REPO_ROOT" && pip install -e . )
 else
-    echo -e "${C_DIM}  已安装：$(command -v t2s)${C_OFF}"
+    echo -e "${C_DIM}  已安装：$(command -v xskill)${C_OFF}"
 fi
 
 # ── 2. 准备 workspace + 解压轨迹 ───────────────────────────────────────
@@ -90,6 +90,6 @@ echo
 echo
 echo -e "${C_OK}✓ 端到端演示完成${C_OFF}"
 echo -e "${C_DIM}  workspace: $WORKSPACE${C_OFF}"
-echo -e "${C_DIM}  Web UI：   (cd $WORKSPACE && t2s serve --port 8000) → http://localhost:8000${C_OFF}"
-echo -e "${C_DIM}  skill 详情：(cd $WORKSPACE && t2s skill show <name>)${C_OFF}"
+echo -e "${C_DIM}  Web UI：   (cd $WORKSPACE && xskill serve --port 8000) → http://localhost:8000${C_OFF}"
+echo -e "${C_DIM}  skill 详情：(cd $WORKSPACE && xskill skill show <name>)${C_OFF}"
 echo -e "${C_DIM}  清理重跑：  rm -rf $WORKSPACE && $0 $MAX $WORKSPACE${C_OFF}"

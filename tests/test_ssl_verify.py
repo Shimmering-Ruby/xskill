@@ -29,7 +29,7 @@ import pytest
     ("anything-else", True),
 ])
 def test_ssl_verify_env(monkeypatch, val, expect_verify):
-    from traj2skill.llm_client import _ssl_verify
+    from xskill.llm_client import _ssl_verify
     if val == "":
         monkeypatch.delenv("T2S_SSL_VERIFY", raising=False)
     else:
@@ -70,7 +70,7 @@ class _ModelNoClientKwargs:
 
 def test_inject_verify_off_new_agno(monkeypatch):
     monkeypatch.setenv("T2S_SSL_VERIFY", "false")
-    from traj2skill.agent import _inject_verify_off_if_requested
+    from xskill.agent import _inject_verify_off_if_requested
     log = _FakeLog()
     kwargs = {"id": "x", "base_url": "u", "api_key": "k"}
     _inject_verify_off_if_requested(_ModelHttpClient, kwargs, log)
@@ -83,7 +83,7 @@ def test_inject_verify_off_new_agno(monkeypatch):
 
 def test_inject_verify_off_old_agno(monkeypatch):
     monkeypatch.setenv("T2S_SSL_VERIFY", "false")
-    from traj2skill.agent import _inject_verify_off_if_requested
+    from xskill.agent import _inject_verify_off_if_requested
     log = _FakeLog()
     kwargs = {}
     _inject_verify_off_if_requested(_ModelAsyncHttpClient, kwargs, log)
@@ -95,7 +95,7 @@ def test_inject_verify_off_old_agno(monkeypatch):
 
 def test_inject_verify_off_unsupported_class(monkeypatch):
     monkeypatch.setenv("T2S_SSL_VERIFY", "false")
-    from traj2skill.agent import _inject_verify_off_if_requested
+    from xskill.agent import _inject_verify_off_if_requested
     log = _FakeLog()
     kwargs = {}
     _inject_verify_off_if_requested(_ModelNoClientKwargs, kwargs, log)
@@ -110,7 +110,7 @@ def test_inject_verify_off_unsupported_class(monkeypatch):
 def test_inject_verify_on_is_noop(monkeypatch):
     """T2S_SSL_VERIFY 未设或非 false 时不动 kwargs"""
     monkeypatch.delenv("T2S_SSL_VERIFY", raising=False)
-    from traj2skill.agent import _inject_verify_off_if_requested
+    from xskill.agent import _inject_verify_off_if_requested
     log = _FakeLog()
     kwargs = {"id": "x"}
     _inject_verify_off_if_requested(_ModelHttpClient, kwargs, log)
@@ -121,7 +121,7 @@ def test_inject_verify_on_is_noop(monkeypatch):
 # ── StreamLog 回归：确认它只能 log(msg, tag)，不能 log.step(...) ─────
 def test_streamlog_is_callable_not_has_step():
     """防回归：不要再写 log.step(...)；StreamLog 是 callable 不是 has attr step"""
-    from traj2skill.log import StreamLog
+    from xskill.log import StreamLog
     log = StreamLog(verbose=False)
     assert callable(log)
     assert not hasattr(log, "step"), (

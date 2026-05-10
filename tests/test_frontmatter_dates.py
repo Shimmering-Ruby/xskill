@@ -12,7 +12,7 @@ import pytest
 
 
 def test_sanitize_future_created_date():
-    from traj2skill.skill_tools import _sanitize_frontmatter_dates
+    from xskill.skill_tools import _sanitize_frontmatter_dates
     future = (date.today() + timedelta(days=365)).isoformat()
     fm = {"metadata": {"created": future, "last_updated": future}}
     _sanitize_frontmatter_dates(fm)
@@ -21,14 +21,14 @@ def test_sanitize_future_created_date():
 
 
 def test_sanitize_auto_placeholder_created():
-    from traj2skill.skill_tools import _sanitize_frontmatter_dates
+    from xskill.skill_tools import _sanitize_frontmatter_dates
     fm = {"metadata": {"created": "<AUTO>", "last_updated": "<AUTO>"}}
     _sanitize_frontmatter_dates(fm)
     assert fm["metadata"]["created"] == date.today().isoformat()
 
 
 def test_sanitize_empty_created():
-    from traj2skill.skill_tools import _sanitize_frontmatter_dates
+    from xskill.skill_tools import _sanitize_frontmatter_dates
     fm = {"metadata": {}}
     _sanitize_frontmatter_dates(fm)
     assert fm["metadata"]["created"] == date.today().isoformat()
@@ -36,7 +36,7 @@ def test_sanitize_empty_created():
 
 def test_sanitize_keeps_valid_past_created():
     """历史 created（合法 ISO 且非未来）要保留，别把老 skill 的 created 改掉"""
-    from traj2skill.skill_tools import _sanitize_frontmatter_dates
+    from xskill.skill_tools import _sanitize_frontmatter_dates
     past = "2024-11-15"  # 真实过去日期
     fm = {"metadata": {"created": past}}
     _sanitize_frontmatter_dates(fm)
@@ -44,7 +44,7 @@ def test_sanitize_keeps_valid_past_created():
 
 
 def test_sanitize_last_updated_always_now():
-    from traj2skill.skill_tools import _sanitize_frontmatter_dates
+    from xskill.skill_tools import _sanitize_frontmatter_dates
     fm = {"metadata": {"created": "2024-01-01", "last_updated": "1970-01-01T00:00:00"}}
     _sanitize_frontmatter_dates(fm)
     # 检查是合法 ISO datetime，且年份是今天或之后
@@ -54,7 +54,7 @@ def test_sanitize_last_updated_always_now():
 
 def test_write_file_sanitizes_skill_md(tmp_path, monkeypatch):
     """write_file 写 SKILL.md 时自动消毒（集成层）"""
-    from traj2skill import skill_tools
+    from xskill import skill_tools
     skill_tools._ctx["skill_dir"] = tmp_path
     sk = tmp_path / "fix-x"
     sk.mkdir()
@@ -76,7 +76,7 @@ metadata:
 
 def test_write_file_leaves_nonskill_md_alone(tmp_path):
     """写非 SKILL.md 的文件不改内容"""
-    from traj2skill import skill_tools
+    from xskill import skill_tools
     skill_tools._ctx["skill_dir"] = tmp_path
     sk = tmp_path / "fix-x"
     sk.mkdir()
@@ -89,7 +89,7 @@ def test_write_file_leaves_nonskill_md_alone(tmp_path):
 # ── warning fraction 消毒（N/M 编造检查）────────────────────────────────
 def test_sanitize_fraction_strips_when_denominator_exceeds_sources():
     """observed real bug: "3/7 条失败轨迹" 但 source_trajs 只有 4 条"""
-    from traj2skill.skill_tools import _sanitize_warning_fractions
+    from xskill.skill_tools import _sanitize_warning_fractions
     body = "> ⚠️ 3/7 条失败轨迹未完整查看函数代码\n\n> ⚠️ 2/7 条轨迹修复后遗漏了边界"
     new_body, n = _sanitize_warning_fractions(body, source_trajs_count=4)
     assert "3/7" not in new_body
@@ -100,7 +100,7 @@ def test_sanitize_fraction_strips_when_denominator_exceeds_sources():
 
 def test_sanitize_fraction_keeps_valid():
     """N/M 在合理范围内时不改"""
-    from traj2skill.skill_tools import _sanitize_warning_fractions
+    from xskill.skill_tools import _sanitize_warning_fractions
     body = "> ⚠️ 2/3 条失败轨迹有相同错误"
     new_body, n = _sanitize_warning_fractions(body, source_trajs_count=3)
     assert new_body == body
@@ -108,7 +108,7 @@ def test_sanitize_fraction_keeps_valid():
 
 
 def test_sanitize_fraction_blocks_numerator_greater_than_denominator():
-    from traj2skill.skill_tools import _sanitize_warning_fractions
+    from xskill.skill_tools import _sanitize_warning_fractions
     body = "> ⚠️ 5/3 条轨迹"
     new_body, n = _sanitize_warning_fractions(body, source_trajs_count=3)
     assert "5/3" not in new_body
@@ -117,7 +117,7 @@ def test_sanitize_fraction_blocks_numerator_greater_than_denominator():
 
 def test_sanitize_fraction_integration_via_write_file(tmp_path):
     """fraction 消毒需要和 gate 配合：3 条真实 traj_NNNN → gate 放行 → 消毒生效"""
-    from traj2skill import skill_tools
+    from xskill import skill_tools
     from datetime import date
     (tmp_path / "skill").mkdir()
     (tmp_path / "data").mkdir()

@@ -1,14 +1,14 @@
-# t2s 配置模板 — 复制到 ~/.t2s/config.yaml，按需修改
+# xskill 配置模板 — 复制到 ~/.xskill/config.yaml，按需修改
 #
 # 安装后首次使用：
-#   mkdir -p ~/.t2s
-#   cp examples/config.yaml.example ~/.t2s/config.yaml
+#   mkdir -p ~/.xskill
+#   cp examples/config.yaml.example ~/.xskill/config.yaml
 #   # 编辑 llm.api_key / embedding.api_key
 #
 # 不读环境变量、不读 ~/.aikey；缺失字段直接抛 FileNotFoundError / KeyError。
 
 # ===== Skill 仓库 =====
-skill_dir: ~/.t2s/skill            # 全局唯一 skill repo（可改任意绝对路径）
+skill_dir: ~/.xskill/skill            # 全局唯一 skill repo（可改任意绝对路径）
 
 # ===== LLM（生成 / 评分 / chat 用）=====
 llm:

@@ -11,7 +11,7 @@
 #      OPEN_BROWSER=1    启动成功后自动打开浏览器（xdg-open / open）
 #      HOST=0.0.0.0      绑定地址（默认 0.0.0.0，远程机器同网段可直接访问）
 #
-#  前端资源：已内置在 src/traj2skill/web/dist/，pip install -e . 后随包发布，
+#  前端资源：已内置在 src/xskill/web/dist/，pip install -e . 后随包发布，
 #  不需要 npm build。若想自己改 UI，去 web/ 目录下开发，构建脚本见 web/README。
 # =============================================================================
 set -e
@@ -28,8 +28,8 @@ else
 fi
 
 # ── 预检 ────────────────────────────────────────────────────────────────
-if ! command -v t2s >/dev/null 2>&1; then
-    echo -e "${C_ERR}✗ t2s 命令不存在 —— 先跑 ./scripts/demo/run_demo.sh${C_OFF}"
+if ! command -v xskill >/dev/null 2>&1; then
+    echo -e "${C_ERR}✗ xskill 命令不存在 —— 先跑 ./scripts/demo/run_demo.sh${C_OFF}"
     exit 1
 fi
 
@@ -64,7 +64,7 @@ fi
 
 # ── 打印摘要 ───────────────────────────────────────────────────────────
 echo -e "${C_HEAD}════════════════════════════════════════════════════════════════${C_OFF}"
-echo -e "${C_HEAD}  traj2skill Web UI${C_OFF}"
+echo -e "${C_HEAD}  xskill Web UI${C_OFF}"
 echo -e "${C_HEAD}════════════════════════════════════════════════════════════════${C_OFF}"
 echo -e "  workspace   ${C_BOLD}$WORKSPACE${C_OFF}"
 echo -e "  bind        ${C_BOLD}http://$HOST:$PORT${C_OFF}"
@@ -88,6 +88,6 @@ if [ "${OPEN_BROWSER:-0}" = "1" ]; then
     ) &
 fi
 
-# ── 启动服务（在 workspace 目录下跑，让 t2s 读对 config.yaml） ────────
+# ── 启动服务（在 workspace 目录下跑，让 xskill 读对 config.yaml） ────────
 cd "$WORKSPACE"
-exec t2s serve --host "$HOST" --port "$PORT"
+exec xskill serve --host "$HOST" --port "$PORT"

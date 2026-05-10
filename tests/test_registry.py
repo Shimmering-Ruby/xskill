@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from traj2skill.registry import (
+from xskill.registry import (
     get_connection,
     register_dir,
     unregister_dir,

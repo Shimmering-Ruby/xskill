@@ -1,17 +1,17 @@
 """tests/test_traj_meta.py -- trajectory header parsing"""
 
 import pytest
-from traj2skill.traj_meta import parse_traj_header
+from xskill.traj_meta import parse_traj_header
 
 
 class TestParseTrajHeader:
     def test_full_header(self):
-        md = "<!-- t2s:skill=fix_django side=staging sha=a1b2c3d4 -->\n# Trajectory"
+        md = "<!-- xskill:skill=fix_django side=staging sha=a1b2c3d4 -->\n# Trajectory"
         result = parse_traj_header(md)
         assert result == {"skill": "fix_django", "side": "staging", "sha": "a1b2c3d4"}
 
     def test_partial_header_skill_only(self):
-        md = "<!-- t2s:skill=my_skill -->\n# Traj"
+        md = "<!-- xskill:skill=my_skill -->\n# Traj"
         result = parse_traj_header(md)
         assert result == {"skill": "my_skill"}
 
@@ -23,28 +23,28 @@ class TestParseTrajHeader:
         assert parse_traj_header("") is None
 
     def test_header_not_in_first_500_chars(self):
-        md = "x" * 600 + "\n<!-- t2s:skill=late -->"
+        md = "x" * 600 + "\n<!-- xskill:skill=late -->"
         assert parse_traj_header(md) is None
 
     def test_header_at_start(self):
-        md = "<!-- t2s:skill=first side=main sha=deadbeef -->\n# Title"
+        md = "<!-- xskill:skill=first side=main sha=deadbeef -->\n# Title"
         result = parse_traj_header(md)
         assert result["skill"] == "first"
         assert result["side"] == "main"
         assert result["sha"] == "deadbeef"
 
     def test_header_with_extra_whitespace(self):
-        md = "<!--  t2s:skill=ws   side=staging   sha=abc  -->"
+        md = "<!--  xskill:skill=ws   side=staging   sha=abc  -->"
         result = parse_traj_header(md)
         assert result == {"skill": "ws", "side": "staging", "sha": "abc"}
 
     def test_header_after_other_comments(self):
-        md = "<!-- source: swe_smith -->\n<!-- t2s:skill=second side=main -->\n# Traj"
+        md = "<!-- source: swe_smith -->\n<!-- xskill:skill=second side=main -->\n# Traj"
         result = parse_traj_header(md)
         assert result == {"skill": "second", "side": "main"}
 
     def test_arbitrary_keys(self):
-        md = "<!-- t2s:skill=test agent=agent_007 custom=value -->"
+        md = "<!-- xskill:skill=test agent=agent_007 custom=value -->"
         result = parse_traj_header(md)
         assert result == {"skill": "test", "agent": "agent_007", "custom": "value"}
 

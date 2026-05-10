@@ -1,4 +1,4 @@
-# traj2skill 端到端演示包
+# xskill 端到端演示包
 
 一键跑通 **index → batch → eval → skill list** 全流程，自带 **300 条** SWE-smith 真实修复轨迹（只含原始 `.md` + `.json`，不含 meta / 向量索引）作为输入数据。
 
@@ -23,7 +23,7 @@ scripts/demo/
 默认行为：
 - `max = 3`（只处理前 3 条轨迹，约 15-20 分钟；受 LLM 串行影响）
 - `workspace = /tmp/t2s_demo`（所有产出放这里，不污染仓库）
-- 自动 `pip install -e .`（若 `t2s` 不在 PATH）
+- 自动 `pip install -e .`（若 `xskill` 不在 PATH）
 - 自动解压 `trajectories.zip` → `$WORKSPACE/data/swe_smith_demo/`
 - 自动调用 `scripts/pipeline.sh` 执行 5 阶段流水线
 
@@ -41,9 +41,9 @@ INTERACTIVE=1 ./scripts/demo/run_demo.sh           # 每步等确认
 
 ```bash
 cd /tmp/t2s_demo
-t2s skill list                          # 生成的 skill
-t2s skill show <name>                   # 单个 skill 详情
-t2s eval --list                         # 所有 eval 历史
+xskill skill list                          # 生成的 skill
+xskill skill show <name>                   # 单个 skill 详情
+xskill eval --list                         # 所有 eval 历史
 cd skill && git log --all --oneline     # skill 仓库的版本历史
 ```
 
@@ -61,9 +61,9 @@ OPEN_BROWSER=1 ./scripts/demo/serve_ui.sh        # 启动后自动开浏览器
 脚本会自动：
 - 检查 workspace 里是否有 `config.yaml` 和 `skill/` 目录
 - 检测端口冲突（ss / lsof）
-- `cd $WORKSPACE && t2s serve`，前端页面 http://localhost:8000/、SSE 流 `/api/stream`、OpenAPI `/docs`
+- `cd $WORKSPACE && xskill serve`，前端页面 http://localhost:8000/、SSE 流 `/api/stream`、OpenAPI `/docs`
 
-前端产物已随包发布在 `src/traj2skill/web/dist/`，不需要额外 `npm build`。
+前端产物已随包发布在 `src/xskill/web/dist/`，不需要额外 `npm build`。
 
 产出目录结构：
 
@@ -105,7 +105,7 @@ EMBED_MODEL="doubao-embedding-vision-251215" # 向量模型
 从 `data/swe_smith_dataset/` 取 N 条（需要同时存在 `.md` 和 `.json`），**只复制原始 `*.md` 和 `*.json`**到临时目录后压成 zip。
 
 **刻意不打包**：
-- `*.md.meta` — LLM 抽的结构化元数据，会随模型漂移；接收方首次 `t2s index` 时由他们自己的 LLM 重新生成
+- `*.md.meta` — LLM 抽的结构化元数据，会随模型漂移；接收方首次 `xskill index` 时由他们自己的 LLM 重新生成
 - `index.pkl` — 向量索引，接收方首次 index 时用自己的 embedding 重建，和模型对齐
 
 这样 zip 里只含"原料"，和接收方的 LLM/embedding 完全解耦。

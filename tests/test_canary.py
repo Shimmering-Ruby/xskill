@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from traj2skill import canary
-from traj2skill.git_lock import run_git
+from xskill import canary
+from xskill.git_lock import run_git
 
 
 # ──────────────────────────────────────────────────────

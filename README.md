@@ -1,108 +1,225 @@
-# traj2skill (`t2s`)
+<div align="center">
 
-从 AI Agent 执行轨迹中自动蒸馏可复用的 Skill。**watcher 后台自动跑全 pipeline**（meta → embed → distill → ux 反馈），CLI 仅暴露 5 条用户真正用的命令。
+# xskill
 
----
+**Distill reusable Skills from your AI Agent's execution trajectories — automatically.**
 
-## 安装 + 配置
+[![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
+[![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![GitHub](https://img.shields.io/badge/github-370025263%2Fxskill-181717?logo=github)](https://github.com/370025263/xskill)
 
-```bash
-pip install -e .
-
-mkdir -p ~/.t2s
-cp examples/config.yaml.example ~/.t2s/config.yaml
-# 编辑 ~/.t2s/config.yaml 填入 llm.api_key 和 embedding.api_key
-```
-
-**所有状态/配置都在 `~/.t2s/`**：
-
-```
-~/.t2s/
-├── config.yaml         # 所有配置（无环境变量、无 ~/.aikey fallback；缺即抛错）
-├── registry.db         # 监听目录 + 轨迹处理状态
-├── chat_sessions.db    # chat 会话历史
-├── logs/               # 每条轨迹的 process 日志
-├── chat_archive/       # serve 自动注册的 chat 归档目录
-└── skill/              # 全局 skill 仓库（每个 skill 自带 .git 子仓维护 main/staging 灰度）
-```
+</div>
 
 ---
 
-## CLI（5 条）
+> Your agents already know how to do things. They just forget every time.
+> **xskill** watches what they do, distills what works into a Skill library, and ships only the patterns that pass A/B grading.
 
-```bash
-t2s serve [--host 0.0.0.0] [--port 8000]
-        # 唯一长跑入口：FastAPI + Web UI + watcher 后台线程
+## Why xskill
 
-t2s registry add    <path>
-t2s registry remove <path>
-t2s registry list
+LLM agents repeat the same problem-solving over and over because their experience evaporates the moment a session ends. Hand-curated prompt libraries help, but they age fast and don't capture the *why*.
 
-t2s search traj  <query> [--top-k 5]    # 跨所有 registry
-t2s search skill <query> [--top-k 5]    # 跨所有 registry
+**xskill** treats every agent run (a `traj_*.md` file) as raw material:
+
+```
+traj_*.md  ──►  meta ──►  embed ──►  distill ──►  Skill (main)
+                                          │
+                                          └─►  Skill (staging) ──A/B──►  merge | discard
 ```
 
-`search` 输出 tab 分隔的列，shell 友好：
+A daemon watches your trajectory directories. New trajectories get embedded, clustered, and turned into named **Skills**. Each Skill is its own tiny git repo with `main` and `staging` branches; new candidates are gated through canary traffic, scored by an LLM-as-judge UX rubric, and merged only when they win.
+
+## Highlights
+
+- **Zero-touch ingestion** — drop `traj_*.md` into a watched dir, the rest is automatic.
+- **Skills as code** — every Skill is a versioned directory with `SKILL.md`, supporting trajs, candidates, and a per-skill git history.
+- **Built-in canary** — staging vs. main rollout, sample-size gating, automatic merge/discard.
+- **Tiny CLI** — five commands. Filtering and formatting belong to `grep`/`awk`, not flags.
+- **OpenAI-compatible** — works with DeepSeek, Qwen, Ark, OpenAI, anything that speaks `/v1/chat/completions` + embeddings.
+- **One source of truth** — all state lives under `~/.xskill/`. No env vars, no fallbacks, no dotfiles to chase.
+
+## Quick Start
 
 ```bash
-$ t2s search skill "form validation"
-0.350  fix-early-return-in-validation-functions  3   7.8(15)  -
-0.343  fix-cli-language-validation               2   8.1(12)  staging
-0.309  fix-api-method-parameter-validation       0   -        -
-# 列：similarity name use_count ux_avg(N) canary
+pip install xskill
+
+mkdir -p ~/.xskill
+curl -fsSL https://raw.githubusercontent.com/370025263/xskill/main/examples/config.yaml.example \
+  -o ~/.xskill/config.yaml
+# edit llm.api_key + embedding.api_key
+
+xskill registry add /path/to/your/agent/trajectories
+xskill serve   # daemon: FastAPI + watcher + Web UI on :8000
 ```
 
-筛选/排序交给 shell（`grep` / `awk` / `sort`），不内置 `--filter` / `--json`。
+That's it. Drop a new `traj_*.md` into the registered directory and watch the daemon pick it up, embed it, and update the Skill library.
 
----
+## CLI
+
+Five commands. No more.
+
+```bash
+xskill serve [--host 0.0.0.0] [--port 8000]
+xskill registry add    <abs-path> [--label NAME]
+xskill registry remove <abs-path>
+xskill registry list
+xskill search traj  <query> [--top-k 5]
+xskill search skill <query> [--top-k 5]
+```
+
+`search` returns tab-separated columns — pipe it:
+
+```bash
+$ xskill search skill "form validation" | sort -k4 -nr | head -3
+0.350  fix-early-return-in-validation-functions   3   7.8(15)  -
+0.343  fix-cli-language-validation                2   8.1(12)  staging
+0.309  fix-api-method-parameter-validation        0   -        -
+# columns: similarity  name  use_count  ux_avg(N)  canary_status
+```
 
 ## Python SDK
 
+The public surface is **4 classes + 6 dataclasses**.
+
 ```python
-from traj2skill import T2S, Skill, Trajectory, Evaluator
+from xskill import XSkill, Skill, Trajectory, Evaluator
 
-t2s = T2S()                       # 默认从 ~/.t2s/config.yaml 加载
+x = XSkill()  # loads ~/.xskill/config.yaml
 
-# 检索
-hits = t2s.search_skills("django form")
-for h in hits:
-    print(h.skill.name, h.similarity, h.skill.use_count)
+# Search across every registered directory
+for hit in x.search_skills("django form", top_k=5):
+    print(f"{hit.similarity:.3f}  {hit.skill.name}  uses={hit.skill.use_count}")
 
-# 注册新目录
-wd = t2s.registry.add("/path/to/traj_dir")
+# Browse the repo
+for skill in x.skill_repo:
+    print(skill.name,
+          skill.canary_status(),
+          skill.ux_avg(side="main", days=30))
 
-# 浏览 skill 仓库
-for skill in t2s.skill_repo:
-    print(skill.name, skill.canary_status(), skill.ux_avg(side="main", days=30))
-    for c in skill.candidates:
-        print("  candidate:", c.pattern, c.kind, len(c.supporting_trajs))
+# Register a new watched dir
+x.registry.add("/abs/path/to/trajs", label="prod-eng")
 
-# 评估（CI / 单测用）
-ev = Evaluator(t2s.llm, t2s.config)
-score = ev.evaluate(t2s.skill_repo["fix-foo"])
-print(score.tier, score.eval_score, score.scores)
+# Run the merge gate yourself (CI / unit tests)
+ev = Evaluator(x.llm, x.config)
+score = ev.evaluate(x.skill_repo["fix-foo"])
 if Evaluator.should_merge(score):
-    print("merge!")
+    print("ready to merge")
 
-# 启动 daemon
-t2s.serve(host="0.0.0.0", port=8000)
+# Or just start the daemon and let it work
+x.serve(host="0.0.0.0", port=8000)
 ```
 
-**4 类 + 6 dataclass** 是公开面：`T2S / Skill / Trajectory / Evaluator` + `WatchDir / SkillHit / TrajectoryHit / EvalScore / Candidate / UxScoreResult`。
+Advanced (rare): `from xskill import Registry, SkillRepo` for direct subsystem access.
+
+## How It Works
+
+```
+                       ┌──────────────────────────────────────┐
+   traj_*.md  ────►    │  watcher (background thread)         │
+   (any registered     │     ├─ meta extraction               │
+    directory)         │     ├─ embedding + index             │
+                       │     ├─ distill / update Skill        │
+                       │     └─ ux_score (LLM-as-judge)       │
+                       └──────────────┬───────────────────────┘
+                                      ▼
+                       ~/.xskill/skill/<name>/
+                          ├── SKILL.md              ← the prompt-shaped artifact
+                          ├── candidates/           ← unpromoted patterns
+                          ├── source_trajs/         ← evidence
+                          └── .git/                 ← per-skill versioning
+                                main  ⇄  staging   (canary A/B)
+```
+
+When a chat agent retrieves a Skill, traffic is split: `p` of requests get `staging`, the rest get `main`. After ≥ N samples on each side, xskill compares average UX scores and either merges staging into main or discards it. No human intervention required.
+
+## Configuration
+
+Everything lives at `~/.xskill/config.yaml`. Missing or malformed → hard error, no silent fallbacks.
+
+```yaml
+skill_dir: ~/.xskill/skill
+
+llm:
+  base_url: https://api.deepseek.com
+  model:    deepseek-v4-flash
+  api_key:  YOUR_KEY
+
+embedding:
+  base_url: https://api.example.com/v1
+  model:    your-embedding-model
+  api_key:  YOUR_KEY
+  dim:      0   # 0 = auto-detect
+
+canary:
+  enabled:     true
+  probability: 0.2
+  min_samples: 5
+  max_days_hold: 14
+
+watcher:
+  poll_interval: 30   # seconds
+```
+
+Full template: [`examples/config.yaml.example`](examples/config.yaml.example).
+
+```
+~/.xskill/
+├── config.yaml         # the only config file (no env-var fallback)
+├── registry.db         # watched dirs + per-trajectory state (sqlite)
+├── chat_sessions.db    # chat history
+├── logs/               # one log file per trajectory
+├── chat_archive/       # auto-registered chat trajectories
+└── skill/              # the global skill repo (one git subrepo per skill)
+```
+
+## Concepts
+
+| Term         | What it is |
+| ------------ | ---------- |
+| **Trajectory** | A single agent run, written as `traj_*.md`. Embeds optional `<!-- xskill:skill=... side=... sha=... -->` metadata so the watcher can score it. |
+| **Skill**      | A reusable, prompt-shaped artifact distilled from ≥ N supporting trajectories. Lives at `~/.xskill/skill/<name>/`, version-controlled. |
+| **Candidate**  | An unpromoted pattern inside a Skill. Becomes `SKILL.md` content once enough trajs reinforce it. |
+| **Canary**     | Per-skill A/B between `main` and `staging` branches. Merge or discard is decided by UX score, not by hand. |
+| **UX score**   | LLM-as-judge rubric that grades how well a skill served the user, from chat archive feedback. |
+| **Registry**   | The list of watched directories. Add a path → the watcher polls it forever. |
+
+## Roadmap
+
+- [ ] Web UI for browsing skills, viewing canary stats, manual merge/discard
+- [ ] Skill marketplace: import / export portable skill bundles
+- [ ] Multi-tenant skill repos (per-team `skill_dir`)
+- [ ] Native MCP server interface (skills as tools)
+- [ ] Async embedding backend for large registries
+
+Have an idea? Open an [issue](https://github.com/370025263/xskill/issues).
+
+## Development
+
+```bash
+git clone https://github.com/370025263/xskill
+cd xskill
+pip install -e .[dev]
+pytest -q
+```
+
+Internal design notes live under [`docs/`](docs/) (English & 中文 mixed).
+
+## Contributing
+
+PRs welcome — please:
+1. Open an issue describing the problem first.
+2. Add or extend a test (no test, no merge).
+3. Keep public API additions in `xskill/__init__.py` minimal — we guard the surface area.
+
+## License
+
+MIT © [370025263](https://github.com/370025263). See [LICENSE](LICENSE).
 
 ---
 
-## 工作流
+<div align="center">
 
-1. `t2s registry add /path/to/agent/trajectory/dir` 注册目录（绝对路径）
-2. `t2s serve` 起 daemon，watcher 后台轮询所有注册目录
-3. agent 每跑完一条任务写 `traj_*.md` 到注册目录
-4. watcher 自动：抽 meta → 建索引 → 蒸馏成新 skill 或更新已有 skill → 灰度 staging
-5. 用户用 chat UI 提问，路由到匹配的 skill；chat 归档反馈 → ux_score 自动闭环
+If xskill saves your agents from repeating themselves, a ⭐ on [GitHub](https://github.com/370025263/xskill) helps others find it.
 
----
-
-## 设计 / 测试方案
-
-- 设计：[`docs/superpowers/specs/2026-05-09-cli-compaction-design.md`](docs/superpowers/specs/2026-05-09-cli-compaction-design.md)
-- E2E 测试方案：[`docs/superpowers/test-plans/2026-05-09-cli-compaction-e2e.md`](docs/superpowers/test-plans/2026-05-09-cli-compaction-e2e.md)
+</div>

@@ -33,11 +33,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from traj2skill import canary
-from traj2skill.chat_app import ChatApp
-from traj2skill.config import load_config
-from traj2skill.git_lock import ensure_repo, run_git
-from traj2skill.llm_client import create_llm_client
+from xskill import canary
+from xskill.chat_app import ChatApp
+from xskill.config import load_config
+from xskill.git_lock import ensure_repo, run_git
+from xskill.llm_client import create_llm_client
 
 
 logging.basicConfig(

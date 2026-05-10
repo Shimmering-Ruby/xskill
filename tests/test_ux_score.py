@@ -13,8 +13,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from traj2skill import canary, ux_score
-from traj2skill.git_lock import run_git
+from xskill import canary, ux_score
+from xskill.git_lock import run_git
 
 
 # ──────────────────────────────────────────────────────

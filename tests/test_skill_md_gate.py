@@ -17,7 +17,7 @@ import pytest
 
 def _mk_workspace(tmp_path: Path):
     """搭一个 skill_dir + data_dir 的临时环境"""
-    from traj2skill import skill_tools
+    from xskill import skill_tools
     (tmp_path / "skill").mkdir()
     (tmp_path / "data").mkdir()
     skill_tools._ctx["skill_dir"] = tmp_path / "skill"

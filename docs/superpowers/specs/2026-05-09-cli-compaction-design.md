@@ -1,4 +1,4 @@
-# t2s CLI 紧凑化与 OOP 重构设计
+# xskill CLI 紧凑化与 OOP 重构设计
 
 - 作者：370025263
 - 日期：2026-05-09
@@ -11,11 +11,11 @@
 
 ### 1.1 现状
 
-`src/traj2skill/cli.py` 当前 911 行、**16 个子命令**（`index / search / search-skill / process / batch / init / status / reindex / eval / skill (12 子动作) / show / serve / validate / watch / registry`）。状态与配置散落在三处：
+`src/xskill/cli.py` 当前 911 行、**16 个子命令**（`index / search / search-skill / process / batch / init / status / reindex / eval / skill (12 子动作) / show / serve / validate / watch / registry`）。状态与配置散落在三处：
 
 - `./config.yaml`（cwd 相对，`config.py:34` 写死 `Path.cwd() / "config.yaml"`）
-- `~/.traj2skill/registry.db`（SQLite，`watch_dirs + trajectories`）
-- `~/.traj2skill/chat_sessions.db`（agno chat 历史）
+- `~/.xskill/registry.db`（SQLite，`watch_dirs + trajectories`）
+- `~/.xskill/chat_sessions.db`（agno chat 历史）
 
 模块层面有 3 处独立的 agno Agent 装配（蒸馏 / 候选促升 / chat），每处自带一套 `read_file / write_file / list_files` 工具实现，写域、字节上限、根目录边界各不相同。`<skill_dir>` 实际是双 git 仓结构：顶层 `.git`（`process.commit_changes` 用）+ 每个 `<skill>/.git`（canary 子仓 main/staging）。
 
@@ -23,9 +23,9 @@
 
 ### 1.2 动机
 
-CLI 子命令绝大多数是 watcher 内部步骤的对外暴露，不是用户工作流。配置/状态散落导致 cwd 耦合（必须在项目目录跑 `t2s` 才正常）。三套 agent 工具是熵增最严重的位置，改一处 bug 要同步三处。
+CLI 子命令绝大多数是 watcher 内部步骤的对外暴露，不是用户工作流。配置/状态散落导致 cwd 耦合（必须在项目目录跑 `xskill` 才正常）。三套 agent 工具是熵增最严重的位置，改一处 bug 要同步三处。
 
-**目标**：把 CLI 收敛到"用户真正用的入口"，把状态/配置统一到 `~/.t2s/`，把三套 agent 工具收敛到一套 `AgentToolkit`，把蒸馏流程从 200+ 行函数升级为 `PipelineRunner` 类，删除全部已识别死代码。
+**目标**：把 CLI 收敛到"用户真正用的入口"，把状态/配置统一到 `~/.xskill/`，把三套 agent 工具收敛到一套 `AgentToolkit`，把蒸馏流程从 200+ 行函数升级为 `PipelineRunner` 类，删除全部已识别死代码。
 
 ### 1.3 非目标
 
@@ -38,16 +38,16 @@ CLI 子命令绝大多数是 watcher 内部步骤的对外暴露，不是用户�
 ## 2. CLI 终态
 
 ```bash
-t2s serve [--host 0.0.0.0] [--port 8000]
+xskill serve [--host 0.0.0.0] [--port 8000]
         # 唯一长跑入口：FastAPI + watcher 内置同进程
         # 不再有 --no-watch / --no-ui 等关功能 flag
 
-t2s registry add <path>
-t2s registry remove <path>
-t2s registry list
+xskill registry add <path>
+xskill registry remove <path>
+xskill registry list
 
-t2s search traj  <query> [--top-k 5]   # 跨所有 registry
-t2s search skill <query> [--top-k 5]   # 跨所有 registry
+xskill search traj  <query> [--top-k 5]   # 跨所有 registry
+xskill search skill <query> [--top-k 5]   # 跨所有 registry
 ```
 
 全局：`--debug / --quiet`。**删除** `--config / --skill-dir / --traj-dir / --llm-base-url / --llm-model / --llm-key`。
@@ -57,12 +57,12 @@ t2s search skill <query> [--top-k 5]   # 跨所有 registry
 ### 2.1 search 输出格式（文本，shell 友好）
 
 ```
-# t2s search traj <query>
+# xskill search traj <query>
 # 列：similarity  status   skill_used        side   path
 0.781  success  fix_form_validation  main     /home/admin/data/swe/traj_0042.md
 0.722  failure  -                    -        /home/admin/data/swe/traj_0123.md
 
-# t2s search skill <query>
+# xskill search skill <query>
 # 列：similarity  name                 used   ux_avg(N)   canary
 0.853  fix_form_validation  23     7.8(15)     staging
 0.791  fix_orm_n_plus_one   17     8.1(12)     -
@@ -72,10 +72,10 @@ t2s search skill <query> [--top-k 5]   # 跨所有 registry
 
 ---
 
-## 3. `~/.t2s/` 布局
+## 3. `~/.xskill/` 布局
 
 ```
-~/.t2s/
+~/.xskill/
 ├── config.yaml         # 取代 ./config.yaml；带注释，无 fallback
 ├── registry.db         # 监听目录 + 轨迹状态
 ├── chat_sessions.db    # agno chat 历史
@@ -83,21 +83,21 @@ t2s search skill <query> [--top-k 5]   # 跨所有 registry
 └── skill/              # 默认 skill 仓库（config.yaml 可改）
 ```
 
-**不做自动迁移**。老用户手动 `mv ~/.traj2skill ~/.t2s/` 并把原 `./config.yaml` 内容搬入 `~/.t2s/config.yaml`。找不到 `~/.t2s/config.yaml` 直接 `FileNotFoundError`。
+**不做自动迁移**。老用户手动 `mv ~/.xskill ~/.xskill/` 并把原 `./config.yaml` 内容搬入 `~/.xskill/config.yaml`。找不到 `~/.xskill/config.yaml` 直接 `FileNotFoundError`。
 
 **关键观念变更**：
 - 删除 `traj_dir` 概念。dataset 只通过 `registry add <绝对路径>` 注册，没有"默认 traj 目录"
-- `skill_dir` 默认 `~/.t2s/skill/`，单一全局仓库；改在 `config.yaml` 里改
+- `skill_dir` 默认 `~/.xskill/skill/`，单一全局仓库；改在 `config.yaml` 里改
 - `<skill_dir>` 顶层 `.git` 删除（历史遗留）；每个 `<skill>/.git` 保留，作为 canary main/staging 的载体
 - 全部使用 `<skill>/.git` 子仓做 commit；不再有顶层"打包 commit"行为
 
 ---
 
-## 4. `~/.t2s/config.yaml` Schema
+## 4. `~/.xskill/config.yaml` Schema
 
 ```yaml
 # ===== Skill 仓库 =====
-skill_dir: ~/.t2s/skill          # 全局唯一 skill repo
+skill_dir: ~/.xskill/skill          # 全局唯一 skill repo
 
 # ===== LLM（生成 / 评分用）=====
 llm:
@@ -156,7 +156,7 @@ watcher:
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │ SDK 暴露层（用户 import）                                     │
-│   T2S, Skill, Trajectory, Evaluator                           │
+│   XSkill, Skill, Trajectory, Evaluator                           │
 │   + dataclasses: WatchDir / SkillHit / TrajectoryHit /        │
 │                  EvalScore / Candidate / UxScoreResult        │
 └───────────────────────────────────────────────────────────────┘
@@ -184,7 +184,7 @@ watcher:
 ═════════════════════════════════════════════════════════════════════════════
 
            ┌────────────────────────────────────────┐
-           │                T2S                     │
+           │                XSkill                     │
            │            (facade / 门面)             │
            ├────────────────────────────────────────┤
            │ - config: dict                         │
@@ -202,7 +202,7 @@ watcher:
 ┌──────────────────────────┐                              │
 │       Registry           │                              │
 ├──────────────────────────┤                              │
-│ - db_path: Path          │  ← ~/.t2s/registry.db        │
+│ - db_path: Path          │  ← ~/.xskill/registry.db        │
 ├──────────────────────────┤                              │
 │ + add(path) → WatchDir   │                              │
 │ + remove(path) → bool    │                              │
@@ -218,9 +218,9 @@ watcher:
 ┌──────────────────────────────┐
 │        SkillRepo             │  ← <skill_dir> 顶层管理
 ├──────────────────────────────┤  ← 顶层 .git 删除，只管 <skill>/ 子目录
-│ - root: Path                 │  ← ~/.t2s/skill/
+│ - root: Path                 │  ← ~/.xskill/skill/
 ├──────────────────────────────┤
-│ + __getitem__(name) → Skill  │  (t2s.skill_repo["foo"])
+│ + __getitem__(name) → Skill  │  (xskill.skill_repo["foo"])
 │ + __iter__() → Iter[Skill]   │
 │ + __contains__(name) → bool  │
 │ + rebuild_index()            │  ← .skill_index.pkl
@@ -401,16 +401,16 @@ watcher:
 
 ```python
 # 4 个核心类
-from traj2skill import T2S, Skill, Trajectory, Evaluator
+from xskill import XSkill, Skill, Trajectory, Evaluator
 
 # dataclass 类型
-from traj2skill.types import (
+from xskill.types import (
     WatchDir, SkillHit, TrajectoryHit,
     EvalScore, Candidate, UxScoreResult,
 )
 ```
 
-`Config / Registry / SkillRepo / CandidateBuffer / CanaryGitOps / AgentToolkit / DistillationAgent / PromotionAgent / ChatAgent / PipelineRunner` **不暴露**——通过 `T2S.config / T2S.registry / T2S.skill_repo / Skill.candidates / Skill.canary` 访问。
+`Config / Registry / SkillRepo / CandidateBuffer / CanaryGitOps / AgentToolkit / DistillationAgent / PromotionAgent / ChatAgent / PipelineRunner` **不暴露**——通过 `XSkill.config / XSkill.registry / XSkill.skill_repo / Skill.candidates / Skill.canary` 访问。
 
 ### 5.4 关键 dataclass schema
 
@@ -541,10 +541,10 @@ class PipelineRunner:
 
 ### 6.3 chat 路由 side 选择统一
 
-当前三处实现（`/resolve` 走 `pick_side(p)`、`/chat` 看物化文件、`/chat/stream` 看物化文件）。统一为单一函数 `traj2skill.canary.resolve_side`，**ChatAgent / api_chat / api_chat_stream 三处都调它**：
+当前三处实现（`/resolve` 走 `pick_side(p)`、`/chat` 看物化文件、`/chat/stream` 看物化文件）。统一为单一函数 `xskill.canary.resolve_side`，**ChatAgent / api_chat / api_chat_stream 三处都调它**：
 
 ```python
-# traj2skill/canary.py 新增
+# xskill/canary.py 新增
 def resolve_side(skill: Skill, traj_id: str, config: dict) -> tuple[str, Path]:
     """统一返回 (side, skill_md_path)。
        staging 端要求 materialize 已由 PipelineRunner 在路由 staging 时完成；
@@ -580,11 +580,11 @@ class Trajectory:
 ```
 
 **Registry 注入路径**：
-- `T2S.search_trajectories()` 返回的 `Trajectory` 自动带 `registry=self.registry`
-- `Skill.supporting_trajectories()` 返回的 `Trajectory` 自动带 registry（Skill 持有 SkillRepo 引用，间接拿到 T2S.registry）
+- `XSkill.search_trajectories()` 返回的 `Trajectory` 自动带 `registry=self.registry`
+- `Skill.supporting_trajectories()` 返回的 `Trajectory` 自动带 registry（Skill 持有 SkillRepo 引用，间接拿到 XSkill.registry）
 - 用户主动 `Trajectory.load(path)`（无 registry 参数）→ `skill_used / skill_generated / canary_side` 全返回 None。这是有意的：独立加载模式只读文件本身，不查 DB
 
-**为什么不让 Trajectory 自己 import `t2s.config` 找 DB**：避免 Trajectory 实体持全局状态，保持纯数据视图特性。需要反查的代码路径都从 T2S/Skill 走，自然有 registry。
+**为什么不让 Trajectory 自己 import `xskill.config` 找 DB**：避免 Trajectory 实体持全局状态，保持纯数据视图特性。需要反查的代码路径都从 XSkill/Skill 走，自然有 registry。
 
 `Registry.trajectories_using(skill_name)` 反查：
 
@@ -642,16 +642,16 @@ WHERE t.skill_used LIKE ? OR t.skill_used = ?
 
 ### 8.1 用户影响
 
-- **不再支持** `./config.yaml`，找不到 `~/.t2s/config.yaml` 直接抛异常
+- **不再支持** `./config.yaml`，找不到 `~/.xskill/config.yaml` 直接抛异常
 - **不再支持** `--skill-dir / --traj-dir / --llm-*` flag
 - **不读** `~/.aikey`、不读环境变量、无任何 fallback
-- 老用户必须手动 `mv ~/.traj2skill ~/.t2s/` + 手编 `~/.t2s/config.yaml`
+- 老用户必须手动 `mv ~/.xskill ~/.xskill/` + 手编 `~/.xskill/config.yaml`
 - README / docs 全部改写
 
 ### 8.2 代码影响
 
-- 现有 `tests/` 中过程式 import（如 `from traj2skill.process import process_traj`）部分会失效——`process_traj` 函数被 `PipelineRunner.run_distill` 替代
-- `server.py` 内部目前直接 import `skill_tools / candidates / canary` 等模块函数；改为通过 `T2S` 实例访问
+- 现有 `tests/` 中过程式 import（如 `from xskill.process import process_traj`）部分会失效——`process_traj` 函数被 `PipelineRunner.run_distill` 替代
+- `server.py` 内部目前直接 import `skill_tools / candidates / canary` 等模块函数；改为通过 `XSkill` 实例访问
 - `__init__.py` 重写公开面（见 §5.3）
 
 ### 8.3 顶层 git 删除
@@ -687,12 +687,12 @@ v1/v2 schema 共存清理（`migrate.py` 是否仍需保留）放下一期评估
 
 本设计落地后应满足：
 
-- [ ] `t2s --help` 列出仅 5 个子命令（serve / registry add|remove|list / search traj|skill）
+- [ ] `xskill --help` 列出仅 5 个子命令（serve / registry add|remove|list / search traj|skill）
 - [ ] `cli.py` < 200 行
-- [ ] `~/.t2s/config.yaml` 不存在时 `t2s serve` 抛 `FileNotFoundError`，不 fallback
-- [ ] `from traj2skill import T2S, Skill, Trajectory, Evaluator` 成功
+- [ ] `~/.xskill/config.yaml` 不存在时 `xskill serve` 抛 `FileNotFoundError`，不 fallback
+- [ ] `from xskill import XSkill, Skill, Trajectory, Evaluator` 成功
 - [ ] 单一 `AgentToolkit` 实现，三个 Agent 类共用
 - [ ] `<skill_dir>/.git`（顶层）不再被任何代码路径访问
 - [ ] §7 列出的死代码全部从代码库消失（`grep` 0 匹配）
 - [ ] 现有 watcher 自动 pipeline 行为不变（traj 落盘 → meta → embed → distill → ux_score）
-- [ ] `t2s search skill <q>` 输出包含 `used` 和 `ux_avg(N)` 列
+- [ ] `xskill search skill <q>` 输出包含 `used` 和 `ux_avg(N)` 列

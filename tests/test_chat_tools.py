@@ -20,7 +20,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from traj2skill.server import (
+from xskill.server import (
     _exec_tool,
     CHAT_TOOLS,
     CHAT_TOOLS_INFO,
@@ -98,10 +98,10 @@ class TestExecToolUnknown:
 
 class TestExecToolSearchSkills:
     def test_delegates_to_search_skills(self, tmp_path):
-        with patch("traj2skill.server._exec_tool.__module__", "traj2skill.server"):
+        with patch("xskill.server._exec_tool.__module__", "xskill.server"):
             pass
         # Patch the import target inside _exec_tool
-        with patch("traj2skill.skill_tools.search_skills", return_value='[{"name":"foo"}]') as mock_ss:
+        with patch("xskill.skill_tools.search_skills", return_value='[{"name":"foo"}]') as mock_ss:
             result = _exec_tool("search_skills", {"query": "deploy"}, tmp_path, tmp_path, {})
             mock_ss.assert_called_once_with("deploy", top_k=3)
             assert "foo" in result
@@ -112,7 +112,7 @@ class TestExecToolSearchTrajectories:
         fake_results = [
             {"traj_id": "t1", "similarity": 0.9, "meta": {"intent": "fix bug"}},
         ]
-        with patch("traj2skill.search.search_all", return_value=fake_results) as mock_sa:
+        with patch("xskill.search.search_all", return_value=fake_results) as mock_sa:
             cfg = {"some": "config"}
             result = _exec_tool("search_trajectories", {"query": "bug fix", "top_k": 2},
                                 tmp_path, tmp_path, cfg)
@@ -174,16 +174,16 @@ class TestApiChatLLMErrors:
     @pytest.fixture()
     def client(self):
         """Create a test client with all heavy deps mocked out."""
-        with patch("traj2skill.server.create_embed_client"), \
-             patch("traj2skill.server.init_context"):
-            from traj2skill.server import create_app
+        with patch("xskill.server.create_embed_client"), \
+             patch("xskill.server.init_context"):
+            from xskill.server import create_app
             from starlette.testclient import TestClient
             app = create_app()
             yield TestClient(app, raise_server_exceptions=False)
 
     def test_returns_503_when_llm_not_configured(self, client):
-        with patch("traj2skill.server.create_llm_client", return_value=None), \
-             patch("traj2skill.server.search_skills", return_value="[]"):
+        with patch("xskill.server.create_llm_client", return_value=None), \
+             patch("xskill.server.search_skills", return_value="[]"):
             resp = client.post("/api/v1/chat", json={"message": "hello"})
             assert resp.status_code == 503
             body = resp.json()
@@ -192,8 +192,8 @@ class TestApiChatLLMErrors:
     def test_returns_502_when_llm_call_fails(self, client):
         mock_llm = MagicMock()
         mock_llm.chat.side_effect = RuntimeError("connection refused")
-        with patch("traj2skill.server.create_llm_client", return_value=mock_llm), \
-             patch("traj2skill.server.search_skills", return_value="[]"):
+        with patch("xskill.server.create_llm_client", return_value=mock_llm), \
+             patch("xskill.server.search_skills", return_value="[]"):
             resp = client.post("/api/v1/chat", json={"message": "hello"})
             assert resp.status_code == 502
             body = resp.json()

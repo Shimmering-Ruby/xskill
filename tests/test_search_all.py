@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from traj2skill.search import search_all
+from xskill.search import search_all
 
 
 @pytest.fixture()
@@ -25,7 +25,7 @@ def _make_search_result(traj_id: str, similarity: float, dataset_dir: str = ""):
 
 class TestSearchAll:
     def test_merges_and_sorts_across_datasets(self, tmp_path, db_path):
-        from traj2skill.registry import register_dir
+        from xskill.registry import register_dir
 
         d1 = tmp_path / "ds1"
         d1.mkdir()
@@ -53,9 +53,9 @@ class TestSearchAll:
                 ]
             return []
 
-        with patch("traj2skill.search.search", side_effect=fake_search), \
-             patch("traj2skill.registry.get_registry_dir", return_value=tmp_path), \
-             patch("traj2skill.registry.all_index_paths",
+        with patch("xskill.search.search", side_effect=fake_search), \
+             patch("xskill.registry.get_registry_dir", return_value=tmp_path), \
+             patch("xskill.registry.all_index_paths",
                    return_value=[d1.resolve(), d2.resolve()]):
             results = search_all("test query", top_k=3)
 
@@ -68,7 +68,7 @@ class TestSearchAll:
         # traj_D (0.3) is cut off by top_k=3
 
     def test_returns_empty_when_no_dirs(self, db_path):
-        with patch("traj2skill.registry.all_index_paths", return_value=[]):
+        with patch("xskill.registry.all_index_paths", return_value=[]):
             results = search_all("test query")
         assert results == []
 
@@ -77,8 +77,8 @@ class TestSearchAll:
         d1.mkdir()
         # no index.pkl
 
-        with patch("traj2skill.registry.all_index_paths", return_value=[d1]), \
-             patch("traj2skill.search.search", side_effect=FileNotFoundError("no index")):
+        with patch("xskill.registry.all_index_paths", return_value=[d1]), \
+             patch("xskill.search.search", side_effect=FileNotFoundError("no index")):
             results = search_all("test query")
         assert results == []
 
@@ -94,8 +94,8 @@ class TestSearchAll:
                                     min_similarity=0.0, success_filter="all", config=None):
             return [_make_search_result("traj_X", 0.7)]
 
-        with patch("traj2skill.registry.all_index_paths", return_value=[d1]), \
-             patch("traj2skill.search.search", side_effect=fake_search_positional):
+        with patch("xskill.registry.all_index_paths", return_value=[d1]), \
+             patch("xskill.search.search", side_effect=fake_search_positional):
             results = search_all("test query")
 
         assert len(results) == 1

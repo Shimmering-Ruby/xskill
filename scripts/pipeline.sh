@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  traj2skill 一站式 Demo 脚本
+#  xskill 一站式 Demo 脚本
 # =============================================================================
 #  用法：
 #      ./scripts/pipeline.sh [dataset] [max] [workspace]
@@ -19,10 +19,10 @@
 #  本脚本会自动：
 #      1. 在 workspace 目录写好 config.yaml（如果不存在 / 或你改过脚本里的 model）
 #      2. 软链到仓库的 data/ 目录（复用已下载的 660 条 swe/dataclaw/sample）
-#      3. t2s init 建 skill 仓库
+#      3. xskill init 建 skill 仓库
 #      4. 跑完 index → batch → eval → skill list → candidates 五阶段
 #
-#  每一条实际执行的 t2s 命令都会先以紫色 "$ ..." 打印出来，方便复制单独重跑。
+#  每一条实际执行的 xskill 命令都会先以紫色 "$ ..." 打印出来，方便复制单独重跑。
 #  不改环境、不污染仓库；所有产出落在 workspace 目录。
 #
 # -----------------------------------------------------------------------------
@@ -96,11 +96,11 @@ CANDIDATES_THRESHOLD=3           # supporting_trajs 达到此数自动 promote
 # -----------------------------------------------------------------------------
 #      data/<dataset>/traj_*.md + traj_*.json
 #             │
-#      [1] t2s index
+#      [1] xskill index
 #             │ ── LLM 抽 intent/summary/blockers/tags      → traj_*.md.meta
 #             │ ── Embedding                                → index.pkl
 #             │
-#      [2] t2s batch  (for each traj → process_traj):
+#      [2] xskill batch  (for each traj → process_traj):
 #             │
 #             ├─ agent (agno) 用工具:
 #             │    search_skills             路由：看 frontmatter.description
@@ -131,22 +131,22 @@ CANDIDATES_THRESHOLD=3           # supporting_trajs 达到此数自动 promote
 # -----------------------------------------------------------------------------
 #  关键命令参数速查
 # -----------------------------------------------------------------------------
-#  t2s index   -c N   --dataset NAME  --all  --no-llm  --reindex  --dry-run
-#  t2s batch          --dataset NAME  --max N  --dry-run
-#  t2s process PATH   --dry-run
-#  t2s eval    --skill NAME  --n-runs N  --sandbox  --no-sandbox  --list
-#  t2s skill   list | show NAME | log NAME | diff NAME
+#  xskill index   -c N   --dataset NAME  --all  --no-llm  --reindex  --dry-run
+#  xskill batch          --dataset NAME  --max N  --dry-run
+#  xskill process PATH   --dry-run
+#  xskill eval    --skill NAME  --n-runs N  --sandbox  --no-sandbox  --list
+#  xskill skill   list | show NAME | log NAME | diff NAME
 #              freeze NAME | unfreeze NAME | delete NAME
 #              rollback NAME --to HEAD~1
 #              export NAME | import --from skill.tgz
 #              migrate [NAME|--all]               # v1→v2 格式迁移
 #              promote [--skill NAME|--all] [--threshold N]
 #              archive-stale [--days N] [--threshold N]
-#  t2s search       -q "…" -k N --filter all|success|failure
-#  t2s search-skill -q "…" -k N
-#  t2s serve   --port N [--no-ui]                 # 起 HTTP+WebUI
-#  t2s init [path]                                # 初始化 skill/ 仓库
-#  t2s status                                     # 显示当前配置和 skill 数量
+#  xskill search       -q "…" -k N --filter all|success|failure
+#  xskill search-skill -q "…" -k N
+#  xskill serve   --port N [--no-ui]                 # 起 HTTP+WebUI
+#  xskill init [path]                                # 初始化 skill/ 仓库
+#  xskill status                                     # 显示当前配置和 skill 数量
 #
 # -----------------------------------------------------------------------------
 #  路径优先级 (CLI flag > 环境变量 > config.yaml > 默认)
@@ -202,7 +202,7 @@ else
 fi
 
 # ── 命令执行封装：打印 → （可选等确认）→ 执行 ─────────────────────────
-# 用法：run t2s index --dataset foo -c 10
+# 用法：run xskill index --dataset foo -c 10
 run() {
     # 把参数拼成一行 shell 安全的命令回显
     local cmd_display="$*"
@@ -223,8 +223,8 @@ run() {
 }
 
 # ── 预检 ────────────────────────────────────────────────────────────────
-if ! command -v t2s >/dev/null 2>&1; then
-    echo -e "${C_ERR}✗ t2s 命令不存在${C_OFF}"
+if ! command -v xskill >/dev/null 2>&1; then
+    echo -e "${C_ERR}✗ xskill 命令不存在${C_OFF}"
     echo "  请先安装： cd $REPO_ROOT && pip install -e ."
     exit 1
 fi
@@ -233,7 +233,7 @@ fi
 # 如果 workspace 里已经有对应 dataset（比如 run_demo.sh 解压好的），就没啥可警告的。
 if [ ! -d "$REPO_ROOT/data" ] && [ ! -d "$WORKSPACE/data/$DATASET" ]; then
     echo -e "${C_WARN}⚠ 仓库的 data/ 和 workspace 里都没有 $DATASET${C_OFF}"
-    echo "  先跑一次 python -m traj2skill.download_data --mode sample 下载数据"
+    echo "  先跑一次 python -m xskill.download_data --mode sample 下载数据"
 elif [ ! -d "$REPO_ROOT/data" ]; then
     echo -e "${C_DIM}  仓库的 data/ 不存在（gitignored），继续用 workspace 里的 $DATASET${C_OFF}"
 fi
@@ -373,7 +373,7 @@ fi
 
 # 初始化 skill 仓库（已存在则跳过）
 if [ ! -d "$WORKSPACE/skill/.git" ]; then
-    run t2s init
+    run xskill init
 else
     echo -e "${C_DIM}  复用已有的 skill/ 仓库（$(cd "$WORKSPACE/skill" && git log --oneline 2>/dev/null | wc -l) 个 commit）${C_OFF}"
 fi
@@ -381,7 +381,7 @@ fi
 # ── 打印摘要 ────────────────────────────────────────────────────────────
 echo
 echo -e "${C_HEAD}════════════════════════════════════════════════════════════════${C_OFF}"
-echo -e "${C_HEAD}  traj2skill 一站式 Demo${C_OFF}"
+echo -e "${C_HEAD}  xskill 一站式 Demo${C_OFF}"
 echo -e "${C_HEAD}════════════════════════════════════════════════════════════════${C_OFF}"
 echo -e "  workspace         ${C_BOLD}$WORKSPACE${C_OFF}"
 echo -e "  dataset           ${C_BOLD}$DATASET${C_OFF} (max=${C_BOLD}$MAX${C_OFF} 条)"
@@ -410,33 +410,33 @@ echo -e "${C_HEAD}━━━ [1/5] Indexing trajectories from $DATASET ━━━$
 echo -e "${C_DIM}  预计耗时: ~5-10 min / 300 条 (并发 10)${C_OFF}"
 echo -e "${C_DIM}  已有 .meta 会跳过；想强制重建加 REINDEX=1 env var${C_OFF}"
 if [ "${REINDEX:-0}" = "1" ]; then
-    run t2s index --reindex --dataset "$DATASET" -c 10
+    run xskill index --reindex --dataset "$DATASET" -c 10
 else
-    run t2s index --dataset "$DATASET" -c 10
+    run xskill index --dataset "$DATASET" -c 10
 fi
 echo
 
 # ── [2] 批处理 ──────────────────────────────────────────────────────────
 echo -e "${C_HEAD}━━━ [2/5] Batch processing (max=$MAX) ━━━${C_OFF}"
 echo -e "${C_DIM}  预计耗时: ~5-7 min / 条 x $MAX 条 (LLM 串行)${C_OFF}"
-echo -e "${C_DIM}  想只看 agent 推理不写入：改为调用 t2s batch --dry-run${C_OFF}"
-run t2s batch --dataset "$DATASET" --max "$MAX"
+echo -e "${C_DIM}  想只看 agent 推理不写入：改为调用 xskill batch --dry-run${C_OFF}"
+run xskill batch --dataset "$DATASET" --max "$MAX"
 echo
 
 # ── [3] 评测汇总 ────────────────────────────────────────────────────────
 echo -e "${C_HEAD}━━━ [3/5] Eval summary (all skills) ━━━${C_OFF}"
-run t2s eval --list
+run xskill eval --list
 echo
 
 # ── [4] Skill 列表 ──────────────────────────────────────────────────────
 echo -e "${C_HEAD}━━━ [4/5] Skills produced ━━━${C_OFF}"
-run t2s skill list
+run xskill skill list
 echo
 
 # ── [5] Candidate 缓冲 ──────────────────────────────────────────────────
 echo -e "${C_HEAD}━━━ [5/5] Candidate buffers (pending promotion) ━━━${C_OFF}"
 echo -e "${C_DIM}  supporting_trajs >= $CANDIDATES_THRESHOLD 时自动 promote${C_OFF}"
-echo -e "${C_DIM}  手动 flush:   t2s skill promote --all --threshold 2${C_OFF}"
+echo -e "${C_DIM}  手动 flush:   xskill skill promote --all --threshold 2${C_OFF}"
 echo
 SKILL_DIR="$WORKSPACE/skill"
 if [ -d "$SKILL_DIR" ]; then
@@ -461,10 +461,10 @@ echo
 echo -e "${C_OK}✓ 流水线完成${C_OFF}"
 echo
 echo -e "${C_DIM}下一步可做：${C_OFF}"
-echo -e "${C_DIM}  单 skill 详情    (cd $WORKSPACE && t2s skill show <name>)${C_OFF}"
-echo -e "${C_DIM}  重评             (cd $WORKSPACE && t2s eval --skill <name> --n-runs 5)${C_OFF}"
-echo -e "${C_DIM}  降阈值 promote   (cd $WORKSPACE && t2s skill promote --all --threshold 2)${C_OFF}"
-echo -e "${C_DIM}  前端演示         (cd $WORKSPACE && t2s serve --port 8000)  → 浏览器开 http://localhost:8000${C_OFF}"
+echo -e "${C_DIM}  单 skill 详情    (cd $WORKSPACE && xskill skill show <name>)${C_OFF}"
+echo -e "${C_DIM}  重评             (cd $WORKSPACE && xskill eval --skill <name> --n-runs 5)${C_OFF}"
+echo -e "${C_DIM}  降阈值 promote   (cd $WORKSPACE && xskill skill promote --all --threshold 2)${C_OFF}"
+echo -e "${C_DIM}  前端演示         (cd $WORKSPACE && xskill serve --port 8000)  → 浏览器开 http://localhost:8000${C_OFF}"
 echo -e "${C_DIM}  看 git 历史      (cd $WORKSPACE/skill && git log --all --oneline)${C_OFF}"
 echo -e "${C_DIM}  重跑 (保留产出)  ./scripts/pipeline.sh $DATASET $MAX $WORKSPACE${C_OFF}"
 echo -e "${C_DIM}  全新 workspace   rm -rf $WORKSPACE && ./scripts/pipeline.sh${C_OFF}"

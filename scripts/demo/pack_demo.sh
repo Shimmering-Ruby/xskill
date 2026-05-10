@@ -34,7 +34,7 @@ trap 'rm -rf "$STAGE"' EXIT
 
 if [ ! -d "$SRC" ]; then
     echo "✗ 源数据不存在：$SRC"
-    echo "  先下载：python -m traj2skill.download_data --mode swe_smith"
+    echo "  先下载：python -m xskill.download_data --mode swe_smith"
     exit 1
 fi
 

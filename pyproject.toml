@@ -3,10 +3,23 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "traj2skill"
-version = "0.2.0"
-description = "从 AI Agent 执行轨迹自动蒸馏可复用 Skill"
+name = "xskill"
+version = "0.3.0"
+description = "Distill reusable Skills from AI Agent execution trajectories"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "370025263", email = "370025263@qq.com" }]
+keywords = ["agent", "skill", "trajectory", "llm", "rag", "self-evolving"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.24",
@@ -22,8 +35,13 @@ dependencies = [
     "sse-starlette",
 ]
 
+[project.urls]
+Homepage = "https://github.com/370025263/xskill"
+Repository = "https://github.com/370025263/xskill"
+Issues = "https://github.com/370025263/xskill/issues"
+
 [project.scripts]
-t2s = "traj2skill.cli:main"
+xskill = "xskill.cli:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -32,4 +50,4 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-traj2skill = ["web/dist/**/*"]
+xskill = ["web/dist/**/*"]

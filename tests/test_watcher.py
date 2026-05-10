@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from traj2skill.registry import register_dir, discover_trajectories, get_unindexed, get_needs_meta
-from traj2skill.watcher import DirectoryWatcher
+from xskill.registry import register_dir, discover_trajectories, get_unindexed, get_needs_meta
+from xskill.watcher import DirectoryWatcher
 
 
 @pytest.fixture()
@@ -47,7 +47,7 @@ class TestWatcherDiscovery:
         watcher._poll_once()
 
         # File should be discovered but not indexed (no LLM/embed)
-        from traj2skill.registry import get_connection
+        from xskill.registry import get_connection
         conn = get_connection(db_path)
         rows = conn.execute("SELECT filename FROM trajectories WHERE watch_dir_id=?", (wid,)).fetchall()
         conn.close()
@@ -77,8 +77,8 @@ class TestWatcherMetaExtraction:
 
         mock_llm = MagicMock()
 
-        with patch("traj2skill.watcher.get_needs_meta", return_value=["traj_0001.md"]) as mock_gn, \
-             patch("traj2skill.index._process_one_meta") as mock_pom:
+        with patch("xskill.watcher.get_needs_meta", return_value=["traj_0001.md"]) as mock_gn, \
+             patch("xskill.index._process_one_meta") as mock_pom:
             mock_gn.side_effect = lambda wid, **kw: ["traj_0001.md"] if kw else ["traj_0001.md"]
 
             watcher = DirectoryWatcher(
@@ -103,16 +103,16 @@ class TestWatcherUxScore:
         skill_dir.mkdir()
         (skill_dir / "test_skill").mkdir()
 
-        # Write a traj with t2s header
+        # Write a traj with xskill header
         (traj_dir / "traj_0001.md").write_text(
-            "<!-- t2s:skill=test_skill side=staging sha=abc123 -->\n# Traj\nagent did X"
+            "<!-- xskill:skill=test_skill side=staging sha=abc123 -->\n# Traj\nagent did X"
         )
 
         register_dir(traj_dir, db_path=db_path)
 
         mock_llm = MagicMock()
 
-        with patch("traj2skill.ux_score.score_and_record") as mock_score:
+        with patch("xskill.ux_score.score_and_record") as mock_score:
             watcher = DirectoryWatcher(
                 llm=mock_llm, embed_client=None, config={},
                 skill_dir=skill_dir, poll_interval=1, db_path=db_path,
@@ -135,7 +135,7 @@ class TestWatcherUxScore:
         (traj_dir / "traj_0001.md").write_text("# No header\njust content")
         register_dir(traj_dir, db_path=db_path)
 
-        with patch("traj2skill.ux_score.score_and_record") as mock_score:
+        with patch("xskill.ux_score.score_and_record") as mock_score:
             watcher = DirectoryWatcher(
                 llm=MagicMock(), embed_client=None, config={},
                 skill_dir=skill_dir, poll_interval=1, db_path=db_path,
