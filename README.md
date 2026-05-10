@@ -9,6 +9,8 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![GitHub](https://img.shields.io/badge/github-370025263%2Fxskill-181717?logo=github)](https://github.com/370025263/xskill)
 
+**English** · [简体中文](./README.zh-CN.md)
+
 </div>
 
 ---
