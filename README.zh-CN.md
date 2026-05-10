@@ -32,6 +32,17 @@ traj_*.md  ──►  抽 meta ──►  embed ──►  蒸馏 ──►  Ski
 
 后台 daemon 监听你注册的轨迹目录。新轨迹会被 embed、聚类，然后蒸馏成一个有名字的 **Skill**。每个 Skill 是一个独立的小 git 仓，拥有 `main` 与 `staging` 两个分支；新候选通过灰度流量 + LLM 评审 UX 打分进行 A/B，赢了才合并到 main。
 
+## 跨 code agent 兼容
+
+xskill 站在**任何写出轨迹的 agent** 与**任何最终消费 skill 的 agent** 之间。两端都是可插拔的。
+
+| 方向 | 当前支持 | 路线图 |
+| ---- | -------- | ------ |
+| **轨迹入口**（你的 agent 写出来的） | Claude Code (`traj_*.md`，带 `<!-- xskill: -->` 头) | Codex CLI、OpenCode、Goose、OpenHands、Cursor、Aider —— 每个 agent 一个 adapter |
+| **Skill 出口**（谁读这份 skill 库） | Anthropic 风格 `SKILL.md` + YAML frontmatter —— Claude Code 的 `.claude/skills/<name>/` 直接就能读 | Codex（symlink）、OpenCode（路径标准化）、Goose、通用 MCP server（每个 skill 暴露成一个工具） |
+
+输出格式遵循事实标准 `agentskills.io` 的 SKILL.md schema——任何已经能读 Anthropic Skills 的 agent 都能直接读 xskill 的产物。不兼容的 agent 通过一个薄薄的 per-agent adapter 把 skill 翻译成它要的形态（system prompt block、tool description、结构化 JSON 等）。
+
 ## 核心特性
 
 - **零接入成本**：把 `traj_*.md` 丢进监听目录，剩下的全自动。
@@ -186,8 +197,36 @@ watcher:
 | **UX score**   | LLM-as-judge 评分。从 chat 归档反馈中读取，给 skill 服务用户的效果打分。 |
 | **Registry**   | 已注册的监听目录列表。一旦 add，watcher 永久轮询。 |
 
+## xskill 与同类项目对比
+
+在动手之前，我们横向调研了 10 个学术 / 开源的 trajectory→skill 系统（Hermes、OpenSpace、EvoSkill、AutoSkill、AgentEvolver、MemSkill、EvoAgentX、SE-Agent、SkillRL、GEPA）。完整的 ~270 行交叉矩阵在 [`docs/research/related-work-survey.md`](docs/research/related-work-survey.md)，每个单元格都带 `path:line` 的代码证据。
+
+**xskill 借鉴了什么**
+
+- *把 SKILL.md 当作跨 agent 的共同单位* —— OpenSpace / EvoSkill / AutoSkill 已经收敛在这里，我们沿用同一份 Anthropic frontmatter schema，保证可移植。
+- *LLM-as-judge 的 UX 评分* —— AutoSkill 的 per-turn `relevant/used` 信号（`autoskill/interactive/usage_tracking.py`）启发了我们的 `ux_score` 量表。
+- *单 skill 独立 git 版本控制* —— EvoSkill 的 "git branch = program version"（`src/registry/manager.py:33-95`）；我们把 `.git` 放进每个 skill 目录。
+- *完整 provenance* —— OpenSpace 记录 `parent_skill_ids + source_task_id + created_by + change_summary`；xskill 在每个 skill 的 git log 里留同等信息。
+
+**xskill 做了 10 个项目都没做的事**
+
+> *"真正灰度 / A-B：10 个项目无一实现。"* —— 调研报告 §10
+- **真正的 canary A/B**：每个 skill 自带 `main` / `staging` 分支；chat 流量按概率分流，两侧各 ≥ N 条 UX 分后自动判定 merge 还是 discard。**全程无人。**
+- **对称的两端入口**：per-turn 流式（丢一份 `traj_*.md` → watcher 自动接住）与批量回填（`xskill registry add /path` 把整个归档目录全量入库）同等优先——大多数被调研的项目只挑一种。
+
+**调研报告点出的空白（=我们的 Roadmap）**
+
+- 基于使用统计的自动淘汰（AutoSkill 的 `retrieved>=40 && used<=0` 规则）
+- 基于共同祖先的 git-style 三方合并（GEPA `merge.py:118-207`）
+- BM25 → embedding cosine → LLM-judge 三段式检索（OpenSpace）
+- 更多 code-agent adapter —— 见下方
+
 ## Roadmap
 
+- [ ] **更多 code-agent adapter** —— Codex、OpenCode、Goose、OpenHands、Cursor、Aider 双向（轨迹入口 + skill 出口）
+- [ ] 基于使用统计的自动淘汰（`retrieved>=N && used<=0` → 删除）
+- [ ] git-style 三方合并，处理多源 skill 整合
+- [ ] BM25 + embedding + LLM-judge 三段式检索 reranker
 - [ ] Web UI 浏览 skill、查看灰度数据、手动 merge / discard
 - [ ] Skill marketplace：导入 / 导出可移植的 skill bundle
 - [ ] 多租户 skill 仓（每个团队一个 `skill_dir`）

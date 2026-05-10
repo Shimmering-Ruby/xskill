@@ -32,6 +32,17 @@ traj_*.md  ──►  meta ──►  embed ──►  distill ──►  Skill 
 
 A daemon watches your trajectory directories. New trajectories get embedded, clustered, and turned into named **Skills**. Each Skill is its own tiny git repo with `main` and `staging` branches; new candidates are gated through canary traffic, scored by an LLM-as-judge UX rubric, and merged only when they win.
 
+## Cross-agent compatibility
+
+xskill sits between **whatever produced the trajectory** and **whatever will eventually consume the skill**. Both ends are pluggable.
+
+| Direction | Today | Roadmap |
+| --------- | ----- | ------- |
+| **Trajectory in** (what your agent writes) | Claude Code (`traj_*.md` with `<!-- xskill: -->` headers) | Codex CLI, OpenCode, Goose, OpenHands, Cursor, Aider — adapter-per-agent |
+| **Skill out** (who reads the produced library) | Anthropic-style `SKILL.md` with YAML frontmatter — drop-in for Claude Code's `.claude/skills/<name>/` | Codex (symlink), OpenCode (path normalization), Goose, generic MCP server exposing each skill as a tool |
+
+The output format is the *de facto* `agentskills.io` SKILL.md schema, so anything that already groks Anthropic Skills can read xskill output verbatim. Non-conforming agents get a thin per-agent adapter that translates the same skill into whatever shape they need (system prompt block, tool description, structured JSON, etc.).
+
 ## Highlights
 
 - **Zero-touch ingestion** — drop `traj_*.md` into a watched dir, the rest is automatic.
@@ -186,8 +197,36 @@ Full template: [`examples/config.yaml.example`](examples/config.yaml.example).
 | **UX score**   | LLM-as-judge rubric that grades how well a skill served the user, from chat archive feedback. |
 | **Registry**   | The list of watched directories. Add a path → the watcher polls it forever. |
 
+## How xskill compares
+
+Before building xskill we surveyed 10 academic / open-source trajectory→skill systems (Hermes, OpenSpace, EvoSkill, AutoSkill, AgentEvolver, MemSkill, EvoAgentX, SE-Agent, SkillRL, GEPA). The full ~270-line cross-cutting matrix lives at [`docs/research/related-work-survey.md`](docs/research/related-work-survey.md) — each cell carries `path:line` evidence.
+
+**What xskill borrows from the field**
+
+- *SKILL.md as the cross-agent unit* — OpenSpace / EvoSkill / AutoSkill all converged here; we follow the same Anthropic frontmatter schema for portability.
+- *LLM-as-judge UX scoring* — AutoSkill's per-turn `relevant/used` signal (`autoskill/interactive/usage_tracking.py`) inspires our `ux_score` rubric.
+- *per-skill git versioning* — EvoSkill's "git branch = program version" (`src/registry/manager.py:33-95`); we put a `.git` inside every skill directory.
+- *full provenance* — OpenSpace records `parent_skill_ids + source_task_id + created_by + change_summary`; xskill keeps the equivalent in each skill's git log.
+
+**What xskill does that none of the 10 surveyed projects do**
+
+> *"真正灰度 / A-B：10 个项目无一实现。"* — survey §10
+- **Real canary A/B**: each skill has its own `main` / `staging` branches; chat traffic is split by probability, two-sided UX scores ≥ N samples decide merge or discard. No human in the loop.
+- **Symmetric ingestion**: per-turn streaming (drop a file → watcher picks it up) *and* batch backfill (`xskill registry add /path` reindexes a whole archive) are first-class — most surveyed projects pick one.
+
+**Open gaps the survey identifies (our roadmap)**
+
+- usage-stat-driven auto-prune (AutoSkill `retrieved>=40 && used<=0` rule)
+- git-style 3-way merge by common ancestor (GEPA's `merge.py:118-207`)
+- BM25 → embedding cosine → LLM-judge three-stage retrieval (OpenSpace)
+- multi-code-agent adapters — see Roadmap below
+
 ## Roadmap
 
+- [ ] **More code-agent adapters** — Codex, OpenCode, Goose, OpenHands, Cursor, Aider on both ends (trajectory ingest + skill emit)
+- [ ] usage-stat-driven auto-prune (`retrieved>=N && used<=0` deletion)
+- [ ] git-style 3-way merge for multi-source skill consolidation
+- [ ] BM25 + embedding + LLM-judge three-stage retrieval reranker
 - [ ] Web UI for browsing skills, viewing canary stats, manual merge/discard
 - [ ] Skill marketplace: import / export portable skill bundles
 - [ ] Multi-tenant skill repos (per-team `skill_dir`)
