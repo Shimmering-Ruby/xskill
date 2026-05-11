@@ -172,14 +172,33 @@ class TestApiChatLLMErrors:
     and 502 when the LLM call itself fails at runtime."""
 
     @pytest.fixture()
-    def client(self):
-        """Create a test client with all heavy deps mocked out."""
-        with patch("xskill.server.create_embed_client"), \
-             patch("xskill.server.init_context"):
-            from xskill.server import create_app
-            from starlette.testclient import TestClient
-            app = create_app()
-            yield TestClient(app, raise_server_exceptions=False)
+    def client(self, tmp_path):
+        """Create a test client with all heavy deps mocked out.
+
+        ``create_app()`` 第一行调 ``_ensure_loaded()``，它会读
+        ``~/.xskill/config.yaml`` — CI runner 上没这个文件。我们在 fixture
+        进入时先把模块级全局填上 dummy，让 ``_ensure_loaded()`` 看到非 None
+        就直接 return。
+        """
+        from xskill import server as srv
+        srv._config = {"llm": {}, "embedding": {}, "watcher": {"poll_interval": 30}}
+        srv._skill_dir = tmp_path / "skill"
+        srv._chat_archive_dir = tmp_path / "chat_archive"
+        srv._traj_dir = srv._chat_archive_dir
+        srv._skill_dir.mkdir(exist_ok=True)
+        srv._chat_archive_dir.mkdir(exist_ok=True)
+        try:
+            with patch("xskill.server.create_embed_client"), \
+                 patch("xskill.server.init_context"):
+                from xskill.server import create_app
+                from starlette.testclient import TestClient
+                app = create_app()
+                yield TestClient(app, raise_server_exceptions=False)
+        finally:
+            srv._config = None
+            srv._skill_dir = None
+            srv._chat_archive_dir = None
+            srv._traj_dir = None
 
     def test_returns_503_when_llm_not_configured(self, client):
         with patch("xskill.server.create_llm_client", return_value=None), \

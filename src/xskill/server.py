@@ -49,16 +49,37 @@ from xskill.git_lock import ensure_repo, current_branch
 logger = logging.getLogger("xskill.server")
 
 # ---------------------------------------------------------------------------
-# Module-level config -- loaded at import time
+# Module-level config -- lazy loaded
 # ---------------------------------------------------------------------------
-_config = load_config()
-_skill_dir = get_skill_dir()
-# chat 归档基目录（取代旧 _traj_dir 的"轨迹根目录"概念）
-# 真实数据集走 registry add 注册，不再依赖此变量
-_chat_archive_dir = get_chat_archive_dir()
-_traj_dir = _chat_archive_dir  # 兼容仍引用 _traj_dir 的代码路径
+# 之前是 import 时就跑 ``_config = load_config()``，会让"导入 xskill.server"
+# 这件本来无副作用的事情强依赖 ``~/.xskill/config.yaml``。CI runner 上没这个
+# 文件 → 所有间接 import xskill.server 的测试 collection 都炸。
+#
+# 改成 lazy：占位 None；``_ensure_loaded()`` 在 ``create_app()`` 入口 + 每个
+# server 启动路径首次调用时填充。endpoints 在 startup hook 之后才被 hit，
+# 拿到的就是非 None；测试如果只 import ``_exec_tool`` / 常量，模块加载阶段
+# 完全不读 config。
+_config: dict | None = None
+_skill_dir: Path | None = None
+_chat_archive_dir: Path | None = None
+_traj_dir: Path | None = None  # 兼容仍引用 _traj_dir 的代码路径
 _watcher_ref: dict = {}  # {"instance": DirectoryWatcher} — set in create_app startup
 _chat_agents: dict = {}   # session_id → Agno Agent instance
+
+
+def _ensure_loaded() -> None:
+    """幂等：第一次调用时载入配置 + 解析关键目录，之后是 no-op。
+
+    server 内部的 endpoint / startup / chat 等代码路径都通过模块级
+    ``_config`` / ``_skill_dir`` 等访问，这里只负责把 None 占位填上。
+    """
+    global _config, _skill_dir, _chat_archive_dir, _traj_dir
+    if _config is not None:
+        return
+    _config = load_config()
+    _skill_dir = get_skill_dir()
+    _chat_archive_dir = get_chat_archive_dir()
+    _traj_dir = _chat_archive_dir
 
 # ---------------------------------------------------------------------------
 # Pydantic request / response models
@@ -1249,6 +1270,10 @@ async def api_reindex():
 # ---------------------------------------------------------------------------
 
 def create_app() -> FastAPI:
+    """Build the FastAPI app. Calls ``_ensure_loaded`` first so all module-level
+    config globals (``_config``/``_skill_dir``/...) are populated before any
+    endpoint or startup hook reads them."""
+    _ensure_loaded()
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="xskill",
