@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
+
+from xskill.adapters import submit_trajectory
 
 
 def install_to_claude_code(
@@ -51,6 +53,55 @@ def install_to_claude_code(
     dest_md = dest_dir / "SKILL.md"
     shutil.copyfile(src_md, dest_md)
     return dest_md
+
+
+def ingest_claude_code_sessions(
+    target_traj_dir: Path | str,
+    *,
+    home_root: Path | str | None = None,
+    seen_sessions: Optional[set[str]] = None,
+) -> list[dict]:
+    """Bridge Claude Code session JSONLs into xskill's trajectory directory.
+
+    Scans ``<home_root>/.claude/projects/*/*.jsonl`` and submits any session
+    whose ``sessionId`` is not in ``seen_sessions`` as a new trajectory
+    (``traj_NNNN.md`` + ``.json``) under ``target_traj_dir`` using the
+    ``claude_code_jsonl`` adapter. ``seen_sessions`` is updated in place so
+    repeat calls are idempotent. Returns the list of submission results from
+    ``submit_trajectory``.
+
+    ``home_root`` defaults to ``Path.home()``.
+
+    A session is identified by the file stem (which is the session UUID Claude
+    Code uses as filename). Empty or malformed JSONLs raise upstream rather
+    than being silently skipped — this is by design (no fallback).
+    """
+    target_traj_dir = Path(target_traj_dir)
+    target_traj_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(home_root) if home_root else Path.home()
+    proj_root = root / ".claude" / "projects"
+    if not proj_root.is_dir():
+        return []
+
+    seen = seen_sessions if seen_sessions is not None else set()
+    submitted: list[dict] = []
+    for jsonl_path in sorted(proj_root.glob("*/*.jsonl")):
+        sid = jsonl_path.stem
+        if sid in seen:
+            continue
+        content = jsonl_path.read_text(encoding="utf-8")
+        if not content.strip():
+            continue
+        result = submit_trajectory(
+            content=content,
+            format="claude_code_jsonl",
+            traj_dir=target_traj_dir,
+        )
+        result["session_id"] = sid
+        result["source_jsonl"] = str(jsonl_path)
+        submitted.append(result)
+        seen.add(sid)
+    return submitted
 
 
 def install_all_to_claude_code(
