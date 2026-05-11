@@ -319,16 +319,7 @@ class TestMaterialize:
         out = canary.materialize_staging(sd, canary_root)
         assert out is None
 
-    def test_cleanup_removes_dir(self, tmp_path):
-        canary_root = tmp_path / "canary"
-        skill_dir = canary_root / "test_skill"
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("content")
-
-        canary.cleanup_canary(canary_root, "test_skill")
-        assert not skill_dir.exists()
-
-    def test_cleanup_noop_if_missing(self, tmp_path):
-        canary_root = tmp_path / "canary"
-        canary_root.mkdir()
-        canary.cleanup_canary(canary_root, "nonexistent")  # no error
+    # 老测试针对 ``canary.cleanup_canary``，那个函数在 2140de5 "死代码清理"
+    # 提交里跟着一批未被任何路径调用的 helper 一起删了。当前 canary 模块的
+    # 物化/丢弃语义由 ``materialize_staging`` + ``discard_staging`` 承担，
+    # 在 TestMaterialize 上面已经覆盖。这里不再保留 orphan 测试。

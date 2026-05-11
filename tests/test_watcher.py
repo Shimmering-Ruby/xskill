@@ -2,6 +2,11 @@
 
 Tests the watcher's discover + meta + index pipeline with mocked LLM/embed.
 Does NOT test actual LLM calls or process_traj (those are integration tests).
+
+历史注记：watcher 在 fce9146 那版是同步 `_poll_once`，后来改成异步
+ThreadPoolExecutor 流水线，入口改名 `_scan_once`，且 meta 提取等耗时步骤
+被 submit 到 self._pool。这些测试现在通过 ``_drain`` 把 pending future
+全部跑完再 assert，以契合新行为。
 """
 
 from pathlib import Path
@@ -9,8 +14,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from xskill.registry import register_dir, discover_trajectories, get_unindexed, get_needs_meta
+from xskill.registry import register_dir, discover_trajectories, get_unindexed
 from xskill.watcher import DirectoryWatcher
+
+
+def _drain(watcher: DirectoryWatcher) -> None:
+    """等所有提交到 watcher._pool 的 future 跑完，再触发一次 _harvest 把
+    收割回调（更新 DB 状态、移除 future 记录）跑齐。供测试用。
+    """
+    for fut in list(watcher._futures):
+        fut.result()
+    watcher._harvest()
 
 
 @pytest.fixture()
@@ -35,7 +49,7 @@ def skill_dir(tmp_path):
 
 
 class TestWatcherDiscovery:
-    """Test that _poll_once discovers files and updates DB."""
+    """Test that _scan_once discovers files and updates DB."""
 
     def test_discover_new_files(self, traj_dir, skill_dir, db_path):
         wid = register_dir(traj_dir, db_path=db_path)
@@ -44,9 +58,10 @@ class TestWatcherDiscovery:
             llm=None, embed_client=None, config={},
             skill_dir=skill_dir, poll_interval=1, db_path=db_path,
         )
-        watcher._poll_once()
+        watcher._scan_once()
+        _drain(watcher)
 
-        # File should be discovered but not indexed (no LLM/embed)
+        # File should be discovered (no LLM/embed means no meta extraction).
         from xskill.registry import get_connection
         conn = get_connection(db_path)
         rows = conn.execute("SELECT filename FROM trajectories WHERE watch_dir_id=?", (wid,)).fetchall()
@@ -61,7 +76,7 @@ class TestWatcherDiscovery:
             llm=None, embed_client=None, config={},
             skill_dir=skill_dir, poll_interval=1, db_path=db_path,
         )
-        watcher._poll_once()
+        watcher._scan_once()
 
         assert watcher.stats["polls"] == 1
         assert watcher.stats["new_trajs"] == 1
@@ -72,20 +87,19 @@ class TestWatcherMetaExtraction:
 
     def test_calls_process_one_meta(self, traj_dir, skill_dir, db_path):
         wid = register_dir(traj_dir, db_path=db_path)
-        # Pre-discover so file is known
+        # Pre-discover so the file row already has status='discovered'.
+        # Watcher's _scan_dir will then submit a meta-extract future for it.
         discover_trajectories(wid, traj_dir, db_path=db_path)
 
         mock_llm = MagicMock()
 
-        with patch("xskill.watcher.get_needs_meta", return_value=["traj_0001.md"]) as mock_gn, \
-             patch("xskill.index._process_one_meta") as mock_pom:
-            mock_gn.side_effect = lambda wid, **kw: ["traj_0001.md"] if kw else ["traj_0001.md"]
-
+        with patch("xskill.index._process_one_meta") as mock_pom:
             watcher = DirectoryWatcher(
                 llm=mock_llm, embed_client=None, config={},
                 skill_dir=skill_dir, poll_interval=1, db_path=db_path,
             )
-            watcher._poll_once()
+            watcher._scan_once()
+            _drain(watcher)
 
             mock_pom.assert_called_once()
             call_args = mock_pom.call_args
@@ -117,7 +131,8 @@ class TestWatcherUxScore:
                 llm=mock_llm, embed_client=None, config={},
                 skill_dir=skill_dir, poll_interval=1, db_path=db_path,
             )
-            watcher._poll_once()
+            watcher._scan_once()
+            _drain(watcher)
 
             mock_score.assert_called_once()
             call_kw = mock_score.call_args[1]
@@ -140,7 +155,8 @@ class TestWatcherUxScore:
                 llm=MagicMock(), embed_client=None, config={},
                 skill_dir=skill_dir, poll_interval=1, db_path=db_path,
             )
-            watcher._poll_once()
+            watcher._scan_once()
+            _drain(watcher)
             mock_score.assert_not_called()
 
 

@@ -53,8 +53,10 @@ class TestSearchAll:
                 ]
             return []
 
+        # ``xskill.registry.get_registry_dir`` 旧 API 已迁到 xskill.config，
+        # 而且 search_all 根本不调用它 — 当年那行 patch 就是历史残留。
+        # search_all 实际只依赖 all_index_paths + xskill.search.search。
         with patch("xskill.search.search", side_effect=fake_search), \
-             patch("xskill.registry.get_registry_dir", return_value=tmp_path), \
              patch("xskill.registry.all_index_paths",
                    return_value=[d1.resolve(), d2.resolve()]):
             results = search_all("test query", top_k=3)
