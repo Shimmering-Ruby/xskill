@@ -692,9 +692,12 @@ def _exec_tool(name: str, args: dict, skill_dir: Path, traj_dir: Path, config: d
             return f"Error: {e}"
     elif name == "execute_code":
         import subprocess
+        import sys as _sys
         try:
+            # 用当前解释器自己跑用户代码：跨 py3.11 / py3.12 / 任意环境都成立，
+            # 不会因为 runner 上没有 ``python3.11`` 二进制而直接报 ENOENT。
             result = subprocess.run(
-                ["python3.11", "-c", args.get("code", "")],
+                [_sys.executable, "-c", args.get("code", "")],
                 capture_output=True, text=True, timeout=10,
                 cwd=str(traj_dir),
             )
@@ -1014,10 +1017,10 @@ async def api_chat_stream(req: dict):
 
     @_agno_tool(name="execute_code", description="Execute a Python code snippet.\nArgs:\n    code: Python code to execute")
     def _tool_execute_code(code: str) -> str:
-        import subprocess
+        import subprocess, sys as _sys
         _tool_emit("tool_call", {"name": "execute_code", "args": {"code": code[:80]}, "live": True})
         try:
-            r = subprocess.run(["python3.11", "-c", code],
+            r = subprocess.run([_sys.executable, "-c", code],
                                capture_output=True, text=True, timeout=10)
             out = r.stdout[:3000]
             if r.stderr:
