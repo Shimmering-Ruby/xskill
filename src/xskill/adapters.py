@@ -59,6 +59,9 @@ def adapt_trajectory(
     if format == "raw":
         return _adapt_raw(content, metadata)
 
+    if format == "claude_code_jsonl":
+        return _adapt_claude_code_jsonl(content, metadata)
+
     raise ValueError(f"unsupported trajectory format: {format!r}")
 
 
@@ -120,6 +123,200 @@ def _adapt_json(content: str, metadata: dict) -> tuple[str, dict]:
 
     md_content = "\n".join(lines)
     return md_content, meta
+
+
+def _adapt_claude_code_jsonl(content: str, metadata: dict) -> tuple[str, dict]:
+    """Convert a Claude Code session JSONL (``~/.claude/projects/.../*.jsonl``) to
+    markdown + metadata.
+
+    Each line is one event. Recognised event types:
+
+    - ``user``: ``message.content`` may be a string (real user input) or a list
+      containing ``tool_result`` parts.
+    - ``assistant``: ``message.content`` is a list of parts -- ``text``,
+      ``tool_use``, ``thinking``.
+    - Anything else (``permission-mode``, ``file-history-snapshot``,
+      ``system``, ``attachment``, ``last-prompt``) is skipped.
+
+    Produces a markdown body with ``## User`` / ``## Assistant`` / ``## Tool
+    Call`` / ``## Tool Output`` sections and a metadata dict containing
+    ``session_id``, ``cwd``, ``git_branch``, ``timeline`` (structured), and
+    ``tool_names``.
+    """
+    timeline: list[dict] = []
+    tool_calls: list[dict] = []
+    tool_names: list[str] = []
+    session_id = ""
+    cwd = ""
+    git_branch = ""
+    first_user_query = ""
+    t = 0
+    step = 0
+    pending_tool_by_id: dict[str, str] = {}
+
+    for raw_line in content.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+
+        ev_type = event.get("type")
+        if ev_type not in ("user", "assistant"):
+            continue
+
+        session_id = session_id or event.get("sessionId", "") or ""
+        cwd = cwd or event.get("cwd", "") or ""
+        git_branch = git_branch or event.get("gitBranch", "") or ""
+
+        msg = event.get("message") or {}
+        msg_content = msg.get("content")
+
+        if ev_type == "user":
+            if isinstance(msg_content, str):
+                if not first_user_query:
+                    first_user_query = msg_content[:500]
+                timeline.append({
+                    "t": t, "role": "user",
+                    "content": msg_content[:2000],
+                })
+                t += 1
+            elif isinstance(msg_content, list):
+                for part in msg_content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "tool_result":
+                        tc_id = part.get("tool_use_id", "")
+                        tool_name = pending_tool_by_id.get(tc_id, "unknown")
+                        result_content = part.get("content")
+                        if isinstance(result_content, list):
+                            parts_text = []
+                            for rp in result_content:
+                                if isinstance(rp, dict) and rp.get("type") == "text":
+                                    parts_text.append(rp.get("text") or "")
+                            output_text = "\n".join(parts_text)
+                        else:
+                            output_text = str(result_content) if result_content else ""
+                        output_text = output_text[:2000]
+                        timeline.append({
+                            "t": t, "role": "tool_output",
+                            "tool": tool_name,
+                            "output": output_text,
+                            "is_error": bool(part.get("is_error")),
+                        })
+                        # Backfill the matching tool_calls entry
+                        for entry in reversed(tool_calls):
+                            if entry.get("_tc_id") == tc_id:
+                                entry["output"] = output_text
+                                entry["output_available"] = True
+                                break
+                        t += 1
+
+        else:  # assistant
+            if isinstance(msg_content, list):
+                for part in msg_content:
+                    if not isinstance(part, dict):
+                        continue
+                    ptype = part.get("type")
+                    if ptype == "text":
+                        text = (part.get("text") or "").strip()
+                        if text:
+                            timeline.append({
+                                "t": t, "role": "assistant",
+                                "content": text[:2000],
+                            })
+                            t += 1
+                    elif ptype == "tool_use":
+                        tc_id = part.get("id", "")
+                        tool_name = part.get("name", "unknown")
+                        tool_input = part.get("input") or {}
+                        if tool_name not in tool_names:
+                            tool_names.append(tool_name)
+                        pending_tool_by_id[tc_id] = tool_name
+                        timeline.append({
+                            "t": t, "role": "tool_call",
+                            "tool": tool_name,
+                            "input": tool_input,
+                        })
+                        tool_calls.append({
+                            "step": step,
+                            "tool": tool_name,
+                            "input": tool_input,
+                            "output": "",
+                            "output_available": False,
+                            "_tc_id": tc_id,
+                        })
+                        step += 1
+                        t += 1
+                    # `thinking` parts are intentionally skipped.
+
+    # Strip internal _tc_id from tool_calls before returning
+    for entry in tool_calls:
+        entry.pop("_tc_id", None)
+
+    # Build markdown body
+    lines: list[str] = ["# Claude Code Session Trajectory", ""]
+    if session_id:
+        lines.append(f"**session_id**: {session_id}")
+    if cwd:
+        lines.append(f"**cwd**: {cwd}")
+    if git_branch:
+        lines.append(f"**git_branch**: {git_branch}")
+    lines.append("")
+    if first_user_query:
+        lines.append("## Initial Query")
+        lines.append("")
+        lines.append(first_user_query)
+        lines.append("")
+
+    for entry in timeline:
+        role = entry["role"]
+        if role == "user":
+            lines.append("## User")
+            lines.append("")
+            lines.append(entry["content"])
+            lines.append("")
+        elif role == "assistant":
+            lines.append("## Assistant")
+            lines.append("")
+            lines.append(entry["content"])
+            lines.append("")
+        elif role == "tool_call":
+            lines.append(f"## Tool Call: {entry['tool']}")
+            lines.append("```json")
+            lines.append(json.dumps(entry["input"], ensure_ascii=False)[:1000])
+            lines.append("```")
+            lines.append("")
+        elif role == "tool_output":
+            err_tag = " (error)" if entry.get("is_error") else ""
+            lines.append(f"## Tool Output: {entry['tool']}{err_tag}")
+            lines.append("```")
+            lines.append(entry["output"])
+            lines.append("```")
+            lines.append("")
+
+    md = "\n".join(lines)
+
+    meta = dict(metadata)
+    meta.setdefault("source", "claude_code_session_jsonl")
+    meta.setdefault("category", "claude_code_session")
+    if session_id:
+        meta.setdefault("session_id", session_id)
+    if cwd:
+        meta.setdefault("cwd", cwd)
+    if git_branch:
+        meta.setdefault("git_branch", git_branch)
+    meta["timeline"] = timeline
+    meta["tool_calls"] = tool_calls
+    meta["tool_names"] = tool_names
+    meta["total_tool_calls"] = len(tool_calls)
+    meta["total_turns"] = len(timeline)
+    if first_user_query:
+        meta.setdefault("query", first_user_query)
+
+    return md, meta
 
 
 def _adapt_raw(content: str, metadata: dict) -> tuple[str, dict]:
