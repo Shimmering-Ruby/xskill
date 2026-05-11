@@ -4,15 +4,22 @@ download_data.py — 下载公开 agent 轨迹数据集，转换为统一格式
 ══════════════════════════════════════════════════════════════
 
 数据集:
-  python download_data.py --mode swe_smith       # SWE-smith-trajectories (SWE-bench 代码修复)
-  python download_data.py --mode dataclaw        # Claude-Opus-Dataclaw (Claude Code 真实会话)
-  python download_data.py --mode sample          # 合成样本 (离线)
-  python download_data.py --mode all             # 全部
+  python -m xskill.download_data --mode swe_smith    # SWE-smith-trajectories
+  python -m xskill.download_data --mode dataclaw     # Claude-Opus-Dataclaw
+  python -m xskill.download_data --mode sample       # 合成样本 (离线)
+  python -m xskill.download_data --mode all          # 全部
 
 国内镜像加速:
-  python download_data.py --mode all --mirror    # 自动使用 hf-mirror.com
+  python -m xskill.download_data --mode all --mirror     # hf-mirror.com
 
-输出: ./data/{dataset_name}/trajectories.json  (统一格式)
+输出: ~/data/xskill_eval/{dataset_name}/trajectories.json  (统一格式)
+  覆盖位置: --out-dir <path>
+
+历史:
+  4 月 PyPI 重构之前用 ``Path(__file__).parent / "data"``，错把数据下到
+  ``src/xskill/data/``（site-packages 里）。现在统一落到用户级
+  ``~/data/xskill_eval/``，跟其他 xskill 工具读 Registry 注册目录的约定一致：
+  下载完之后 ``xskill registry add ~/data/xskill_eval/<dataset>``。
 
 依赖: pip install datasets huggingface-hub
 """
@@ -21,8 +28,10 @@ import argparse, json, uuid, random, re, os, sys
 from pathlib import Path
 from datetime import datetime, timedelta
 
-ROOT = Path(__file__).parent
-DATA_DIR = ROOT / "data"
+# Default output location. Overridable via ``--out-dir``. ``DATA_DIR`` /
+# ``RAW_DIR`` are mutated in ``main()`` before any download function runs.
+DEFAULT_OUT_DIR = Path.home() / "data" / "xskill_eval"
+DATA_DIR = DEFAULT_OUT_DIR
 RAW_DIR = DATA_DIR / "raw"
 
 
@@ -819,8 +828,22 @@ def main():
     parser.add_argument("--mirror-url", default="https://hf-mirror.com",
                         help="自定义镜像 URL (默认 hf-mirror.com)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=DEFAULT_OUT_DIR,
+        help=f"数据写入目录 (默认 {DEFAULT_OUT_DIR})",
+    )
     args = parser.parse_args()
     random.seed(args.seed)
+
+    # 把全局 DATA_DIR / RAW_DIR 切到本次目标。后续 save_dataset / download_*
+    # 等函数都通过模块级常量寻址，必须先改后用。
+    global DATA_DIR, RAW_DIR
+    DATA_DIR = args.out_dir.expanduser().resolve()
+    RAW_DIR = DATA_DIR / "raw"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"📁 输出目录: {DATA_DIR}")
 
     # ── 设置国内镜像 ──
     if args.mirror:
@@ -890,7 +913,8 @@ def main():
         print(f"   {name}: {info['count']} 条 ({label})")
 
     print(f"\n{'='*55}")
-    print("  完成! 数据目录: ./data/")
+    print(f"  完成! 数据目录: {DATA_DIR}")
+    print(f"  下一步: xskill registry add <{DATA_DIR}>/<dataset_name>")
     print(f"{'='*55}\n")
 
 

@@ -229,13 +229,15 @@ if ! command -v xskill >/dev/null 2>&1; then
     exit 1
 fi
 
-# 仓库根的 data/ 只是"方便多数据集切换时自动软链"的可选源；
-# 如果 workspace 里已经有对应 dataset（比如 run_demo.sh 解压好的），就没啥可警告的。
+# 仓库根的 data/ 在 v1 时代是数据集"软链源"，现在已经迁到用户级
+# ~/data/xskill_eval/。这段保留是为了兼容 workspace 里已经解压好的
+# dataset；download_data.py 现在默认下到 ~/data/xskill_eval/。
 if [ ! -d "$REPO_ROOT/data" ] && [ ! -d "$WORKSPACE/data/$DATASET" ]; then
     echo -e "${C_WARN}⚠ 仓库的 data/ 和 workspace 里都没有 $DATASET${C_OFF}"
     echo "  先跑一次 python -m xskill.download_data --mode sample 下载数据"
+    echo "  (默认输出: ~/data/xskill_eval/sample_dataset/)"
 elif [ ! -d "$REPO_ROOT/data" ]; then
-    echo -e "${C_DIM}  仓库的 data/ 不存在（gitignored），继续用 workspace 里的 $DATASET${C_OFF}"
+    echo -e "${C_DIM}  仓库的 data/ 不存在（已迁到 ~/data/xskill_eval/），继续用 workspace 里的 $DATASET${C_OFF}"
 fi
 
 # ── 准备 workspace ──────────────────────────────────────────────────────
