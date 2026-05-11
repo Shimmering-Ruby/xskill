@@ -73,15 +73,43 @@ def detect_known_ecosystems(home_root: Path | str | None = None) -> list[dict]:
     return found
 
 
+def _source_md_for_side(skill_path: Path, side: str) -> Path:
+    """根据 side 选磁盘上的内容源。
+
+    main:     ``<skill_path>/SKILL.md``                       (git@main 的工作树)
+    staging:  ``<skill_path>/../.canary/<name>/SKILL.md``    (canary.materialize_staging 物化)
+
+    两侧都不存在则抛 FileNotFoundError——daemon 翻牌子时这两个文件应当**已经**
+    都准备好了；找不到说明灰度状态不一致，应该 fail-loud 而不是 silently
+    fall back（CLAUDE.md "遇到问题 throw error"）。
+    """
+    if side == "main":
+        src = skill_path / "SKILL.md"
+        if not src.is_file():
+            raise FileNotFoundError(f"main SKILL.md not found: {src}")
+        return src
+    if side == "staging":
+        canary_md = skill_path.parent / ".canary" / skill_path.name / "SKILL.md"
+        if not canary_md.is_file():
+            raise FileNotFoundError(
+                f"staging SKILL.md not found: {canary_md} "
+                f"(did you forget canary.materialize_staging?)"
+            )
+        return canary_md
+    raise ValueError(f"side must be 'main' or 'staging', got {side!r}")
+
+
 def install_to_claude_code(
     skill_path: Path | str,
     target_root: Path | str | None = None,
+    side: str = "main",
 ) -> Path:
     """Install one skill into ``<target_root>/.claude/skills/<name>/``.
 
     ``skill_path`` is a xskill skill directory (must contain ``SKILL.md``).
-    ``target_root`` defaults to ``Path.home()``. Returns the destination
-    ``SKILL.md`` path.
+    ``target_root`` defaults to ``Path.home()``. ``side`` selects which copy
+    to ship: ``main`` reads ``<skill_path>/SKILL.md``; ``staging`` reads
+    the canary-materialized copy under ``<skill_path>/../.canary/<name>/``.
 
     The destination directory is created if absent. An existing ``SKILL.md``
     is overwritten (Claude Code's discovery is content-driven; stale frontmatter
@@ -91,10 +119,7 @@ def install_to_claude_code(
     if not skill_path.is_dir():
         raise NotADirectoryError(f"skill_path is not a directory: {skill_path}")
 
-    src_md = skill_path / "SKILL.md"
-    if not src_md.exists():
-        raise FileNotFoundError(f"SKILL.md not found in {skill_path}")
-
+    src_md = _source_md_for_side(skill_path, side)
     name = skill_path.name
     root = Path(target_root) if target_root else Path.home()
     dest_dir = root / ".claude" / "skills" / name
@@ -102,6 +127,113 @@ def install_to_claude_code(
     dest_md = dest_dir / "SKILL.md"
     shutil.copyfile(src_md, dest_md)
     return dest_md
+
+
+def _parse_iso_to_epoch(s: str) -> Optional[float]:
+    """ISO-8601 (CC JSONL 时间戳格式，例 '2026-05-11T10:05:47.962Z') → epoch float。"""
+    if not s:
+        return None
+    from datetime import datetime, timezone
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s).replace(tzinfo=datetime.fromisoformat(s).tzinfo or timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _session_used_skill(jsonl_path: Path, skill_name: str) -> bool:
+    """扫 CC session JSONL，看模型是否真触发了 ``tool_use=Skill, input.skill==skill_name``。
+
+    "用了 skill" 不是"CC 把 skill 列入 system prompt"——后者每个 session
+    都会发生（CC 在启动时把所有装着的 skill 列进 'following skills are
+    available' 段落）。真"用了"要看模型有没有发出 ``Skill`` tool 调用
+    且参数指到我们关心的那个名字。这是 daemon 区分"消耗灰度配额的
+    session"与"路过 session"的唯一可靠信号。
+    """
+    if not jsonl_path.is_file():
+        return False
+    for line in jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") != "assistant":
+            continue
+        msg = ev.get("message") or {}
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "tool_use":
+                continue
+            if part.get("name") != "Skill":
+                continue
+            inp = part.get("input") or {}
+            # CC 的 Skill tool 入参 schema: {"skill": "<name>", "args": ...}
+            if inp.get("skill") == skill_name:
+                return True
+    return False
+
+
+def _session_start_t(jsonl_path: Path) -> Optional[float]:
+    """读 CC session JSONL 第一条带 timestamp 的事件，转 epoch float。
+
+    queue-operation / file-history-snapshot 等元事件也带 timestamp，取第一条
+    即可——daemon 关心的是"这个 session 在哪一刻开始活跃"，第一条元事件距
+    用户真发出请求只差几毫秒。
+    """
+    if not jsonl_path.is_file():
+        return None
+    for line in jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = ev.get("timestamp")
+        if ts:
+            t = _parse_iso_to_epoch(ts)
+            if t is not None:
+                return t
+    return None
+
+
+def _staging_skills_under(skill_dir: Path) -> list[str]:
+    """返回 ``skill_dir/.canary/<name>/SKILL.md`` 存在的 skill 名列表。
+
+    这才是 daemon 翻牌子翻得动的真实候选——staging 分支在 git 里有不算，必须
+    canary.materialize_staging 把内容物化到 .canary/ 才能被
+    ``install_to_claude_code(side='staging')`` 读到。
+    """
+    canary_root = skill_dir / ".canary"
+    if not canary_root.is_dir():
+        return []
+    out = []
+    for entry in sorted(canary_root.iterdir()):
+        if entry.is_dir() and (entry / "SKILL.md").is_file():
+            out.append(entry.name)
+    return out
+
+
+def _prepend_xskill_header(traj_md_path: Path, *, skill: str, side: str, sha: str) -> None:
+    """把 ``<!-- xskill:skill=X side=Y sha=Z -->`` 注到 traj_*.md 顶部。
+
+    watcher._score_new 通过 parse_traj_header 抽这个 marker 来决定要不要给
+    这条 traj 跑 LLM ux 评分。CC native 桥过来的 traj 默认没有 header，
+    ingester 在确认 session 应当被哪 side 标注后补上。
+    """
+    text = traj_md_path.read_text(encoding="utf-8")
+    header = f"<!-- xskill:skill={skill} side={side} sha={sha} -->\n"
+    traj_md_path.write_text(header + text, encoding="utf-8")
 
 
 def ingest_claude_code_sessions(
@@ -116,14 +248,8 @@ def ingest_claude_code_sessions(
     whose ``sessionId`` is not in ``seen_sessions`` as a new trajectory
     (``traj_NNNN.md`` + ``.json``) under ``target_traj_dir`` using the
     ``claude_code_jsonl`` adapter. ``seen_sessions`` is updated in place so
-    repeat calls are idempotent. Returns the list of submission results from
-    ``submit_trajectory``.
-
-    ``home_root`` defaults to ``Path.home()``.
-
-    A session is identified by the file stem (which is the session UUID Claude
-    Code uses as filename). Empty or malformed JSONLs raise upstream rather
-    than being silently skipped — this is by design (no fallback).
+    repeat calls are idempotent. Returns the list of submission results
+    (each augmented with ``session_id``, ``source_jsonl``, ``session_start_t``).
     """
     target_traj_dir = Path(target_traj_dir)
     target_traj_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +274,7 @@ def ingest_claude_code_sessions(
         )
         result["session_id"] = sid
         result["source_jsonl"] = str(jsonl_path)
+        result["session_start_t"] = _session_start_t(jsonl_path)
         submitted.append(result)
         seen.add(sid)
     return submitted
@@ -176,16 +303,32 @@ def _scan_seen_sessions(target_traj_dir: Path) -> set[str]:
 
 
 class CCSessionIngester:
-    """周期性把 Claude Code 会话 JSONL 桥到 xskill 的 watch 目录。
+    """周期性把 Claude Code 会话 JSONL 桥到 xskill 的 watch 目录 + 灰度翻牌。
 
     服务启动时实例化一份长跑线程；它和 DirectoryWatcher 并行，但只负责
-    "从 native 源拉到 xskill 这边"这一步——拉过来之后剩下的 meta / index /
-    skill 生成全部走 DirectoryWatcher 现有流水线。
+    "从 native 源拉到 xskill 这边"+ 灰度翻转。后续 meta / index / skill 生成
+    都走 DirectoryWatcher 现有流水线。
+
+    每轮 ``run_once()`` 做四件事：
+
+    1. ``ingest_claude_code_sessions`` 把新出现的 CC JSONL 桥成 traj_*.md
+       （顺手记下 session_start_t）。
+    2. 扫 ``skill_dir/.canary/*/SKILL.md``，找出**当前有 staging 物化**的
+       skill——这是灰度链路里 daemon 能翻牌子的真实候选。
+    3. 对每条新桥的 traj：用 ``install_history.lookup(session_start_t)``
+       倒查"那一刻 daemon 给这个 skill 装的是哪 side"，把
+       ``<!-- xskill:skill=X side=Y sha=Z -->`` 注到 traj_*.md 顶部——
+       这是 watcher._score_new 触发 LLM ux 评分的唯一门槛。
+    4. **翻牌子**：对每个 staging-active 的 skill，往 history 查当前 side，
+       下次装 install_to_claude_code(side=opposite) + history.record。
 
     设计上：
       - ``seen_sessions`` 重启可恢复：扫 target dir 的 traj_*.json 重建。
-      - 周期 poll，没有用 inotify (移植性差且并发模型上没必要)。
+      - 周期 poll；没有用 inotify（移植性差且并发上没必要——见 install_history
+        模块顶部注释）。
       - 找不到 source 目录是正常情况（用户机器上压根没装 CC），不报错。
+      - 没有 ``skill_dir`` 或 ``install_history``（旧调用约定）时，**仅**做
+        桥接，不注 header / 不翻牌——退化成 commit b250f0a 的纯 ingester。
     """
 
     def __init__(
@@ -194,14 +337,38 @@ class CCSessionIngester:
         *,
         home_root: Path | str | None = None,
         poll_interval: float = 10.0,
+        skill_dir: Path | str | None = None,
+        target_root: Path | str | None = None,
+        history_path: Path | str | None = None,
+        assignments_path: Path | str | None = None,
     ):
+        from xskill.install_history import InstallHistory
+        from xskill.session_assignments import SessionAssignments
+
         self.target_traj_dir = Path(target_traj_dir)
         self.home_root = Path(home_root) if home_root else Path.home()
         self.poll_interval = poll_interval
+        self.skill_dir = Path(skill_dir) if skill_dir else None
+        self.target_root = Path(target_root) if target_root else self.home_root
+        self.history: InstallHistory | None = (
+            InstallHistory(history_path) if history_path else None
+        )
+        self.assignments: SessionAssignments | None = (
+            SessionAssignments(assignments_path) if assignments_path else None
+        )
+
         self._seen: set[str] = _scan_seen_sessions(self.target_traj_dir)
+        # 如果 assignments 表里已经登记过的 sid 也算"见过"——daemon 重启时
+        # 不重复处理。两个来源（traj.json 元数据 / 显式 assignments）并集。
+        if self.assignments is not None:
+            self._seen.update(self.assignments.all_sids())
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._stats = {"polls": 0, "ingested": 0, "errors": 0, "last_poll": None}
+        self._stats = {
+            "polls": 0, "ingested": 0, "headers_injected": 0,
+            "flips": 0, "skipped_unused": 0,
+            "errors": 0, "last_poll": None,
+        }
 
     # ── lifecycle ─────────────────────────────────────────────────
 
@@ -215,9 +382,10 @@ class CCSessionIngester:
         self._thread.start()
         logger.info(
             "CCSessionIngester started "
-            "(source=%s, target=%s, interval=%.1fs, %d sessions pre-seen)",
+            "(source=%s, target=%s, skill_dir=%s, interval=%.1fs, %d sessions pre-seen)",
             self.home_root / ".claude" / "projects",
             self.target_traj_dir,
+            self.skill_dir,
             self.poll_interval,
             len(self._seen),
         )
@@ -249,7 +417,17 @@ class CCSessionIngester:
             self._stop.wait(self.poll_interval)
 
     def run_once(self) -> list[dict]:
-        """单次扫描 + 桥接。供测试或手动触发使用。"""
+        """单次扫描 + 桥接 + 判 used_skill + 标 side + 翻牌。
+
+        翻牌策略（按用户要求）：**不是无脑见 session 就翻**，而是只在
+        session 真正触发 ``tool_use=Skill, input.skill==<canary_skill>``
+        时才算它消耗了一次灰度配额——这样的 session 才打 header、才翻牌、
+        才进 ux 评分链路。其余 session 桥过来后透明跳过，不污染 A/B 分布。
+
+        Session→side 持久化：每条 session 不管 used 与否都在
+        ``session_assignments.jsonl`` 留一条 record，供 daemon 外部
+        ``GET /api/v1/session/<sid>/side`` 之类的查询。
+        """
         self._stats["polls"] += 1
         self._stats["last_poll"] = time.time()
         submitted = ingest_claude_code_sessions(
@@ -263,7 +441,99 @@ class CCSessionIngester:
                 "CCSessionIngester: bridged %d new CC session(s) → %s",
                 len(submitted), self.target_traj_dir,
             )
+
+        # 退化模式：没配置 skill_dir + history（如老调用）→ 只 bridge，
+        # 不做灰度。
+        if not (self.skill_dir and self.history and submitted):
+            return submitted
+
+        staging_skills = _staging_skills_under(self.skill_dir)
+        if not staging_skills:
+            # 当前没 skill 处于灰度——所有 session 透明桥接即可。
+            return submitted
+
+        # v1: 一次只翻一个 skill（多 skill 并发灰度等下版本再说）
+        canary_skill = staging_skills[0]
+
+        for rec in submitted:
+            sid = rec.get("session_id")
+            start_t = rec.get("session_start_t")
+            jsonl_path = Path(rec.get("source_jsonl", ""))
+            if not sid or start_t is None or not jsonl_path.is_file():
+                continue
+
+            entry = self.history.lookup(start_t, skill=canary_skill)
+            if entry is None:
+                # session 早于 daemon 第一次 install——没法标 side
+                continue
+            side = entry.get("side") or "main"
+            sha = entry.get("sha") or ""
+
+            used = _session_used_skill(jsonl_path, canary_skill)
+
+            # 持久化 session→side 映射（不管 used 与否——查询需要）
+            if self.assignments is not None:
+                self.assignments.record(
+                    sid=sid, side=side, sha=sha, used_skill=used, t=start_t,
+                )
+
+            if not used:
+                # 模型这条 session 根本没 invoke 我们关心的 skill；不打
+                # header、不翻牌、不评分。透明放过。
+                self._stats["skipped_unused"] += 1
+                rec["xskill_used_skill"] = False
+                continue
+
+            # 真用了 → 打 header 让 watcher._score_new 触发 ux 评分员
+            traj_md = Path(rec["path"])
+            _prepend_xskill_header(traj_md, skill=canary_skill, side=side, sha=sha)
+            rec["xskill_used_skill"] = True
+            rec["xskill_side"] = side
+            rec["xskill_skill"] = canary_skill
+            self._stats["headers_injected"] += 1
+
+            # 翻牌：仅在 used_skill 时翻一次，让下个真用 skill 的 session
+            # 拿到对面 side。每个 used session 翻一次；多个 used session
+            # 在一个 poll 内被见到 → 翻多次（净 effect 视奇偶决定下次 side）。
+            self._flip(canary_skill)
         return submitted
+
+    # ── flip helper ──────────────────────────────────────────────
+
+    def _flip(self, skill_name: str) -> None:
+        """装 opposite-of-current side；记 history。"""
+        assert self.skill_dir is not None and self.history is not None
+        skill_path = self.skill_dir / skill_name
+        if not skill_path.is_dir():
+            return
+        last = self.history.lookup(time.time(), skill=skill_name)
+        current_side = last.get("side") if last else "staging"  # 没记录 → 默认下次装 main
+        next_side = "staging" if current_side == "main" else "main"
+        try:
+            install_to_claude_code(
+                skill_path, target_root=self.target_root, side=next_side,
+            )
+        except FileNotFoundError as e:
+            # staging side 的内容物化文件不在了——说明灰度已结束，停止翻。
+            logger.info("flip(%s, %s) skipped: %s", skill_name, next_side, e)
+            return
+        sha = _read_head_sha(skill_path, ref="staging" if next_side == "staging" else "main")
+        self.history.record(skill=skill_name, side=next_side, sha=sha)
+        self._stats["flips"] += 1
+        logger.info("CCSessionIngester: flipped %s → %s (sha=%s)",
+                    skill_name, next_side, sha[:8] if sha else "?")
+
+
+def _read_head_sha(skill_path: Path, *, ref: str) -> str:
+    """读 skill 子仓 ``ref`` 分支的 HEAD sha；读不到返回 ""。"""
+    try:
+        from xskill.git_lock import run_git
+        code, out, _ = run_git(["rev-parse", ref], cwd=str(skill_path))
+        if code == 0 and out:
+            return out.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def install_all_to_claude_code(

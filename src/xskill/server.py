@@ -1397,8 +1397,16 @@ def create_app() -> FastAPI:
         # thread that periodically mirrors native sessions into it as
         # traj_*.md. After that the regular watcher takes over.
         try:
-            from xskill.ecosystems import detect_known_ecosystems, CCSessionIngester
+            from xskill.ecosystems import (
+                detect_known_ecosystems, CCSessionIngester,
+                install_all_to_claude_code,
+            )
+            from xskill.install_history import InstallHistory
             from xskill.registry import register_dir
+
+            install_history_path = _skill_dir / "install_history.jsonl"
+            install_history = InstallHistory(install_history_path)
+
             detections = detect_known_ecosystems()
             for det in detections:
                 bridge: Path = det["bridge"]
@@ -1409,10 +1417,33 @@ def create_app() -> FastAPI:
                     ecosystem=det["ecosystem"],
                 )
                 if det["ecosystem"] == "claude_code":
+                    # 启动时先把现有 skill 全部装 main 到 ~/.claude/skills/，
+                    # 同时往 install_history append 起始记录。后续 ingester
+                    # 见到新 session 才有依据查"那一刻装的是哪 side"。
+                    try:
+                        installed = install_all_to_claude_code(
+                            _skill_dir, target_root=Path.home(),
+                        )
+                        for dest in installed:
+                            install_history.record(
+                                skill=dest.parent.name, side="main",
+                                sha="",  # 启动时不取 sha，避免硬依赖 git 状态
+                            )
+                        logger.info(
+                            "startup install_all_to_claude_code: %d skills installed (side=main)",
+                            len(installed),
+                        )
+                    except Exception:
+                        logger.warning("startup install_all_to_claude_code failed", exc_info=True)
+
                     ingester = CCSessionIngester(
                         target_traj_dir=bridge,
                         home_root=Path.home(),
                         poll_interval=float(_config.get("watcher", {}).get("poll_interval", 10)),
+                        skill_dir=_skill_dir,
+                        target_root=Path.home(),
+                        history_path=install_history_path,
+                        assignments_path=_skill_dir / "session_assignments.jsonl",
                     )
                     ingester.start()
                     _watcher_ref[f"ingester_{det['ecosystem']}"] = ingester
