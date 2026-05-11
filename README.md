@@ -7,7 +7,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
 [![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![GitHub](https://img.shields.io/badge/github-370025263%2Fxskill-181717?logo=github)](https://github.com/370025263/xskill)
+[![GitHub](https://img.shields.io/badge/github-SkillNerds%2Fxskill-181717?logo=github)](https://github.com/SkillNerds/xskill)
 
 **English** · [简体中文](./README.zh-CN.md)
 
@@ -58,7 +58,7 @@ The output format is the *de facto* `agentskills.io` SKILL.md schema, so anythin
 pip install xskill
 
 mkdir -p ~/.xskill
-curl -fsSL https://raw.githubusercontent.com/370025263/xskill/main/examples/config.yaml.example \
+curl -fsSL https://raw.githubusercontent.com/SkillNerds/xskill/main/examples/config.yaml.example \
   -o ~/.xskill/config.yaml
 # edit llm.api_key + embedding.api_key
 
@@ -233,12 +233,12 @@ Before building xskill we surveyed 10 academic / open-source trajectory→skill 
 - [ ] Native MCP server interface (skills as tools)
 - [ ] Async embedding backend for large registries
 
-Have an idea? Open an [issue](https://github.com/370025263/xskill/issues).
+Have an idea? Open an [issue](https://github.com/SkillNerds/xskill/issues).
 
 ## Development
 
 ```bash
-git clone https://github.com/370025263/xskill
+git clone https://github.com/SkillNerds/xskill
 cd xskill
 pip install -e .[dev]
 pytest -q
@@ -261,6 +261,6 @@ MIT © [370025263](https://github.com/370025263). See [LICENSE](LICENSE).
 
 <div align="center">
 
-If xskill saves your agents from repeating themselves, a ⭐ on [GitHub](https://github.com/370025263/xskill) helps others find it.
+If xskill saves your agents from repeating themselves, a ⭐ on [GitHub](https://github.com/SkillNerds/xskill) helps others find it.
 
 </div>

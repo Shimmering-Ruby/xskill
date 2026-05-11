@@ -1,15 +1,15 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=68.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "xskill"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Distill reusable Skills from AI Agent execution trajectories"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "370025263", email = "370025263@qq.com" }]
+authors = [{ name = "SkillNerds", email = "370025263@qq.com" }]
 keywords = ["agent", "skill", "trajectory", "llm", "rag", "self-evolving"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -35,10 +35,13 @@ dependencies = [
     "sse-starlette",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
 [project.urls]
-Homepage = "https://github.com/370025263/xskill"
-Repository = "https://github.com/370025263/xskill"
-Issues = "https://github.com/370025263/xskill/issues"
+Homepage = "https://github.com/SkillNerds/xskill"
+Repository = "https://github.com/SkillNerds/xskill"
+Issues = "https://github.com/SkillNerds/xskill/issues"
 
 [project.scripts]
 xskill = "xskill.cli:main"
@@ -51,3 +54,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 xskill = ["web/dist/**/*"]
+
+[tool.setuptools_scm]
+version_file = "src/xskill/_version.py"
+fallback_version = "0.0.0+unknown"

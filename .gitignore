@@ -24,6 +24,9 @@ build/
 *.so
 .pytest_cache/
 
+# setuptools-scm generated version file
+src/xskill/_version.py
+
 # 调试残渣（Playwright / 截图 / DOM 快照）
 .playwright-mcp/
 *-snapshot.yml

@@ -7,7 +7,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
 [![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![GitHub](https://img.shields.io/badge/github-370025263%2Fxskill-181717?logo=github)](https://github.com/370025263/xskill)
+[![GitHub](https://img.shields.io/badge/github-SkillNerds%2Fxskill-181717?logo=github)](https://github.com/SkillNerds/xskill)
 
 [English](./README.md) · **简体中文**
 
@@ -58,7 +58,7 @@ xskill 站在**任何写出轨迹的 agent** 与**任何最终消费 skill 的 a
 pip install xskill
 
 mkdir -p ~/.xskill
-curl -fsSL https://raw.githubusercontent.com/370025263/xskill/main/examples/config.yaml.example \
+curl -fsSL https://raw.githubusercontent.com/SkillNerds/xskill/main/examples/config.yaml.example \
   -o ~/.xskill/config.yaml
 # 编辑 llm.api_key 和 embedding.api_key
 
@@ -233,12 +233,12 @@ watcher:
 - [ ] 原生 MCP server 接口（skill 即工具）
 - [ ] 异步 embedding 后端，支撑大型 registry
 
-有想法？请提 [issue](https://github.com/370025263/xskill/issues)。
+有想法？请提 [issue](https://github.com/SkillNerds/xskill/issues)。
 
 ## 开发
 
 ```bash
-git clone https://github.com/370025263/xskill
+git clone https://github.com/SkillNerds/xskill
 cd xskill
 pip install -e .[dev]
 pytest -q
@@ -261,6 +261,6 @@ MIT © [370025263](https://github.com/370025263)，详见 [LICENSE](LICENSE)。
 
 <div align="center">
 
-如果 xskill 帮你的 agent 不再"重复造轮子"，请给 [GitHub](https://github.com/370025263/xskill) 一颗 ⭐，让更多人看到。
+如果 xskill 帮你的 agent 不再"重复造轮子"，请给 [GitHub](https://github.com/SkillNerds/xskill) 一颗 ⭐，让更多人看到。
 
 </div>
