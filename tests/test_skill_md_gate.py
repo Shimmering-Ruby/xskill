@@ -3,7 +3,7 @@ test_skill_md_gate.py -- write_file(SKILL.md) 硬拦截
 =====================================================
 覆盖三条 gate 规则：
   R1 source_trajs 只接受 traj_NNNN 规范形式
-  R2 每条 traj_NNNN 必须在 data/ 下有对应 .md 文件
+  R2 每条 traj_NNNN 必须在已注册的 watch dir 下有对应 .md 文件
   R3 body 有实质内容时，去重后的 source_trajs 必须 ≥ 3
 
 gate 被拦截时 write_file 不应真的写文件，而是返回 error 字符串给 agent。
@@ -15,13 +15,22 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_registry_db(tmp_path, monkeypatch):
+    """每个测试用一份独立的 registry.db（gate 走 Registry 查 traj）。"""
+    from xskill import config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "REGISTRY_DB", tmp_path / "registry.db")
+
+
 def _mk_workspace(tmp_path: Path):
-    """搭一个 skill_dir + data_dir 的临时环境"""
+    """搭一个 skill_dir + 注册一个 data_dir 作 watch dir 的临时环境。"""
     from xskill import skill_tools
+    from xskill.registry import register_dir
     (tmp_path / "skill").mkdir()
     (tmp_path / "data").mkdir()
     skill_tools._ctx["skill_dir"] = tmp_path / "skill"
-    skill_tools._ctx["data_dir"] = tmp_path / "data"
+    skill_tools._ctx["data_dir"] = tmp_path / "data"  # 仅 search_similar_trajs 还在用
+    register_dir(tmp_path / "data", label="test-data")
     return skill_tools
 
 

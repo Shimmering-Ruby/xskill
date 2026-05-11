@@ -115,16 +115,21 @@ def test_sanitize_fraction_blocks_numerator_greater_than_denominator():
     assert n == 1
 
 
-def test_sanitize_fraction_integration_via_write_file(tmp_path):
+def test_sanitize_fraction_integration_via_write_file(tmp_path, monkeypatch):
     """fraction 消毒需要和 gate 配合：3 条真实 traj_NNNN → gate 放行 → 消毒生效"""
-    from xskill import skill_tools
+    from xskill import skill_tools, config as cfg_mod
+    from xskill.registry import register_dir
     from datetime import date
+    # 隔离 registry.db：gate 走 Registry 查 traj，必须用 tmp 库否则会读到机器
+    # 上 prod xskill 的注册目录，找不到 traj_0001 就被 gate 拦下。
+    monkeypatch.setattr(cfg_mod, "REGISTRY_DB", tmp_path / "registry.db")
     (tmp_path / "skill").mkdir()
     (tmp_path / "data").mkdir()
     skill_tools._ctx["skill_dir"] = tmp_path / "skill"
     skill_tools._ctx["data_dir"] = tmp_path / "data"
     for tid in ("traj_0001", "traj_0002", "traj_0003"):
         (tmp_path / "data" / f"{tid}.md").write_text("# stub", encoding="utf-8")
+    register_dir(tmp_path / "data", label="test-frac")
     sk = tmp_path / "skill" / "fix-x"
     sk.mkdir()
     content = f"""---

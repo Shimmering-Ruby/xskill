@@ -20,6 +20,7 @@ from xskill.registry import (
     get_needs_meta,
     get_needs_embedding,
     all_index_paths,
+    find_traj_file,
 )
 
 
@@ -177,3 +178,56 @@ class TestListStats:
         dirs = list_watch_dirs(db_path=db_path)
         assert dirs[0]["traj_count"] == 2
         assert dirs[0]["indexed_count"] == 1
+
+
+# ---- find_traj_file: replaces legacy `skill_dir.parent.parent/"data"` ----
+
+class TestFindTrajFile:
+    def test_returns_none_when_no_dirs_registered(self, db_path, caplog):
+        caplog.set_level("WARNING")
+        result = find_traj_file("traj_0001", ".md", db_path=db_path)
+        assert result is None
+        assert any("no watch dirs registered" in r.message for r in caplog.records)
+
+    def test_finds_md_flat_in_registered_dir(self, traj_dir, db_path):
+        register_dir(traj_dir, db_path=db_path)
+        hit = find_traj_file("traj_0001", ".md", db_path=db_path)
+        assert hit is not None
+        assert hit.name == "traj_0001.md"
+        assert hit.parent == traj_dir.resolve()
+
+    def test_finds_json_suffix(self, tmp_path, db_path):
+        d = tmp_path / "ds"
+        d.mkdir()
+        (d / "traj_0042.json").write_text('{"raw_metadata": {"instance_id": "x"}}')
+        register_dir(d, db_path=db_path)
+        hit = find_traj_file("traj_0042", ".json", db_path=db_path)
+        assert hit is not None and hit.name == "traj_0042.json"
+
+    def test_recursive_fallback_finds_nested_md(self, tmp_path, db_path):
+        d = tmp_path / "ds"
+        nested = d / "subdir" / "deeper"
+        nested.mkdir(parents=True)
+        (nested / "traj_0099.md").write_text("# nested")
+        register_dir(d, db_path=db_path)
+        hit = find_traj_file("traj_0099", ".md", db_path=db_path)
+        assert hit is not None and hit.name == "traj_0099.md"
+
+    def test_searches_all_registered_dirs(self, tmp_path, db_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        (b / "traj_0007.md").write_text("# in b")
+        register_dir(a, db_path=db_path)
+        register_dir(b, db_path=db_path)
+        hit = find_traj_file("traj_0007", ".md", db_path=db_path)
+        assert hit is not None and hit.parent.resolve() == b.resolve()
+
+    def test_warns_when_not_found(self, traj_dir, db_path, caplog):
+        register_dir(traj_dir, db_path=db_path)
+        caplog.set_level("WARNING")
+        result = find_traj_file("traj_9999", ".md", db_path=db_path)
+        assert result is None
+        msgs = [r.message for r in caplog.records]
+        assert any("not found in any registered watch dir" in m for m in msgs)

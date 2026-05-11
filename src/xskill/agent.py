@@ -69,7 +69,7 @@ Skill 开放标准（SKILL.md + YAML frontmatter）。
 4. **禁止输出英文 body**。见下面的"语言要求"，pypinyin 那个英文 skill 是反例。
 5. **禁止单轨迹 skill**。`write_file(SKILL.md)` 有硬拦截：
    - `source_trajs` 只接受 `traj_NNNN` 规范形式（不是 SWE-smith instance_id）
-   - 每条 traj_NNNN 必须真实存在于 data/ 下（不准编 traj_9999）
+   - 每条 traj_NNNN 必须真实存在于已注册的轨迹目录下（不准编 traj_9999）
    - body 有 `##` 阶段标题或 `> ⚠️` warning 时，**去重后 source_trajs 必须 ≥3**
    违反 → write_file 返回 error。不要和拦截器对抗。对策：
    - 凑不够 3 条 → 走路径 C (pass) 或只调 add_candidate（无 body 的骨架 skill）

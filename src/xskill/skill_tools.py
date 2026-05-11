@@ -69,14 +69,7 @@ _STAGE_HEADER_RE = _re.compile(r"^##\s+\S", _re.MULTILINE)
 MIN_SOURCE_TRAJS_FOR_BODY = 3
 
 
-def _find_traj_files(data_dir: Path, traj_id: str) -> list[Path]:
-    """在 data_dir 下（递归）查找 traj_NNNN.md 文件"""
-    if not data_dir or not data_dir.exists():
-        return []
-    return list(data_dir.rglob(f"{traj_id}.md"))
-
-
-def _validate_skill_md_gate(fm: dict, body: str, data_dir: Path | None = None) -> str | None:
+def _validate_skill_md_gate(fm: dict, body: str) -> str | None:
     """SKILL.md 写入前的强制拦截。
 
     三条硬规则（任何一条违反都返回 error 字符串，write_file 就不会写）：
@@ -84,14 +77,16 @@ def _validate_skill_md_gate(fm: dict, body: str, data_dir: Path | None = None) -
     R1. source_trajs 里每一项必须是 `traj_NNNN` 规范形式。
         禁止 SWE-smith instance_id 这种又长又带 dot 的原始名，它和 traj_id
         是同一条轨迹的两种写法，agent 之前靠同时写两种来"凑够 ≥2 source_trajs"。
-    R2. 每条 traj_NNNN 必须在 data_dir/ 下真的有对应 .md 文件。
-        防 LLM 伪造 traj_id 充数。
+    R2. 每条 traj_NNNN 必须在已注册的 watch dir 下真的有对应 .md 文件。
+        防 LLM 伪造 traj_id 充数。跨所有 Registry 注册目录查找。
     R3. body 有实质内容（存在 `## <stage>` 阶段标题 或 `> ⚠️` warning）时，
         去重后的 source_trajs 数量必须 ≥ MIN_SOURCE_TRAJS_FOR_BODY (=3)。
         单条轨迹直接出 body 是 candidates 机制被架空的根因。
 
     返回 None = 放行；返回字符串 = 拦截，该字符串会作为 tool 结果回给 agent。
     """
+    from xskill.registry import find_traj_file
+
     meta = fm.get("metadata", {}) or {}
     source_trajs = [str(t).strip() for t in (meta.get("source_trajs") or []) if str(t).strip()]
 
@@ -105,18 +100,14 @@ def _validate_skill_md_gate(fm: dict, body: str, data_dir: Path | None = None) -
             f"不要把 instance_id 和 traj_id 并列凑数，它们是同一条轨迹。"
         )
 
-    # R2: 真实存在
-    if data_dir is not None:
-        fake = []
-        for tid in source_trajs:
-            if not _find_traj_files(data_dir, tid):
-                fake.append(tid)
-        if fake:
-            return (
-                f"source_trajs 里这些 traj_id 在 data/ 下找不到对应文件: {fake}。"
-                f"请检查是不是拼错了 / 凭空编造的。只引用你通过 search_similar_trajs "
-                f"真正看到过的 traj_id。"
-            )
+    # R2: 真实存在 — 跨所有已注册 watch dir 找
+    fake = [tid for tid in source_trajs if find_traj_file(tid, ".md") is None]
+    if fake:
+        return (
+            f"source_trajs 里这些 traj_id 在任何已注册的轨迹目录下都找不到对应文件: {fake}。"
+            f"请检查是不是拼错了 / 凭空编造的。只引用你通过 search_similar_trajs "
+            f"真正看到过的 traj_id。"
+        )
 
     # R3: body 实质性 → ≥3 共识
     has_stage_headers = bool(_STAGE_HEADER_RE.search(body or ""))
@@ -459,7 +450,7 @@ def write_file(path: str, content: str) -> str:
     if p.name == "SKILL.md":
         try:
             fm, body = fm_parse(content)
-            gate_err = _validate_skill_md_gate(fm, body, _ctx.get("data_dir"))
+            gate_err = _validate_skill_md_gate(fm, body)
             if gate_err:
                 logger.warning(f"❌ SKILL.md gate 拒绝写入 {p}: {gate_err}")
                 return f"error: {gate_err}"

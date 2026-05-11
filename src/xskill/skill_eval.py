@@ -179,16 +179,15 @@ def eval_llm_scoring(skill_dir: Path, llm_client, n_runs: int = 3, log_fn=None) 
             except Exception:
                 pass
     if source_trajs:
-        # 尝试找到对应的 traj md
+        # 取第一条 source_traj 的 MD 当 LLM 打分的"事实佐证"输入。
+        # 跨所有已注册 watch dir 查找；找不到只 warning 不抛 — eval prompt
+        # 退化成只看 SKILL.md 本身，仍能产出打分。
+        from xskill.registry import find_traj_file
         for traj_ref in source_trajs[:1]:
-            # traj_ref 可能是 "traj_0023" 或完整路径
-            for data_dir in (skill_dir.parent.parent / "data").iterdir():
-                if not data_dir.is_dir():
-                    continue
-                md_file = data_dir / f"{traj_ref}.md"
-                if md_file.exists():
-                    sample_traj = md_file.read_text(encoding="utf-8")[:3000]
-                    break
+            md_file = find_traj_file(traj_ref, ".md")
+            if md_file is not None:
+                sample_traj = md_file.read_text(encoding="utf-8")[:3000]
+                break
 
     prompt = SCORING_PROMPT.format(skill_md=skill_md[:4000], sample_traj_md=sample_traj)
 
@@ -371,25 +370,22 @@ def _collect_swe_instances(skill_dir: Path) -> list[str]:
                 source_trajs = abstract.get("source_trajs", []) or []
             except Exception:
                 source_trajs = []
-    data_dir = skill_dir.parent.parent / "data"
-
-    if not data_dir.exists():
-        return swe_instances
+    # 跨所有已注册 watch dir 找每条 source_traj 的 .json，从中抽 SWE-bench
+    # instance_id。找不到只 warning（由 helper 处理），不抛 — 没 instance
+    # 时 Tier 1 沙箱评测自动跳过，回落 Tier 2 LLM 打分。
+    from xskill.registry import find_traj_file
 
     for traj_ref in source_trajs:
-        for d in data_dir.iterdir():
-            if not d.is_dir():
-                continue
-            json_file = d / f"{traj_ref}.json"
-            if json_file.exists():
-                try:
-                    traj_json = json.loads(json_file.read_text(encoding="utf-8"))
-                    iid = traj_json.get("raw_metadata", {}).get("instance_id", "")
-                    if iid:
-                        swe_instances.append(iid)
-                except Exception:
-                    pass
-                break
+        json_file = find_traj_file(traj_ref, ".json")
+        if json_file is None:
+            continue
+        try:
+            traj_json = json.loads(json_file.read_text(encoding="utf-8"))
+            iid = traj_json.get("raw_metadata", {}).get("instance_id", "")
+            if iid:
+                swe_instances.append(iid)
+        except Exception:
+            pass
 
     return list(set(swe_instances))
 

@@ -434,15 +434,20 @@ def _run_skill_edit_agent(skill_dir: Path, candidates: list[dict],
             "supporting_trajs": c.get("supporting_trajs", []),
         })
 
-    # Find trajectory file paths
-    traj_dir = skill_dir.parent.parent / "data"
+    # Find trajectory file paths — search across all registered watch dirs.
+    # Missing IDs are skipped (warning logged by helper); the promote agent
+    # then sees a partial map, which is better than the v1 reverse-derived
+    # `skill_dir.parent.parent / "data"` path that silently returned {} once
+    # trajectories moved out of the repo root.
+    from xskill.registry import find_traj_file
     traj_paths = {}
     for c in candidates:
         for tid in c.get("supporting_trajs", []):
-            if tid not in traj_paths:
-                for p in traj_dir.rglob(f"{tid}.md"):
-                    traj_paths[tid] = str(p)
-                    break
+            if tid in traj_paths:
+                continue
+            p = find_traj_file(tid, ".md")
+            if p is not None:
+                traj_paths[tid] = str(p)
 
     user_msg = f"""你是一个从 agent 执行轨迹中抽取复用模式的 Skill 编辑 Agent。
 

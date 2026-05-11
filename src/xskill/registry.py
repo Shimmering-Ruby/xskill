@@ -333,6 +333,49 @@ def all_index_paths(*, db_path: Optional[Path] = None) -> list[Path]:
         conn.close()
 
 
+def find_traj_file(
+    traj_id: str,
+    suffix: str = ".md",
+    *,
+    db_path: Optional[Path] = None,
+) -> Path | None:
+    """跨所有注册的 watch dir 查找 ``<traj_id><suffix>``。
+
+    各 dir 先按"扁平布局"（``<wd>/<traj_id><suffix>``）直查，未命中再递归
+    rglob。返回第一个命中；都没有就返回 None 并打 warning。
+
+    用于替代历史上写死的 ``skill_dir.parent.parent / "data"`` 反推路径。
+    那条 v1 假设在轨迹搬到 Registry 注册任意目录后已失效，会让
+    eval / candidate / SWE-bench 收集等多处静默拿不到源轨迹。
+    """
+    filename = f"{traj_id}{suffix}"
+    watch_dirs = list_watch_dirs(db_path=db_path)
+    if not watch_dirs:
+        logger.warning(
+            "find_traj_file(%s): no watch dirs registered; "
+            "run `xskill registry add <path>` to register a trajectory directory",
+            filename,
+        )
+        return None
+    searched: list[str] = []
+    for wd in watch_dirs:
+        wd_path = Path(wd["path"])
+        if not wd_path.is_dir():
+            continue
+        searched.append(str(wd_path))
+        direct = wd_path / filename
+        if direct.is_file():
+            return direct
+        for hit in wd_path.rglob(filename):
+            return hit
+    logger.warning(
+        "find_traj_file(%s): not found in any registered watch dir "
+        "(searched %d dir(s): %s)",
+        filename, len(searched), ", ".join(searched) or "(none reachable)",
+    )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Status management
 # ---------------------------------------------------------------------------
