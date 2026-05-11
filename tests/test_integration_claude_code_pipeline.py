@@ -1,13 +1,22 @@
-"""End-to-end test: Claude Code ↔ xskill ↔ Claude Code
+"""Integration test: Claude Code ↔ xskill ↔ Claude Code 数据流
 
-This test wires up a single fake HTTP LLM backend on one port that pretends
-to be all three protocols xskill's runtime touches:
+**这是集成测试，不是 E2E**——5 个 stage 之间用 ``from xskill.ecosystems
+import ingest_claude_code_sessions / install_all_to_claude_code`` +
+``from xskill.process import process_traj`` 手调把"daemon 应该自动做的事"
+拼起来跑。它验证的是"如果这些函数被正确调用，整条 pipeline 各模块衔接得上"，
+对 daemon 是否真有"装上就闭环"的能力**完全不验证**。
 
-  - Anthropic ``/v1/messages``       (the real ``claude`` CLI calls this)
-  - OpenAI    ``/chat/completions``  (xskill LLMClient calls this)
-  - ARK       ``/embeddings/multimodal`` (xskill EmbedClient calls this)
+真 E2E 看 ``tests/test_e2e_xskill_serve_auto.py``——那个只用 subprocess +
+HTTP 跟真 ``xskill serve`` 对话，0 行 import xskill.*。
 
-It then drives the full pipeline:
+保留本测试的价值：
+  - 跨模块衔接的快速回归（4-5 秒一轮，比拉真 daemon 快）
+  - fake LLM responder 编程方式的样板（生态 detection / agent stub / eval
+    score 应答都有覆盖）
+  - 一份"手调 helper 函数应当怎么用"的活文档（commit-A 把
+    ``ingest_claude_code_sessions`` 等做成了可单独调用的公开 API）
+
+测试结构（5 个 stage）：
 
   Stage A: run ``claude -p`` against the fake server with ``HOME`` and
            ``ANTHROPIC_BASE_URL`` redirected to a sandbox + the fake. The CLI

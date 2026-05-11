@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS watch_dirs (
     path       TEXT UNIQUE NOT NULL,
     label      TEXT DEFAULT '',
     auto_index INTEGER DEFAULT 1,
+    ecosystem  TEXT DEFAULT 'manual',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -75,6 +76,7 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns missing from older schema versions."""
+    # ── trajectories ──
     cur = conn.execute("PRAGMA table_info(trajectories)")
     cols = {row[1] for row in cur.fetchall()}
     migrations = [
@@ -90,6 +92,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col, typedef in migrations:
         if col not in cols:
             conn.execute(f"ALTER TABLE trajectories ADD COLUMN {col} {typedef}")
+
+    # ── watch_dirs ──
+    cur = conn.execute("PRAGMA table_info(watch_dirs)")
+    wd_cols = {row[1] for row in cur.fetchall()}
+    if "ecosystem" not in wd_cols:
+        conn.execute(
+            "ALTER TABLE watch_dirs ADD COLUMN ecosystem TEXT DEFAULT 'manual'"
+        )
+        # 已有行历史上都是用户手动 register，标 'manual'
+        conn.execute("UPDATE watch_dirs SET ecosystem='manual' WHERE ecosystem IS NULL")
     # Backfill status from has_meta/has_embedding for pre-existing rows
     conn.execute(
         "UPDATE trajectories SET status='indexed'"
@@ -110,17 +122,28 @@ def register_dir(
     dir_path: str | Path,
     label: str = "",
     auto_index: bool = True,
+    ecosystem: str = "manual",
     *,
     db_path: Optional[Path] = None,
 ) -> int:
-    """注册一个目录。幂等：已存在则更新 label/auto_index，返回 id。"""
+    """注册一个目录。幂等：已存在则更新 label/auto_index/ecosystem，返回 id。
+
+    ``ecosystem`` 标记目录来源，便于 list / search 时区分：
+      - ``manual`` (默认)：用户手动 ``xskill registry add`` 注册的
+      - ``claude_code``：daemon 启动时自动发现的 Claude Code 会话桥接目录
+      - 未来：``codex``、``opencode`` 等
+    """
     dir_path = str(Path(dir_path).resolve())
     conn = get_connection(db_path)
     try:
         conn.execute(
-            "INSERT INTO watch_dirs (path, label, auto_index) VALUES (?, ?, ?)"
-            " ON CONFLICT(path) DO UPDATE SET label=excluded.label, auto_index=excluded.auto_index",
-            (dir_path, label, int(auto_index)),
+            "INSERT INTO watch_dirs (path, label, auto_index, ecosystem)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(path) DO UPDATE SET"
+            "   label=excluded.label,"
+            "   auto_index=excluded.auto_index,"
+            "   ecosystem=excluded.ecosystem",
+            (dir_path, label, int(auto_index), ecosystem),
         )
         conn.commit()
         row = conn.execute("SELECT id FROM watch_dirs WHERE path=?", (dir_path,)).fetchone()

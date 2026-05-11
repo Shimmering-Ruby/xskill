@@ -25,11 +25,13 @@ class Registry:
         self._db_path = db_path  # None = 用 config 默认
 
     # ─── watch_dir 管理 ───────────────────────────────────────────
-    def add(self, path: str | Path, label: str = "") -> WatchDir:
+    def add(self, path: str | Path, label: str = "",
+            ecosystem: str = "manual") -> WatchDir:
         p = Path(path).expanduser().resolve()
         if not p.is_dir():
             raise NotADirectoryError(f"not a directory: {p}")
-        wid = _r.register_dir(p, label=label, db_path=self._db_path)
+        wid = _r.register_dir(p, label=label, ecosystem=ecosystem,
+                              db_path=self._db_path)
         row = _r.get_watch_dir(p, db_path=self._db_path)
         if not row:
             raise RuntimeError(f"register_dir succeeded but row missing: {p}")
@@ -57,6 +59,7 @@ class Registry:
             auto_index=bool(row.get("auto_index", 1)),
             traj_count=overrides.get("traj_count", row.get("traj_count", 0)),
             indexed_count=overrides.get("indexed_count", row.get("indexed_count", 0)),
+            ecosystem=row.get("ecosystem", "manual"),
         )
 
     # ─── trajectory 反查 ────────────────────────────────────────

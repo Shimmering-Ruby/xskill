@@ -17,11 +17,60 @@ it lands on ``main`` and the next ``install_*`` call ships it to the host.
 
 from __future__ import annotations
 
+import json
+import logging
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Iterable, Optional
 
 from xskill.adapters import submit_trajectory
+
+logger = logging.getLogger("xskill.ecosystems")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Ecosystem auto-detection
+# ─────────────────────────────────────────────────────────────────
+
+# Known agent tools and where each one writes its session trajectories.
+# Used by ``detect_known_ecosystems`` at server startup to auto-register
+# without making the user run `xskill registry add` for every ecosystem.
+_KNOWN_ECOSYSTEMS: list[dict] = [
+    {
+        "id": "claude_code",
+        "source_subpath": ".claude/projects",  # CC writes <home>/<this>/<cwd-hash>/*.jsonl
+        "bridge_subpath": ".xskill/cc_sessions",  # we mirror them here as traj_*.md
+    },
+    # Future: codex / opencode / etc. follow the same {id, source, bridge} shape.
+]
+
+
+def detect_known_ecosystems(home_root: Path | str | None = None) -> list[dict]:
+    """Probe the user's HOME for known agent tools and report which ones
+    have something on disk. Returns a list of detection records:
+
+        {"ecosystem": "claude_code",
+         "source": <abs path of native session dir>,
+         "bridge": <abs path of paired xskill watch dir>}
+
+    A record only appears if the source dir exists. The bridge dir is the
+    path daemon should ``register_dir(..., ecosystem=...)`` to put under
+    Registry control — it may or may not exist yet.
+    """
+    root = Path(home_root) if home_root else Path.home()
+    found: list[dict] = []
+    for spec in _KNOWN_ECOSYSTEMS:
+        source = root / spec["source_subpath"]
+        if not source.is_dir():
+            continue
+        found.append({
+            "ecosystem": spec["id"],
+            "source": source.resolve(),
+            "bridge": (root / spec["bridge_subpath"]).resolve(),
+        })
+    return found
 
 
 def install_to_claude_code(
@@ -102,6 +151,119 @@ def ingest_claude_code_sessions(
         submitted.append(result)
         seen.add(sid)
     return submitted
+
+
+def _scan_seen_sessions(target_traj_dir: Path) -> set[str]:
+    """重启时重建 ``seen_sessions``。
+
+    桥接出的 ``traj_NNNN.json`` 的 metadata 里已经存了 ``session_id``（由
+    ``_adapt_claude_code_jsonl`` 写入）。扫一遍 ``target_traj_dir`` 下所有
+    json，把它们的 session_id 集进 set，避免 daemon 重启时把同一条 CC
+    session 再桥一遍。
+    """
+    seen: set[str] = set()
+    if not target_traj_dir.is_dir():
+        return seen
+    for jp in target_traj_dir.glob("traj_*.json"):
+        try:
+            meta = json.loads(jp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        sid = meta.get("session_id")
+        if sid:
+            seen.add(sid)
+    return seen
+
+
+class CCSessionIngester:
+    """周期性把 Claude Code 会话 JSONL 桥到 xskill 的 watch 目录。
+
+    服务启动时实例化一份长跑线程；它和 DirectoryWatcher 并行，但只负责
+    "从 native 源拉到 xskill 这边"这一步——拉过来之后剩下的 meta / index /
+    skill 生成全部走 DirectoryWatcher 现有流水线。
+
+    设计上：
+      - ``seen_sessions`` 重启可恢复：扫 target dir 的 traj_*.json 重建。
+      - 周期 poll，没有用 inotify (移植性差且并发模型上没必要)。
+      - 找不到 source 目录是正常情况（用户机器上压根没装 CC），不报错。
+    """
+
+    def __init__(
+        self,
+        target_traj_dir: Path | str,
+        *,
+        home_root: Path | str | None = None,
+        poll_interval: float = 10.0,
+    ):
+        self.target_traj_dir = Path(target_traj_dir)
+        self.home_root = Path(home_root) if home_root else Path.home()
+        self.poll_interval = poll_interval
+        self._seen: set[str] = _scan_seen_sessions(self.target_traj_dir)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stats = {"polls": 0, "ingested": 0, "errors": 0, "last_poll": None}
+
+    # ── lifecycle ─────────────────────────────────────────────────
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="xskill-cc-ingester",
+        )
+        self._thread.start()
+        logger.info(
+            "CCSessionIngester started "
+            "(source=%s, target=%s, interval=%.1fs, %d sessions pre-seen)",
+            self.home_root / ".claude" / "projects",
+            self.target_traj_dir,
+            self.poll_interval,
+            len(self._seen),
+        )
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=self.poll_interval + 5)
+        logger.info("CCSessionIngester stopped")
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def stats(self) -> dict:
+        return {**self._stats, "seen_sessions": len(self._seen),
+                "running": self.is_running}
+
+    # ── main loop ─────────────────────────────────────────────────
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.run_once()
+            except Exception:
+                self._stats["errors"] += 1
+                logger.exception("CCSessionIngester scan error")
+            self._stop.wait(self.poll_interval)
+
+    def run_once(self) -> list[dict]:
+        """单次扫描 + 桥接。供测试或手动触发使用。"""
+        self._stats["polls"] += 1
+        self._stats["last_poll"] = time.time()
+        submitted = ingest_claude_code_sessions(
+            target_traj_dir=self.target_traj_dir,
+            home_root=self.home_root,
+            seen_sessions=self._seen,
+        )
+        if submitted:
+            self._stats["ingested"] += len(submitted)
+            logger.info(
+                "CCSessionIngester: bridged %d new CC session(s) → %s",
+                len(submitted), self.target_traj_dir,
+            )
+        return submitted
 
 
 def install_all_to_claude_code(

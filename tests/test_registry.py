@@ -55,6 +55,28 @@ class TestWatchDirCRUD:
         assert dirs[0]["label"] == "test"
         assert dirs[0]["traj_count"] == 0
 
+    def test_register_default_ecosystem_is_manual(self, tmp_path, db_path):
+        d = tmp_path / "data"
+        d.mkdir()
+        register_dir(d, label="cli", db_path=db_path)
+        rows = list_watch_dirs(db_path=db_path)
+        assert rows[0]["ecosystem"] == "manual"
+
+    def test_register_with_ecosystem(self, tmp_path, db_path):
+        d = tmp_path / "cc_sessions"
+        d.mkdir()
+        register_dir(d, label="cc", ecosystem="claude_code", db_path=db_path)
+        rows = list_watch_dirs(db_path=db_path)
+        assert rows[0]["ecosystem"] == "claude_code"
+
+    def test_register_updates_ecosystem_on_reregister(self, tmp_path, db_path):
+        d = tmp_path / "data"
+        d.mkdir()
+        register_dir(d, db_path=db_path)
+        assert list_watch_dirs(db_path=db_path)[0]["ecosystem"] == "manual"
+        register_dir(d, ecosystem="claude_code", db_path=db_path)
+        assert list_watch_dirs(db_path=db_path)[0]["ecosystem"] == "claude_code"
+
     def test_register_idempotent(self, tmp_path, db_path):
         d = tmp_path / "data"
         d.mkdir()

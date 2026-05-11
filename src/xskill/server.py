@@ -1386,10 +1386,42 @@ def create_app() -> FastAPI:
         # Auto-register chat archive directory
         try:
             from xskill.registry import register_dir
-            register_dir(_chat_archive_dir, label="chat_archive")
+            register_dir(_chat_archive_dir, label="chat_archive", ecosystem="manual")
             logger.info("chat archive dir registered: %s", _chat_archive_dir)
         except Exception:
             logger.warning("failed to register chat archive dir", exc_info=True)
+
+        # Auto-detect known agent ecosystems on this host and bridge them in.
+        # For each detected source (e.g. ~/.claude/projects), we register a
+        # paired bridge dir (~/.xskill/cc_sessions) and start an ingester
+        # thread that periodically mirrors native sessions into it as
+        # traj_*.md. After that the regular watcher takes over.
+        try:
+            from xskill.ecosystems import detect_known_ecosystems, CCSessionIngester
+            from xskill.registry import register_dir
+            detections = detect_known_ecosystems()
+            for det in detections:
+                bridge: Path = det["bridge"]
+                bridge.mkdir(parents=True, exist_ok=True)
+                register_dir(
+                    bridge,
+                    label=f"{det['ecosystem']} sessions",
+                    ecosystem=det["ecosystem"],
+                )
+                if det["ecosystem"] == "claude_code":
+                    ingester = CCSessionIngester(
+                        target_traj_dir=bridge,
+                        home_root=Path.home(),
+                        poll_interval=float(_config.get("watcher", {}).get("poll_interval", 10)),
+                    )
+                    ingester.start()
+                    _watcher_ref[f"ingester_{det['ecosystem']}"] = ingester
+                logger.info(
+                    "ecosystem %s detected: source=%s bridge=%s",
+                    det["ecosystem"], det["source"], bridge,
+                )
+        except Exception:
+            logger.warning("ecosystem auto-detect failed", exc_info=True)
 
         # Start watcher if any dirs are registered
         try:
@@ -1415,5 +1447,12 @@ def create_app() -> FastAPI:
         watcher = _watcher_ref.get("instance")
         if watcher:
             watcher.stop()
+        # Stop any ecosystem ingesters started in startup.
+        for k, v in list(_watcher_ref.items()):
+            if k.startswith("ingester_"):
+                try:
+                    v.stop()
+                except Exception:
+                    logger.warning("failed to stop %s", k, exc_info=True)
 
     return app

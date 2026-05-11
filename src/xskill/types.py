@@ -25,6 +25,10 @@ class WatchDir:
     auto_index: bool
     traj_count: int
     indexed_count: int
+    # 来源标签：``manual`` = 用户手动 ``xskill registry add``；其他如
+    # ``claude_code`` = ``xskill serve`` 启动时自动 detect+register 的桥接
+    # 目录。同时用 codex / opencode 时按这个字段区分聚合。
+    ecosystem: str = "manual"
 
 
 # ─── Search ───────────────────────────────────────────────────────

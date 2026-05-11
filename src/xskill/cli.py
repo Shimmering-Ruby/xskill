@@ -43,8 +43,15 @@ def cmd_registry(args, xskill) -> int:
         if not dirs:
             print("(no registered directories)")
             return 0
+        # 列序: id  ecosystem  traj  indexed  label  path
+        # ecosystem 是来源标签：``manual`` = 用户手动注册；其他如
+        # ``claude_code`` = daemon 启动时自动 detect 出来的生态目录。
+        # 同时用 codex / opencode 等其他工具时一眼能区分来源。
         for w in dirs:
-            print(f"{w.id}\t{w.traj_count}\t{w.indexed_count}\t{w.label or '-'}\t{w.path}")
+            print(
+                f"{w.id}\t{w.ecosystem}\t{w.traj_count}\t{w.indexed_count}\t"
+                f"{w.label or '-'}\t{w.path}"
+            )
         return 0
     return 1
 
