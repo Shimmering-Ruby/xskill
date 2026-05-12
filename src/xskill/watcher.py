@@ -57,7 +57,7 @@ class DirectoryWatcher:
 
     def __init__(self, *, llm=None, embed_client=None, config=None,
                  skill_dir=None, poll_interval=30.0, max_concurrent=5,
-                 max_retries=3, db_path=None):
+                 max_retries=3, db_path=None, cold_start_threshold=3):
         self.llm = llm
         self.embed_client = embed_client
         self.config = config or {}
@@ -66,6 +66,14 @@ class DirectoryWatcher:
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
         self.db_path = db_path
+        # Cold-start 门控：当某 wd 还有 ≥ N 条 traj 处于"未 indexed"状态时，
+        # 本轮 scan 不提交任何 process_traj。设计动机：process_traj 内部
+        # 的 agent 调 search_similar_trajs 找共识（path-B 需 ≥2 条同类
+        # 成功轨迹），如果向量索引还没建完，agent 看到的是不完整的快照，
+        # 必然走 path-C insufficient-signal 把这批轨迹的复用价值全错失。
+        # 等所有先到的 traj 完成 embed 落进 index.pkl，再开 process。
+        # filtered / error 不计入 pending（防止单条卡死阻断全场）。
+        self.cold_start_threshold = cold_start_threshold
 
         self._stop = threading.Event()
         self._pause = threading.Event()
@@ -76,7 +84,7 @@ class DirectoryWatcher:
         self._stats = {
             "polls": 0, "new_trajs": 0, "meta_extracted": 0,
             "indexed": 0, "skills_generated": 0, "scores": 0,
-            "errors": 0, "retries": 0,
+            "errors": 0, "retries": 0, "cold_start_deferrals": 0,
         }
 
     def start(self):
@@ -222,14 +230,32 @@ class DirectoryWatcher:
                     fut = self._pool.submit(self._do_embed, dir_path, wd_id, meta_done_files)
                     self._futures[fut] = {"wd_id": wd_id, "fname": "_batch_embed", "stage": "embed"}
 
-        # ── 提交 process_traj 任务（indexed → processing）──
+        # ── Cold-start 门控 + 提交 process_traj 任务（indexed → processing）──
         if self.skill_dir:
-            for fname in get_trajs_by_status(wd_id, "indexed", limit=self.max_concurrent, **kw):
-                if self._too_many_in_flight():
-                    break
-                update_traj_status(wd_id, fname, "processing", **kw)
-                fut = self._pool.submit(self._do_process, dir_path, fname)
-                self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "process"}
+            # 算"未 indexed 的 pending 量"——只算还在前置流水线里的状态，
+            # 不算 filtered/error（这些已经退出流水线，不会再变 indexed，
+            # 拿来当 pending 计数会导致永久卡死）。
+            pending_index = (
+                len(get_trajs_by_status(wd_id, "discovered", **kw))
+                + len(get_trajs_by_status(wd_id, "meta_extracting", **kw))
+                + len(get_trajs_by_status(wd_id, "meta_done", **kw))
+            )
+            if pending_index >= self.cold_start_threshold:
+                # 还在批量上索引阶段，等下一轮——这时候启动 process_traj
+                # 会让 agent 看到不完整的向量索引，path-B 搜不到共识。
+                self._stats["cold_start_deferrals"] += 1
+                logger.info(
+                    "[%s] cold-start gate: %d trajs not yet indexed (>= %d threshold), "
+                    "defer process_traj",
+                    dir_path.name, pending_index, self.cold_start_threshold,
+                )
+            else:
+                for fname in get_trajs_by_status(wd_id, "indexed", limit=self.max_concurrent, **kw):
+                    if self._too_many_in_flight():
+                        break
+                    update_traj_status(wd_id, fname, "processing", **kw)
+                    fut = self._pool.submit(self._do_process, dir_path, fname)
+                    self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "process"}
 
         # ── ux_score（对有 xskill header 的新轨迹）──
         if self.llm and self.skill_dir and new:

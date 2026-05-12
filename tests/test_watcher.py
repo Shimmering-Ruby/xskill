@@ -160,6 +160,87 @@ class TestWatcherUxScore:
             mock_score.assert_not_called()
 
 
+class TestWatcherColdStartGate:
+    """冷启动场景：批量发现 N 条 traj 时 process_traj 必须等所有前序
+    上完索引才启动，否则 agent 调 search_similar_trajs 看到不完整索引，
+    path-B 共识搜索几乎必然失败。"""
+
+    def test_defers_process_when_many_pending_index(self, traj_dir, skill_dir, db_path):
+        wid = register_dir(traj_dir, db_path=db_path)
+        # 造 5 条新文件（这个 fixture 默认 2 条，再加 3 条让 pending_index 够触发）
+        for i in range(3, 6):
+            (traj_dir / f"traj_000{i}.md").write_text(
+                f"# Traj {i}\nagent did X", encoding="utf-8"
+            )
+        # pre-discover 让它们全部进 discovered 状态
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+
+        # 手动把 1 条改成 indexed —— 模拟"已经过索引的"，
+        # 但其它 4 条还 discovered → pending_index=4 > threshold=3
+        from xskill.registry import get_connection
+        conn = get_connection(db_path)
+        conn.execute(
+            "UPDATE trajectories SET status='indexed', has_meta=1, has_embedding=1 "
+            "WHERE watch_dir_id=? AND filename='traj_0001.md'",
+            (wid,),
+        )
+        conn.commit()
+        conn.close()
+
+        # 启动 watcher 时显式给 cold_start_threshold=3
+        with patch("xskill.index._process_one_meta"), \
+             patch("xskill.process.process_traj") as mock_process:
+            watcher = DirectoryWatcher(
+                llm=MagicMock(), embed_client=None, config={},
+                skill_dir=skill_dir, poll_interval=1, db_path=db_path,
+                cold_start_threshold=3,
+            )
+            watcher._scan_once()
+            # process_traj 应当被 defer——pending=4 >= 3
+            for fut in list(watcher._futures):
+                fut.result()  # 等其它 future 都跑完
+            watcher._harvest()
+
+            # 关键断言：本轮没提交任何 process 阶段的 future
+            assert mock_process.call_count == 0, (
+                f"cold-start gate failed: process_traj called {mock_process.call_count} times "
+                f"while pending pre-index trajs exist"
+            )
+            assert watcher.stats["cold_start_deferrals"] >= 1
+
+    def test_resumes_process_when_pending_below_threshold(self, traj_dir, skill_dir, db_path):
+        """pending_index < threshold 时 process_traj 应当正常提交。"""
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+
+        # 把全部 traj 标 indexed
+        from xskill.registry import get_connection
+        conn = get_connection(db_path)
+        conn.execute(
+            "UPDATE trajectories SET status='indexed', has_meta=1, has_embedding=1 "
+            "WHERE watch_dir_id=?",
+            (wid,),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("xskill.process.process_traj", return_value={"action": "skip"}) as mock_process:
+            watcher = DirectoryWatcher(
+                llm=MagicMock(), embed_client=None, config={},
+                skill_dir=skill_dir, poll_interval=1, db_path=db_path,
+                cold_start_threshold=3,
+            )
+            watcher._scan_once()
+            for fut in list(watcher._futures):
+                fut.result()
+            watcher._harvest()
+
+            # pending_index = 0 → 不 defer，process_traj 必被提交
+            assert mock_process.call_count >= 1, (
+                "process_traj should be submitted when no pending pre-index trajs"
+            )
+
+
 class TestWatcherStartStop:
     """Test thread lifecycle."""
 
