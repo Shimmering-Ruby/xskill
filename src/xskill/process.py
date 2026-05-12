@@ -18,7 +18,13 @@ logger = logging.getLogger("xskill.process")
 
 def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
                       store, embed_client, agno_agent_factory) -> dict:
-    """处理一个 AtomTask：cluster → 触发 SkillEdit。
+    """处理一个 AtomTask：只跑 cluster，**不跑 edit**。
+
+    edit 触发由 watcher 每轮独立扫描所有 skill 目录完成（见
+    ``watcher.DirectoryWatcher._check_pending_skill_edits``）。把 edit 从
+    cluster 解耦后，即便某次 cluster 抛异常，buffer 已满阈值的 skill 仍能
+    在后续 watcher 轮次中被检出 + 触发——不会因为某个 atom cluster 失败
+    错失整批 candidates 的 promote 机会。
 
     Args:
         atom_id: AtomTask 主键
@@ -31,10 +37,9 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
                             单测注入 stub。
 
     Returns:
-        dict 含 keys: action / atom_id / edited_skills / cluster_log
+        dict 含 keys: action / atom_id / cluster_log
     """
     from xskill.task_cluster_agent import TaskClusterAgent
-    from xskill.skill_edit_agent import SkillEditAgent
     from xskill import skill_tools as ST
 
     atom = store.load(atom_id)
@@ -57,24 +62,8 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
     )
     cluster_content = cluster.process(atom)
 
-    # cluster 跑完后，遍历每个 skill 子目录：buffer 攒到阈值的触发 SkillEdit
-    edited: list[str] = []
-    if skill_dir.is_dir():
-        for d in sorted(skill_dir.iterdir()):
-            if not d.is_dir() or d.name.startswith("."):
-                continue
-            editor = SkillEditAgent(
-                skill_dir=d, store=store,
-                agno_agent_factory=agno_agent_factory,
-                llm_cfg=config.get("llm", {}),
-                traj_root=traj_root,
-            )
-            if editor.maybe_run():
-                edited.append(d.name)
-
     return {
         "action": "clustered",
         "atom_id": atom_id,
-        "edited_skills": edited,
         "cluster_log": (cluster_content or "")[:500],
     }

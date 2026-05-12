@@ -17,23 +17,34 @@ from tests.test_task_agent import _SPLIT_XML, _StubLLM
 
 
 class _StubAgno:
-    """根据 sysprompt 头分发：cluster agent 调 add_task_to_skill；其他 no-op。"""
+    """根据 sysprompt 头分发：
+    - cluster agent → 调 add_task_to_skill 给 auto-skill 打 10 分
+    - edit agent    → 调 write_file 真写出 SKILL.md（验证 v2.1 真实落盘判据）
+    """
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
         self.tools = tools
 
     def run(self, user_msg, **kw):
         head = (self.instructions[0] if self.instructions else "")[:60]
+        tool_by_name = {getattr(t, "__name__", ""): t for t in self.tools}
         if "TaskClusterAgent" in head:
-            # 给每个 atom 写到 auto-skill 满 10 分立即触发 SkillEdit
             import re
             m = re.search(r"atom_id:\s*(\S+)", user_msg)
             atom_id = m.group(1) if m else None
-            for fn in self.tools:
-                if getattr(fn, "__name__", "") == "new_skill_folder":
-                    fn("auto-skill")
-                if getattr(fn, "__name__", "") == "add_task_to_skill" and atom_id:
-                    fn("auto-skill", atom_id, 10)
+            if "new_skill_folder" in tool_by_name:
+                tool_by_name["new_skill_folder"]("auto-skill")
+            if "add_task_to_skill" in tool_by_name and atom_id:
+                tool_by_name["add_task_to_skill"]("auto-skill", atom_id, 10)
+        elif "SkillEditAgent" in head:
+            # 真写 SKILL.md（让 v2.1 判据"真实落盘"成立）
+            import re
+            m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
+            if m and "write_file" in tool_by_name:
+                tool_by_name["write_file"](
+                    m.group(1),
+                    "---\nname: auto-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n",
+                )
         class _R: pass
         r = _R(); r.content = "stub"; return r
 
@@ -152,6 +163,82 @@ class TestColdStartGate:
         # 关键断言：本轮 indexed 的 traj_a 没被推到 clustering（被 gate 拦下）
         assert "traj_a.md" not in get_trajs_by_status(wd_id, "clustering", db_path=db)
         assert watcher.stats["cold_start_deferrals"] >= 1
+
+
+class TestIndependentSkillEditScan:
+    """Bug 1 修复关键回归：edit 触发独立于 cluster 链路。
+
+    即便单个 atom 的 cluster 抛异常，buffer 已满阈值的 skill 仍能被
+    每轮 watcher scan 检出 + 触发 SkillEdit。
+    """
+
+    def test_edit_triggers_even_when_cluster_fails(self, tmp_path):
+        """先手动在 buffer 写满候选 → cluster stub 抛异常 → edit 仍触发。"""
+        db = tmp_path / "test.db"
+        wd = tmp_path / "wd"; wd.mkdir()
+        skill_dir = tmp_path / "skill"; skill_dir.mkdir()
+        (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
+
+        # 提前 seed：skill_dir 下创建 my-skill，buffer 累计满 10 分
+        from xskill import candidates as C
+        my_skill = skill_dir / "my-skill"
+        my_skill.mkdir()
+        data = {"candidates": []}
+        data, _ = C.add_atom_contribution(data, "atom_pre_0001", 10)
+        C.save_candidates(my_skill, data)
+
+        # cluster + edit stub：cluster 抛异常；edit 写 SKILL.md
+        class _MixedStub:
+            def __init__(self, *, instructions, tools):
+                self.instructions = instructions
+                self.tools = tools
+            def run(self, msg, **kw):
+                head = (self.instructions[0] if self.instructions else "")[:60]
+                if "TaskClusterAgent" in head:
+                    raise RuntimeError("cluster LLM 402")
+                # edit agent：真写 SKILL.md
+                tool_by_name = {getattr(t, "__name__", ""): t for t in self.tools}
+                import re
+                m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", msg)
+                if m and "write_file" in tool_by_name:
+                    tool_by_name["write_file"](
+                        m.group(1),
+                        "---\nname: my-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n",
+                    )
+                class _R: pass
+                r = _R(); r.content = ""; return r
+
+        register_dir(wd, db_path=db)
+        store = AtomTaskStore(root=wd)
+        watcher = DirectoryWatcher(
+            llm=_StubLLM([_SPLIT_XML]),
+            embed_client=_FakeEmbed(),
+            config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
+            skill_dir=skill_dir,
+            poll_interval=0.0,
+            max_concurrent=2,
+            db_path=db,
+            cold_start_threshold=999,
+            store=store,
+            agno_agent_factory=lambda **kw: _MixedStub(**kw),
+        )
+
+        # 跑 _scan_once 几轮——_check_pending_skill_edits 应在某轮看到
+        # my-skill buffer 已满 + 跑 edit stub → 写 SKILL.md
+        for _ in range(10):
+            watcher._scan_once()
+            for _ in range(20):
+                if not watcher._futures:
+                    break
+                time.sleep(0.05)
+                watcher._harvest()
+            if (my_skill / "SKILL.md").is_file():
+                break
+
+        assert (my_skill / "SKILL.md").is_file(), \
+            "Bug 1 回归：cluster 抛异常时 edit 应仍能独立触发"
+        data2 = C.load_candidates(my_skill)
+        assert any(c.get("promoted") for c in data2["candidates"])
 
 
 class TestUxScoreAtomLevel:
@@ -286,18 +373,22 @@ class TestPipelineRun:
         )
 
         # 多轮 scan + harvest 推动状态流转
-        for _ in range(20):
+        # done 后还需再跑 ≥1 轮 _scan_once 让 _check_pending_skill_edits
+        # 检测到 cluster 阶段写的 candidates 并触发 SkillEdit（Bug 1 修复后
+        # edit 不再绑在 cluster 链路里）
+        done_seen_rounds = 0
+        for _ in range(25):
             watcher._scan_once()
-            # 等异步任务完成
             for _ in range(30):
                 if not watcher._futures:
                     break
                 time.sleep(0.05)
                 watcher._harvest()
-            # 看是否走到 done
             counts = get_status_counts(db_path=db)
             if counts.get("done"):
-                break
+                done_seen_rounds += 1
+                if done_seen_rounds >= 2:  # done 后再跑一轮让 edit scan 触发
+                    break
 
         # 最终状态：traj_x.md 应到 done
         final_status = get_trajs_by_status(

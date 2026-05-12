@@ -91,23 +91,53 @@ class SkillEditAgent:
     def maybe_run(self) -> bool:
         """检查 buffer，达阈值则跑 agent 编辑 SKILL.md。
 
-        返回 ``True`` 表示触发了一次 agent 调用；``False`` 表示门槛未到。
-        无论 agent 是否成功落盘，都把 pending candidates 全部标 promoted——
-        与 v1 行为一致：避免 buffer 反复重触发同一批弱信号。
+        返回 ``True`` 表示**确实把候选 promote 了**（即 SKILL.md 实际落盘且
+        非空）；``False`` 表示门槛未到、或 agent 跑完但没产出 SKILL.md
+        （LLM 失败 / agno 静默吞错误 / agent 想写但被工具拒）——这种情况下
+        candidates 保留 promoted=false，下一轮 watcher 扫描时会再次重试。
+
+        关键设计：**不能无条件 finally 标 promoted**。曾经被 agno 内部静默
+        吞 402 错误坑过——agent.run 看似成功返回，但 SKILL.md 根本没写；
+        如果那时仍标 promoted=true，candidates 永久污染，无法再重试。
+        所以现在以"SKILL.md 实测落盘"作为 promote 判据，agent 不写就不标。
         """
         data = C.load_candidates(self.skill_dir)
         ready = C.ready_for_promotion_v2(data, threshold=self.threshold)
         if not ready:
             return False
+
+        skill_md = self.skill_dir / "SKILL.md"
+        mtime_before = skill_md.stat().st_mtime if skill_md.is_file() else 0.0
+        size_before = skill_md.stat().st_size if skill_md.is_file() else 0
+
         try:
             self._run(ready)
-        finally:
-            now = datetime.now().isoformat(timespec="seconds")
-            for c in data.get("candidates", []):
-                if not c.get("promoted"):
-                    c["promoted"] = True
-                    c["promoted_at"] = now
-            C.save_candidates(self.skill_dir, data)
+        except Exception:
+            logger.exception("SkillEditAgent _run failed: %s", self.skill_dir.name)
+
+        # 真实落盘检查：mtime 推进 + 文件非空 = agent 真的写了
+        wrote = (
+            skill_md.is_file()
+            and skill_md.stat().st_size > 0
+            and (
+                skill_md.stat().st_mtime > mtime_before
+                or skill_md.stat().st_size != size_before
+            )
+        )
+        if not wrote:
+            logger.warning(
+                "SkillEditAgent ran but SKILL.md not written/empty: %s — "
+                "candidates 保留 promoted=false 等下轮重试",
+                self.skill_dir.name,
+            )
+            return False
+
+        now = datetime.now().isoformat(timespec="seconds")
+        for c in data.get("candidates", []):
+            if not c.get("promoted"):
+                c["promoted"] = True
+                c["promoted_at"] = now
+        C.save_candidates(self.skill_dir, data)
         return True
 
     def _run(self, ready: list[dict]) -> None:

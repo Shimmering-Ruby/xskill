@@ -161,7 +161,7 @@ class DirectoryWatcher:
             self._stop.wait(self.poll_interval)
 
     def _scan_once(self):
-        """一次扫描：收割 → 发现 → 提交任务。秒完，不阻塞。"""
+        """一次扫描：收割 → 发现 → 提交任务 → 独立扫 pending skill edits。"""
         self._last_poll = time.time()
         self._stats["polls"] += 1
         kw = self._db_kw()
@@ -176,6 +176,64 @@ class DirectoryWatcher:
             if not wd.get("auto_index"):
                 continue
             self._scan_dir(wd, **kw)
+
+        # ── Step 5: 独立扫所有 skill 目录的 candidates buffer ──
+        # 这步与具体 atom 处理解耦：即便某些 atom cluster 失败，buffer
+        # 已满阈值的 skill 仍能在每轮 scan 中被检出 + 触发 SkillEdit。
+        # 不放在 _scan_dir 内是因为 skill_dir 不是 watch_dir，跟 wd 循环
+        # 无关——每个 watcher 只有一个全局 skill_dir。
+        self._check_pending_skill_edits()
+
+    def _check_pending_skill_edits(self):
+        """遍历每个 skill 目录调 SkillEditAgent.maybe_run()。
+
+        独立于 process_atom_task：不依赖任何 atom 处理成功；只看 candidates.yml
+        当前累计 weightscore 是否够阈值。即便某次 cluster 抛异常导致 buffer
+        虽满阈值但 process_atom_task 没机会触发 edit，下一轮 watcher scan 这步
+        会兜底重试。
+
+        要求 skill_dir + agno_factory_factory + store 都可用；任何一项缺失
+        直接跳过（保留单测路径）。
+        """
+        if self.skill_dir is None or not self.skill_dir.is_dir():
+            return
+        from xskill.skill_edit_agent import SkillEditAgent
+        factory = self._factory()
+        # store 选哪个：edit agent 工具 (atom_task_read/read_traj) 需要
+        # store + traj_root 来工作；从已注册的第一个 wd 取（生产环境通常
+        # 只有 cc_sessions 一个有 atom 的 dir）。
+        store = None
+        traj_root = None
+        for wd in list_watch_dirs(**self._db_kw()):
+            try:
+                store = self._store_for(Path(wd["path"]))
+                traj_root = Path(wd["path"])
+                break
+            except Exception:
+                continue
+        if store is None:
+            return
+        # 初始化 v2 工具 ctx（SkillEditAgent 工具用）
+        from xskill import skill_tools as ST
+        ST.init_context_v2(
+            skill_dir=self.skill_dir, store=store,
+            embed_client=self.embed_client, traj_root=traj_root,
+        )
+        for d in sorted(self.skill_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            editor = SkillEditAgent(
+                skill_dir=d, store=store,
+                agno_agent_factory=factory,
+                llm_cfg=self.config.get("llm", {}),
+                traj_root=traj_root,
+            )
+            try:
+                if editor.maybe_run():
+                    self._stats["skills_edited"] += 1
+                    logger.info("SkillEditAgent promoted: %s", d.name)
+            except Exception:
+                logger.exception("SkillEditAgent failed: %s", d.name)
 
     # ───────────────────────────────────────────────────────────
     # 收割：检查所有 in-flight futures
@@ -352,9 +410,14 @@ class DirectoryWatcher:
         return (wd_id, filenames)
 
     def _do_cluster(self, dir_path, fname):
-        """对该 traj 已拆出的每个 atom 调 process_atom_task。
+        """对该 traj 已拆出的每个 atom 调 process_atom_task (只跑 cluster)。
 
-        返回 (fname, [result_dict, ...])。每个 result 含 edited_skills 列表。
+        edit 触发独立由 ``_check_pending_skill_edits`` 在每轮 scan 中完成，
+        不依赖某个 atom cluster 成功——即便这里某些 atom 因 LLM 失败抛错，
+        已经写进 candidates 的其他 atom 仍能在下一轮 watcher scan 中
+        被检出 + 触发 SkillEdit。
+
+        返回 (fname, [result_dict, ...])。
         """
         from xskill.process import process_atom_task
         traj_id = (dir_path / fname).stem
@@ -363,15 +426,22 @@ class DirectoryWatcher:
         atoms = store.list_by_traj(traj_id)
         results = []
         for atom in atoms:
-            res = process_atom_task(
-                atom_id=atom.atom_id,
-                config=self.config,
-                skill_dir=self.skill_dir,
-                store=store,
-                embed_client=self.embed_client,
-                agno_agent_factory=factory,
-            )
-            results.append(res)
+            try:
+                res = process_atom_task(
+                    atom_id=atom.atom_id,
+                    config=self.config,
+                    skill_dir=self.skill_dir,
+                    store=store,
+                    embed_client=self.embed_client,
+                    agno_agent_factory=factory,
+                )
+                results.append(res)
+            except Exception as e:
+                # 单个 atom cluster 失败不阻断同 traj 其他 atom，也不阻断
+                # 后续 watcher 轮次的 edit 扫描
+                logger.warning("cluster %s failed: %s", atom.atom_id, e)
+                results.append({"action": "error", "atom_id": atom.atom_id,
+                                "error": str(e)[:200]})
         return (fname, results)
 
     # ───────────────────────────────────────────────────────────
@@ -401,22 +471,13 @@ class DirectoryWatcher:
 
     def _on_cluster_done(self, wd_id, fname, result, **kw):
         _fname, results = result
-        # 收集所有 cluster + edit 信号
-        edited_skills: list[str] = []
-        for r in results:
-            edited_skills.extend(r.get("edited_skills") or [])
-        action = "clustered"  # 总有动作；individual error 由 cluster agent 自己消化
+        action = "clustered"  # edit 触发独立扫描，这里不再聚合 edited_skills
         new_status = _ACTION_STATUS.get(action, "error")
         update_traj_status(
-            wd_id, fname, new_status,
-            process_action=action,
-            skill_generated=",".join(edited_skills) if edited_skills else None,
-            **kw,
+            wd_id, fname, new_status, process_action=action, **kw,
         )
         self._stats["atoms_clustered"] += len(results)
-        self._stats["skills_edited"] += len(edited_skills)
-        logger.info("%s → clustered (%d atoms, edited skills=%s)",
-                    fname, len(results), edited_skills or "-")
+        logger.info("%s → clustered (%d atoms)", fname, len(results))
         # cluster 完成后该 traj 的所有 atom 都已落盘——这是 ux_score 应当
         # 跑的时机（旧 _score_new 在 traj 发现时跑会看到空 atom 列表）。
         self._score_atoms_for_traj(wd_id, fname, **kw)
