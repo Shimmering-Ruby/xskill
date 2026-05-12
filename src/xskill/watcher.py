@@ -195,10 +195,26 @@ class DirectoryWatcher:
         if not dir_path.is_dir():
             return
 
-        # 清理僵尸 processing
+        # 清理僵尸 in-flight 状态。
+        # 两个 in-flight 中间态：
+        #   meta_extracting — _do_meta 在跑（应有 stage='meta' 的 future）
+        #   processing      — _do_process 在跑（应有 stage='process' 的 future）
+        # 任一状态在 DB 里但没有对应 in-flight future = 上一次 daemon 退出
+        # 时 future 被切了 / 进程崩溃 / OOM kill。回退到流水线前一阶段让
+        # watcher 下轮自动重新调度，否则永远卡死（如 issue: cold-start gate
+        # 持续触发但 pending count 不下降）。
+        for fname in get_trajs_by_status(wd_id, "meta_extracting", **kw):
+            if not any(
+                i["fname"] == fname and i["wd_id"] == wd_id and i["stage"] == "meta"
+                for i in self._futures.values()
+            ):
+                update_traj_status(wd_id, fname, "discovered", **kw)
+
         for fname in get_trajs_by_status(wd_id, "processing", **kw):
-            # 检查是否有 in-flight future
-            if not any(i["fname"] == fname and i["wd_id"] == wd_id for i in self._futures.values()):
+            if not any(
+                i["fname"] == fname and i["wd_id"] == wd_id and i["stage"] == "process"
+                for i in self._futures.values()
+            ):
                 update_traj_status(wd_id, fname, "indexed", **kw)
 
         # 重试 error

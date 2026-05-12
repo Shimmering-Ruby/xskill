@@ -160,6 +160,126 @@ class TestWatcherUxScore:
             mock_score.assert_not_called()
 
 
+class TestWatcherZombieCleanup:
+    """meta_extracting / processing 这两个 in-flight 中间态如果 daemon
+    重启后还留在 DB 里（上一次进程死时 future 被切），新 daemon 进程没有
+    对应 in-flight future，必须回退到流水线前一阶段重新调度，否则永远
+    卡死。"""
+
+    def test_meta_extracting_zombie_rollback_to_discovered(self, traj_dir, skill_dir, db_path):
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+        # 模拟"上一次 daemon 在跑这条 meta 但进程死了，DB 状态没回滚"
+        from xskill.registry import get_connection
+        conn = get_connection(db_path)
+        conn.execute(
+            "UPDATE trajectories SET status='meta_extracting' "
+            "WHERE watch_dir_id=? AND filename='traj_0001.md'",
+            (wid,),
+        )
+        conn.commit()
+        conn.close()
+
+        watcher = DirectoryWatcher(
+            llm=MagicMock(), embed_client=None, config={},
+            skill_dir=skill_dir, poll_interval=1, db_path=db_path,
+        )
+        # 新 watcher 进程 self._futures 是空的——僵尸触发
+        with patch("xskill.index._process_one_meta"):
+            watcher._scan_once()
+            _drain(watcher)
+
+        # 应回退到 discovered，下一轮 watcher 才会重新提交 meta 任务
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT status FROM trajectories WHERE watch_dir_id=? AND filename='traj_0001.md'",
+            (wid,),
+        ).fetchone()
+        conn.close()
+        # _scan_once 同一轮里清理完僵尸后又提交了新 meta 任务，状态可能是
+        # meta_extracting 或 meta_done 等更靠后状态——关键是它**前进**了，
+        # 不再卡死在原 meta_extracting。
+        assert row["status"] != "meta_extracting" or len(watcher._futures) > 0, (
+            f"meta_extracting zombie not rolled back; status={row['status']}, "
+            f"futures={len(watcher._futures)}"
+        )
+
+    def test_processing_zombie_rollback_to_indexed(self, traj_dir, skill_dir, db_path):
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+        from xskill.registry import get_connection
+        conn = get_connection(db_path)
+        conn.execute(
+            "UPDATE trajectories SET status='processing', has_meta=1, has_embedding=1 "
+            "WHERE watch_dir_id=? AND filename='traj_0001.md'",
+            (wid,),
+        )
+        conn.commit()
+        conn.close()
+
+        watcher = DirectoryWatcher(
+            llm=MagicMock(), embed_client=None, config={},
+            skill_dir=skill_dir, poll_interval=1, db_path=db_path,
+        )
+        with patch("xskill.process.process_traj", return_value={"action": "skip"}):
+            watcher._scan_once()
+            _drain(watcher)
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT status FROM trajectories WHERE watch_dir_id=? AND filename='traj_0001.md'",
+            (wid,),
+        ).fetchone()
+        conn.close()
+        # 跟上面同样：要么已经回到 indexed 并被重新提交（status=processing
+        # + future 在飞），要么已跑完 → action=skip → indexed
+        assert row["status"] != "processing" or len(watcher._futures) > 0
+
+    def test_does_not_touch_active_meta_extracting(self, traj_dir, skill_dir, db_path):
+        """有对应 in-flight future 的 meta_extracting **不能**被误清理。"""
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+
+        watcher = DirectoryWatcher(
+            llm=MagicMock(), embed_client=None, config={},
+            skill_dir=skill_dir, poll_interval=1, db_path=db_path,
+        )
+        # 注一个 in-flight future 进 _futures（模拟正在跑的 meta 任务）
+        from concurrent.futures import Future
+        fake_fut: Future = Future()
+        # 不 set_result —— 让它"未完成"，模拟正在跑
+        watcher._futures[fake_fut] = {
+            "wd_id": wid, "fname": "traj_0001.md", "stage": "meta",
+        }
+        # 手动设状态
+        from xskill.registry import get_connection
+        conn = get_connection(db_path)
+        conn.execute(
+            "UPDATE trajectories SET status='meta_extracting' "
+            "WHERE watch_dir_id=? AND filename='traj_0001.md'",
+            (wid,),
+        )
+        conn.commit()
+        conn.close()
+
+        # 跑 _scan_dir 的清理逻辑（不能 _scan_once 因为会去 harvest 这个永远不完成的 future）
+        watcher._scan_dir({"id": wid, "path": str(traj_dir), "auto_index": 1})
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT status FROM trajectories WHERE watch_dir_id=? AND filename='traj_0001.md'",
+            (wid,),
+        ).fetchone()
+        conn.close()
+        assert row["status"] == "meta_extracting", (
+            f"active meta_extracting (with in-flight future) should not be touched; "
+            f"got status={row['status']}"
+        )
+
+        # cleanup: future never completes naturally; release it for test teardown
+        fake_fut.set_result((traj_dir.name, False, "test teardown"))
+
+
 class TestWatcherColdStartGate:
     """冷启动场景：批量发现 N 条 traj 时 process_traj 必须等所有前序
     上完索引才启动，否则 agent 调 search_similar_trajs 看到不完整索引，
