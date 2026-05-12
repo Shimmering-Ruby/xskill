@@ -383,34 +383,81 @@ class DirectoryWatcher:
         self._stats["skills_edited"] += len(edited_skills)
         logger.info("%s → clustered (%d atoms, edited skills=%s)",
                     fname, len(results), edited_skills or "-")
+        # cluster 完成后该 traj 的所有 atom 都已落盘——这是 ux_score 应当
+        # 跑的时机（旧 _score_new 在 traj 发现时跑会看到空 atom 列表）。
+        self._score_atoms_for_traj(wd_id, fname, **kw)
 
     # ───────────────────────────────────────────────────────────
     # ux_score
     # ───────────────────────────────────────────────────────────
 
     def _score_new(self, wd_id, dir_path, filenames, **kw):
-        from xskill.ux_score import score_and_record
+        """v2: 不在发现新 traj 时打分（那时 atom 还没拆）。
+
+        实际打分在 ``_on_cluster_done`` → ``_score_atoms_for_traj`` 触发。
+        此方法保留 hook 兼容 ``_scan_dir`` 末尾的调用；只在 traj 没有
+        ``xskill:`` header 时早返回，避免无谓 IO。
+        """
+        return  # noop: 打分时机改到 cluster 完成后
+
+    def _score_atoms_for_traj(self, wd_id, fname, **kw):
+        """对一条已跑完 cluster 的 traj 扫所有 atom 打 ux_score。
+
+        前置：
+        - traj.md 顶部含 ``<!-- xskill:skill=X side=Y sha=Z -->`` header
+        - 该 traj 已拆出 atom（self.store.list_by_traj(traj_id) 非空）
+
+        每个 atom 独立调 ``score_atom`` + ``AtomCanary.append``。同一 atom
+        在同 (skill, side) 上幂等：``AtomCanary.append`` 自带去重。
+        每条 atom 打完调 ``check_and_decide`` 让 staging 该升的升 / 该弃的弃。
+        """
+        if self.llm is None or self.skill_dir is None or self.store is None:
+            return
+        from xskill.ux_score import score_atom
+        from xskill.atom_canary import AtomCanary
+        # 找到该 wd 的 dir_path
+        for wd in list_watch_dirs(**kw):
+            if wd["id"] == wd_id:
+                dir_path = Path(wd["path"])
+                break
+        else:
+            return
+        md_path = dir_path / fname
+        if not md_path.is_file():
+            return
+        md_text = md_path.read_text(encoding="utf-8")
+        header = parse_traj_header(md_text)
+        if not header or not header.get("skill") or not header.get("side"):
+            return
+        skill_name = header["skill"]
+        skill_sub = self.skill_dir / skill_name
+        if not skill_sub.is_dir():
+            return
+        traj_id = md_path.stem
+        atoms = self.store.list_by_traj(traj_id)
+        if not atoms:
+            return
+        ac = AtomCanary(skill_dir=skill_sub)
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
-        for fname in filenames:
-            md_path = dir_path / fname
-            if not md_path.is_file():
-                continue
-            md_text = md_path.read_text(encoding="utf-8")
-            header = parse_traj_header(md_text)
-            if not header or not header.get("skill") or not header.get("side"):
-                continue
-            skill_name = header["skill"]
-            skill_sub = self.skill_dir / skill_name
-            if not skill_sub.is_dir():
-                continue
+        for atom in atoms:
             try:
-                score_and_record(
-                    llm=self.llm, skill_dir=skill_sub, skill_name=skill_name,
-                    traj_id=fname.replace(".md", ""), traj_md=md_text,
-                    side=header["side"], commit_sha=header.get("sha", ""),
-                    canary_config=canary_cfg,
+                result = score_atom(
+                    llm=self.llm, atom=atom, side=header["side"],
                 )
-                mark_skill_used(wd_id, fname, skill_name, header["side"], **kw)
+                if result["score"] is None:
+                    continue
+                ac.append(
+                    atom_id=atom.atom_id, skill_name=skill_name,
+                    side=header["side"], commit_sha=header.get("sha", ""),
+                    score=result["score"], reasons=result["reasons"],
+                )
                 self._stats["scores"] += 1
             except Exception:
-                logger.exception("ux_score failed: %s", fname)
+                logger.exception("score_atom failed: %s/%s",
+                                 fname, atom.atom_id)
+        # 翻牌判定
+        try:
+            ac.check_and_decide(config=canary_cfg)
+        except Exception:
+            logger.exception("check_and_decide failed: %s", skill_name)
+        mark_skill_used(wd_id, fname, skill_name, header["side"], **kw)

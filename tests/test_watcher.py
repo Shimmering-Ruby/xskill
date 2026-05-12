@@ -87,59 +87,6 @@ class TestWatcherDiscovery:
         assert watcher.stats["new_trajs"] == 1
 
 
-class TestWatcherUxScore:
-    """Test header parsing → ux_score trigger."""
-
-    def test_triggers_score_for_traj_with_header(self, tmp_path, db_path):
-        traj_dir = tmp_path / "dataset"
-        traj_dir.mkdir()
-        skill_dir = tmp_path / "skill"
-        skill_dir.mkdir()
-        (skill_dir / "test_skill").mkdir()
-
-        # Write a traj with xskill header
-        (traj_dir / "traj_0001.md").write_text(
-            "<!-- xskill:skill=test_skill side=staging sha=abc123 -->\n# Traj\nagent did X"
-        )
-
-        register_dir(traj_dir, db_path=db_path)
-
-        mock_llm = MagicMock()
-
-        with patch("xskill.ux_score.score_and_record") as mock_score:
-            watcher = DirectoryWatcher(
-                llm=mock_llm, embed_client=None, config={},
-                skill_dir=skill_dir, poll_interval=1, db_path=db_path,
-            )
-            watcher._scan_once()
-            _drain(watcher)
-
-            mock_score.assert_called_once()
-            call_kw = mock_score.call_args[1]
-            assert call_kw["skill_name"] == "test_skill"
-            assert call_kw["side"] == "staging"
-            assert call_kw["commit_sha"] == "abc123"
-            assert call_kw["traj_id"] == "traj_0001"
-
-    def test_skips_traj_without_header(self, tmp_path, db_path):
-        traj_dir = tmp_path / "dataset"
-        traj_dir.mkdir()
-        skill_dir = tmp_path / "skill"
-        skill_dir.mkdir()
-
-        (traj_dir / "traj_0001.md").write_text("# No header\njust content")
-        register_dir(traj_dir, db_path=db_path)
-
-        with patch("xskill.ux_score.score_and_record") as mock_score:
-            watcher = DirectoryWatcher(
-                llm=MagicMock(), embed_client=None, config={},
-                skill_dir=skill_dir, poll_interval=1, db_path=db_path,
-            )
-            watcher._scan_once()
-            _drain(watcher)
-            mock_score.assert_not_called()
-
-
 class TestWatcherStartStop:
     """Test thread lifecycle."""
 

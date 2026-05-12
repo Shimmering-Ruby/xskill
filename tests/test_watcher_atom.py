@@ -154,6 +154,113 @@ class TestColdStartGate:
         assert watcher.stats["cold_start_deferrals"] >= 1
 
 
+class TestUxScoreAtomLevel:
+    """cluster 完成后该 traj 的所有 atom 应被逐个调 score_atom + AtomCanary.append。"""
+
+    def test_with_header_triggers_atom_scoring(self, tmp_path):
+        from unittest.mock import patch
+        db = tmp_path / "test.db"
+        wd = tmp_path / "wd"; wd.mkdir()
+        skill_dir = tmp_path / "skill"; skill_dir.mkdir()
+        # 准备 skill 目录（需要存在才会真打分）
+        (skill_dir / "test-skill").mkdir()
+        from xskill.git_lock import run_git
+        run_git(["init"], cwd=str(skill_dir / "test-skill"))
+        run_git(["checkout", "-b", "main"], cwd=str(skill_dir / "test-skill"))
+        run_git(["config", "user.email", "t@t"], cwd=str(skill_dir / "test-skill"))
+        run_git(["config", "user.name", "t"], cwd=str(skill_dir / "test-skill"))
+        (skill_dir / "test-skill" / "SKILL.md").write_text("v1", encoding="utf-8")
+        run_git(["add", "-A"], cwd=str(skill_dir / "test-skill"))
+        run_git(["commit", "-m", "init"], cwd=str(skill_dir / "test-skill"))
+
+        traj_text = (
+            "<!-- xskill:skill=test-skill side=staging sha=abc123 -->\n"
+            + "X" * 250
+        )
+        (wd / "traj_z.md").write_text(traj_text, encoding="utf-8")
+
+        register_dir(wd, db_path=db)
+        store = AtomTaskStore(root=wd)
+        watcher = DirectoryWatcher(
+            llm=_StubLLM([_SPLIT_XML]),
+            embed_client=_FakeEmbed(),
+            config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
+            skill_dir=skill_dir,
+            poll_interval=0.0,
+            max_concurrent=2,
+            db_path=db,
+            cold_start_threshold=999,
+            store=store,
+            agno_agent_factory=_StubAgno,
+        )
+        # mock score_atom 返回固定分数
+        with patch("xskill.watcher.score_atom",
+                   return_value={"score": 8, "reasons": "ok"}) if False else \
+             patch("xskill.ux_score.score_atom",
+                   return_value={"score": 8, "reasons": "ok"}) as mock_score:
+            # 多轮推进到 done
+            for _ in range(20):
+                watcher._scan_once()
+                for _ in range(30):
+                    if not watcher._futures:
+                        break
+                    time.sleep(0.05)
+                    watcher._harvest()
+                counts = get_status_counts(db_path=db)
+                if counts.get("done"):
+                    break
+            # _SPLIT_XML 有 2 个 atom → score_atom 调 2 次
+            assert mock_score.call_count == 2
+            # 验证传给 score_atom 的 side 来自 header
+            call_kw = mock_score.call_args[1]
+            assert call_kw["side"] == "staging"
+
+        # 落盘到 .ux_scores.jsonl，主键是 atom_id
+        import json
+        ux_file = skill_dir / "test-skill" / ".ux_scores.jsonl"
+        assert ux_file.is_file()
+        lines = ux_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+        for line in lines:
+            rec = json.loads(line)
+            assert rec["atom_id"].startswith("atom_traj_z_")
+            assert rec["side"] == "staging"
+            assert rec["commit_sha"] == "abc123"
+
+    def test_no_header_no_scoring(self, tmp_path):
+        from unittest.mock import patch
+        db = tmp_path / "test.db"
+        wd = tmp_path / "wd"; wd.mkdir()
+        skill_dir = tmp_path / "skill"; skill_dir.mkdir()
+        (wd / "traj_z.md").write_text("X" * 250, encoding="utf-8")  # no header
+
+        register_dir(wd, db_path=db)
+        store = AtomTaskStore(root=wd)
+        watcher = DirectoryWatcher(
+            llm=_StubLLM([_SPLIT_XML]),
+            embed_client=_FakeEmbed(),
+            config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
+            skill_dir=skill_dir,
+            poll_interval=0.0,
+            max_concurrent=2,
+            db_path=db,
+            cold_start_threshold=999,
+            store=store,
+            agno_agent_factory=_StubAgno,
+        )
+        with patch("xskill.ux_score.score_atom") as mock_score:
+            for _ in range(20):
+                watcher._scan_once()
+                for _ in range(30):
+                    if not watcher._futures:
+                        break
+                    time.sleep(0.05)
+                    watcher._harvest()
+                if get_status_counts(db_path=db).get("done"):
+                    break
+            mock_score.assert_not_called()
+
+
 class TestPipelineRun:
     def test_scan_then_harvest_full_chain(self, tmp_path):
         db = tmp_path / "test.db"
