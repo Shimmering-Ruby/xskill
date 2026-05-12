@@ -58,3 +58,8 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# 本地杂物（个人脚本 / 工作笔记，不入仓）
+/CLAUDE.md
+/claude.sh
+/docs/research/
