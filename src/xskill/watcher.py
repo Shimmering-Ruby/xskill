@@ -243,8 +243,8 @@ class DirectoryWatcher:
             logger.info("[%s] discovered %d new", dir_path.name, len(new))
 
         # ── 提交 split 任务（discovered → splitting）──
-        # 需要 store + llm；缺任一这条 traj 留在 discovered 等条件齐备
-        if self.store is not None and self.llm is not None:
+        # 需要 llm；缺则 traj 留在 discovered 等条件齐备
+        if self.llm is not None:
             for fname in get_trajs_by_status(
                 wd_id, "discovered", limit=self.max_concurrent * 2, **kw,
             ):
@@ -255,16 +255,17 @@ class DirectoryWatcher:
                 self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "split"}
 
         # ── 提交 embed 任务（split_done → indexed，整批一个任务） ──
-        if self.embed_client is not None and self.store is not None:
+        if self.embed_client is not None:
             split_done_files = get_trajs_by_status(wd_id, "split_done", **kw)
             if split_done_files and not any(
                 i["stage"] == "embed" and i["wd_id"] == wd_id for i in self._futures.values()
             ):
-                fut = self._pool.submit(self._do_atom_index, wd_id, split_done_files)
+                fut = self._pool.submit(self._do_atom_index, dir_path, wd_id,
+                                         split_done_files)
                 self._futures[fut] = {"wd_id": wd_id, "fname": "_batch_embed", "stage": "embed"}
 
         # ── Cold-start 门控 + cluster（indexed → clustering）──
-        if self.skill_dir and self.store is not None and self.agno_agent_factory is not None:
+        if self.skill_dir:
             pending_index = (
                 len(get_trajs_by_status(wd_id, "discovered", **kw))
                 + len(get_trajs_by_status(wd_id, "splitting", **kw))
@@ -295,28 +296,59 @@ class DirectoryWatcher:
         return len(self._futures) >= self.max_concurrent * 3
 
     # ───────────────────────────────────────────────────────────
+    # Helpers: store / agno factory 按需获取
+    # ───────────────────────────────────────────────────────────
+
+    def _store_for(self, dir_path):
+        """返回该 dir 对应的 AtomTaskStore。
+
+        测试时显式 inject self.store；生产 watcher 监控多个 dir（registry
+        里每个 wd 一份），每个 dir 一个独立 store——按 dir_path 缓存创建。
+        """
+        from xskill.atom_task import AtomTaskStore
+        if self.store is not None and Path(self.store.root) == Path(dir_path):
+            return self.store
+        if not hasattr(self, "_store_cache"):
+            self._store_cache = {}
+        key = str(Path(dir_path).resolve())
+        if key not in self._store_cache:
+            self._store_cache[key] = AtomTaskStore(root=Path(dir_path))
+        return self._store_cache[key]
+
+    def _factory(self):
+        """返回 agno agent 工厂；优先 inject 的，否则用默认 deepseek 工厂。"""
+        if self.agno_agent_factory is not None:
+            return self.agno_agent_factory
+        from xskill.agno_factory import make_default_factory
+        if not hasattr(self, "_default_factory_cache"):
+            self._default_factory_cache = make_default_factory(self.config)
+        return self._default_factory_cache
+
+    # ───────────────────────────────────────────────────────────
     # 任务执行函数（在线程池中运行）
     # ───────────────────────────────────────────────────────────
 
     # v2 流水线任务：split / atom_index / cluster
 
     def _do_split(self, dir_path, fname):
-        """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id)。"""
+        """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id, err)。"""
         from xskill.task_agent import TaskAgent
         md_path = dir_path / fname
         if not md_path.is_file():
             return (fname, 0, 0, None, "file not found")
         traj_id = md_path.stem
-        atoms = TaskAgent(llm=self.llm, store=self.store).run(
+        store = self._store_for(dir_path)
+        atoms = TaskAgent(llm=self.llm, store=store).run(
             traj_id=traj_id, traj_path=md_path,
         )
-        last_off = self.store.last_offset(traj_id)
-        last_id = self.store.last_atom_id(traj_id)
+        last_off = store.last_offset(traj_id)
+        last_id = store.last_atom_id(traj_id)
         return (fname, len(atoms), last_off, last_id, None)
 
-    def _do_atom_index(self, wd_id, filenames):
+    def _do_atom_index(self, dir_path, wd_id, filenames):
         """整批重建 AtomTask 向量索引。返回 (wd_id, filenames)。"""
-        self.store.rebuild_vector_index(self.embed_client)
+        store = self._store_for(dir_path)
+        store.rebuild_vector_index(self.embed_client)
         return (wd_id, filenames)
 
     def _do_cluster(self, dir_path, fname):
@@ -326,16 +358,18 @@ class DirectoryWatcher:
         """
         from xskill.process import process_atom_task
         traj_id = (dir_path / fname).stem
-        atoms = self.store.list_by_traj(traj_id)
+        store = self._store_for(dir_path)
+        factory = self._factory()
+        atoms = store.list_by_traj(traj_id)
         results = []
         for atom in atoms:
             res = process_atom_task(
                 atom_id=atom.atom_id,
                 config=self.config,
                 skill_dir=self.skill_dir,
-                store=self.store,
+                store=store,
                 embed_client=self.embed_client,
-                agno_agent_factory=self.agno_agent_factory,
+                agno_agent_factory=factory,
             )
             results.append(res)
         return (fname, results)
@@ -405,13 +439,14 @@ class DirectoryWatcher:
 
         前置：
         - traj.md 顶部含 ``<!-- xskill:skill=X side=Y sha=Z -->`` header
-        - 该 traj 已拆出 atom（self.store.list_by_traj(traj_id) 非空）
+        - 该 traj 已拆出 atom
 
         每个 atom 独立调 ``score_atom`` + ``AtomCanary.append``。同一 atom
         在同 (skill, side) 上幂等：``AtomCanary.append`` 自带去重。
-        每条 atom 打完调 ``check_and_decide`` 让 staging 该升的升 / 该弃的弃。
+        所有 atom 处理完调一次 ``check_and_decide`` 让 staging 该升的升 /
+        该弃的弃。
         """
-        if self.llm is None or self.skill_dir is None or self.store is None:
+        if self.llm is None or self.skill_dir is None:
             return
         from xskill.ux_score import score_atom
         from xskill.atom_canary import AtomCanary
@@ -434,7 +469,8 @@ class DirectoryWatcher:
         if not skill_sub.is_dir():
             return
         traj_id = md_path.stem
-        atoms = self.store.list_by_traj(traj_id)
+        store = self._store_for(dir_path)
+        atoms = store.list_by_traj(traj_id)
         if not atoms:
             return
         ac = AtomCanary(skill_dir=skill_sub)

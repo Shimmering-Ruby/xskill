@@ -138,16 +138,21 @@ sse_router = APIRouter(prefix="/api/v1")
 
 @sse_router.post("/trajectories/index")
 async def api_index(req: IndexRequest):
+    """v2: 对一个目录跑 TaskAgent 拆 AtomTask + 整批重建向量索引。
+
+    旧 v1 走 index_dataset（meta + index）已删除。新流水线下"索引"=
+    AtomTask 索引；不再有独立的"meta 提取"阶段。
+    """
     queue: asyncio.Queue = asyncio.Queue()
 
     def run():
         try:
-            from xskill.index import index_dataset
+            from xskill.atom_task import AtomTaskStore
+            from xskill.task_agent import TaskAgent
 
             config = load_config()
             log_fn = make_sse_log(queue)
 
-            # Resolve dataset directory
             base_traj_dir = get_traj_dir()
             if req.path:
                 dataset_dir = Path(req.path)
@@ -160,49 +165,42 @@ async def api_index(req: IndexRequest):
                 _fail(queue, f"directory not found: {dataset_dir}")
                 return
 
-            # Create clients
             llm = None if req.no_llm else create_llm_client(config)
             embed_client = create_embed_client(config)
+            store = AtomTaskStore(root=dataset_dir)
 
-            _push(queue, "progress", {
-                "step": "start",
-                "current": 0,
-                "total": 0,
-                "detail": f"indexing {dataset_dir.name}, concurrency={req.concurrency}",
-            })
-
-            # Count trajectories for progress reporting
             md_files = sorted(dataset_dir.glob("traj_*.md"))
             md_files = [f for f in md_files if not f.name.endswith(".meta")]
             total = len(md_files)
             _push(queue, "progress", {
-                "step": "meta提取",
+                "step": "拆分 AtomTask",
                 "current": 0,
                 "total": total,
+                "detail": f"{dataset_dir.name}, concurrency={req.concurrency}",
             })
 
-            # Run the actual index — this is the heavy part.
-            # index_dataset uses tqdm internally; we wrap with log_fn for
-            # coarse-grained progress.  Fine-grained tqdm interception is
-            # left to a future enhancement.
-            index_dataset(
-                dataset_dir=dataset_dir,
-                llm=llm,
-                embed_client=embed_client,
-                concurrency=req.concurrency,
-            )
+            if llm is None:
+                _fail(queue, "AtomTask 拆分需要 LLM；不要传 no_llm=true")
+                return
 
-            _push(queue, "progress", {
-                "step": "meta提取",
-                "current": total,
-                "total": total,
-            })
+            agent = TaskAgent(llm=llm, store=store)
+            for idx, md in enumerate(md_files, 1):
+                try:
+                    atoms = agent.run(traj_id=md.stem, traj_path=md)
+                    log_fn(f"[{idx}/{total}] {md.name} -> {len(atoms)} atoms", "step")
+                except Exception as e:
+                    log_fn(f"[{idx}/{total}] {md.name} 拆分失败: {e}", "error")
+                _push(queue, "progress", {
+                    "step": "拆分 AtomTask",
+                    "current": idx,
+                    "total": total,
+                })
 
-            _finish(queue, {
-                "status": "done",
-                "dataset": str(dataset_dir),
-                "trajectories": total,
-            })
+            _push(queue, "progress", {"step": "重建向量索引", "current": 0, "total": 1})
+            store.rebuild_vector_index(embed_client)
+            _push(queue, "progress", {"step": "重建向量索引", "current": 1, "total": 1})
+
+            return _early_finish_index(queue, dataset_dir, total)
         except Exception as exc:
             logger.error("index task failed: %s", exc, exc_info=True)
             _fail(queue, f"{type(exc).__name__}: {exc}")
@@ -213,56 +211,98 @@ async def api_index(req: IndexRequest):
     return EventSourceResponse(_event_generator(queue))
 
 
+def _early_finish_index(queue, dataset_dir, total):
+    _finish(queue, {
+        "status": "done",
+        "dataset": str(dataset_dir),
+        "trajectories": total,
+    })
+
+
 # ===================================================================
 # POST /api/v1/skills/process
 # ===================================================================
 
 @sse_router.post("/skills/process")
 async def api_process(req: ProcessRequest):
+    """v2: 单条 traj 的同步流水线 = 拆 atom + 重建索引 + 对每个 atom 跑 cluster + edit。
+
+    旧 v1 的 process_traj（整篇喂 LLM → SkillAgent → eval）已删除。
+    返回字段：
+      {status, traj, n_atoms, edited_skills, atom_results}
+    """
     queue: asyncio.Queue = asyncio.Queue()
 
     def run():
         try:
-            from xskill.process import process_traj
+            from xskill.atom_task import AtomTaskStore
+            from xskill.task_agent import TaskAgent
+            from xskill.process import process_atom_task
+            from xskill.agno_factory import make_default_factory
             from xskill.git_lock import ensure_repo
 
             config = load_config()
             log_fn = make_sse_log(queue)
             skill_dir = get_skill_dir()
+            traj_path = Path(req.traj_path)
+            if not traj_path.is_file():
+                _fail(queue, f"traj file not found: {traj_path}")
+                return
 
             _push(queue, "progress", {
-                "step": "init",
-                "current": 0,
-                "total": 1,
-                "detail": f"processing {Path(req.traj_path).name}",
+                "step": "init", "current": 0, "total": 1,
+                "detail": f"processing {traj_path.name}",
             })
 
             ensure_repo(str(skill_dir))
+            llm = create_llm_client(config, role="skill")
+            embed = create_embed_client(config)
+            store = AtomTaskStore(root=traj_path.parent)
 
-            # process_traj creates its own StreamLog internally.
-            # We monkey-patch nothing — instead we capture the result.
-            # For richer streaming the caller can parse the result dict.
-            result = process_traj(
-                traj_md_path=req.traj_path,
-                config=config,
-                dry_run=req.dry_run,
-                skill_dir=skill_dir,
-                log_fn=log_fn,
+            _push(queue, "progress", {"step": "拆分 AtomTask", "current": 0, "total": 1})
+            atoms = TaskAgent(llm=llm, store=store).run(
+                traj_id=traj_path.stem, traj_path=traj_path,
             )
+            log_fn(f"拆出 {len(atoms)} 个 atom", "step")
+            _push(queue, "progress", {"step": "拆分 AtomTask", "current": 1, "total": 1})
 
-            _push(queue, "log", {
-                "tag": "decision",
-                "msg": f"action={result.get('action', '?')}",
+            store.rebuild_vector_index(embed)
+            log_fn("AtomTask 向量索引已重建", "step")
+
+            if req.dry_run:
+                _finish(queue, {"status": "dry_run", "traj": traj_path.name,
+                                "n_atoms": len(atoms)})
+                return
+
+            factory = make_default_factory(config)
+            atom_results = []
+            edited_total: set[str] = set()
+            for i, atom in enumerate(store.list_by_traj(traj_path.stem), 1):
+                _push(queue, "progress", {
+                    "step": "cluster + edit",
+                    "current": i, "total": len(atoms) or 1,
+                    "detail": atom.atom_id,
+                })
+                res = process_atom_task(
+                    atom_id=atom.atom_id,
+                    config=config,
+                    skill_dir=skill_dir,
+                    store=store,
+                    embed_client=embed,
+                    agno_agent_factory=factory,
+                )
+                atom_results.append(res)
+                for s in res.get("edited_skills") or []:
+                    edited_total.add(s)
+                log_fn(f"  {atom.atom_id} -> edited={res.get('edited_skills') or '-'}",
+                       "decision")
+
+            _finish(queue, {
+                "status": "done", "traj": traj_path.name,
+                "n_atoms": len(atoms),
+                "edited_skills": sorted(edited_total),
+                "atom_results": atom_results,
             })
-
-            if result.get("eval"):
-                for skill_name, er in result["eval"].items():
-                    _push(queue, "log", {
-                        "tag": "eval",
-                        "msg": f"{skill_name}: score={er.get('eval_score', 0)}",
-                    })
-
-            _finish(queue, result)
         except Exception as exc:
             logger.error("process task failed: %s", exc, exc_info=True)
             _fail(queue, f"{type(exc).__name__}: {exc}")
@@ -283,7 +323,10 @@ async def api_batch(req: BatchRequest):
 
     def run():
         try:
-            from xskill.process import process_traj
+            from xskill.atom_task import AtomTaskStore
+            from xskill.task_agent import TaskAgent
+            from xskill.process import process_atom_task
+            from xskill.agno_factory import make_default_factory
             from xskill.git_lock import ensure_repo
 
             config = load_config()
@@ -291,7 +334,6 @@ async def api_batch(req: BatchRequest):
             skill_dir = get_skill_dir()
             base_traj_dir = get_traj_dir()
 
-            # Resolve directory
             if req.path:
                 dataset_dir = Path(req.path)
             elif req.dataset:
@@ -307,75 +349,70 @@ async def api_batch(req: BatchRequest):
             md_files = [f for f in md_files if not f.name.endswith(".meta")]
             if req.max and req.max > 0:
                 md_files = md_files[: req.max]
-
             total = len(md_files)
             if total == 0:
-                _finish(queue, {"status": "done", "processed": 0, "detail": "no trajectories found"})
+                _finish(queue, {"status": "done", "processed": 0,
+                                "detail": "no trajectories found"})
                 return
 
-            _push(queue, "progress", {
-                "step": "batch",
-                "current": 0,
-                "total": total,
-            })
-
+            _push(queue, "progress", {"step": "batch", "current": 0, "total": total})
             ensure_repo(str(skill_dir))
+            llm = create_llm_client(config, role="skill")
+            embed = create_embed_client(config)
+            store = AtomTaskStore(root=dataset_dir)
 
-            summary = {
-                "merged": 0,
-                "rejected": 0,
-                "skipped": 0,
-                "errors": 0,
-                "details": [],
-            }
-
-            for idx, md_file in enumerate(md_files, 1):
-                _push(queue, "progress", {
-                    "step": "batch",
-                    "current": idx,
-                    "total": total,
-                    "detail": md_file.name,
-                })
-
+            # Phase 1: 整批拆 atom + 重建索引
+            for idx, md in enumerate(md_files, 1):
                 try:
-                    result = process_traj(
-                        traj_md_path=str(md_file),
-                        config=config,
-                        dry_run=req.dry_run,
-                        skill_dir=skill_dir,
+                    atoms = TaskAgent(llm=llm, store=store).run(
+                        traj_id=md.stem, traj_path=md,
                     )
-                    action = result.get("action", "unknown")
-                    if action == "merged":
-                        summary["merged"] += 1
-                    elif action == "rejected":
-                        summary["rejected"] += 1
-                    elif action in ("skip", "updated_abstract", "dry_run"):
-                        summary["skipped"] += 1
-                    else:
-                        summary["errors"] += 1
+                    log_fn(f"[{idx}/{total}] split: {md.name} -> {len(atoms)} atoms",
+                           "step")
+                except Exception as e:
+                    log_fn(f"[{idx}/{total}] split failed: {md.name}: {e}", "error")
+            store.rebuild_vector_index(embed)
+            log_fn("AtomTask 向量索引已重建", "step")
 
+            if req.dry_run:
+                _finish(queue, {"status": "dry_run",
+                                "trajectories": total,
+                                "atoms": sum(1 for _ in store.all_atoms())})
+                return
+
+            # Phase 2: 对每个 atom 跑 cluster + edit
+            factory = make_default_factory(config)
+            summary = {"clustered_atoms": 0, "edited_skills": set(), "errors": 0,
+                       "details": []}
+            atoms_all = list(store.all_atoms())
+            for j, atom in enumerate(atoms_all, 1):
+                _push(queue, "progress", {
+                    "step": "cluster", "current": j,
+                    "total": len(atoms_all), "detail": atom.atom_id,
+                })
+                try:
+                    res = process_atom_task(
+                        atom_id=atom.atom_id, config=config,
+                        skill_dir=skill_dir, store=store,
+                        embed_client=embed, agno_agent_factory=factory,
+                    )
+                    summary["clustered_atoms"] += 1
+                    for s in res.get("edited_skills") or []:
+                        summary["edited_skills"].add(s)
                     summary["details"].append({
-                        "traj": md_file.name,
-                        "action": action,
-                    })
-
-                    _push(queue, "log", {
-                        "tag": "batch",
-                        "msg": f"[{idx}/{total}] {md_file.name} -> {action}",
+                        "atom_id": atom.atom_id,
+                        "edited_skills": res.get("edited_skills") or [],
                     })
                 except Exception as e:
                     summary["errors"] += 1
                     summary["details"].append({
-                        "traj": md_file.name,
-                        "action": "error",
-                        "error": str(e),
+                        "atom_id": atom.atom_id, "error": str(e),
                     })
-                    _push(queue, "log", {
-                        "tag": "error",
-                        "msg": f"[{idx}/{total}] {md_file.name} failed: {e}",
-                    })
+                    log_fn(f"  cluster failed: {atom.atom_id}: {e}", "error")
 
-            _finish(queue, {"status": "done", **summary})
+            summary["edited_skills"] = sorted(summary["edited_skills"])
+            _finish(queue, {"status": "done", **summary,
+                            "trajectories": total})
         except Exception as exc:
             logger.error("batch task failed: %s", exc, exc_info=True)
             _fail(queue, f"{type(exc).__name__}: {exc}")

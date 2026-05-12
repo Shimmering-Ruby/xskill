@@ -1,6 +1,6 @@
-"""tests/test_search_all.py -- cross-dataset search via search_all()"""
+"""tests/test_search_all.py -- cross-dataset AtomTask 检索（v2）"""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -8,97 +8,69 @@ import pytest
 from xskill.search import search_all
 
 
-@pytest.fixture()
-def db_path(tmp_path):
-    return tmp_path / "test_registry.db"
-
-
-def _make_search_result(traj_id: str, similarity: float, dataset_dir: str = ""):
+def _hit(atom_id: str, vec_sim: float, dataset_dir: str = ""):
     return {
-        "traj_id": traj_id,
-        "similarity": similarity,
-        "meta": {"intent": f"intent for {traj_id}", "success": True, "tags": ["test"]},
-        "md_path": f"{dataset_dir}/{traj_id}.md",
-        "traj_json": {},
+        "atom_id": atom_id,
+        "sources": ["vector"],
+        "vector_similarity": vec_sim,
+        "traj_id": atom_id.replace("atom_", "traj_").split("_")[0],
+        "intent": f"intent for {atom_id}",
+        "summary": f"summary {atom_id}",
+        "md_path": f"{dataset_dir}/traj_x.md",
     }
 
 
 class TestSearchAll:
-    def test_merges_and_sorts_across_datasets(self, tmp_path, db_path):
+    def test_merges_and_sorts_across_datasets(self, tmp_path):
         from xskill.registry import register_dir
-
-        d1 = tmp_path / "ds1"
-        d1.mkdir()
-        (d1 / "index.pkl").write_bytes(b"fake")
-
-        d2 = tmp_path / "ds2"
-        d2.mkdir()
-        (d2 / "index.pkl").write_bytes(b"fake")
-
+        db_path = tmp_path / "test_registry.db"
+        d1 = tmp_path / "ds1"; d1.mkdir(); (d1 / "index.pkl").write_bytes(b"fake")
+        d2 = tmp_path / "ds2"; d2.mkdir(); (d2 / "index.pkl").write_bytes(b"fake")
         register_dir(d1, db_path=db_path)
         register_dir(d2, db_path=db_path)
 
-        # Mock search() to return different results per directory
         def fake_search(dataset_dir, query_text, top_k=5, min_similarity=0.0,
                         success_filter="all", config=None):
             if dataset_dir == d1.resolve():
-                return [
-                    _make_search_result("traj_A", 0.9, str(d1)),
-                    _make_search_result("traj_B", 0.5, str(d1)),
-                ]
-            elif dataset_dir == d2.resolve():
-                return [
-                    _make_search_result("traj_C", 0.8, str(d2)),
-                    _make_search_result("traj_D", 0.3, str(d2)),
-                ]
+                return [_hit("atom_A", 0.9, str(d1)),
+                        _hit("atom_B", 0.5, str(d1))]
+            if dataset_dir == d2.resolve():
+                return [_hit("atom_C", 0.8, str(d2)),
+                        _hit("atom_D", 0.3, str(d2))]
             return []
 
-        # ``xskill.registry.get_registry_dir`` 旧 API 已迁到 xskill.config，
-        # 而且 search_all 根本不调用它 — 当年那行 patch 就是历史残留。
-        # search_all 实际只依赖 all_index_paths + xskill.search.search。
         with patch("xskill.search.search", side_effect=fake_search), \
              patch("xskill.registry.all_index_paths",
                    return_value=[d1.resolve(), d2.resolve()]):
             results = search_all("test query", top_k=3)
 
         assert len(results) == 3
-        assert results[0]["traj_id"] == "traj_A"
-        assert results[0]["similarity"] == 0.9
-        assert results[1]["traj_id"] == "traj_C"
-        assert results[1]["similarity"] == 0.8
-        assert results[2]["traj_id"] == "traj_B"
-        # traj_D (0.3) is cut off by top_k=3
+        # 按 vector_similarity 倒序
+        assert results[0]["atom_id"] == "atom_A"
+        assert results[0]["vector_similarity"] == 0.9
+        assert results[1]["atom_id"] == "atom_C"
+        assert results[2]["atom_id"] == "atom_B"
 
-    def test_returns_empty_when_no_dirs(self, db_path):
+    def test_returns_empty_when_no_dirs(self):
         with patch("xskill.registry.all_index_paths", return_value=[]):
-            results = search_all("test query")
-        assert results == []
+            assert search_all("test query") == []
 
-    def test_skips_dirs_with_missing_index(self, tmp_path, db_path):
-        d1 = tmp_path / "ds1"
-        d1.mkdir()
-        # no index.pkl
-
+    def test_skips_dirs_with_missing_index(self, tmp_path):
+        d1 = tmp_path / "ds1"; d1.mkdir()
         with patch("xskill.registry.all_index_paths", return_value=[d1]), \
              patch("xskill.search.search", side_effect=FileNotFoundError("no index")):
             results = search_all("test query")
         assert results == []
 
-    def test_adds_dataset_dir_field(self, tmp_path, db_path):
-        d1 = tmp_path / "ds1"
-        d1.mkdir()
+    def test_adds_dataset_dir_field(self, tmp_path):
+        d1 = tmp_path / "ds1"; d1.mkdir()
 
-        def fake_search(**kwargs):
-            return [_make_search_result("traj_X", 0.7)]
-
-        # Use keyword form to match the actual call
-        def fake_search_positional(dataset_dir, query_text, top_k=5,
-                                    min_similarity=0.0, success_filter="all", config=None):
-            return [_make_search_result("traj_X", 0.7)]
+        def fake_search(dataset_dir, query_text, top_k=5, min_similarity=0.0,
+                        success_filter="all", config=None):
+            return [_hit("atom_X", 0.7)]
 
         with patch("xskill.registry.all_index_paths", return_value=[d1]), \
-             patch("xskill.search.search", side_effect=fake_search_positional):
+             patch("xskill.search.search", side_effect=fake_search):
             results = search_all("test query")
-
         assert len(results) == 1
         assert results[0]["dataset_dir"] == str(d1)

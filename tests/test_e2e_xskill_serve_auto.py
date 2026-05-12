@@ -1,25 +1,26 @@
-"""tests/test_e2e_xskill_serve_auto.py — 真正的 E2E (含灰度全链路)
+"""tests/test_e2e_xskill_serve_auto.py — 真正的 E2E (AtomTask 流水线 + 灰度全链路)
 
-跟 tests/test_integration_claude_code_pipeline.py 的区别：那是集成测试，5
-个 stage 间用 ``from xskill.ecosystems import ...`` 手调拼接。本文件是从
-用户视角出发的 E2E，只用 subprocess + HTTP，**0 行 ``import xskill.*``**。
+从用户视角出发的 E2E，只用 subprocess + HTTP + fake LLM 服务器，**0 行
+``import xskill.*``**。
 
 验证两件事：
 
 1. **自动 detect + bridge + index**：``xskill serve`` 起来后扫到
    ``~/.claude/projects/``，自动 register ``~/.xskill/cc_sessions/``，
-   ``claude -p`` 写的 JSONL 被 daemon 桥成 traj_*.md → watcher 入索引。
-   ``GET /api/v1/registry/dirs`` 和 ``xskill registry list`` 反映状态。
+   ``claude -p`` 写的 JSONL 被 daemon 桥成 traj_*.md → watcher 拆 AtomTask
+   入索引。``GET /api/v1/registry/dirs`` 和 ``xskill registry list`` 反映
+   状态。
 
 2. **灰度翻牌全链路**（这是大头）：bootstrap 一个 skill X 含 main v1 +
    staging v2 → 起 daemon → 跑 16+ 次 claude -p → 每次 ingester 见到新
    session 就翻牌（main ↔ staging 交替装到 ~/.claude/skills/） → 每条
-   traj 被打上 side header → watcher 跑 LLM ux 评分员 →
-   ``check_and_decide`` 判 staging 胜出 → 自动 promote 替换 main →
-   下次 claude -p 启动时 system prompt 看到 v2 内容。
+   traj 被打上 side header → watcher 跑 TaskAgent 拆 atom → cluster
+   (noop) → ux 打分员对每个 atom 评分 → AtomCanary.append (主键=atom_id)
+   → check_and_decide 判 staging 胜出 → 自动 promote 替换 main → 下次
+   claude -p 启动时 system prompt 看到 v2 内容。
 
 mock 数据按功能块整理在文件顶部：SKILL_V1_BODY / SKILL_V2_BODY /
-SESSION_PROMPTS / FAKE_LLM_SCORE_PROFILE / EXPECTED_META_XML 等。
+SESSION_PROMPTS / FAKE_LLM_SCORE_PROFILE / FAKE_ATOM_SPLIT_XML 等。
 """
 from __future__ import annotations
 
@@ -181,27 +182,27 @@ FAKE_LLM_SCORE_PROFILE = {
 }
 
 
-# ── D. meta 抽取假数据 ─────────────────────────────────────────────
-# index.extract_meta_llm 期望 XML 形态 (<intent>/<summary>/<tags>/<success>)。
-# 内容不重要——validate_meta 只看长度/非空。一份模板让所有 traj 共享。
-FAKE_META_XML = """<intent>列出当前目录下的 .py 文件</intent>
-<summary>
-1. 用户请求列 Python 文件。
-2. Agent 调 Bash 跑 ls *.py，输出 main.py / utils.py。
-3. 产出：可复用的快捷查询。
-4. 验证：用户确认输出无误。
-</summary>
-<blockers><blocker>[无] 执行顺畅</blocker></blockers>
-<shortest_path>1. 在工作目录跑 ls *.py</shortest_path>
-<success>true</success>
-<tags><tag>file_ops</tag><tag>bash</tag><tag>listing</tag></tags>
-"""
+# ── D. AtomTask 拆分假数据 ────────────────────────────────────────
+# TaskAgent SYSTEM_PROMPT 期望 ``<atoms><atom>...</atom></atoms>`` schema。
+# 单 atom 简单覆盖 offset [50..400]，对 bridged CC traj（通常 ≥500 字符）
+# 都不越界。validate 只看 offset 单调 + 区间正；语义内容不重要。
+FAKE_ATOM_SPLIT_XML = """<atoms>
+<atom>
+  <offset_start>50</offset_start>
+  <offset_end>400</offset_end>
+  <intent>列出当前目录下的 .py 文件</intent>
+  <summary>用户请求列 Python 文件；agent 调 Bash 跑 ls *.py 输出文件列表。</summary>
+  <tags><tag>file_ops</tag><tag>bash</tag></tags>
+  <used_skills><skill>list-py-files</skill></used_skills>
+  <ux_score>7</ux_score>
+</atom>
+</atoms>"""
 
-# ── E. Skill-curation agent 应答 ───────────────────────────────────
-# watcher 入索引后跑 process_traj → run_agent；fake LLM 看到 "Skill 整理
-# Agent" system prompt 就回 "insufficient-signal"，让 agent 啥也不写，
-# action=skip——测试只关心灰度链路不关心新 skill 蒸馏。
-FAKE_AGENT_RESPONSE = "insufficient-signal"
+# ── E. cluster agent 应答：不调任何工具（empty text reply） ───────
+# v2 下 TaskClusterAgent 调时 fake 回纯文本，不返工具调用 → agent 不调
+# add_task_to_skill → 不进 candidates → 不触发 SkillEdit。E2E 只关心
+# 灰度链路（ux_score + canary 翻牌），不关心新 skill 蒸馏。
+FAKE_CLUSTER_RESPONSE = "本次 atom 信号不足以新建或更新 skill，跳过。"
 
 
 # ── F. canary 行为期望 ─────────────────────────────────────────────
@@ -382,9 +383,11 @@ def _program_fake_server(fake: FakeLLMServer) -> None:
       - "没用 skill"的 session（普通问题）→ 直接 text reply，CC 写 JSONL
         但**没有** tool_use=Skill 事件，ingester 跳过翻牌。
       - 预处理请求（tools=[]）→ default text。
-    OpenAI /chat/completions 端：ux_score 区分 main/staging 给档分；meta
-    extract；agent 返回 insufficient-signal。
-    Embeddings：默认 8-dim 向量足够。
+    OpenAI /chat/completions 端：
+      - ux_score 区分 main/staging 给档分（驱动 staging 胜出）
+      - TaskAgent atom 拆分（返回 FAKE_ATOM_SPLIT_XML）
+      - TaskClusterAgent 返回纯文本不调工具（noop）
+    Embeddings：默认 8-dim 向量足够（不写 responder fake server 自带）。
     """
     fake.reset()
 
@@ -424,16 +427,22 @@ def _program_fake_server(fake: FakeLLMServer) -> None:
         ),
     ))
 
-    # ── OpenAI：ux 评分员 ───────────────────────────────────────
-    # 区分点：system prompt 里有 "用户体验评审员"。从 user content
-    # 里抓 "来自 (main|staging) 分支" 决定给哪档分。
+    # ── OpenAI：ux 评分员（atom 粒度）─────────────────────────
+    # v2 SYSTEM_PROMPT_ATOM 标志："你是用户体验评审员" + 严格分档表。
+    # 区分主请求 user content 里的 "side=main" / "side=staging" 给档分。
     def _ux_match(body: dict) -> bool:
-        return "用户体验评审员" in _msg_system_text(body)
+        sys_t = _msg_system_text(body)
+        return "用户体验评审员" in sys_t and "严格分档表" in sys_t
 
     def _ux_build(body: dict) -> dict:
         user_text = _msg_user_text(body)
-        m = _UX_SIDE_RE.search(user_text)
-        side = m.group(1) if m else "main"
+        if "side=staging" in user_text:
+            side = "staging"
+        elif "side=main" in user_text:
+            side = "main"
+        else:
+            m = _UX_SIDE_RE.search(user_text)
+            side = m.group(1) if m else "main"
         profile = FAKE_LLM_SCORE_PROFILE.get(side, FAKE_LLM_SCORE_PROFILE["main"])
         payload = json.dumps(profile, ensure_ascii=False)
         return make_openai_chat_response(payload, model=body.get("model", "fake"))
@@ -442,28 +451,33 @@ def _program_fake_server(fake: FakeLLMServer) -> None:
         name="ux-score", match=_ux_match, build=_ux_build,
     ))
 
-    # ── OpenAI：meta extraction ────────────────────────────────
-    # extract prompt 不带 system，全在 user content。区分点：含
-    # "<intent>" 与 "<summary>" tag 描述（XML schema 教模型怎么填）。
+    # ── OpenAI：TaskAgent atom 拆分 ─────────────────────────────
+    # SYSTEM_PROMPT 标志："你是 AtomTask 拆分员"。返回 <atoms> XML。
     fake.add_responder("/chat/completions", Responder(
-        name="meta-extract",
-        match=lambda b: (
-            "<intent>" in _msg_user_text(b)
-            and "<summary>" in _msg_user_text(b)
-            and "<tags>" in _msg_user_text(b)
-        ),
+        name="atom-split",
+        match=lambda b: "AtomTask 拆分员" in _msg_system_text(b),
         build=lambda b: make_openai_chat_response(
-            FAKE_META_XML, model=b.get("model", "fake"),
+            FAKE_ATOM_SPLIT_XML, model=b.get("model", "fake"),
         ),
     ))
 
-    # ── OpenAI：agent 调用 → 返回 insufficient-signal ──────────
-    # agent system prompt 的标志：含 "Skill 整理 Agent" 文本。
+    # ── OpenAI：TaskClusterAgent noop ─────────────────────────
+    # SYSTEM_PROMPT 标志："TaskClusterAgent"。回纯文本不调工具——
+    # E2E 不关心 cluster 决策，只关心灰度链路。
     fake.add_responder("/chat/completions", Responder(
-        name="agent-insufficient",
-        match=lambda b: "Skill 整理 Agent" in _msg_system_text(b),
+        name="cluster-noop",
+        match=lambda b: "TaskClusterAgent" in _msg_system_text(b),
         build=lambda b: make_openai_chat_response(
-            FAKE_AGENT_RESPONSE, model=b.get("model", "fake"),
+            FAKE_CLUSTER_RESPONSE, model=b.get("model", "fake"),
+        ),
+    ))
+
+    # ── OpenAI：SkillEditAgent noop（理论不该被触发；保险垫底） ──
+    fake.add_responder("/chat/completions", Responder(
+        name="edit-noop",
+        match=lambda b: "SkillEditAgent" in _msg_system_text(b),
+        build=lambda b: make_openai_chat_response(
+            "candidates 不足，本次跳过编辑。", model=b.get("model", "fake"),
         ),
     ))
 
@@ -843,7 +857,7 @@ def test_canary_flip_promote_and_install_new_version(sandbox, xskill_daemon):
             return False
         return "v2" in cur
 
-    _poll(_promoted, timeout=60.0,
+    _poll(_promoted, timeout=180.0,
           desc="canary controller promote staging→main on skill_dir side")
 
     # ── F. promote 后再跑一次 claude -p 让 ingester 把新 main 装到

@@ -115,12 +115,18 @@ class XSkill:
             ))
         return out[:top_k]
 
-    # ─── UX 打分（主动）─────────────────────────────────────────
+    # ─── UX 打分（主动；v2 atom 粒度）──────────────────────────
     def score_trajectory_ux(self, traj: Trajectory) -> UxScoreResult:
-        """主动给一条轨迹补 UX 分（幂等：已存在返回 scored=False）。
+        """主动给一条 traj 的所有 atom 补 UX 分（幂等：已落盘的跳过）。
 
-        watcher 会自动调；本方法用于 watcher 漏打 / 手动重打。"""
-        from xskill.ux_score import score_and_record
+        v2: 打分对象是 AtomTask，不是整条 traj。前置条件——该 traj 已被
+        watcher 走完 split 阶段（atoms 落在 ``<traj_dir>/<traj_id>/tasks/``）。
+        没拆过的 traj 调本方法 ``scored=0``，因为 store 里没东西。
+
+        watcher 自动跑；本方法用于 watcher 漏打 / 手动重打。
+        """
+        from xskill.ux_score import score_and_record_atoms
+        from xskill.atom_task import AtomTaskStore
         from xskill.canary import CanaryConfig
         from xskill.traj_meta import parse_traj_header
 
@@ -141,20 +147,22 @@ class XSkill:
                 decision={"action": "skill_missing"},
             )
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
-        d = score_and_record(
+        store = AtomTaskStore(root=traj.path.parent)
+        d = score_and_record_atoms(
             llm=self.llm,
             skill_dir=skill.path,
-            skill_name=skill_name,
+            store=store,
             traj_id=traj.path.stem,
-            traj_md=md,
+            skill_name=skill_name,
             side=header["side"],
             commit_sha=header.get("sha", ""),
             canary_config=canary_cfg,
         )
+        # v2 返回 {scored: int, skipped: int, decision}；UxScoreResult.scored 是 bool
         return UxScoreResult(
-            scored=bool(d.get("scored")),
-            score=d.get("score"),
-            reasons=d.get("reasons", ""),
+            scored=bool(d.get("scored", 0) > 0),
+            score=None,  # 多 atom 没有单一分数；调用方需读 .ux_scores.jsonl 细看
+            reasons=f"scored={d.get('scored')}, skipped={d.get('skipped')}",
             decision=d.get("decision", {}),
         )
 
