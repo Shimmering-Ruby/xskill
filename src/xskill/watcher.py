@@ -41,23 +41,31 @@ from xskill.traj_meta import parse_traj_header
 
 logger = logging.getLogger("xskill.watcher")
 
+# v2 (AtomTask 流水线) 的 action → status 映射
+# splitting → split_done → indexed → clustering → done
 _ACTION_STATUS = {
-    "merged": "in_skill",
-    "staged": "staged",
-    "updated_metadata": "in_skill",
-    "rejected": "rejected",
+    "clustered": "done",
     "skip": "indexed",
-    "dry_run": "indexed",
     "error": "error",
 }
 
 
 class DirectoryWatcher:
-    """流水线式目录监听器。每条轨迹独立流转，不分批不阻塞。"""
+    """流水线式目录监听器。每条 traj 独立流转，不分批不阻塞。
+
+    v2 状态机：
+      discovered → splitting → split_done → indexed → clustering → done
+
+    与 v1 (meta-level) 的差异：
+    - splitting 阶段调 TaskAgent 拆 AtomTask，落盘到 ``<traj_root>/<traj_id>/tasks/``
+    - indexed 阶段以 AtomTask 为单位整批重建 ``<traj_root>/index.pkl``
+    - clustering 阶段对该 traj 所有新拆出的 atom 逐个调 process_atom_task
+    """
 
     def __init__(self, *, llm=None, embed_client=None, config=None,
                  skill_dir=None, poll_interval=30.0, max_concurrent=30,
-                 max_retries=3, db_path=None, cold_start_threshold=3):
+                 max_retries=3, db_path=None, cold_start_threshold=3,
+                 store=None, agno_agent_factory=None):
         self.llm = llm
         self.embed_client = embed_client
         self.config = config or {}
@@ -67,24 +75,32 @@ class DirectoryWatcher:
         self.max_retries = max_retries
         self.db_path = db_path
         # Cold-start 门控：当某 wd 还有 ≥ N 条 traj 处于"未 indexed"状态时，
-        # 本轮 scan 不提交任何 process_traj。设计动机：process_traj 内部
-        # 的 agent 调 search_similar_trajs 找共识（path-B 需 ≥2 条同类
-        # 成功轨迹），如果向量索引还没建完，agent 看到的是不完整的快照，
-        # 必然走 path-C insufficient-signal 把这批轨迹的复用价值全错失。
-        # 等所有先到的 traj 完成 embed 落进 index.pkl，再开 process。
+        # 本轮 scan 不提交任何 clustering。设计动机：cluster agent 调
+        # AtomTaskSearch 找相关 atom 共识，如果向量索引还没建完就跑，看到的
+        # 是不完整快照，归类决策会失真。等所有先到的 traj 完成 split + index
+        # 落进 <root>/index.pkl 再开 cluster。
         # filtered / error 不计入 pending（防止单条卡死阻断全场）。
         self.cold_start_threshold = cold_start_threshold
+
+        # v2 注入：AtomTaskStore + agno agent 工厂
+        # store None 时本 watcher 不能跑 splitting/clustering（仅 ux_score 还能跑）
+        self.store = store
+        self.agno_agent_factory = agno_agent_factory
 
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._thread: threading.Thread | None = None
         self._pool = ThreadPoolExecutor(max_workers=max_concurrent)
-        self._futures: dict[Future, dict] = {}  # future → {wd_id, fname, stage}
+        self._futures: dict[Future, dict] = {}
         self._last_poll: float | None = None
         self._stats = {
-            "polls": 0, "new_trajs": 0, "meta_extracted": 0,
-            "indexed": 0, "skills_generated": 0, "scores": 0,
-            "errors": 0, "retries": 0, "cold_start_deferrals": 0,
+            "polls": 0, "new_trajs": 0,
+            "atoms_extracted": 0,    # v2: 累计 atom 数（替代 meta_extracted）
+            "indexed": 0,            # 仍记录索引重建次数
+            "atoms_clustered": 0,    # v2: 累计 cluster 调用次数
+            "skills_edited": 0,      # v2: 触发的 SkillEdit 次数
+            "scores": 0, "errors": 0, "retries": 0,
+            "cold_start_deferrals": 0,
         }
 
     def start(self):
@@ -174,12 +190,12 @@ class DirectoryWatcher:
             kw = self._db_kw()
             try:
                 result = fut.result(timeout=0)
-                if stage == "meta":
-                    self._on_meta_done(wd_id, fname, result, **kw)
+                if stage == "split":
+                    self._on_split_done(wd_id, fname, result, **kw)
                 elif stage == "embed":
                     self._on_embed_done(wd_id, fname, result, **kw)
-                elif stage == "process":
-                    self._on_process_done(wd_id, fname, result, **kw)
+                elif stage == "cluster":
+                    self._on_cluster_done(wd_id, fname, result, **kw)
             except Exception as e:
                 update_traj_status(wd_id, fname, "error", error_msg=str(e)[:200], **kw)
                 self._stats["errors"] += 1
@@ -195,24 +211,21 @@ class DirectoryWatcher:
         if not dir_path.is_dir():
             return
 
-        # 清理僵尸 in-flight 状态。
-        # 两个 in-flight 中间态：
-        #   meta_extracting — _do_meta 在跑（应有 stage='meta' 的 future）
-        #   processing      — _do_process 在跑（应有 stage='process' 的 future）
-        # 任一状态在 DB 里但没有对应 in-flight future = 上一次 daemon 退出
-        # 时 future 被切了 / 进程崩溃 / OOM kill。回退到流水线前一阶段让
-        # watcher 下轮自动重新调度，否则永远卡死（如 issue: cold-start gate
-        # 持续触发但 pending count 不下降）。
-        for fname in get_trajs_by_status(wd_id, "meta_extracting", **kw):
+        # 清理僵尸 in-flight 状态（同 v1 思路；stage 名换成 v2）：
+        #   splitting   — _do_split 在跑（stage='split'）
+        #   clustering  — _do_cluster 在跑（stage='cluster'）
+        # 一旦 DB 里有这两个状态但没对应 in-flight future = 上次 daemon 退出
+        # 时 future 被切 / 进程崩。回退到前一阶段让 watcher 下轮重新调度。
+        for fname in get_trajs_by_status(wd_id, "splitting", **kw):
             if not any(
-                i["fname"] == fname and i["wd_id"] == wd_id and i["stage"] == "meta"
+                i["fname"] == fname and i["wd_id"] == wd_id and i["stage"] == "split"
                 for i in self._futures.values()
             ):
                 update_traj_status(wd_id, fname, "discovered", **kw)
 
-        for fname in get_trajs_by_status(wd_id, "processing", **kw):
+        for fname in get_trajs_by_status(wd_id, "clustering", **kw):
             if not any(
-                i["fname"] == fname and i["wd_id"] == wd_id and i["stage"] == "process"
+                i["fname"] == fname and i["wd_id"] == wd_id and i["stage"] == "cluster"
                 for i in self._futures.values()
             ):
                 update_traj_status(wd_id, fname, "indexed", **kw)
@@ -229,49 +242,50 @@ class DirectoryWatcher:
             self._stats["new_trajs"] += len(new)
             logger.info("[%s] discovered %d new", dir_path.name, len(new))
 
-        # ── 提交 meta 任务（discovered → meta_extracting）──
-        for fname in get_trajs_by_status(wd_id, "discovered", limit=self.max_concurrent * 2, **kw):
-            if self._too_many_in_flight():
-                break
-            update_traj_status(wd_id, fname, "meta_extracting", **kw)
-            fut = self._pool.submit(self._do_meta, dir_path, fname)
-            self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "meta"}
+        # ── 提交 split 任务（discovered → splitting）──
+        # 需要 store + llm；缺任一这条 traj 留在 discovered 等条件齐备
+        if self.store is not None and self.llm is not None:
+            for fname in get_trajs_by_status(
+                wd_id, "discovered", limit=self.max_concurrent * 2, **kw,
+            ):
+                if self._too_many_in_flight():
+                    break
+                update_traj_status(wd_id, fname, "splitting", **kw)
+                fut = self._pool.submit(self._do_split, dir_path, fname)
+                self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "split"}
 
-        # ── 提交 embedding 任务（meta_done → embedding）──
-        if self.embed_client:
-            meta_done_files = get_trajs_by_status(wd_id, "meta_done", **kw)
-            if meta_done_files:
-                # embedding 是批量的，提交一个任务处理整个目录
-                if not any(i["stage"] == "embed" and i["wd_id"] == wd_id for i in self._futures.values()):
-                    fut = self._pool.submit(self._do_embed, dir_path, wd_id, meta_done_files)
-                    self._futures[fut] = {"wd_id": wd_id, "fname": "_batch_embed", "stage": "embed"}
+        # ── 提交 embed 任务（split_done → indexed，整批一个任务） ──
+        if self.embed_client is not None and self.store is not None:
+            split_done_files = get_trajs_by_status(wd_id, "split_done", **kw)
+            if split_done_files and not any(
+                i["stage"] == "embed" and i["wd_id"] == wd_id for i in self._futures.values()
+            ):
+                fut = self._pool.submit(self._do_atom_index, wd_id, split_done_files)
+                self._futures[fut] = {"wd_id": wd_id, "fname": "_batch_embed", "stage": "embed"}
 
-        # ── Cold-start 门控 + 提交 process_traj 任务（indexed → processing）──
-        if self.skill_dir:
-            # 算"未 indexed 的 pending 量"——只算还在前置流水线里的状态，
-            # 不算 filtered/error（这些已经退出流水线，不会再变 indexed，
-            # 拿来当 pending 计数会导致永久卡死）。
+        # ── Cold-start 门控 + cluster（indexed → clustering）──
+        if self.skill_dir and self.store is not None and self.agno_agent_factory is not None:
             pending_index = (
                 len(get_trajs_by_status(wd_id, "discovered", **kw))
-                + len(get_trajs_by_status(wd_id, "meta_extracting", **kw))
-                + len(get_trajs_by_status(wd_id, "meta_done", **kw))
+                + len(get_trajs_by_status(wd_id, "splitting", **kw))
+                + len(get_trajs_by_status(wd_id, "split_done", **kw))
             )
             if pending_index >= self.cold_start_threshold:
-                # 还在批量上索引阶段，等下一轮——这时候启动 process_traj
-                # 会让 agent 看到不完整的向量索引，path-B 搜不到共识。
                 self._stats["cold_start_deferrals"] += 1
                 logger.info(
                     "[%s] cold-start gate: %d trajs not yet indexed (>= %d threshold), "
-                    "defer process_traj",
+                    "defer cluster",
                     dir_path.name, pending_index, self.cold_start_threshold,
                 )
             else:
-                for fname in get_trajs_by_status(wd_id, "indexed", limit=self.max_concurrent, **kw):
+                for fname in get_trajs_by_status(
+                    wd_id, "indexed", limit=self.max_concurrent, **kw,
+                ):
                     if self._too_many_in_flight():
                         break
-                    update_traj_status(wd_id, fname, "processing", **kw)
-                    fut = self._pool.submit(self._do_process, dir_path, fname)
-                    self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "process"}
+                    update_traj_status(wd_id, fname, "clustering", **kw)
+                    fut = self._pool.submit(self._do_cluster, dir_path, fname)
+                    self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "cluster"}
 
         # ── ux_score（对有 xskill header 的新轨迹）──
         if self.llm and self.skill_dir and new:
@@ -284,73 +298,91 @@ class DirectoryWatcher:
     # 任务执行函数（在线程池中运行）
     # ───────────────────────────────────────────────────────────
 
-    def _do_meta(self, dir_path, fname):
-        """提取单条轨迹的 meta。返回 (fname, valid)。"""
-        from xskill.index import _process_one_meta, validate_meta
+    # v2 流水线任务：split / atom_index / cluster
+
+    def _do_split(self, dir_path, fname):
+        """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id)。"""
+        from xskill.task_agent import TaskAgent
         md_path = dir_path / fname
         if not md_path.is_file():
-            return (fname, False, "file not found")
-        _process_one_meta(md_path, self.llm)
-        meta_path = dir_path / f"{fname}.meta"
-        if meta_path.is_file():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if validate_meta(meta):
-                return (fname, True, None)
-            return (fname, False, "validation failed")
-        return (fname, False, "no .meta produced")
+            return (fname, 0, 0, None, "file not found")
+        traj_id = md_path.stem
+        atoms = TaskAgent(llm=self.llm, store=self.store).run(
+            traj_id=traj_id, traj_path=md_path,
+        )
+        last_off = self.store.last_offset(traj_id)
+        last_id = self.store.last_atom_id(traj_id)
+        return (fname, len(atoms), last_off, last_id, None)
 
-    def _do_embed(self, dir_path, wd_id, filenames):
-        """批量 embedding。返回 (wd_id, filenames)。"""
-        from xskill.index import build_vector_index_incremental
-        build_vector_index_incremental(dir_path, self.embed_client)
+    def _do_atom_index(self, wd_id, filenames):
+        """整批重建 AtomTask 向量索引。返回 (wd_id, filenames)。"""
+        self.store.rebuild_vector_index(self.embed_client)
         return (wd_id, filenames)
 
-    def _do_process(self, dir_path, fname):
-        """执行 process_traj。返回 (fname, result_dict)。"""
-        from xskill.process import process_traj
-        result = process_traj(
-            traj_md_path=str(dir_path / fname),
-            config=self.config,
-            skill_dir=self.skill_dir,
-        )
-        return (fname, result)
+    def _do_cluster(self, dir_path, fname):
+        """对该 traj 已拆出的每个 atom 调 process_atom_task。
+
+        返回 (fname, [result_dict, ...])。每个 result 含 edited_skills 列表。
+        """
+        from xskill.process import process_atom_task
+        traj_id = (dir_path / fname).stem
+        atoms = self.store.list_by_traj(traj_id)
+        results = []
+        for atom in atoms:
+            res = process_atom_task(
+                atom_id=atom.atom_id,
+                config=self.config,
+                skill_dir=self.skill_dir,
+                store=self.store,
+                embed_client=self.embed_client,
+                agno_agent_factory=self.agno_agent_factory,
+            )
+            results.append(res)
+        return (fname, results)
 
     # ───────────────────────────────────────────────────────────
     # 收割回调
     # ───────────────────────────────────────────────────────────
 
-    def _on_meta_done(self, wd_id, fname, result, **kw):
-        _fname, valid, err = result
-        if valid:
-            update_traj_status(wd_id, fname, "meta_done", **kw)
-            mark_meta_done(wd_id, fname, **kw)
-            self._stats["meta_extracted"] += 1
-        else:
+    def _on_split_done(self, wd_id, fname, result, **kw):
+        from xskill.registry import update_traj_offset
+        _fname, n_atoms, last_off, last_id, err = result
+        if err is not None:
             update_traj_status(wd_id, fname, "filtered", error_msg=err, **kw)
+            return
+        update_traj_status(wd_id, fname, "split_done", **kw)
+        update_traj_offset(
+            wd_id, fname,
+            last_offset=last_off, last_atom_id=last_id,
+            tasks_extracted=n_atoms, **kw,
+        )
+        self._stats["atoms_extracted"] += n_atoms
 
     def _on_embed_done(self, wd_id, fname, result, **kw):
         _wd_id, filenames = result
         for f in filenames:
-            meta_path = Path(list_watch_dirs(**kw)[0]["path"]) if not kw else None
-            # Just mark as indexed — the actual check is that index.pkl was updated
             update_traj_status(wd_id, f, "indexed", **kw)
             mark_indexed(wd_id, f, **kw)
             self._stats["indexed"] += 1
 
-    def _on_process_done(self, wd_id, fname, result, **kw):
-        _fname, res = result
-        action = res.get("action", "error")
+    def _on_cluster_done(self, wd_id, fname, result, **kw):
+        _fname, results = result
+        # 收集所有 cluster + edit 信号
+        edited_skills: list[str] = []
+        for r in results:
+            edited_skills.extend(r.get("edited_skills") or [])
+        action = "clustered"  # 总有动作；individual error 由 cluster agent 自己消化
         new_status = _ACTION_STATUS.get(action, "error")
-        skills = res.get("skills", [])
         update_traj_status(
             wd_id, fname, new_status,
             process_action=action,
-            skill_generated=",".join(skills) if skills else None,
-            error_msg=res.get("error"),
+            skill_generated=",".join(edited_skills) if edited_skills else None,
             **kw,
         )
-        self._stats["skills_generated"] += 1
-        logger.info("%s → %s", fname, action)
+        self._stats["atoms_clustered"] += len(results)
+        self._stats["skills_edited"] += len(edited_skills)
+        logger.info("%s → clustered (%d atoms, edited skills=%s)",
+                    fname, len(results), edited_skills or "-")
 
     # ───────────────────────────────────────────────────────────
     # ux_score

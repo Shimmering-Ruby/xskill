@@ -88,6 +88,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("retry_count", "INTEGER DEFAULT 0"),
         ("updated_at", "TEXT"),
         ("process_log", "TEXT"),
+        # v2: AtomTask 流水线状态
+        ("tasks_extracted", "INTEGER DEFAULT 0"),
+        ("last_offset", "INTEGER DEFAULT 0"),
+        ("last_atom_id", "TEXT"),
     ]
     for col, typedef in migrations:
         if col not in cols:
@@ -482,6 +486,35 @@ def get_traj_log(
             (watch_dir_id, filename),
         ).fetchone()
         return row["process_log"] if row else None
+    finally:
+        conn.close()
+
+
+def update_traj_offset(
+    watch_dir_id: int,
+    filename: str,
+    *,
+    last_offset: int,
+    last_atom_id: str | None,
+    tasks_extracted: int,
+    db_path: Optional[Path] = None,
+) -> None:
+    """更新轨迹的 AtomTask 增量进度指针。
+
+    watcher 每次跑完 TaskAgent 后调，让下次 scan 用最新的 offset 决定 delta。
+    ``last_atom_id`` 为 None 表示当前轨迹还没切出任何 atom（罕见——通常拆出
+    至少 1 个）。
+    """
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE trajectories SET last_offset=?, last_atom_id=?, "
+            "tasks_extracted=?, updated_at=datetime('now')"
+            " WHERE watch_dir_id=? AND filename=?",
+            (int(last_offset), last_atom_id, int(tasks_extracted),
+             watch_dir_id, filename),
+        )
+        conn.commit()
     finally:
         conn.close()
 

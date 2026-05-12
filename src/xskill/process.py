@@ -327,3 +327,77 @@ def process_traj(traj_md_path: str, config: dict, dry_run: bool = False,
     finally:
         output_dir.mkdir(exist_ok=True)
         log.save(output_dir / f"t2s_{traj_path.stem}_{datetime.now().strftime('%H%M%S')}.log.json")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v2: AtomTask 流水线
+# ═══════════════════════════════════════════════════════════════════
+# process_traj 在 v1 是"轨迹整篇喂 LLM 抽 meta → SkillAgent → eval"。v2 流水线
+# 不存在"轨迹整篇"概念，watcher 拆出 atom 后逐个调 process_atom_task：先
+# TaskClusterAgent 做归类决策（调 add_task_to_skill 等工具），再遍历每个 skill
+# 子目录跑 SkillEditAgent.maybe_run() —— buffer 累计 weightscore_total ≥ 10
+# 就生成或更新 SKILL.md。整套不走 eval / canary 分流（那些移到 ux_score
+# 链路），保持单一职责。
+
+def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
+                      store, embed_client, agno_agent_factory) -> dict:
+    """处理一个 AtomTask：cluster → 触发 SkillEdit。
+
+    Args:
+        atom_id: AtomTask 主键
+        config: xskill 配置（含 llm 段）
+        skill_dir: skill 根目录（其下每个子目录是一个 skill 仓库）
+        store: AtomTaskStore（持有所有 atom + 索引）
+        embed_client: 向量客户端（HybridSearch 用）
+        agno_agent_factory: callable(*, instructions, tools) -> agno-like Agent。
+                            生产环境用 agno.Agent + DeepSeek 子类；单测注入 stub。
+
+    Returns:
+        dict with keys: action / atom_id / edited_skills / cluster_log
+    """
+    from xskill.atom_task import AtomTaskStore  # type-only safety
+    from xskill.task_cluster_agent import TaskClusterAgent
+    from xskill.skill_edit_agent import SkillEditAgent
+    from xskill import skill_tools as ST
+
+    atom = store.load(atom_id)
+    traj_root = store.root
+
+    ST.init_context_v2(
+        skill_dir=skill_dir, store=store,
+        embed_client=embed_client, traj_root=traj_root,
+    )
+
+    cluster = TaskClusterAgent(
+        skill_dir=skill_dir, store=store,
+        agno_agent_factory=agno_agent_factory,
+        llm_cfg=config.get("llm", {}),
+        tools=[
+            ST.atom_task_read, ST.atom_task_search, ST.read_traj,
+            ST.skill_read, ST.new_skill_folder, ST.add_task_to_skill,
+            ST.score_task,
+        ],
+    )
+    cluster_content = cluster.process(atom)
+
+    # cluster 跑完后，遍历每个 skill 子目录：buffer 攒到阈值的触发 SkillEdit
+    edited: list[str] = []
+    if skill_dir.is_dir():
+        for d in sorted(skill_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            editor = SkillEditAgent(
+                skill_dir=d, store=store,
+                agno_agent_factory=agno_agent_factory,
+                llm_cfg=config.get("llm", {}),
+                traj_root=traj_root,
+            )
+            if editor.maybe_run():
+                edited.append(d.name)
+
+    return {
+        "action": "clustered",
+        "atom_id": atom_id,
+        "edited_skills": edited,
+        "cluster_log": (cluster_content or "")[:500],
+    }
