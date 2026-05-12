@@ -116,7 +116,23 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _setup_logging(debug: bool, quiet: bool) -> None:
+def _setup_logging(debug: bool, quiet: bool, *, command: str = "") -> None:
+    """配置 logging。
+
+    - ``serve``：用 ``log_setup.configure_logging`` 拆 component 到独立文件
+      （~/.xskill/logs/xskill.<component>.log）+ stdout 简略输出，方便
+      tail -f 单独跟某条流水。
+    - 其他短命令（``search`` / ``registry``）：保留旧 basicConfig，stdout
+      only，不创建文件 handler——这些命令几秒就退，没必要落日志。
+    """
+    if command == "serve":
+        # serve 用 file-split 模式
+        from xskill.config import get_logs_dir
+        from xskill.log_setup import configure_logging
+        configure_logging(get_logs_dir(), debug=debug, quiet=quiet, stdout=True)
+        return
+
+    # 老 basicConfig 路径（短命令）
     if debug:
         level, fmt = logging.DEBUG, "%(asctime)s [%(name)s] %(levelname)s %(message)s"
     elif quiet:
@@ -140,7 +156,7 @@ def main() -> int:
         return 1
 
     set_overrides(debug=args.debug, quiet=args.quiet)
-    _setup_logging(args.debug, args.quiet)
+    _setup_logging(args.debug, args.quiet, command=args.command)
 
     if args.command == "registry" and args.registry_action in ("add", "remove"):
         if not args.path:

@@ -224,6 +224,60 @@ def _staging_skills_under(skill_dir: Path) -> list[str]:
     return out
 
 
+_SAFE_NAME_RE = None  # lazy init below
+
+def _sanitize_for_filename(s: str, maxlen: int = 32) -> str:
+    """把任意字符串转成"能进文件名"的版本：保留 a-z A-Z 0-9 - _ . 其余转 _ ."""
+    import re as _re
+    global _SAFE_NAME_RE
+    if _SAFE_NAME_RE is None:
+        _SAFE_NAME_RE = _re.compile(r"[^A-Za-z0-9._-]")
+    if not s:
+        return ""
+    cleaned = _SAFE_NAME_RE.sub("_", s).strip("._-")
+    return cleaned[:maxlen] if cleaned else ""
+
+
+def _read_cwd_from_jsonl(jsonl_path: Path) -> str:
+    """读 CC session JSONL 第一条带 ``cwd`` 字段的事件，返回工作目录路径。
+
+    CC 在 user / assistant event 上都会塞 ``cwd``（=用户在 ~/.claude/...
+    那个 -tmp-...-workdir hash 反推不出原路径——这是 CC 自己生成的 hash，
+    我们要的是 ``cwd``）。
+    """
+    if not jsonl_path.is_file():
+        return ""
+    for line in jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        cwd = ev.get("cwd")
+        if cwd:
+            return cwd
+    return ""
+
+
+def _cc_traj_id(jsonl_path: Path, session_id: str) -> str:
+    """为 CC bridged 轨迹生成 ``traj_cc_<projectname>_<sid8>`` 形式的 ID。
+
+    保留 ``traj_`` 前缀让 watcher 的 ``traj_*.md`` glob 仍能匹配；
+    ``projectname`` 从 JSONL 的 ``cwd`` 字段取 basename，无 cwd 退化为
+    ``unknown``；``sid8`` 是 session UUID 前 8 字符（碰撞概率极低）。
+
+    例：
+      cwd=/home/admin/dataharness, sid=f2eb54d4-... → traj_cc_dataharness_f2eb54d4
+      cwd 不存在,                  sid=abc-...       → traj_cc_unknown_abc12345
+    """
+    cwd = _read_cwd_from_jsonl(jsonl_path)
+    project = _sanitize_for_filename(Path(cwd).name if cwd else "", maxlen=32) or "unknown"
+    sid_short = _sanitize_for_filename(session_id, maxlen=8) or "nosid"
+    return f"traj_cc_{project}_{sid_short}"
+
+
 def _prepend_xskill_header(traj_md_path: Path, *, skill: str, side: str, sha: str) -> None:
     """把 ``<!-- xskill:skill=X side=Y sha=Z -->`` 注到 traj_*.md 顶部。
 
@@ -267,9 +321,13 @@ def ingest_claude_code_sessions(
         content = jsonl_path.read_text(encoding="utf-8")
         if not content.strip():
             continue
+        # 给 CC bridged 轨迹起带项目信息的名字，方便事后查阅：
+        # traj_cc_<projectname>_<sid8>.md 比 traj_0001.md 包含的语义多。
+        traj_id = _cc_traj_id(jsonl_path, sid)
         result = submit_trajectory(
             content=content,
             format="claude_code_jsonl",
+            traj_id=traj_id,
             traj_dir=target_traj_dir,
         )
         result["session_id"] = sid
