@@ -42,7 +42,13 @@ class LLMClient:
     base_url: str
     model: str
     api_key: str
-    max_tokens: int = 1500
+    # max_tokens 是模型 thinking + content 的总预算。对 deepseek-v4-flash
+    # 这类 thinking model，reasoning 会先吃掉一部分 budget，剩下的才落到
+    # XML/JSON content；之前默认 1500 偏紧，复杂 traj 上经常出现"返回 0
+    # chars"或"截断在某个标签中段"导致 meta validate 失败 fallback rule。
+    # 10000 给 thinking + 实际输出留足空间。``llm.max_tokens`` 在 config
+    # 里可覆盖；缩小可省 token 费但要承担更高 fallback 率。
+    max_tokens: int = 10000
     temperature: float = 0.0
     _client: object = field(default=None, repr=False)
 
@@ -58,7 +64,14 @@ class LLMClient:
         )
         if not base_url or not model:
             raise ValueError("llm.base_url 和 llm.model 必须配置")
-        return cls(base_url=base_url, model=model, api_key=api_key)
+        kwargs = dict(base_url=base_url, model=model, api_key=api_key)
+        # 允许 config 覆盖 max_tokens / temperature（缺省则用 dataclass 默认）。
+        # 之前这里不读 max_tokens，导致 yaml 配了也不生效。
+        if "max_tokens" in cfg:
+            kwargs["max_tokens"] = int(cfg["max_tokens"])
+        if "temperature" in cfg:
+            kwargs["temperature"] = float(cfg["temperature"])
+        return cls(**kwargs)
 
     def _get_client(self):
         if self._client is None:
