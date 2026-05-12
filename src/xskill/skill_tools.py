@@ -77,99 +77,6 @@ def _sanitize_frontmatter_dates(fm: dict) -> dict:
     return fm
 
 
-import re as _re
-_WARNING_FRACTION_RE = _re.compile(r"(\d+)\s*/\s*(\d+)\s*条(失败)?轨迹")
-_TRAJ_ID_RE = _re.compile(r"^traj_\d+$")
-_STAGE_HEADER_RE = _re.compile(r"^##\s+\S", _re.MULTILINE)
-
-# 路径 B 准入门槛：body 有实质内容时 source_trajs 去重后必须 ≥ 此数
-MIN_SOURCE_TRAJS_FOR_BODY = 3
-
-
-def _validate_skill_md_gate(fm: dict, body: str) -> str | None:
-    """SKILL.md 写入前的强制拦截。
-
-    三条硬规则（任何一条违反都返回 error 字符串，write_file 就不会写）：
-
-    R1. source_trajs 里每一项必须是 `traj_NNNN` 规范形式。
-        禁止 SWE-smith instance_id 这种又长又带 dot 的原始名，它和 traj_id
-        是同一条轨迹的两种写法，agent 之前靠同时写两种来"凑够 ≥2 source_trajs"。
-    R2. 每条 traj_NNNN 必须在已注册的 watch dir 下真的有对应 .md 文件。
-        防 LLM 伪造 traj_id 充数。跨所有 Registry 注册目录查找。
-    R3. body 有实质内容（存在 `## <stage>` 阶段标题 或 `> ⚠️` warning）时，
-        去重后的 source_trajs 数量必须 ≥ MIN_SOURCE_TRAJS_FOR_BODY (=3)。
-        单条轨迹直接出 body 是 candidates 机制被架空的根因。
-
-    返回 None = 放行；返回字符串 = 拦截，该字符串会作为 tool 结果回给 agent。
-    """
-    from xskill.registry import find_traj_file
-
-    meta = fm.get("metadata", {}) or {}
-    source_trajs = [str(t).strip() for t in (meta.get("source_trajs") or []) if str(t).strip()]
-
-    # R1: 规范形式
-    non_canonical = [t for t in source_trajs if not _TRAJ_ID_RE.match(t)]
-    if non_canonical:
-        return (
-            f"source_trajs 只接受 traj_NNNN 形式（如 'traj_0009'），"
-            f"禁用 SWE-smith instance_id。违规项: {non_canonical}。"
-            f"提示：search_similar_trajs 结果里 traj_id 字段就是规范形式，用那个。"
-            f"不要把 instance_id 和 traj_id 并列凑数，它们是同一条轨迹。"
-        )
-
-    # R2: 真实存在 — 跨所有已注册 watch dir 找
-    fake = [tid for tid in source_trajs if find_traj_file(tid, ".md") is None]
-    if fake:
-        return (
-            f"source_trajs 里这些 traj_id 在任何已注册的轨迹目录下都找不到对应文件: {fake}。"
-            f"请检查是不是拼错了 / 凭空编造的。只引用你通过 search_similar_trajs "
-            f"真正看到过的 traj_id。"
-        )
-
-    # R3: body 实质性 → ≥3 共识
-    has_stage_headers = bool(_STAGE_HEADER_RE.search(body or ""))
-    has_warning = "> ⚠️" in (body or "")
-    unique_count = len(set(source_trajs))
-    if (has_stage_headers or has_warning) and unique_count < MIN_SOURCE_TRAJS_FOR_BODY:
-        # Don't delete the scaffold — agent may still use add_candidate to this skill_name.
-        # Just reject the SKILL.md write. The empty dir with .candidates.yml is valid.
-        return (
-            f"SKILL.md body 有实质内容（阶段标题 / warning blockquote）但 "
-            f"source_trajs 去重后只有 {unique_count} 条 < {MIN_SOURCE_TRAJS_FOR_BODY}。"
-            f"路径 B 新建 skill 的硬门槛是 ≥{MIN_SOURCE_TRAJS_FOR_BODY} 条**独立**轨迹共识。"
-            f"三选一：(a) 走路径 C pass 本轨迹；"
-            f"(b) 用 search_similar_trajs 再找 ≥{MIN_SOURCE_TRAJS_FOR_BODY - unique_count} 条同类 "
-            f"success 轨迹补到 source_trajs；"
-            f"(c) 把 body 里的具体步骤都改走 add_candidate，让系统在多轨迹汇聚后自动 promote。"
-        )
-
-    return None
-
-
-def _sanitize_warning_fractions(body: str, source_trajs_count: int) -> tuple[str, int]:
-    """修掉 warning 里编造的 N/M 分子分母。
-
-    LLM 经常写 "3/7 条轨迹表明..."，但 M 根本超过实际 source_trajs 数量 ——
-    这是纯幻觉。规则：如果 M > source_trajs_count，或 N > M，就把整个 "N/M 条轨迹"
-    替换成 "源轨迹"，让 warning 只剩"见 traj_XXXX"这种可核对的引用。
-
-    返回 (新 body, 替换次数)。
-    """
-    count = 0
-
-    def _replace(m: _re.Match) -> str:
-        nonlocal count
-        n, total = int(m.group(1)), int(m.group(2))
-        fail_word = m.group(3) or ""
-        # M 必须 ≤ 实际 source_trajs 总数；N 必须 ≤ M 且 ≥ 1
-        if total > source_trajs_count or n > total or n < 1 or total < 1:
-            count += 1
-            return f"源{fail_word}轨迹中"
-        return m.group(0)
-
-    return _WARNING_FRACTION_RE.sub(_replace, body), count
-
-
 def _read_skill_md(skill_path: Path) -> tuple[dict, str, Path]:
     """Return (frontmatter_dict, body, path_of_SKILL.md). Supports legacy
     lowercase `skill.md` as a fallback read path (writes always go to
@@ -453,9 +360,18 @@ def list_candidates(skill_name: str) -> str:
 
 
 def write_file(path: str, content: str) -> str:
-    """Write or overwrite a file under ./skill/ only."""
+    """Write or overwrite a file under ./skill/ only.
+
+    v2 行为：只做路径安全 + frontmatter 日期消毒。旧 v1 ``source_trajs ≥ 3``
+    gate 和 ``N/M 条轨迹`` warning 消毒已删——v2 用 ``source_atoms`` 引用 atom
+    而非 traj，且质量保障靠 candidates buffer 累计 weightscore ≥ 10 的硬门槛，
+    不需要 SKILL.md 写入端再卡一道。
+    """
     p = Path(path)
-    skill_dir = _ctx["skill_dir"]
+    if _ctx_v2["skill_dir"] is not None:
+        skill_dir = _ctx_v2["skill_dir"]
+    else:
+        skill_dir = _ctx["skill_dir"]
 
     try:
         p.resolve().relative_to(skill_dir.resolve())
@@ -463,22 +379,14 @@ def write_file(path: str, content: str) -> str:
         return f"error: writes restricted to ./skill/ (tried: {path})"
 
     p.parent.mkdir(parents=True, exist_ok=True)
-    # 如果写的是 SKILL.md：先硬拦截 → 再消毒日期/N-M 幻觉
+    # 写 SKILL.md：消毒 frontmatter 日期（防止 LLM 写未来日期 / 不合法 ISO）
     if p.name == "SKILL.md":
         try:
             fm, body = fm_parse(content)
-            gate_err = _validate_skill_md_gate(fm, body)
-            if gate_err:
-                logger.warning(f"❌ SKILL.md gate 拒绝写入 {p}: {gate_err}")
-                return f"error: {gate_err}"
             _sanitize_frontmatter_dates(fm)
-            source_count = len((fm.get("metadata", {}) or {}).get("source_trajs") or [])
-            body, frac_replaced = _sanitize_warning_fractions(body, source_count)
-            if frac_replaced:
-                logger.info(f"warning 里编造的 N/M 已替换 {frac_replaced} 处（source_trajs={source_count}）")
             content = fm_serialize(fm, body)
         except Exception as e:
-            logger.warning(f"skill.md frontmatter 消毒失败，原样写入: {e}")
+            logger.warning(f"SKILL.md frontmatter 日期消毒失败，原样写入: {e}")
     p.write_text(content, encoding="utf-8")
     logger.info(f"✏️  wrote: {p} ({len(content)} bytes)")
     return f"wrote: {p} ({len(content)} chars)"

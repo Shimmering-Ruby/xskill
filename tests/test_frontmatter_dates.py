@@ -86,66 +86,44 @@ def test_write_file_leaves_nonskill_md_alone(tmp_path):
     assert text == content, "非 SKILL.md 文件不应被处理"
 
 
-# ── warning fraction 消毒（N/M 编造检查）────────────────────────────────
-def test_sanitize_fraction_strips_when_denominator_exceeds_sources():
-    """observed real bug: "3/7 条失败轨迹" 但 source_trajs 只有 4 条"""
-    from xskill.skill_tools import _sanitize_warning_fractions
-    body = "> ⚠️ 3/7 条失败轨迹未完整查看函数代码\n\n> ⚠️ 2/7 条轨迹修复后遗漏了边界"
-    new_body, n = _sanitize_warning_fractions(body, source_trajs_count=4)
-    assert "3/7" not in new_body
-    assert "2/7" not in new_body
-    assert "源失败轨迹中" in new_body or "源轨迹中" in new_body
-    assert n == 2
+# ── v1 N/M warning 消毒 / source_trajs gate 已删除 ─────────────────
+# 旧 v1 path B 强制 source_trajs ≥ 3 + N/M 分母消毒在 AtomTask 重构中
+# 整体废弃：v2 用 source_atoms 引用 atom 而非 traj，质量保障靠 candidates
+# buffer 累计 weightscore ≥ 10 的硬门槛，不需要 SKILL.md 写入端再卡一道。
+# 相关单测随 _sanitize_warning_fractions / _validate_skill_md_gate 函数
+# 一并移除。
 
 
-def test_sanitize_fraction_keeps_valid():
-    """N/M 在合理范围内时不改"""
-    from xskill.skill_tools import _sanitize_warning_fractions
-    body = "> ⚠️ 2/3 条失败轨迹有相同错误"
-    new_body, n = _sanitize_warning_fractions(body, source_trajs_count=3)
-    assert new_body == body
-    assert n == 0
-
-
-def test_sanitize_fraction_blocks_numerator_greater_than_denominator():
-    from xskill.skill_tools import _sanitize_warning_fractions
-    body = "> ⚠️ 5/3 条轨迹"
-    new_body, n = _sanitize_warning_fractions(body, source_trajs_count=3)
-    assert "5/3" not in new_body
-    assert n == 1
-
-
-def test_sanitize_fraction_integration_via_write_file(tmp_path, monkeypatch):
-    """fraction 消毒需要和 gate 配合：3 条真实 traj_NNNN → gate 放行 → 消毒生效"""
-    from xskill import skill_tools, config as cfg_mod
-    from xskill.registry import register_dir
-    from datetime import date
-    # 隔离 registry.db：gate 走 Registry 查 traj，必须用 tmp 库否则会读到机器
-    # 上 prod xskill 的注册目录，找不到 traj_0001 就被 gate 拦下。
-    monkeypatch.setattr(cfg_mod, "REGISTRY_DB", tmp_path / "registry.db")
-    (tmp_path / "skill").mkdir()
-    (tmp_path / "data").mkdir()
-    skill_tools._ctx["skill_dir"] = tmp_path / "skill"
-    skill_tools._ctx["data_dir"] = tmp_path / "data"
-    for tid in ("traj_0001", "traj_0002", "traj_0003"):
-        (tmp_path / "data" / f"{tid}.md").write_text("# stub", encoding="utf-8")
-    register_dir(tmp_path / "data", label="test-frac")
-    sk = tmp_path / "skill" / "fix-x"
+def test_v2_write_skill_md_with_source_atoms_not_blocked(tmp_path):
+    """v2 SkillEditAgent 写出来的 SKILL.md 用 source_atoms 而非 source_trajs；
+    必须能直接写入，不被旧 source_trajs ≥ 3 gate 拦下。"""
+    from xskill import skill_tools
+    skill_tools._ctx["skill_dir"] = tmp_path
+    sk = tmp_path / "fix-django"
     sk.mkdir()
-    content = f"""---
-name: fix-x
-description: test
+    content = """---
+name: fix-django
+description: test v2
 metadata:
-  created: "{date.today().isoformat()}"
-  source_trajs: [traj_0001, traj_0002, traj_0003]
+  version: 1
+  created: "<AUTO>"
+  last_updated: "<AUTO>"
+  source_atoms: ["atom_traj_x_0001"]
+  frozen: false
+  use_count: 0
 ---
 
-# body
+# 修复 django 迁移冲突
 
-## stage
-1. step one
-   > ⚠️ 3/9 条失败轨迹做了错事
+## 检测冲突
+
+1. 跑 `python manage.py showmigrations` 看冲突。
+
+   > ⚠️ 见 atom_traj_x_0001：直接 fake-apply 会污染 django_migrations 表。
 """
-    skill_tools.write_file(str(sk / "SKILL.md"), content)
-    text = (sk / "SKILL.md").read_text()
-    assert "3/9" not in text, "source_trajs=3，M=9 属于编造，必须被替换"
+    result = skill_tools.write_file(str(sk / "SKILL.md"), content)
+    assert not result.startswith("error"), f"write_file 不应被拦下: {result}"
+    assert (sk / "SKILL.md").is_file()
+    text = (sk / "SKILL.md").read_text(encoding="utf-8")
+    assert "source_atoms" in text
+    assert "atom_traj_x_0001" in text
