@@ -56,7 +56,7 @@ class DirectoryWatcher:
     """流水线式目录监听器。每条轨迹独立流转，不分批不阻塞。"""
 
     def __init__(self, *, llm=None, embed_client=None, config=None,
-                 skill_dir=None, poll_interval=30.0, max_concurrent=5,
+                 skill_dir=None, poll_interval=30.0, max_concurrent=30,
                  max_retries=3, db_path=None, cold_start_threshold=3):
         self.llm = llm
         self.embed_client = embed_client

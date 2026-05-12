@@ -15,6 +15,10 @@ llm:
   base_url: https://api.deepseek.com           # 或 dashscope / openai 兼容 endpoint
   model:    deepseek-v4-flash
   api_key:  PUT_YOUR_LLM_API_KEY_HERE
+  max_tokens: 10000      # 可选；thinking model（如 deepseek-v4-flash）需要给
+                         # reasoning_tokens + content 足够预算，太小会让 meta
+                         # 抽取返回空 / 截断 → fallback 到 rule extractor
+  # temperature: 0.0     # 可选；默认 0（确定性）
 
 # ===== Embedding（向量检索用）=====
 embedding:
@@ -53,4 +57,16 @@ canary:
 
 # ===== Watcher（serve 内置的目录轮询）=====
 watcher:
-  poll_interval: 30                 # 秒
+  poll_interval: 30                 # 秒；每轮扫一次所有 watch_dir，发现 →
+                                    # meta → embed → process → ux_score 流水
+  max_concurrent: 30                # ThreadPoolExecutor 大小；4N 个 worker
+                                    # 同时跑 meta 抽取（LLM I/O 阻塞，多并发
+                                    # 真能加速）。冷启动批量上索引时 30 比
+                                    # 默认 5 显著加速。受 LLM provider 的
+                                    # RPM 限制；deepseek 几千 RPM 够任意调，
+                                    # doubao 看账户配额。
+  cold_start_threshold: 3           # 同一 wd 还有 ≥N 条 traj 未 indexed 时
+                                    # 推迟 process_traj 到下一轮——保证 agent
+                                    # 调 search_similar_trajs 时能看到全量
+                                    # 索引快照，避免 path-B 共识搜空。
+                                    # 1 = 完全顺序串行；999 ≈ 禁用门控。

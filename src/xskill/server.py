@@ -1465,7 +1465,7 @@ def create_app() -> FastAPI:
                     llm=llm, embed_client=embed, config=_config,
                     skill_dir=_skill_dir,
                     poll_interval=float(watcher_cfg.get("poll_interval", 30)),
-                    max_concurrent=int(watcher_cfg.get("max_concurrent", 5)),
+                    max_concurrent=int(watcher_cfg.get("max_concurrent", 30)),
                     cold_start_threshold=int(watcher_cfg.get("cold_start_threshold", 3)),
                 )
                 watcher.start()
