@@ -360,10 +360,58 @@ NaT，而不是之后 —— 事后补救会让 grouper 进入不一致状态。
 # Agent 执行 (agno)
 # ===================================================================
 
+def _build_chat_model(llm_cfg: dict, log: StreamLog):
+    """根据 llm_cfg.base_url 路由到合适的 agno model 类。
+
+    为什么不一律用 OpenAIChat：DeepSeek 直连（``api.deepseek.com``）的
+    thinking 类模型（``deepseek-v4-flash`` / ``deepseek-reasoner`` 等）在
+    multi-turn 对话中**要求**把上一轮 assistant 的 ``reasoning_content``
+    原样回传给下一轮请求，否则 400 invalid_request_error。OpenAIChat 不
+    会做这步，agent 多轮 tool 调用必崩。
+
+    agno 提供 ``DeepSeek`` 子类（继承 OpenAILike），它的 ``_format_message``
+    会把 ``reasoning_content`` 一并塞进发回去的 message dict —— 用这个
+    类就解决 round-trip 问题。
+
+    其他 OpenAI 兼容 endpoint（dashscope / together / 自建 vLLM 等）即使
+    挂的是 deepseek 模型，协议层一般不强制 reasoning_content 回传，仍走
+    通用 OpenAIChat。判别按 ``base_url`` 不按 ``model`` 名字：dashscope
+    上挂的 ``deepseek-v3.2`` 走的是 dashscope 协议，跟 DeepSeek 直连不
+    一样。
+    """
+    base_url = (llm_cfg.get("base_url") or "").lower()
+    model_id = llm_cfg.get("model", "gpt-4o")
+    api_key = llm_cfg.get("api_key") or os.environ.get("LLM_API_KEY", "")
+
+    common_kwargs = dict(
+        id=model_id,
+        base_url=llm_cfg.get("base_url", ""),
+        api_key=api_key,
+        role_map={
+            "system": "system",
+            "user": "user",
+            "assistant": "assistant",
+            "tool": "tool",
+            "model": "assistant",
+        },
+    )
+
+    if "api.deepseek.com" in base_url:
+        # DeepSeek 直连——必须用 DeepSeek 类避免丢 reasoning_content
+        from agno.models.deepseek import DeepSeek
+        _inject_verify_off_if_requested(DeepSeek, common_kwargs, log)
+        log(f"使用 agno DeepSeek model class (base_url=api.deepseek.com)", "step")
+        return DeepSeek(**common_kwargs)
+
+    # 其他所有 OpenAI 兼容 endpoint 走通用 OpenAIChat
+    from agno.models.openai import OpenAIChat
+    _inject_verify_off_if_requested(OpenAIChat, common_kwargs, log)
+    return OpenAIChat(**common_kwargs)
+
+
 def run_agent_agno(new_traj_md: str, new_traj_meta: dict, config: dict, log: StreamLog) -> dict:
     """Run the skill-curation agent via agno."""
     from agno.agent import Agent
-    from agno.models.openai import OpenAIChat
     from xskill.skill_tools import (
         search_similar_trajs, search_skills, read_file,
         create_skill, write_file,
@@ -374,23 +422,7 @@ def run_agent_agno(new_traj_md: str, new_traj_meta: dict, config: dict, log: Str
     base_cfg = config.get("llm", {}) or {}
     override_cfg = config.get("llm_skill", {}) or {}
     llm_cfg = {**base_cfg, **{k: v for k, v in override_cfg.items() if v}}
-    model_kwargs = dict(
-        id=llm_cfg.get("model", "gpt-4o"),
-        base_url=llm_cfg.get("base_url", ""),
-        api_key=llm_cfg.get("api_key") or os.environ.get("LLM_API_KEY", ""),
-        role_map={
-            "system": "system",
-            "user": "user",
-            "assistant": "assistant",
-            "tool": "tool",
-            "model": "assistant",
-        },
-    )
-    # T2S_SSL_VERIFY=false 时 agno 内部的 openai client 也要跳过证书验证。
-    # agno 各版本 kwarg 名不一致（http_client / client，async_client / async_http_client），
-    # 用 inspect 检查实际接受的参数，只传能认的那几个。
-    _inject_verify_off_if_requested(OpenAIChat, model_kwargs, log)
-    model = OpenAIChat(**model_kwargs)
+    model = _build_chat_model(llm_cfg, log)
 
     # Surface high-signal meta fields explicitly so the LLM sees them without
     # having to parse JSON. Keep the raw JSON too for anything we missed.
