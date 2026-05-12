@@ -33,6 +33,12 @@ logger = logging.getLogger("candidates")
 CANDIDATES_FILENAME = ".candidates.yml"
 FUZZY_PREFIX = 60
 
+# v2 schema：以 atom_id 为单位累计 weightscore（cluster agent 给的 0-10 分）。
+# buffer 中 pending（非 promoted）的 weightscore_total 累加 ≥ 这个阈值
+# 就让 SkillEditAgent 触发一次 SKILL.md 整理。
+# 单 atom 给 10 分立即触发——cluster agent 的提示词鼓励"非常确信时打高分"。
+ATOM_PROMOTION_THRESHOLD = 10
+
 
 # ═══════════════════════════════════════════════════════════════════
 # I/O
@@ -138,6 +144,76 @@ def add_or_merge(
     candidates.append(entry)
     return data, True
 
+
+# ═══════════════════════════════════════════════════════════════════
+# v2 schema — atom_id + weightscore 累计
+# ═══════════════════════════════════════════════════════════════════
+
+def add_atom_contribution(
+    data: dict,
+    atom_id: str,
+    weightscore: int,
+    *,
+    note: str = "",
+) -> tuple[dict, bool]:
+    """累加一条 atom 对该 skill 的贡献。
+
+    schema::
+
+        candidates:
+          - atom_id: str
+            weightscore_total: int      # 累计分（同一 atom 多次 add 相加）
+            contributions:
+              - score: int
+                ts: ISO date
+                note: str
+            promoted: bool
+            promoted_at: ISO datetime | null
+
+    返回 ``(data, was_new)``。``was_new=True`` 表示这是该 atom 在 buffer
+    中的第一条贡献，``False`` 表示与已有 entry 合并。
+    """
+    today = date.today().isoformat()
+    candidates = data.setdefault("candidates", [])
+    for c in candidates:
+        if c.get("atom_id") == atom_id:
+            c["weightscore_total"] = int(c.get("weightscore_total", 0)) + int(weightscore)
+            c.setdefault("contributions", []).append({
+                "score": int(weightscore), "ts": today, "note": note,
+            })
+            c.setdefault("promoted", False)
+            return data, False
+    candidates.append({
+        "atom_id": atom_id,
+        "weightscore_total": int(weightscore),
+        "contributions": [{"score": int(weightscore), "ts": today, "note": note}],
+        "promoted": False,
+        "promoted_at": None,
+    })
+    return data, True
+
+
+def ready_for_promotion_v2(
+    data: dict, threshold: int = ATOM_PROMOTION_THRESHOLD,
+) -> list[dict]:
+    """返回 buffer 中所有未 promoted 的 candidate，仅当它们的
+    ``weightscore_total`` 累加 ≥ ``threshold`` 时；否则返回空列表。
+
+    与 v1 (`ready_for_promotion`) 的差异：
+    - v1 是单 pattern 攒到 N 条独立 traj 才 promote
+    - v2 是 skill buffer 里**所有未 promote 的 atom 贡献总和** ≥ threshold
+      就触发；单 atom 高分（如 10）也会立即触发。
+    """
+    pending = [c for c in data.get("candidates", []) if not c.get("promoted")]
+    total = sum(int(c.get("weightscore_total", 0)) for c in pending)
+    if total >= threshold:
+        return pending
+    return []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v1 schema — 保留给旧 watcher / 旧 SkillAgent 用，下个 task 切换后再清
+# ═══════════════════════════════════════════════════════════════════
 
 def ready_for_promotion(data: dict, threshold: int = 3) -> list[dict]:
     out = []

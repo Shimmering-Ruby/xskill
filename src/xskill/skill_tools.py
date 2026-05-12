@@ -24,6 +24,23 @@ _ctx = {
     "config": {},
 }
 
+# v2 context for AtomTask-era tools (TaskClusterAgent / SkillEditAgent use these).
+# Kept separate from _ctx so legacy callers (旧 SkillAgent) don't accidentally
+# read stale fields during Task 3/4 transition.
+_ctx_v2 = {
+    "skill_dir": None,     # Path: <skill root>
+    "store": None,         # AtomTaskStore
+    "embed_client": None,  # EmbedClient
+    "traj_root": None,     # Path: <traj root> e.g. ~/.xskill/cc_sessions
+}
+
+
+def init_context_v2(*, skill_dir, store, embed_client, traj_root):
+    _ctx_v2["skill_dir"] = Path(skill_dir)
+    _ctx_v2["store"] = store
+    _ctx_v2["embed_client"] = embed_client
+    _ctx_v2["traj_root"] = Path(traj_root)
+
 
 def init_context(skill_dir, data_dir, llm_client, embed_client, config):
     _ctx["skill_dir"] = Path(skill_dir)
@@ -605,3 +622,172 @@ def rebuild_skill_index():
         pickle.dump(index_data, f)
 
     logger.info(f"🔄 skill index rebuilt: {len(names)} entries → {index_path}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AtomTask-era tools (v2) — consumed by TaskClusterAgent / SkillEditAgent
+# ═══════════════════════════════════════════════════════════════════
+
+def atom_task_read(atom_id: str) -> str:
+    """读一个 AtomTask 的完整 JSON。
+
+    用于 cluster / edit agent 在决定归类前查看 atom 的 intent / summary /
+    raw_segment / used_skills。
+    """
+    store = _ctx_v2["store"]
+    if store is None:
+        return "error: v2 context not initialized"
+    try:
+        return store.load(atom_id).to_json()
+    except FileNotFoundError as e:
+        return f"error: {e}"
+
+
+def atom_task_search(query: str, top_k: int = 5) -> str:
+    """混合检索（向量 ⊕ BM25 关键字）AtomTask；返回 JSON 命中列表。
+
+    每条结果含 ``atom_id`` 和 ``sources``（命中通道）；不做 rerank。
+    """
+    from xskill.hybrid_search import HybridSearch
+    store = _ctx_v2["store"]
+    embed = _ctx_v2["embed_client"]
+    if store is None or embed is None:
+        return "error: v2 context not initialized"
+    hs = HybridSearch(store, embed)
+    hits = hs.search(query, top_k=top_k)
+    return json.dumps(hits, ensure_ascii=False, indent=2)
+
+
+def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
+    """按字符 offset 读 traj.md 片段。
+
+    用法：agent 看了 atom 摘要后想确认细节时，传 atom 的 offset_start/end
+    回来取原文。校验区间合法（``offset_end > offset_start`` 且区间在文件
+    长度内），违反直接返回 error。
+    """
+    traj_root = _ctx_v2["traj_root"]
+    if traj_root is None:
+        return "error: v2 context not initialized"
+    p = traj_root / f"{traj_id}.md"
+    if not p.is_file():
+        return f"error: traj file not found: {p}"
+    if offset_end <= offset_start:
+        return f"error: offset_end ({offset_end}) must be > offset_start ({offset_start})"
+    text = p.read_text(encoding="utf-8")
+    if offset_start < 0 or offset_end > len(text):
+        return (
+            f"error: offsets [{offset_start}..{offset_end}] outside file "
+            f"length {len(text)}"
+        )
+    return text[offset_start:offset_end]
+
+
+def new_skill_folder(skill_name: str) -> str:
+    """创建一个空 skill 目录骨架（scripts/ + references/）。
+
+    与 v1 ``create_skill`` 的差异：不预生成 SKILL.md 占位骨架——v2 流程下
+    SkillEditAgent 在 candidates 攒到阈值后再自主写完整内容；中间态目录
+    只有 ``.candidates.yml``。
+    """
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if target.exists():
+        return f"already exists: {target}"
+    target.mkdir(parents=True)
+    (target / "scripts").mkdir()
+    (target / "references").mkdir()
+    (target / "scripts" / ".gitkeep").write_text("", encoding="utf-8")
+    (target / "references" / ".gitkeep").write_text("", encoding="utf-8")
+    return f"created: {target}"
+
+
+def skill_read(skill_name: str) -> str:
+    """读 skill 的 SKILL.md；没有则返回 placeholder 提示。"""
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    slug = _slugify(skill_name)
+    p = skill_dir / slug / "SKILL.md"
+    if not p.is_file():
+        return f"(skill {slug} has no SKILL.md yet — only candidates buffer)"
+    return p.read_text(encoding="utf-8")
+
+
+def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
+    """把一个 atom 作为贡献追加到该 skill 的 .candidates.yml。
+
+    ``weightscore`` 必须 1-10。返回末尾追加 ``weightscore_total=<N>`` 让
+    agent 看到累计进度——达到 ``ATOM_PROMOTION_THRESHOLD`` (=10) 就会被
+    SkillEditAgent 拾起来生成/更新 SKILL.md。
+    """
+    from xskill import candidates as C
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if not target.is_dir():
+        return f"error: skill {slug} not found; call new_skill_folder first"
+    try:
+        ws = int(weightscore)
+    except (TypeError, ValueError):
+        return f"error: weightscore must be int 1..10 (got {weightscore!r})"
+    if not (1 <= ws <= 10):
+        return f"error: weightscore must be 1..10 (got {ws})"
+    data = C.load_candidates(target)
+    data, was_new = C.add_atom_contribution(data, atom_id, ws)
+    C.save_candidates(target, data)
+    total = next(
+        c["weightscore_total"] for c in data["candidates"] if c["atom_id"] == atom_id
+    )
+    verb = "new" if was_new else "merged"
+    return f"{verb}: skill={slug} atom={atom_id} weightscore_total={total}"
+
+
+def score_task(atom_id: str, score: int) -> str:
+    """覆盖 AtomTask 的 ux_score（手动修正 / 灰度链路使用）。"""
+    store = _ctx_v2["store"]
+    if store is None:
+        return "error: v2 context not initialized"
+    try:
+        sc = int(score)
+    except (TypeError, ValueError):
+        return f"error: score must be int 1..10 (got {score!r})"
+    if not (1 <= sc <= 10):
+        return f"error: score must be 1..10 (got {sc})"
+    try:
+        a = store.load(atom_id)
+    except FileNotFoundError as e:
+        return f"error: {e}"
+    a.ux_score = sc
+    store.save(a)
+    return f"scored: {atom_id} → {sc}"
+
+
+def add_task(
+    atom_id: str, *, traj_id: str, offset_start: int, offset_end: int,
+    intent: str, summary: str, tags: list, used_skills: list,
+    ux_score: int | None = None,
+) -> str:
+    """手动创建一个 AtomTask（offline 脚本 / agent 合成 atom 用）。
+
+    生产路径走 TaskAgent；这个工具是给需要补轨的 agent / 脚本兜底。
+    """
+    from xskill.atom_task import AtomTask
+    store = _ctx_v2["store"]
+    if store is None:
+        return "error: v2 context not initialized"
+    atom = AtomTask(
+        atom_id=atom_id, traj_id=traj_id,
+        offset_start=int(offset_start), offset_end=int(offset_end),
+        intent=intent, summary=summary,
+        tags=list(tags or []), used_skills=list(used_skills or []),
+        ux_score=ux_score,
+        pre_atom_id=None, post_atom_id=None,
+        context_prefix="", raw_segment="",
+    )
+    store.save(atom)
+    return f"added: {atom_id}"
