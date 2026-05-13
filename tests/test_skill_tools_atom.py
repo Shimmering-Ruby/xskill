@@ -184,6 +184,120 @@ class TestSkillRead:
         assert "body here" in msg
 
 
+class TestRenameSkill:
+    def test_rename_baby_succeeds(self, tmp_path):
+        skill_dir, _ = _setup(tmp_path)
+        ST.new_skill_folder("old-name", "stub")
+        result = ST.rename_skill("old-name", "new-name")
+        assert "renamed" in result
+        assert (skill_dir / "new-name").is_dir()
+        assert not (skill_dir / "old-name").exists()
+        # SKILL.md frontmatter.name 已更新
+        from xskill.frontmatter import parse as fm_parse
+        fm, _ = fm_parse((skill_dir / "new-name" / "SKILL.md").read_text(encoding="utf-8"))
+        assert fm["name"] == "new-name"
+
+    def test_rename_to_existing_target_fails(self, tmp_path):
+        _setup(tmp_path)
+        ST.new_skill_folder("source", "stub")
+        ST.new_skill_folder("target", "stub")
+        result = ST.rename_skill("source", "target")
+        assert result.startswith("error")
+        assert "已存在" in result
+
+    def test_rename_main_state_fails(self, tmp_path):
+        skill_dir, _ = _setup(tmp_path)
+        ST.new_skill_folder("graduated", "stub")
+        # graduate 到 main
+        from xskill.git_lock import run_git
+        run_git(["branch", "-m", "baby", "main"], cwd=str(skill_dir / "graduated"))
+        result = ST.rename_skill("graduated", "new-name")
+        assert result.startswith("error")
+        assert "baby" in result
+
+    def test_rename_nonexistent_skill_fails(self, tmp_path):
+        _setup(tmp_path)
+        result = ST.rename_skill("nonexistent", "new")
+        assert result.startswith("error")
+
+    def test_rename_to_same_name_noop(self, tmp_path):
+        _setup(tmp_path)
+        ST.new_skill_folder("same", "stub")
+        result = ST.rename_skill("same", "same")
+        assert "noop" in result
+
+
+class TestReadSkillTasks:
+    def test_reads_candidates_with_weightscore(self, tmp_path):
+        _setup(tmp_path)
+        ST.new_skill_folder("buf", "stub")
+        ST.add_task_to_skill("buf", "atom_a", 6)
+        ST.add_task_to_skill("buf", "atom_b", 8)
+        result = ST.read_skill_tasks("buf")
+        assert "atom_a" in result
+        assert "atom_b" in result
+        assert "weightscore=6" in result
+        assert "weightscore=8" in result
+        assert "total=14" in result
+
+    def test_empty_buffer_returns_zero_message(self, tmp_path):
+        _setup(tmp_path)
+        ST.new_skill_folder("empty-buf", "stub")
+        result = ST.read_skill_tasks("empty-buf")
+        assert "0 candidates" in result
+
+    def test_nonexistent_skill_returns_error(self, tmp_path):
+        _setup(tmp_path)
+        result = ST.read_skill_tasks("nonexistent")
+        assert result.startswith("error")
+
+
+class TestMoveTaskTo:
+    def test_move_task_between_skills(self, tmp_path):
+        skill_dir, _ = _setup(tmp_path)
+        ST.new_skill_folder("from-skill", "stub")
+        ST.new_skill_folder("to-skill", "stub")
+        ST.add_task_to_skill("from-skill", "atom_x", 8)
+        result = ST.move_task_to("from-skill", "to-skill", "atom_x")
+        assert "moved" in result
+        # source 空
+        from xskill import candidates as C
+        from_data = C.load_candidates(skill_dir / "from-skill")
+        assert from_data["candidates"] == []
+        # target 含 atom_x，weightscore 保留为 8
+        to_data = C.load_candidates(skill_dir / "to-skill")
+        assert len(to_data["candidates"]) == 1
+        assert to_data["candidates"][0]["atom_id"] == "atom_x"
+        assert to_data["candidates"][0]["weightscore"] == 8
+
+    def test_move_overwrites_existing_target_atom(self, tmp_path):
+        skill_dir, _ = _setup(tmp_path)
+        ST.new_skill_folder("from", "stub")
+        ST.new_skill_folder("to", "stub")
+        ST.add_task_to_skill("from", "atom_dup", 3)
+        ST.add_task_to_skill("to", "atom_dup", 9)
+        ST.move_task_to("from", "to", "atom_dup")
+        # target 的 atom_dup 被覆盖为 from 的 weightscore=3
+        from xskill import candidates as C
+        to_data = C.load_candidates(skill_dir / "to")
+        assert to_data["candidates"][0]["weightscore"] == 3
+
+    def test_move_same_skill_noop(self, tmp_path):
+        _setup(tmp_path)
+        ST.new_skill_folder("solo", "stub")
+        ST.add_task_to_skill("solo", "atom_a", 5)
+        result = ST.move_task_to("solo", "solo", "atom_a")
+        assert "noop" in result
+
+    def test_move_atom_not_in_source_fails(self, tmp_path):
+        _setup(tmp_path)
+        ST.new_skill_folder("a", "stub")
+        ST.new_skill_folder("b", "stub")
+        result = ST.move_task_to("a", "b", "atom_missing")
+        assert result.startswith("error")
+        assert "不在" in result
+
+
 class TestAddTask:
     def test_writes_synthetic_atom(self, tmp_path):
         _, store = _setup(tmp_path)

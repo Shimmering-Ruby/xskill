@@ -864,3 +864,134 @@ def absorb_user_edit_to_main(skill_name: str, message: str) -> str:
         result += " (deleted in-flight staging)"
 
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════
+# v2.2 渐进收敛工具（ClusterAgent 用，处理近义 slug 整合）
+# ═══════════════════════════════════════════════════════════════════
+
+def rename_skill(old_name: str, new_name: str) -> str:
+    """ClusterAgent 专用：把 **baby 分支** 的 skill 重命名（合并近义 slug）。
+
+    只允许 baby 状态的 skill 重命名；main/staging 状态拒绝（已有 git 历史
+    + symlink 已装到 CC，改名会破坏一致性）。
+
+    用例：cluster 发现两个 baby skill 实际同义（``3gpp-crawl-routine`` vs
+    ``3gpp-crawler-routine``），调 RenameSkill 把 less-precise 的归到
+    more-precise；之后 add_task_to_skill 都打到统一 slug 上。
+
+    实现：mv 目录 + 更新 SKILL.md.name + 改 body 标题 + commit on baby。
+    """
+    from xskill.git_lock import current_branch, run_git
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    old_slug = _slugify(old_name)
+    new_slug = _slugify(new_name)
+    if old_slug == new_slug:
+        return f"noop: {old_slug} 已是目标名"
+    old_path = skill_dir / old_slug
+    new_path = skill_dir / new_slug
+    if not old_path.is_dir():
+        return f"error: skill {old_slug} not found"
+    if new_path.exists():
+        return f"error: target {new_slug} 已存在，无法重命名（先 MoveTaskTo 合并 atom）"
+    if not (old_path / ".git").is_dir():
+        return f"error: skill {old_slug} 没 git 仓库"
+    cur = current_branch(str(old_path))
+    if cur != "baby":
+        return (f"error: 仅 baby 分支可重命名 (当前 {cur!r}); "
+                "main/staging 已有 git 历史 + symlink 装到 CC，不可改名")
+
+    old_path.rename(new_path)
+    # 更新 SKILL.md frontmatter.name + body 标题
+    skill_md = new_path / "SKILL.md"
+    if skill_md.is_file():
+        text = skill_md.read_text(encoding="utf-8")
+        fm, body = fm_parse(text)
+        fm["name"] = new_slug
+        body = body.replace(f"# {old_slug}", f"# {new_slug}", 1)
+        skill_md.write_text(fm_serialize(fm, body), encoding="utf-8")
+    run_git(["add", "-A"], cwd=str(new_path))
+    run_git(["commit", "-m", f"rename: {old_slug} → {new_slug}"], cwd=str(new_path))
+    logger.info(f"renamed baby skill: {old_slug} → {new_slug}")
+    return f"renamed: {old_slug} → {new_slug}"
+
+
+def read_skill_tasks(skill_name: str) -> str:
+    """读取某 skill 的 candidates buffer 列表。
+
+    cluster agent 用来"看这个 baby skill 在攒什么类型的 atom"——决定该不该
+    把当前 atom 也归过去。返回 yaml-like 文本，每条 atom 一行含 weightscore。
+    """
+    from xskill import candidates as C
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if not target.is_dir():
+        return f"error: skill {slug} not found"
+    data = C.load_candidates(target)
+    cands = data.get("candidates", []) or []
+    if not cands:
+        return f"(skill {slug}: 0 candidates in buffer)"
+    total = sum(int(c.get("weightscore", 0)) for c in cands)
+    lines = [f"skill {slug} candidates buffer ({len(cands)} atoms, total={total}/10):"]
+    for c in cands:
+        note = c.get("note", "")
+        ext = f"  note: {note}" if note else ""
+        lines.append(
+            f"  - atom_id={c['atom_id']}  weightscore={c.get('weightscore', 0)}{ext}"
+        )
+    return "\n".join(lines)
+
+
+def move_task_to(skill_from: str, skill_to: str, atom_id: str) -> str:
+    """把 atom 从 ``skill_from`` 的 candidates buffer 移到 ``skill_to``。
+
+    用例：cluster 发现某 atom 当初被错放进 skill_A，看完后觉得应当归到
+    skill_B → 调本工具完成迁移。覆盖语义（skill_to 已有该 atom → 覆盖
+    weightscore）。
+
+    源 buffer 为空时不删空骨架（保留 baby skill，cluster 后续可能再填）。
+    """
+    from xskill import candidates as C
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    from_slug = _slugify(skill_from)
+    to_slug = _slugify(skill_to)
+    if from_slug == to_slug:
+        return f"noop: 源和目标是同一 skill ({from_slug})"
+    from_path = skill_dir / from_slug
+    to_path = skill_dir / to_slug
+    if not from_path.is_dir():
+        return f"error: source skill {from_slug} not found"
+    if not to_path.is_dir():
+        return f"error: target skill {to_slug} not found"
+
+    from_data = C.load_candidates(from_path)
+    cands_from = from_data.get("candidates", []) or []
+    target_atom = None
+    new_cands_from: list = []
+    for c in cands_from:
+        if c.get("atom_id") == atom_id:
+            target_atom = c
+        else:
+            new_cands_from.append(c)
+    if target_atom is None:
+        return f"error: atom_id {atom_id} 不在 {from_slug} buffer 中"
+
+    from_data["candidates"] = new_cands_from
+    C.save_candidates(from_path, from_data)
+
+    to_data = C.load_candidates(to_path)
+    weightscore = int(target_atom.get("weightscore", 0))
+    note = target_atom.get("note", "")
+    to_data, _ = C.add_atom_contribution(to_data, atom_id, weightscore, note=note)
+    C.save_candidates(to_path, to_data)
+
+    logger.info(f"moved task: atom={atom_id} {from_slug} → {to_slug}")
+    return (f"moved: atom={atom_id} from {from_slug} to {to_slug} "
+            f"(weightscore={weightscore})")

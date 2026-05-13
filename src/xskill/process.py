@@ -56,7 +56,9 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         llm_cfg=config.get("llm", {}),
         tools=[
             ST.atom_task_read, ST.atom_task_search, ST.read_traj,
-            ST.skill_read, ST.new_skill_folder, ST.add_task_to_skill,
+            ST.skill_read, ST.read_skill_tasks,
+            ST.new_skill_folder, ST.add_task_to_skill,
+            ST.rename_skill, ST.move_task_to,
             ST.score_task,
         ],
     )

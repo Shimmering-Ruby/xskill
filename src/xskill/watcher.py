@@ -412,22 +412,43 @@ class DirectoryWatcher:
                 self._futures[fut] = {"wd_id": wd_id, "fname": "_batch_embed", "stage": "embed"}
 
         # ── Cold-start 门控 + cluster（indexed → clustering）──
+        # 冷启动期间强制 cluster 串行（max=1）：避免并发 cluster agent 看到
+        # 同一时刻的 catalog 各自创建近义 baby slug。
+        # 冷启动判据 = "近期有大量 traj 同时被处理"：
+        #   - pending pre-index ≥ threshold（大量未索引涌入）
+        #   - 或：indexed_待_cluster + clustering_in_flight ≥ threshold
+        #     （已索引但 cluster 还没消化的 traj 数 + 在飞 cluster 数 ≥ 阈值）
+        # 任一满足 → 串行。稳态（孤立单 traj 进来）允许 max_concurrent。
         if self.skill_dir:
-            pending_index = (
+            pending_pre_index = (
                 len(get_trajs_by_status(wd_id, "discovered", **kw))
                 + len(get_trajs_by_status(wd_id, "splitting", **kw))
                 + len(get_trajs_by_status(wd_id, "split_done", **kw))
             )
-            if pending_index >= self.cold_start_threshold:
-                self._stats["cold_start_deferrals"] += 1
-                logger.info(
-                    "[%s] cold-start gate: %d trajs not yet indexed (>= %d threshold), "
-                    "defer cluster",
-                    dir_path.name, pending_index, self.cold_start_threshold,
-                )
+            indexed_count = len(get_trajs_by_status(wd_id, "indexed", **kw))
+            clustering_in_flight = sum(
+                1 for i in self._futures.values()
+                if i["stage"] == "cluster" and i["wd_id"] == wd_id
+            )
+            cluster_backlog = indexed_count + clustering_in_flight
+            is_cold_start = (
+                pending_pre_index >= self.cold_start_threshold
+                or cluster_backlog >= self.cold_start_threshold
+            )
+            cluster_slots = 1 if is_cold_start else self.max_concurrent
+            available = cluster_slots - clustering_in_flight
+            if available <= 0:
+                if is_cold_start:
+                    self._stats["cold_start_deferrals"] += 1
+                    logger.debug(
+                        "[%s] cold-start serial: clustering=%d, pre=%d, backlog=%d, "
+                        "wait current cluster to finish",
+                        dir_path.name, clustering_in_flight,
+                        pending_pre_index, cluster_backlog,
+                    )
             else:
                 for fname in get_trajs_by_status(
-                    wd_id, "indexed", limit=self.max_concurrent, **kw,
+                    wd_id, "indexed", limit=available, **kw,
                 ):
                     if self._too_many_in_flight():
                         break
