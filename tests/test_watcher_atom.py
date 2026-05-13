@@ -242,6 +242,61 @@ class TestColdStartSerial:
         watcher._pool.shutdown(wait=False)
 
 
+class TestClusterAllFailed:
+    """LLM 余额耗尽 / 全部 atom cluster 抛异常时，traj 必须标 error 让下轮 retry，
+    不能被假冒成 ``done``（实跑暴露的 bug：原 ``_on_cluster_done`` 无条件标 done）。"""
+
+    def test_all_atoms_failed_marks_traj_error(self, tmp_path):
+        db = tmp_path / "test.db"
+        wd = tmp_path / "wd"; wd.mkdir()
+        skill_dir = tmp_path / "skill"; skill_dir.mkdir()
+        (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
+
+        class _AlwaysFailAgno:
+            def __init__(self, *, instructions, tools):
+                self.instructions = instructions
+            def run(self, msg, **kw):
+                if "TaskClusterAgent" in (self.instructions[0] or "")[:60]:
+                    raise RuntimeError("Insufficient Balance (stub LLM 402)")
+                class _R: pass
+                r = _R(); r.content = ""; return r
+
+        register_dir(wd, db_path=db)
+        store = AtomTaskStore(root=wd)
+        watcher = DirectoryWatcher(
+            llm=_StubLLM([_SPLIT_XML]),
+            embed_client=_FakeEmbed(),
+            config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
+            skill_dir=skill_dir,
+            poll_interval=0.0,
+            max_concurrent=2,
+            db_path=db,
+            cold_start_threshold=999,
+            store=store,
+            max_retries=0,  # 不让 watcher 自动 retry，便于断言"留在 error"
+            agno_agent_factory=lambda **kw: _AlwaysFailAgno(**kw),
+        )
+
+        # 跑足够多轮把 traj 推到 cluster 阶段
+        for _ in range(10):
+            watcher._scan_once()
+            for _ in range(20):
+                if not watcher._futures:
+                    break
+                time.sleep(0.05)
+                watcher._harvest()
+            wd_id = register_dir(wd, db_path=db)
+            if "traj_x.md" in get_trajs_by_status(wd_id, "error", db_path=db):
+                break
+
+        wd_id = register_dir(wd, db_path=db)
+        # 关键断言：cluster 全失败 → traj 必须是 error，不能是 done
+        assert "traj_x.md" not in get_trajs_by_status(wd_id, "done", db_path=db), \
+            "全部 atom cluster 失败的 traj 不应被标 done"
+        assert "traj_x.md" in get_trajs_by_status(wd_id, "error", db_path=db), \
+            "全部 atom cluster 失败的 traj 应被标 error 等待 retry"
+
+
 class TestIndependentSkillEditScan:
     """Bug 1 修复关键回归：edit 触发独立于 cluster 链路。
 

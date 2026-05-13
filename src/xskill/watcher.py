@@ -581,13 +581,34 @@ class DirectoryWatcher:
 
     def _on_cluster_done(self, wd_id, fname, result, **kw):
         _fname, results = result
-        action = "clustered"  # edit 触发独立扫描，这里不再聚合 edited_skills
-        new_status = _ACTION_STATUS.get(action, "error")
+        n_total = len(results)
+        n_errors = sum(1 for r in results if r.get("action") == "error")
+        n_ok = n_total - n_errors
+
+        # 全部 atom cluster 失败（典型: LLM 402/网络异常）→ 标 error 让下轮 retry。
+        # 此前无条件标 done 会把 traj 假冒成"已处理"，下次永远不再走 cluster。
+        if n_total > 0 and n_ok == 0:
+            err_sample = next(
+                (r.get("error", "?") for r in results
+                 if r.get("action") == "error"),
+                "unknown",
+            )
+            update_traj_status(
+                wd_id, fname, "error",
+                error_msg=f"cluster all atoms failed: {err_sample}"[:200], **kw,
+            )
+            self._stats["errors"] += 1
+            logger.warning(
+                "%s → cluster failed (0/%d atoms ok): %s",
+                fname, n_total, err_sample,
+            )
+            return
+
         update_traj_status(
-            wd_id, fname, new_status, process_action=action, **kw,
+            wd_id, fname, "done", process_action="clustered", **kw,
         )
-        self._stats["atoms_clustered"] += len(results)
-        logger.info("%s → clustered (%d atoms)", fname, len(results))
+        self._stats["atoms_clustered"] += n_ok
+        logger.info("%s → clustered (%d/%d atoms ok)", fname, n_ok, n_total)
         # cluster 完成后该 traj 的所有 atom 都已落盘——这是 ux_score 应当
         # 跑的时机（旧 _score_new 在 traj 发现时跑会看到空 atom 列表）。
         self._score_atoms_for_traj(wd_id, fname, **kw)
