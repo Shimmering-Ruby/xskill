@@ -363,10 +363,34 @@ tests/fixtures/
 
 ## 9. 决策记录（已拍板）
 
-- **R3** Codex npm 包对应 codex-rs 还是 codex-cli：P2 subagent 第一步实地 `npm i -g @openai/codex` + `which codex` 验证，根据实际结果调整 spec
+- **R3** Codex npm 包对应 codex-rs 还是 codex-cli：**主 agent 已实地验证（2026-05-13）**：
+  - `npm i -g @openai/codex` 装的是 wrapper 包 `bin/codex.js`，根据平台 spawn `@openai/codex-{linux-x64,darwin-arm64,win32-x64,...}` 子包里的 native binary
+  - native binary 是 **codex-rs 的预编译产物**（同 `~/learn/codex/codex-rs/` 源码）
+  - 实测版本：`codex-cli 0.130.0`
+  - **结论：会话 JSONL schema 与调研 §3 SessionMeta 完全一致**
 - **R4 `.xskill-managed` 标签**：**不加**（保守）。xskill 写 `~/.agents/skills/` 时直接占用，由用户保证不与外部冲突
 - **R1 / R8 实地验**（用户 2026-05-13 指令"必须实际装 实际测试"覆盖前一版策略）：
   - P2/P3 subagent **强制实地装 + 实跑**（§6 强制实装步骤）
   - CI smoke-e2e **每个 PR 都装 codex/opencode CLI** 验证安装步骤
   - CI live-agent-e2e 在 main push / nightly 用 secret 真跑端到端
-  - 入仓 fixture 必须来自真实 agent 进程（脱敏后），不接受手编
+  - 入仓 fixture 必须来自真实 agent 进程（脱敏后）或来自 codex-rs / opencode **官方测试代码的 fixture 生成逻辑直接移植**（schema 由项目源头保证，非手编）
+
+### 9.1 实地实测限制（2026-05-13 调查）
+
+主 agent 已实地装 codex CLI 并尝试跑 session，发现两条硬约束：
+
+| 约束 | 实际行为 | 影响 |
+| --- | --- | --- |
+| **`wire_api` enum 只剩 `Responses`** | `~/learn/codex/codex-rs/model-provider-info/src/lib.rs`：`pub enum WireApi { Responses, }`；codex 0.130 启动时 `wire_api = "chat"` 报错 `no longer supported` | **DeepSeek / Qwen / 任何 chat completions API 都不能直接驱动 codex**。只剩三条路：OpenAI Responses API（要 OpenAI key）、`--oss` 模式（要 ollama/lmstudio）、`codex login`（OAuth ChatGPT 账号交互式登录） |
+| **本机无 cargo / 无 ollama / 无 OpenAI key** | 装 ollama 要 sudo + 拉模型；装 cargo 要 rustup；没 OpenAI key | **本机无法用 codex 真实生成 fixture** |
+
+**应对策略**（落地到 P2 subagent 工作）：
+
+| 层 | 怎么做 | 真实性保证 |
+| --- | --- | --- |
+| **fixture 生成** | Python 移植 `codex-rs/rollout/src/tests.rs::write_session_file_with_provider` 的逻辑（已读源码确认是简单的 `serde_json::json!` 几个 Map + writeln），生成 `tests/fixtures/codex/sample_rollout.jsonl` | Schema 100% 真实——来自 codex 项目自己的单测，他们用这个 schema 写文件、读取并断言 round-trip |
+| **CI smoke** | runner 上 `npm i -g @openai/codex && codex --version` 验证安装；用入仓 fixture 跑 adapter | "装"步骤每次 PR 都跑真——若 codex 自己 break npm 发布，CI 立刻挂 |
+| **CI live-agent-e2e** | 后续若有 ollama / OAuth / Responses key，再在 nightly job 真跑 `codex exec` | P4 阶段加 secret 后启用，本 PR 不阻塞 |
+| **本机调试** | P2 subagent 装好 codex CLI 后用 `codex --version` 验证安装，不需要真跑 LLM。fixture 用上述 Python 移植脚本生成 | 满足"实际装" + "fixture schema 真实" |
+
+OpenCode 同理：本机已有 `~/.local/share/opencode/opencode.db`（来自先前实测），可脱敏入仓作 fixture；新跑一条 session 需要 LLM provider key，CI 上同样靠 `npm i -g opencode-ai && opencode --version` 验证安装即可。
