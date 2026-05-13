@@ -121,6 +121,18 @@ xskill search skill <query> [--top-k 5]
 
 输出格式遵循 Anthropic 的 `SKILL.md` schema——任何已经能读 Anthropic Skills 的 agent 都能直接读 xskill 的产物。我们正在逐个加原生 adapter——Codex、Cursor、OpenCode 等都在 [roadmap](#roadmap) 上，欢迎 PR。
 
+## 操作系统支持
+
+xskill 是纯 Python (3.11+)，daemon / watcher / SDK 原则上跨平台。当下能诚实声明的覆盖如下：
+
+| 平台 | 状态 | 备注 |
+| ---- | :--: | ---- |
+| **Linux** (x86_64) | 已测试 ✅ | 开发与 CI 环境。 |
+| **macOS** | 应可运行 | 同 POSIX 表面——symlink、`~/.claude/` 路径、`git` subprocess 与 Linux 一致。尚未纳入 CI，遇到问题欢迎反馈。 |
+| **Windows 10 / 11** | 部分支持 ⚠️ | 轨迹采集与 Skill 搜索可用，但 Skill 安装要创建**目录级 symlink**，Windows 需要**开发者模式**或以管理员身份运行；否则 install 那一步会失败。尚未纳入 CI，欢迎社区反馈。 |
+
+如果你在 Windows 上想避开 symlink，可以在 `~/.xskill/config.yaml` 里把 `skill_dir` 直接设成你 agent 的 skill 发现目录，跳过自动 install 那步。
+
 ## 概念
 
 | 术语 | 含义 |

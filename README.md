@@ -121,6 +121,18 @@ The trajectory in / Skill out interfaces are pluggable. Here is the honest curre
 
 The output format is the same `SKILL.md` schema Anthropic uses, so any agent that already reads Anthropic Skills can read xskill's library verbatim. We are adding native adapters one agent at a time — Codex, Cursor, OpenCode and friends are on the [roadmap](#roadmap); PRs welcome.
 
+## Platforms
+
+xskill is pure Python (3.11+) and the daemon, watcher and SDK are OS-agnostic in principle. Coverage we can honestly claim today:
+
+| Platform | Status | Notes |
+| -------- | :----: | ----- |
+| **Linux** (x86_64) | tested ✅ | Development and CI environment. |
+| **macOS** | should work | Same POSIX surface — symlinks, `~/.claude/` path and `git` subprocess all behave the same as Linux. Not part of CI yet — report issues. |
+| **Windows 10 / 11** | partial ⚠️ | Trajectory ingest and Skill search work, but installing a Skill creates a directory symlink, which requires **Developer Mode** or running as Administrator on Windows. Without that, the symlink step fails. Not part of CI — community testing welcome. |
+
+If you are on Windows and want to avoid the symlink requirement, set `skill_dir` directly to your agent's discovery folder in `~/.xskill/config.yaml` and skip the auto-install step.
+
 ## Concepts
 
 | Term | What it means |
