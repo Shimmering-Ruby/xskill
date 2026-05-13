@@ -1423,10 +1423,14 @@ def create_app(home_root: Path | str | None = None) -> FastAPI:
                 detect_known_ecosystems, CCSessionIngester,
                 install_all_to_claude_code,
             )
+            from xskill.config import XSKILL_HOME
             from xskill.install_history import InstallHistory
             from xskill.registry import register_dir
 
-            install_history_path = _skill_dir / "install_history.jsonl"
+            # install_history.jsonl 是 daemon 全局状态（与 registry.db 同级），
+            # 不属于任一 skill；落到 ~/.xskill/ 根而不是 skill_dir。否则 ls
+            # ~/.xskill/skill/ 会把它误识成 skill 名（实跑遇到的 bug）。
+            install_history_path = XSKILL_HOME / "install_history.jsonl"
             install_history = InstallHistory(install_history_path)
 
             detections = detect_known_ecosystems(home_root=_home_root())
