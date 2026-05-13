@@ -93,40 +93,6 @@ xskill search traj  <query> [--top-k 5]
 xskill search skill <query> [--top-k 5]
 ```
 
-`search` 输出 tab 分隔，可直接 pipe：
-
-```bash
-$ xskill search skill "form validation" | sort -k4 -nr | head -3
-0.350  fix-early-return-in-validation-functions   3   7.8(15)  -
-0.343  fix-cli-language-validation                2   8.1(12)  staging
-0.309  fix-api-method-parameter-validation        0   -        -
-# 列：similarity  name  use_count  ux_avg(N)  canary_status
-```
-
-## Python SDK
-
-```python
-from xskill import XSkill
-
-x = XSkill()  # 自动加载 ~/.xskill/config.yaml
-
-# 跨所有注册目录搜索 Skill
-for hit in x.search_skills("django form", top_k=5):
-    print(f"{hit.similarity:.3f}  {hit.skill.name}  uses={hit.skill.use_count}")
-
-# 浏览 Skill 库
-for skill in x.skill_repo:
-    print(skill.name, skill.canary_status(), skill.ux_avg(side="main", days=30))
-
-# 注册新的监听目录
-x.registry.add("/abs/path/to/trajectories", label="prod-eng")
-
-# 或者直接起 daemon
-x.serve(host="0.0.0.0", port=8000)
-```
-
-进阶：`from xskill import Registry, SkillRepo, Evaluator, Skill, Trajectory` 直接拿子系统。
-
 ## xskill 里有哪几个 agent
 
 后台跑着几个 LLM agent，每个职责都很窄：

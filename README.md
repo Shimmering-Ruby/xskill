@@ -93,40 +93,6 @@ xskill search traj  <query> [--top-k 5]
 xskill search skill <query> [--top-k 5]
 ```
 
-`search` prints tab-separated columns — pipe it:
-
-```bash
-$ xskill search skill "form validation" | sort -k4 -nr | head -3
-0.350  fix-early-return-in-validation-functions   3   7.8(15)  -
-0.343  fix-cli-language-validation                2   8.1(12)  staging
-0.309  fix-api-method-parameter-validation        0   -        -
-# columns: similarity  name  use_count  ux_avg(N)  canary_status
-```
-
-## Python SDK
-
-```python
-from xskill import XSkill
-
-x = XSkill()  # loads ~/.xskill/config.yaml
-
-# Search across every registered directory
-for hit in x.search_skills("django form", top_k=5):
-    print(f"{hit.similarity:.3f}  {hit.skill.name}  uses={hit.skill.use_count}")
-
-# Browse the Skill library
-for skill in x.skill_repo:
-    print(skill.name, skill.canary_status(), skill.ux_avg(side="main", days=30))
-
-# Register a new watched directory
-x.registry.add("/abs/path/to/trajectories", label="prod-eng")
-
-# Or just start the daemon and let it run
-x.serve(host="0.0.0.0", port=8000)
-```
-
-Advanced: `from xskill import Registry, SkillRepo, Evaluator, Skill, Trajectory` for direct subsystem access.
-
 ## Agents inside xskill
 
 A handful of LLM agents do the work, each with a single, narrow job:
