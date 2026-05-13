@@ -1,20 +1,26 @@
-"""SkillEditAgent —— SKILL.md 自主整理（candidates buffer 累计阈值触发）
+"""SkillEditAgent —— SKILL.md 自主整理 + git commit（baby→main 或 staging）
 ========================================================================
 
-何时触发：单个 skill 的 ``.candidates.yml`` 中所有 **未 promoted** 的 candidate
-``weightscore_total`` 累加 ≥ ``ATOM_PROMOTION_THRESHOLD`` (=10) 时。
+何时触发（``maybe_run`` 守门）：
+  1. 该 skill 没有 staging 分支（灰度中不再触发新 SkillEdit）
+  2. ``.candidates.yml`` 中所有 atom 的 ``weightscore`` 累加 ≥ 10
+  3. 触发场景是"create staging"时（即 main 已存在），额外要求
+     ``.ux_scores.jsonl`` 至少有 1 条 ``side=main`` 的真实评分——
+     避免冷启动后 main 无人用就连开 staging 卡死灰度链路
+  4. 调用方（watcher._check_pending_skill_edits）保证不在冷启动期触发
 
-与旧 ``candidates._run_skill_edit_agent`` 的差异：
-- 触发器从"≥N 条 supporting_trajs"换成"buffer 累计 weightscore ≥10"
-- 候选条目字段是 ``atom_id`` 而非 ``pattern``；agent 负责通过 AtomTaskRead /
-  ReadTraj 工具拿到真实内容来撰写 SKILL.md
-- 类化封装，便于注入 stub agno agent 工厂做单测
+agent 写完 SKILL.md / scripts / references 后**必须**调以下两个 commit
+工具之一（依当前分支状态）：
+  - baby 分支：调 ``commit_baby_to_main(skill_name, message)`` 完成首版
+  - main 分支：调 ``commit_to_staging(skill_name, message)`` 产出灰度候选
+
+落盘成功（SKILL.md mtime 推进 + 非空）→ 清空 candidates buffer + 立即
+install_to_claude_code 让 CC 立刻看到新版本。
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,16 +29,25 @@ from xskill import candidates as C
 logger = logging.getLogger("xskill.skill_edit_agent")
 
 
-SYSTEM_PROMPT = """你是 SkillEditAgent。一个 skill 的 candidates buffer 已积累了
-若干 atom 贡献（累计 weightscore ≥ 10），系统判定该触发一次 SKILL.md 整理。
+SYSTEM_PROMPT_TEMPLATE = """你是 SkillEditAgent。某 skill 的 candidates buffer 累计
+weightscore ≥ 10，需要你产出/更新它的 SKILL.md。
 
-# 你的输入
-我会列出 candidates 的 atom_id + 各自的 weightscore_total（高分代表 cluster agent
-更确信它对此 skill 有贡献）。
+# 当前场景
+
+{scenario_block}
 
 # 你的目标
-读 atom 内容（AtomTaskRead），必要时读 traj 原文（ReadTraj），按 SKILL.md v2
-schema 写或更新 SKILL.md：
+
+读 atom 内容（AtomTaskRead），必要时读 traj 原文（ReadTraj），整理出一份
+**完整可执行**的 skill。SKILL.md 是必产物，但你**不限于**只写 SKILL.md——
+可以补充任何辅助文件，只要在 skill 目录范围内：
+
+- ``<skill_dir>/SKILL.md`` — 必产物，frontmatter + body
+- ``<skill_dir>/scripts/*.py`` / ``*.sh`` — 可机械执行的脚本
+- ``<skill_dir>/references/*.md`` — 长参考材料（trace / 配置 / 文档摘录）
+- ``<skill_dir>/templates/*`` 等任意子目录
+
+# SKILL.md schema
 
 ```
 ---
@@ -40,12 +55,10 @@ name: <英文 slug>
 description: <2-5 句中文：干什么、典型触发表述（引号引原文）、需要的工具/权限>
 compatibility: <环境/版本/权限 + 至少一条负向硬约束>
 metadata:
-  version: 1
+  version: <自增整数；新建从 1 开始，更新版本号+1>
   created: "<AUTO>"
   last_updated: "<AUTO>"
   source_atoms: ["atom_xxx_0001", ...]
-  frozen: false
-  use_count: 0
 ---
 
 # <中文标题>
@@ -56,25 +69,43 @@ metadata:
 1. <步骤：精确到命令/文件/函数>
 2. <步骤>
 
-   > ⚠️ <警告：引用 atom 证据如"见 atom_xxx_0001"或"3/5 atoms 表明..."，
+   > ⚠️ <警告：引用 atom 证据 "见 atom_xxx_0001" 或 "3/5 atoms 表明..."，
    > 不要凭空猜>
-
-## <阶段名-2>
-3. ...
 ```
 
-# 你可以
-- AtomTaskRead(atom_id) — 读 atom JSON
-- ReadTraj(traj_id, offset_start, offset_end) — 按 offset 取轨迹原文片段
-- SkillRead(name) — 读现有 SKILL.md（若有，用于更新场景）
-- write_file(path, content) — 只允许写在该 skill 目录下
+# 写完文件**必须 commit**
 
-# 你不要
-- 不要随便引用没在 atom 中出现过的命令/函数；以 AtomTaskRead 为唯一可信来源。
-- 不要在描述里发明用户群体或场景。
-- SKILL.md 不超过 400 行；长参考材料放 references/，脚本放 scripts/。
-- 不要写 `## trigger` / `## 触发条件` / `## pitfalls` / `## 陷阱` 这种段；
-  触发信号在 frontmatter.description，pitfalls 用内联 ``> ⚠️`` blockquote。
+写完所有文件后**必须**调以下其中一个工具完成版本化——否则改动只是工作目录
+脏文件，watcher 会判定本次 SkillEdit 失败重试。
+
+## 当前在 {branch_now} 分支，按场景调对应工具：
+
+- **如果在 baby 分支**：调 ``commit_baby_to_main(skill_name, message)``
+  这是该 skill 第一次出版本，graduate 到 main 分支。
+- **如果在 main 分支**（已有 main，本次是更新）：调
+  ``commit_to_staging(skill_name, message)`` 把更新作为灰度候选放进 staging。
+  staging 会被灰度系统 vs main 对比，胜出才升级。
+
+commit message 写明本次基于哪些 atom_id 整理，例如：
+``"v2: 合并 atom_traj_x_0001/0003 的 zombie cleanup 步骤；新增 references/pidns_pitfall.md"``
+
+# 可用工具
+- AtomTaskRead(atom_id) — 读 atom JSON
+- ReadTraj(traj_id, offset_start, offset_end) — 按 offset 取轨迹原文
+- SkillRead(skill_name) — 读现有 SKILL.md（更新场景用）
+- list_files(path) — 列目录文件
+- write_file(path, content) — 写任意文件到 skill_dir 下
+- commit_baby_to_main(skill_name, message) — 仅 baby 分支可用
+- commit_to_staging(skill_name, message) — 仅 main 分支可用
+
+# 硬禁止
+- 不要随便引用没在 atom 中出现过的命令/函数；以 AtomTaskRead 为唯一可信来源
+- 不要在描述里发明用户群体或场景
+- SKILL.md ≤ 400 行；超过的内容拆到 references/ 或 scripts/
+- 不要写 ``## trigger`` / ``## 触发条件`` / ``## pitfalls`` / ``## 陷阱`` 段——
+  触发信号在 frontmatter.description，pitfalls 用 ``> ⚠️`` 内联 blockquote
+- **不要自己用 write_file 写 ``.git/`` 下文件**或 ``.candidates.yml``——前者会
+  破坏 git 状态，后者是 cluster 的 buffer 由系统管理
 """
 
 
@@ -89,21 +120,45 @@ class SkillEditAgent:
     threshold: int = C.ATOM_PROMOTION_THRESHOLD
 
     def maybe_run(self) -> bool:
-        """检查 buffer，达阈值则跑 agent 编辑 SKILL.md。
+        """检查所有守门条件 → 触发 agent → 验证落盘 → 清 buffer。
 
-        返回 ``True`` 表示**确实把候选 promote 了**（即 SKILL.md 实际落盘且
-        非空）；``False`` 表示门槛未到、或 agent 跑完但没产出 SKILL.md
-        （LLM 失败 / agno 静默吞错误 / agent 想写但被工具拒）——这种情况下
-        candidates 保留 promoted=false，下一轮 watcher 扫描时会再次重试。
+        守门顺序（任一失败即 return False）：
+          1. 该 skill 有 staging 分支 → 灰度中，不触发
+          2. candidates 累计 weightscore < threshold → 没攒够
+          3. 触发场景是 "create staging"（main 已存在）：
+             - .ux_scores.jsonl 必须至少有 1 条 side=main → 证明 main 真有人用
+             - 否则保留 candidates 等用户用过 main 再触发
 
-        关键设计：**不能无条件 finally 标 promoted**。曾经被 agno 内部静默
-        吞 402 错误坑过——agent.run 看似成功返回，但 SKILL.md 根本没写；
-        如果那时仍标 promoted=true，candidates 永久污染，无法再重试。
-        所以现在以"SKILL.md 实测落盘"作为 promote 判据，agent 不写就不标。
+        全过 → 跑 agent → 验证 SKILL.md mtime 推进 + 非空 → 清 candidates。
+        agent 没落盘 SKILL.md → 保留 candidates 等下轮重试（Bug 2 修复）。
         """
+        from xskill.git_lock import current_branch, run_git
+
+        # 守门 1: 灰度中（有 staging）不触发
+        code, _, _ = run_git(["rev-parse", "--verify", "staging"],
+                             cwd=str(self.skill_dir))
+        if code == 0:
+            return False
+        # 守门 2: 阈值
         data = C.load_candidates(self.skill_dir)
         ready = C.ready_for_promotion_v2(data, threshold=self.threshold)
         if not ready:
+            return False
+        # 守门 3: 若场景是 "create staging"（即在 main 上）→ 额外要求 main 真有人用过
+        cur = current_branch(str(self.skill_dir))
+        if cur == "main":
+            if not self._main_has_ux_score():
+                logger.info(
+                    "skip SkillEdit: %s main 还没真实 ux_score，"
+                    "保留 candidates 等用户用 main 后再产 staging",
+                    self.skill_dir.name,
+                )
+                return False
+        elif cur != "baby":
+            logger.warning(
+                "skip SkillEdit: %s 在异常分支 %r (期望 baby 或 main)",
+                self.skill_dir.name, cur,
+            )
             return False
 
         skill_md = self.skill_dir / "SKILL.md"
@@ -111,11 +166,11 @@ class SkillEditAgent:
         size_before = skill_md.stat().st_size if skill_md.is_file() else 0
 
         try:
-            self._run(ready)
+            self._run(ready, current_branch_name=cur)
         except Exception:
             logger.exception("SkillEditAgent _run failed: %s", self.skill_dir.name)
 
-        # 真实落盘检查：mtime 推进 + 文件非空 = agent 真的写了
+        # 实测落盘：mtime 推进 + 非空 = agent 真写了
         wrote = (
             skill_md.is_file()
             and skill_md.stat().st_size > 0
@@ -127,41 +182,96 @@ class SkillEditAgent:
         if not wrote:
             logger.warning(
                 "SkillEditAgent ran but SKILL.md not written/empty: %s — "
-                "candidates 保留 promoted=false 等下轮重试",
+                "保留 candidates 等下轮重试",
                 self.skill_dir.name,
             )
             return False
 
-        now = datetime.now().isoformat(timespec="seconds")
-        for c in data.get("candidates", []):
-            if not c.get("promoted"):
-                c["promoted"] = True
-                c["promoted_at"] = now
-        C.save_candidates(self.skill_dir, data)
+        # commit 工具的成功效应（baby→main 或 main→staging）通过当前分支变化
+        # 自然反映，不需要在这里做额外检查
+        C.clear_candidates(self.skill_dir)
+        logger.info("SkillEditAgent done + candidates cleared: %s",
+                    self.skill_dir.name)
         return True
 
-    def _run(self, ready: list[dict]) -> None:
+    def _main_has_ux_score(self) -> bool:
+        """检查该 skill 的 .ux_scores.jsonl 是否有至少 1 条 side=main 记录。
+
+        冷启动后没人用过 main 时，避免立刻产生 staging 卡死灰度链路（B 守门）。
+        """
+        from xskill.canary import load_ux_scores
+        try:
+            scores = load_ux_scores(self.skill_dir)
+        except Exception:
+            return False
+        return any(s.get("side") == "main" for s in scores)
+
+    def _run(self, ready: list[dict], current_branch_name: str) -> None:
         from xskill import skill_tools as ST
-        lines = ["# 待整理 candidates (按 weightscore_total 倒序)"]
-        for c in sorted(
-            ready, key=lambda x: x.get("weightscore_total", 0), reverse=True,
-        ):
-            lines.append(
-                f"- atom_id={c['atom_id']}  weightscore_total={c['weightscore_total']}  "
-                f"contributions={len(c.get('contributions', []))}"
+        from xskill.frontmatter import parse as fm_parse
+
+        # 构造 scenario_block + branch_now 给 prompt 用
+        skill_md = self.skill_dir / "SKILL.md"
+        scenario_lines: list[str] = []
+        if current_branch_name == "baby":
+            scenario_lines.append(
+                "skill_name: " + self.skill_dir.name + "（**baby 分支**——首次出版本）"
             )
-        lines.append("")
-        lines.append(f"目标 skill 目录: {self.skill_dir}")
-        lines.append(f"目标 SKILL.md 路径: {self.skill_dir / 'SKILL.md'}")
-        user_msg = "\n".join(lines)
+            scenario_lines.append(
+                "写完 SKILL.md 后调 ``commit_baby_to_main(skill_name, message)`` "
+                "graduate 到 main 分支。"
+            )
+        else:
+            scenario_lines.append(
+                "skill_name: " + self.skill_dir.name + "（**main 分支** —— 更新现有 skill）"
+            )
+            scenario_lines.append(
+                "写完 SKILL.md 后调 ``commit_to_staging(skill_name, message)`` "
+                "把更新作为灰度候选 commit 到 staging。"
+            )
+
+        # 现有 SKILL.md 是 stub (baby 时) 或正式版 (main 时)
+        if skill_md.is_file():
+            try:
+                fm, _ = fm_parse(skill_md.read_text(encoding="utf-8"))
+                cur_desc = (fm.get("description") or "").strip().replace("\n", " ")
+                cur_ver = (fm.get("metadata", {}) or {}).get("version", "?")
+                scenario_lines.append("")
+                scenario_lines.append(f"现有 SKILL.md description: {cur_desc[:200]}")
+                scenario_lines.append(f"现有 SKILL.md version: {cur_ver}")
+            except Exception:
+                pass
+        scenario_lines.append("")
+        scenario_lines.append("# 待整理 candidates（按 weightscore 倒序）")
+        for c in sorted(
+            ready, key=lambda x: x.get("weightscore", 0), reverse=True,
+        ):
+            note = c.get("note", "")
+            ext = f"  note: {note}" if note else ""
+            scenario_lines.append(
+                f"- atom_id={c['atom_id']}  weightscore={c['weightscore']}{ext}"
+            )
+        scenario_lines.append("")
+        scenario_lines.append(f"目标 skill 目录: {self.skill_dir}")
+        scenario_lines.append(f"目标 SKILL.md 路径: {skill_md}")
+
+        scenario_block = "\n".join(scenario_lines)
+        sysprompt = SYSTEM_PROMPT_TEMPLATE.format(
+            scenario_block=scenario_block,
+            branch_now=current_branch_name,
+        )
+        user_msg = scenario_block  # 同时也作为 user 消息（agno 两端都看）
 
         agent = self.agno_agent_factory(
-            instructions=[SYSTEM_PROMPT],
+            instructions=[sysprompt],
             tools=[
                 ST.atom_task_read,
                 ST.read_traj,
                 ST.skill_read,
+                ST.list_files,
                 ST.write_file,
+                ST.commit_baby_to_main,
+                ST.commit_to_staging,
             ],
         )
         agent.run(user_msg)

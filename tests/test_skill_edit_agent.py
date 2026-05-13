@@ -1,5 +1,5 @@
-"""SkillEditAgent：buffer 累计 ≥ 10 才触发；
-**真的写出 SKILL.md** 才标 promoted（防止 agno 静默吞错误时污染 buffer）。"""
+"""SkillEditAgent v2.1：baby/main 双工具 + has_staging 守门 + main 必须有 ux_score
++ candidates clear 取代 promoted 标记。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,48 +8,106 @@ import pytest
 
 from xskill import candidates as C
 from xskill.skill_edit_agent import SkillEditAgent
+from xskill.git_lock import init_skill_repo_on_baby, run_git
 
 
-class _StubAgnoAgent:
-    """默认 noop（不写文件，模拟 agno 静默吞 LLM 错误）；
-    设置 ``writes_skill_md_with=...`` 让它写一份内容到 SKILL.md，模拟正常 agent。"""
-    invoked = False
-    writes_skill_md_with: str | None = None  # class-level 控制
+def _make_baby_skill(parent: Path, name: str, desc: str = "stub desc") -> Path:
+    """初始化 baby 分支 skill。"""
+    sd = parent / name
+    init_skill_repo_on_baby(str(sd), name=name, description=desc)
+    return sd
+
+
+def _make_main_skill(parent: Path, name: str, desc: str = "stub desc") -> Path:
+    """初始化已 graduate 到 main 的 skill。"""
+    sd = _make_baby_skill(parent, name, desc)
+    run_git(["branch", "-m", "baby", "main"], cwd=str(sd))
+    return sd
+
+
+def _add_ux_score(skill_dir: Path, side: str = "main"):
+    """伪造一条 ux_scores.jsonl 记录给 main 解除守门。"""
+    import json
+    line = json.dumps({
+        "atom_id": "atom_test_0001",
+        "skill_name": skill_dir.name,
+        "side": side,
+        "commit_sha": "abc",
+        "score": 7,
+        "reasons": "",
+        "scored_at": "2026-05-13T10:00:00+00:00",
+    })
+    p = skill_dir / ".ux_scores.jsonl"
+    p.write_text(line + "\n", encoding="utf-8")
+
+
+class _BabyStubAgno:
+    """模拟 SkillEditAgent 在 baby 分支：写 SKILL.md + 调 commit_baby_to_main。"""
+    invoked: bool = False
+    user_msg: str = ""
+    writes_skill_md_with: str | None = None
+    calls_commit: bool = True
+    skill_name: str = ""
 
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = tools
-        # 找到 write_file 工具，给"模拟写"用
-        self._write_file = None
-        for t in tools:
-            if getattr(t, "__name__", "") == "write_file":
-                self._write_file = t
-                break
+        self.tools = {getattr(t, "__name__", ""): t for t in tools}
 
     def run(self, user_msg, **kw):
         type(self).invoked = True
         type(self).user_msg = user_msg
-        # 模拟 agent 调 write_file 写出 SKILL.md
-        if type(self).writes_skill_md_with is not None and self._write_file is not None:
-            # 从 user_msg 抓 skill_dir 路径
-            import re
-            m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
-            if m:
-                self._write_file(m.group(1), type(self).writes_skill_md_with)
+        # 抓 skill_name
+        import re
+        m = re.search(r"skill_name:\s*([\w-]+)", user_msg)
+        skill = m.group(1) if m else type(self).skill_name
+        # 抓目标 SKILL.md 路径
+        m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
+        target_path = m.group(1) if m else None
+        # 写 SKILL.md
+        if type(self).writes_skill_md_with is not None and target_path:
+            self.tools["write_file"](target_path, type(self).writes_skill_md_with)
+        # 调 commit_baby_to_main
+        if type(self).calls_commit and skill:
+            self.tools["commit_baby_to_main"](skill, "stub baby commit")
         class _R: pass
         r = _R(); r.content = "done"
         return r
 
 
-def _stub_factory(*, instructions, tools):
-    return _StubAgnoAgent(instructions=instructions, tools=tools)
+class _StagingStubAgno(_BabyStubAgno):
+    """模拟 SkillEditAgent 在 main 分支：写 SKILL.md + 调 commit_to_staging。"""
+    def run(self, user_msg, **kw):
+        type(self).invoked = True
+        type(self).user_msg = user_msg
+        import re
+        m = re.search(r"skill_name:\s*([\w-]+)", user_msg)
+        skill = m.group(1) if m else type(self).skill_name
+        m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
+        target_path = m.group(1) if m else None
+        if type(self).writes_skill_md_with is not None and target_path:
+            self.tools["write_file"](target_path, type(self).writes_skill_md_with)
+        if type(self).calls_commit and skill:
+            self.tools["commit_to_staging"](skill, "stub staging commit")
+        class _R: pass
+        r = _R(); r.content = "done"
+        return r
+
+
+def _baby_factory(*, instructions, tools):
+    return _BabyStubAgno(instructions=instructions, tools=tools)
+
+
+def _staging_factory(*, instructions, tools):
+    return _StagingStubAgno(instructions=instructions, tools=tools)
 
 
 @pytest.fixture(autouse=True)
 def _init_v2_ctx(tmp_path):
-    """每个 case 默认把 _ctx_v2 指到 tmp_path，让 write_file 能正常工作。"""
+    """每个 case 把 _ctx_v2 指到 tmp_path/skill，让 commit_*/write_file 工具可用。"""
     from xskill import skill_tools as ST
     from xskill.atom_task import AtomTaskStore
+    (tmp_path / "skill").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "store").mkdir(parents=True, exist_ok=True)
     ST.init_context_v2(
         skill_dir=tmp_path / "skill",
         store=AtomTaskStore(root=tmp_path / "store"),
@@ -57,110 +115,153 @@ def _init_v2_ctx(tmp_path):
         traj_root=tmp_path / "store",
     )
     yield
-    # 复位 class state
-    _StubAgnoAgent.invoked = False
-    _StubAgnoAgent.writes_skill_md_with = None
+    for cls in (_BabyStubAgno, _StagingStubAgno):
+        cls.invoked = False
+        cls.user_msg = ""
+        cls.writes_skill_md_with = None
+        cls.calls_commit = True
 
 
 # ────────────────────────────────────────────────────────────────────
-# 触发门槛
+# 守门 1: 阈值
 # ────────────────────────────────────────────────────────────────────
 
 class TestThresholdGate:
     def test_below_threshold_does_not_trigger(self, tmp_path):
-        skill_dir = tmp_path / "skill" / "my-skill"
-        skill_dir.mkdir(parents=True)
+        skill_dir = _make_baby_skill(tmp_path / "skill", "my-skill")
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "atom_a", 5)
         C.save_candidates(skill_dir, data)
 
         agent = SkillEditAgent(
             skill_dir=skill_dir, store=None,
-            agno_agent_factory=_stub_factory,
+            agno_agent_factory=_baby_factory,
             llm_cfg={}, traj_root=tmp_path,
         )
         assert agent.maybe_run() is False
-        assert _StubAgnoAgent.invoked is False
+        assert _BabyStubAgno.invoked is False
 
-    def test_at_threshold_triggers_and_marks_promoted_when_agent_writes(self, tmp_path):
-        skill_dir = tmp_path / "skill" / "my-skill"
-        skill_dir.mkdir(parents=True)
+    def test_at_threshold_triggers_on_baby_and_graduates(self, tmp_path):
+        """baby 分支 + 阈值满 → 调 commit_baby_to_main → 落 main。"""
+        skill_dir = _make_baby_skill(tmp_path / "skill", "my-skill")
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "atom_a", 7)
         data, _ = C.add_atom_contribution(data, "atom_b", 4)
         C.save_candidates(skill_dir, data)
 
-        # 让 stub agent 真写一份 SKILL.md
-        _StubAgnoAgent.writes_skill_md_with = (
+        _BabyStubAgno.writes_skill_md_with = (
             "---\nname: my-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n"
         )
 
         agent = SkillEditAgent(
             skill_dir=skill_dir, store=None,
-            agno_agent_factory=_stub_factory,
+            agno_agent_factory=_baby_factory,
             llm_cfg={}, traj_root=tmp_path,
         )
         assert agent.maybe_run() is True
-        assert _StubAgnoAgent.invoked is True
-        # SKILL.md 真写了
-        assert (skill_dir / "SKILL.md").is_file()
-        # candidates 全部标 promoted
+        # baby → main graduate 完成
+        from xskill.git_lock import current_branch
+        assert current_branch(str(skill_dir)) == "main"
+        # candidates 已清空 (v2.1: clear 取代 promoted 标记)
         data2 = C.load_candidates(skill_dir)
-        assert all(c.get("promoted") for c in data2["candidates"])
-
-    def test_already_promoted_ignored(self, tmp_path):
-        """已 promoted 的不应让 maybe_run 再次触发。"""
-        skill_dir = tmp_path / "skill" / "z-skill"
-        skill_dir.mkdir(parents=True)
-        data = {"candidates": []}
-        data, _ = C.add_atom_contribution(data, "atom_old", 10)
-        data["candidates"][0]["promoted"] = True
-        data, _ = C.add_atom_contribution(data, "atom_new", 4)
-        C.save_candidates(skill_dir, data)
-
-        agent = SkillEditAgent(
-            skill_dir=skill_dir, store=None,
-            agno_agent_factory=_stub_factory,
-            llm_cfg={}, traj_root=tmp_path,
-        )
-        assert agent.maybe_run() is False
-        assert _StubAgnoAgent.invoked is False
+        assert data2["candidates"] == []
 
 
 # ────────────────────────────────────────────────────────────────────
-# 真实落盘判据（Bug 2 修复）：agent 没写 SKILL.md → 不标 promoted
+# 守门 2: has_staging
 # ────────────────────────────────────────────────────────────────────
 
-class TestRequiresActualSkillMdWrite:
-    """agno 静默吞 LLM 错误（agent.run 不抛但没写文件）时，候选不能被
-    错误标 promoted——必须保留 promoted=false 下一轮 watcher scan 重试。"""
-
-    def test_agent_returns_without_writing_skill_md_keeps_promoted_false(self, tmp_path):
-        skill_dir = tmp_path / "skill" / "noop-skill"
-        skill_dir.mkdir(parents=True)
+class TestStagingGuard:
+    def test_has_staging_blocks_trigger(self, tmp_path):
+        """skill 有 staging 分支 → maybe_run 一律不触发（灰度中）。"""
+        skill_dir = _make_main_skill(tmp_path / "skill", "in-canary")
+        # 切 staging
+        run_git(["checkout", "-b", "staging"], cwd=str(skill_dir))
+        run_git(["checkout", "main"], cwd=str(skill_dir))
+        # 候选攒满
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "atom_a", 10)
         C.save_candidates(skill_dir, data)
 
-        # stub agent 默认 noop——不写 SKILL.md
-        _StubAgnoAgent.writes_skill_md_with = None
+        agent = SkillEditAgent(
+            skill_dir=skill_dir, store=None,
+            agno_agent_factory=_staging_factory,
+            llm_cfg={}, traj_root=tmp_path,
+        )
+        assert agent.maybe_run() is False
+        assert _StagingStubAgno.invoked is False
+
+
+# ────────────────────────────────────────────────────────────────────
+# 守门 3: main 必须有 ux_score 才能产 staging
+# ────────────────────────────────────────────────────────────────────
+
+class TestMainNeedsUxScoreBeforeStaging:
+    def test_main_without_ux_score_blocks_staging_creation(self, tmp_path):
+        """已 graduate 到 main 但没真实 ux_score → 即便候选满阈值也不触发。"""
+        skill_dir = _make_main_skill(tmp_path / "skill", "no-users-yet")
+        data = {"candidates": []}
+        data, _ = C.add_atom_contribution(data, "atom_a", 10)
+        C.save_candidates(skill_dir, data)
+        # 不写 .ux_scores.jsonl
+        agent = SkillEditAgent(
+            skill_dir=skill_dir, store=None,
+            agno_agent_factory=_staging_factory,
+            llm_cfg={}, traj_root=tmp_path,
+        )
+        assert agent.maybe_run() is False
+        assert _StagingStubAgno.invoked is False
+
+    def test_main_with_one_ux_score_unblocks_staging_creation(self, tmp_path):
+        """main 有 ≥1 条 side=main ux 评分 → 守门通过，commit_to_staging 跑。"""
+        skill_dir = _make_main_skill(tmp_path / "skill", "has-users")
+        _add_ux_score(skill_dir, side="main")
+        data = {"candidates": []}
+        data, _ = C.add_atom_contribution(data, "atom_a", 10)
+        C.save_candidates(skill_dir, data)
+
+        _StagingStubAgno.writes_skill_md_with = (
+            "---\nname: has-users\ndescription: v2\nmetadata:\n  version: 2\n---\n# v2\n"
+        )
+        agent = SkillEditAgent(
+            skill_dir=skill_dir, store=None,
+            agno_agent_factory=_staging_factory,
+            llm_cfg={}, traj_root=tmp_path,
+        )
+        assert agent.maybe_run() is True
+        # staging 分支已创建
+        code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=str(skill_dir))
+        assert code == 0
+        # candidates 清空
+        data2 = C.load_candidates(skill_dir)
+        assert data2["candidates"] == []
+
+
+# ────────────────────────────────────────────────────────────────────
+# 守门 4: agent 没写 SKILL.md → 保留 candidates (Bug 2 防污染)
+# ────────────────────────────────────────────────────────────────────
+
+class TestRequiresActualSkillMdWrite:
+    def test_agent_returns_without_writing_skill_md_keeps_candidates(self, tmp_path):
+        skill_dir = _make_baby_skill(tmp_path / "skill", "noop-skill")
+        data = {"candidates": []}
+        data, _ = C.add_atom_contribution(data, "atom_a", 10)
+        C.save_candidates(skill_dir, data)
+        _BabyStubAgno.writes_skill_md_with = None
+        _BabyStubAgno.calls_commit = False
 
         agent = SkillEditAgent(
             skill_dir=skill_dir, store=None,
-            agno_agent_factory=_stub_factory,
+            agno_agent_factory=_baby_factory,
             llm_cfg={}, traj_root=tmp_path,
         )
-        result = agent.maybe_run()
-        assert result is False, "agent 没写 SKILL.md，maybe_run 应返回 False"
-        # 关键：candidates 仍保留 promoted=false，让下一轮 scan 重试
+        # baby 分支已有 stub SKILL.md，mtime_before > 0；agent 不动 → wrote=False
+        assert agent.maybe_run() is False
         data2 = C.load_candidates(skill_dir)
-        assert all(not c.get("promoted") for c in data2["candidates"]), \
-            "agent 没写 SKILL.md 时不能错误标 promoted"
+        assert len(data2["candidates"]) == 1  # 候选保留
 
-    def test_agent_raises_keeps_promoted_false(self, tmp_path):
-        """LLM 真抛异常时也不标 promoted。"""
-        skill_dir = tmp_path / "skill" / "err-skill"
-        skill_dir.mkdir(parents=True)
+    def test_agent_raises_keeps_candidates(self, tmp_path):
+        skill_dir = _make_baby_skill(tmp_path / "skill", "err-skill")
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "atom_a", 10)
         C.save_candidates(skill_dir, data)
@@ -170,42 +271,66 @@ class TestRequiresActualSkillMdWrite:
             def run(self, msg, **kw):
                 raise RuntimeError("LLM 402 余额不足")
 
-        def _throwing_factory(*, instructions, tools):
-            return _ThrowingAgent(instructions=instructions, tools=tools)
-
         agent = SkillEditAgent(
             skill_dir=skill_dir, store=None,
-            agno_agent_factory=_throwing_factory,
+            agno_agent_factory=lambda **k: _ThrowingAgent(**k),
             llm_cfg={}, traj_root=tmp_path,
         )
-        result = agent.maybe_run()
-        assert result is False
+        assert agent.maybe_run() is False
         data2 = C.load_candidates(skill_dir)
-        assert all(not c.get("promoted") for c in data2["candidates"])
+        assert len(data2["candidates"]) == 1
 
-    def test_retry_on_next_run_after_failed_attempt(self, tmp_path):
-        """先一次失败（不写），下次成功（写）→ 第二次成功后正常 promoted。"""
-        skill_dir = tmp_path / "skill" / "retry-skill"
-        skill_dir.mkdir(parents=True)
+
+# ────────────────────────────────────────────────────────────────────
+# user_msg 内容
+# ────────────────────────────────────────────────────────────────────
+
+class TestUserMsgContext:
+    def test_baby_scenario_in_user_msg(self, tmp_path):
+        skill_dir = _make_baby_skill(tmp_path / "skill", "django-fix",
+                                      "修复 Django migrate 冲突")
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "atom_a", 10)
         C.save_candidates(skill_dir, data)
-
-        agent = SkillEditAgent(
+        _BabyStubAgno.writes_skill_md_with = (
+            "---\nname: django-fix\n---\n# body\n"
+        )
+        SkillEditAgent(
             skill_dir=skill_dir, store=None,
-            agno_agent_factory=_stub_factory,
+            agno_agent_factory=_baby_factory,
             llm_cfg={}, traj_root=tmp_path,
-        )
-        # 第一次：agent noop 不写
-        _StubAgnoAgent.writes_skill_md_with = None
-        assert agent.maybe_run() is False
-        data1 = C.load_candidates(skill_dir)
-        assert all(not c.get("promoted") for c in data1["candidates"])
+        ).maybe_run()
+        msg = _BabyStubAgno.user_msg
+        assert "baby" in msg
+        assert "django-fix" in msg
+        # 现有 stub SKILL.md 的 desc 也在 user_msg 中
+        assert "修复 Django migrate 冲突" in msg
 
-        # 第二次：agent 写
-        _StubAgnoAgent.writes_skill_md_with = (
-            "---\nname: retry-skill\n---\n# body\n"
+    def test_main_scenario_in_user_msg(self, tmp_path):
+        skill_dir = _make_main_skill(tmp_path / "skill", "update-target",
+                                      "main 描述")
+        # 写一个真实版的 SKILL.md（main 上）
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: update-target\n"
+            "description: 旧版的核心 description\n"
+            "metadata:\n  version: 3\n---\n# body v3\n",
+            encoding="utf-8",
         )
-        assert agent.maybe_run() is True
-        data2 = C.load_candidates(skill_dir)
-        assert all(c.get("promoted") for c in data2["candidates"])
+        run_git(["add", "-A"], cwd=str(skill_dir))
+        run_git(["commit", "-m", "v3"], cwd=str(skill_dir))
+        _add_ux_score(skill_dir)
+        data = {"candidates": []}
+        data, _ = C.add_atom_contribution(data, "atom_x", 10)
+        C.save_candidates(skill_dir, data)
+        _StagingStubAgno.writes_skill_md_with = (
+            "---\nname: update-target\n---\n# v4 body\n"
+        )
+        SkillEditAgent(
+            skill_dir=skill_dir, store=None,
+            agno_agent_factory=_staging_factory,
+            llm_cfg={}, traj_root=tmp_path,
+        ).maybe_run()
+        msg = _StagingStubAgno.user_msg
+        assert "main" in msg
+        assert "旧版的核心 description" in msg
+        assert "现有 SKILL.md version: 3" in msg

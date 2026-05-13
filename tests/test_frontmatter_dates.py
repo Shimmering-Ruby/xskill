@@ -11,6 +11,22 @@ from datetime import date, datetime, timedelta
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_skill_tools_ctx():
+    """每个 case 前后重置 _ctx / _ctx_v2，避免其他 test 文件污染 write_file 的
+    skill_dir 判定（write_file 优先用 _ctx_v2 而非 _ctx）。"""
+    from xskill import skill_tools as ST
+    saved_v2 = dict(ST._ctx_v2)
+    saved_v1 = dict(ST._ctx)
+    ST._ctx_v2["skill_dir"] = None
+    ST._ctx_v2["store"] = None
+    ST._ctx_v2["embed_client"] = None
+    ST._ctx_v2["traj_root"] = None
+    yield
+    ST._ctx_v2.update(saved_v2)
+    ST._ctx.update(saved_v1)
+
+
 def test_sanitize_future_created_date():
     from xskill.skill_tools import _sanitize_frontmatter_dates
     future = (date.today() + timedelta(days=365)).isoformat()

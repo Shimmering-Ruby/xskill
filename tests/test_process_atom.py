@@ -37,7 +37,7 @@ class _ClusterCallsAddTaskStub:
         atom_id = m.group(1) if m else None
         for fn in self.tools:
             if getattr(fn, "__name__", "") == "new_skill_folder":
-                fn(type(self).target_skill)
+                fn(type(self).target_skill, "stub desc")
             if getattr(fn, "__name__", "") == "add_task_to_skill" and atom_id:
                 fn(type(self).target_skill, atom_id, type(self).target_score)
         class _R: pass
@@ -68,14 +68,14 @@ class TestProcessAtomTask:
         assert result["atom_id"] == "atom_x_0001"
         # Bug 1 修复：不再返回 edited_skills（edit 独立扫描）
         assert "edited_skills" not in result
-        # cluster 写了 candidates
+        # cluster 写了 candidates（v2.1 简化 schema）
         from xskill import candidates as C
         data = C.load_candidates(skill_dir / "auto-skill")
         assert len(data["candidates"]) == 1
         assert data["candidates"][0]["atom_id"] == "atom_x_0001"
-        assert data["candidates"][0]["weightscore_total"] == 10
-        # 但 candidates 仍 promoted=false (edit 在 watcher 独立扫描时才跑)
-        assert data["candidates"][0]["promoted"] is False
+        assert data["candidates"][0]["weightscore"] == 10
+        # v2.1: 不再有 promoted 字段
+        assert "promoted" not in data["candidates"][0]
 
     def test_cluster_failure_does_not_corrupt_candidates(self, tmp_path):
         """Bug 1 关键回归：cluster 调 LLM 失败时，已写的 candidates 不被污染。

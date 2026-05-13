@@ -184,6 +184,18 @@ class DirectoryWatcher:
         # 无关——每个 watcher 只有一个全局 skill_dir。
         self._check_pending_skill_edits()
 
+        # ── Step 6: 灰度判定独立轮询 ──
+        # 对每个 staging 分支存在的 skill 跑 AtomCanary.check_and_decide：
+        # 收齐 5 条评分就裁决 promote/reject，超时 max_days_hold 就 discard。
+        # 这条与 cluster / score 链路彻底解耦——灰度系统自治。
+        self._check_canary_decisions()
+
+        # ── Step 7: 用户手改回流检测 ──
+        # 用户改 ~/.claude/skills/<name>/* (symlink 指向源仓库) 后 ≥3 分钟
+        # 没新改动 → 触发 UserEditAbsorbAgent 把手改吸回 main，并删除任何
+        # 在飞 staging（用户改是 ground truth，优先级压过灰度）。
+        self._check_user_edits()
+
     def _check_pending_skill_edits(self):
         """遍历每个 skill 目录调 SkillEditAgent.maybe_run()。
 
@@ -232,8 +244,85 @@ class DirectoryWatcher:
                 if editor.maybe_run():
                     self._stats["skills_edited"] += 1
                     logger.info("SkillEditAgent promoted: %s", d.name)
+                    # 即时 install 让 Claude Code 立刻看到新生成的 SKILL.md
+                    # 不必等 daemon 重启。install_to_claude_code 现在走 symlink，
+                    # 后续 xskill 改 SKILL.md 也会被 CC 立即感知。
+                    self._install_skill_to_cc(d)
             except Exception:
                 logger.exception("SkillEditAgent failed: %s", d.name)
+
+    def _install_skill_to_cc(self, skill_path):
+        """SkillEdit 成功后立刻把该 skill 装到 ~/.claude/skills/（symlink）。"""
+        try:
+            from xskill.ecosystems import install_to_claude_code
+            # 从 home_root 取 install target——生产用 Path.home()，debug 用
+            # 自定义。watcher 不持有 home_root，从 server 模块全局取
+            from xskill import server as _srv
+            target_root = _srv._home_root() if hasattr(_srv, "_home_root") else None
+            dest = install_to_claude_code(
+                skill_path, target_root=target_root, side="main",
+            )
+            logger.info("installed (symlink) to CC: %s", dest)
+        except Exception:
+            logger.exception("install_to_claude_code failed: %s", skill_path.name)
+
+    def _check_user_edits(self):
+        """检测每个 skill 是否有用户手改且静默 ≥3 分钟 → 触发 absorb agent。"""
+        if self.skill_dir is None or not self.skill_dir.is_dir():
+            return
+        from xskill.user_edit_absorb_agent import (
+            UserEditAbsorbAgent, detect_user_edits,
+        )
+        factory = self._factory()
+        for d in sorted(self.skill_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            try:
+                if not detect_user_edits(d):
+                    continue
+                logger.info("user edit detected (stable for 3+ min): %s", d.name)
+                ok = UserEditAbsorbAgent(
+                    skill_dir=d,
+                    agno_agent_factory=factory,
+                    llm_cfg=self.config.get("llm", {}),
+                ).run()
+                if ok:
+                    self._install_skill_to_cc(d)
+            except Exception:
+                logger.exception("user edit absorb failed: %s", d.name)
+
+    def _check_canary_decisions(self):
+        """灰度判定独立轮询：对每个有 staging 分支的 skill 调 check_and_decide。
+
+        与 cluster / score 链路彻底解耦——灰度系统自治。每轮 watcher scan
+        都跑一次（开销很轻：load_ux_scores + 简单算术），让 staging 命运由
+        真实评分数据决定，不依赖任何 traj 触发。
+        """
+        if self.skill_dir is None or not self.skill_dir.is_dir():
+            return
+        from xskill.atom_canary import AtomCanary
+        from xskill.canary import CanaryConfig
+        from xskill.git_lock import run_git
+        canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
+        for d in sorted(self.skill_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            if not (d / ".git").is_dir():
+                continue
+            code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=str(d))
+            if code != 0:
+                continue  # 无 staging，跳过
+            try:
+                decision = AtomCanary(skill_dir=d).check_and_decide(config=canary_cfg)
+                action = decision.get("action", "")
+                if action in ("promoted", "rejected", "timeout_discarded"):
+                    logger.info("canary decision %s: %s — %s",
+                                d.name, action, decision)
+                    # promote 成功 → 重新 install symlink (内容已变)
+                    if action == "promoted":
+                        self._install_skill_to_cc(d)
+            except Exception:
+                logger.exception("check_and_decide failed: %s", d.name)
 
     # ───────────────────────────────────────────────────────────
     # 收割：检查所有 in-flight futures
@@ -553,8 +642,7 @@ class DirectoryWatcher:
                 logger.exception("score_atom failed: %s/%s",
                                  fname, atom.atom_id)
         # 翻牌判定
-        try:
-            ac.check_and_decide(config=canary_cfg)
-        except Exception:
-            logger.exception("check_and_decide failed: %s", skill_name)
+        # check_and_decide 不再绑在打分链路里——移到 watcher 周期性
+        # _check_canary_decisions() 独立轮询，保证灰度系统自治不依赖
+        # traj 触发。这里只负责打分落盘。
         mark_skill_used(wd_id, fname, skill_name, header["side"], **kw)

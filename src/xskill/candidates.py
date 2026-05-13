@@ -156,59 +156,62 @@ def add_atom_contribution(
     *,
     note: str = "",
 ) -> tuple[dict, bool]:
-    """累加一条 atom 对该 skill 的贡献。
+    """v2.1 简化 schema：candidates 是纯文件 buffer，不入 git 不做追溯。
 
     schema::
 
         candidates:
           - atom_id: str
-            weightscore_total: int      # 累计分（同一 atom 多次 add 相加）
-            contributions:
-              - score: int
-                ts: ISO date
-                note: str
-            promoted: bool
-            promoted_at: ISO datetime | null
+            weightscore: int               # 0-10，cluster agent 评分
+            note: str                      # 可选简短理由
 
-    返回 ``(data, was_new)``。``was_new=True`` 表示这是该 atom 在 buffer
-    中的第一条贡献，``False`` 表示与已有 entry 合并。
+    **同 atom + 同 skill 重复 add 时覆盖**（不累加；不保留 contributions 历史）。
+    cluster agent 后续可"改主意"——比如初次打 5 后想清楚改成 8，直接覆盖。
+
+    去掉的字段：``weightscore_total / contributions[] / promoted / promoted_at``。
+    promoted 的语义改为"SkillEditAgent 成功后整批清空 candidates 文件"，
+    不再用单条 marker。
+
+    返回 ``(data, was_new)``。``was_new=True`` 表示新 atom，``False`` 表示
+    覆盖既有条目。
     """
-    today = date.today().isoformat()
     candidates = data.setdefault("candidates", [])
     for c in candidates:
         if c.get("atom_id") == atom_id:
-            c["weightscore_total"] = int(c.get("weightscore_total", 0)) + int(weightscore)
-            c.setdefault("contributions", []).append({
-                "score": int(weightscore), "ts": today, "note": note,
-            })
-            c.setdefault("promoted", False)
+            # 覆盖语义
+            c["weightscore"] = int(weightscore)
+            if note:
+                c["note"] = note
             return data, False
-    candidates.append({
-        "atom_id": atom_id,
-        "weightscore_total": int(weightscore),
-        "contributions": [{"score": int(weightscore), "ts": today, "note": note}],
-        "promoted": False,
-        "promoted_at": None,
-    })
+    entry = {"atom_id": atom_id, "weightscore": int(weightscore)}
+    if note:
+        entry["note"] = note
+    candidates.append(entry)
     return data, True
 
 
 def ready_for_promotion_v2(
     data: dict, threshold: int = ATOM_PROMOTION_THRESHOLD,
 ) -> list[dict]:
-    """返回 buffer 中所有未 promoted 的 candidate，仅当它们的
-    ``weightscore_total`` 累加 ≥ ``threshold`` 时；否则返回空列表。
+    """v2.1 简化：candidates 全是 pending（无 promoted 字段），sum 所有
+    ``weightscore`` ≥ threshold 即 ready。
 
-    与 v1 (`ready_for_promotion`) 的差异：
-    - v1 是单 pattern 攒到 N 条独立 traj 才 promote
-    - v2 是 skill buffer 里**所有未 promote 的 atom 贡献总和** ≥ threshold
-      就触发；单 atom 高分（如 10）也会立即触发。
+    返回 buffer 中所有 candidates iff 总分 ≥ threshold；否则空列表。
     """
-    pending = [c for c in data.get("candidates", []) if not c.get("promoted")]
-    total = sum(int(c.get("weightscore_total", 0)) for c in pending)
+    cands = data.get("candidates", []) or []
+    total = sum(int(c.get("weightscore", 0)) for c in cands)
     if total >= threshold:
-        return pending
+        return list(cands)
     return []
+
+
+def clear_candidates(skill_dir: Path) -> None:
+    """v2.1: SkillEditAgent 成功落盘 SKILL.md 后调用——清空 buffer。
+
+    写入 ``{candidates: []}`` 而不是删文件，保留 yaml 形态便于下次 cluster
+    直接追加。
+    """
+    save_candidates(skill_dir, {"candidates": []})
 
 
 # ═══════════════════════════════════════════════════════════════════

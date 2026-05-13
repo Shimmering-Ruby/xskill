@@ -14,19 +14,21 @@ class TestAddAtomContribution:
         data, was_new = C.add_atom_contribution(data, "atom_x_0001", 7)
         assert was_new is True
         assert data["candidates"][0]["atom_id"] == "atom_x_0001"
-        assert data["candidates"][0]["weightscore_total"] == 7
-        assert data["candidates"][0]["promoted"] is False
-        assert len(data["candidates"][0]["contributions"]) == 1
-        assert data["candidates"][0]["contributions"][0]["score"] == 7
+        assert data["candidates"][0]["weightscore"] == 7
+        # v2.1: 不再有 weightscore_total / contributions / promoted 字段
+        assert "weightscore_total" not in data["candidates"][0]
+        assert "contributions" not in data["candidates"][0]
+        assert "promoted" not in data["candidates"][0]
 
-    def test_repeated_add_sums_weightscore(self):
+    def test_repeated_add_overwrites(self):
+        """v2.1: 同 atom + 同 skill 重复 add → 覆盖 weightscore，不累加。"""
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "atom_x_0001", 4)
-        data, was_new = C.add_atom_contribution(data, "atom_x_0001", 5, note="follow-up")
+        data, was_new = C.add_atom_contribution(data, "atom_x_0001", 8, note="改主意")
         assert was_new is False
-        assert data["candidates"][0]["weightscore_total"] == 9
-        assert len(data["candidates"][0]["contributions"]) == 2
-        assert data["candidates"][0]["contributions"][1]["note"] == "follow-up"
+        assert len(data["candidates"]) == 1   # 仍是单条
+        assert data["candidates"][0]["weightscore"] == 8  # 覆盖为新值
+        assert data["candidates"][0]["note"] == "改主意"
 
     def test_distinct_atoms_create_separate_entries(self):
         data = {"candidates": []}
@@ -49,7 +51,7 @@ class TestPromotionV2:
             data, _ = C.add_atom_contribution(data, aid, s)
         ready = C.ready_for_promotion_v2(data, threshold=10)
         assert len(ready) == 3
-        assert sum(c["weightscore_total"] for c in ready) >= 10
+        assert sum(c["weightscore"] for c in ready) >= 10
 
     def test_below_threshold_returns_empty(self):
         data = {"candidates": []}
@@ -57,21 +59,24 @@ class TestPromotionV2:
         data, _ = C.add_atom_contribution(data, "a2", 4)
         assert C.ready_for_promotion_v2(data, threshold=10) == []
 
-    def test_promoted_entries_excluded_from_sum(self):
-        """已 promoted 的不再计入累计"""
-        data = {"candidates": []}
-        data, _ = C.add_atom_contribution(data, "old", 8)
-        data["candidates"][0]["promoted"] = True
-        data, _ = C.add_atom_contribution(data, "new", 4)
-        # 只剩 new=4 < 10
-        assert C.ready_for_promotion_v2(data, threshold=10) == []
-
     def test_default_threshold_is_ten(self):
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "x", 10)
-        # 不传 threshold 应当也判 ready
         assert len(C.ready_for_promotion_v2(data)) == 1
         assert C.ATOM_PROMOTION_THRESHOLD == 10
+
+
+class TestClearCandidates:
+    def test_clear_writes_empty_list(self, tmp_path):
+        """SkillEditAgent 成功落盘后整批清空 buffer。"""
+        data = {"candidates": []}
+        for aid, s in [("a", 5), ("b", 5)]:
+            data, _ = C.add_atom_contribution(data, aid, s)
+        C.save_candidates(tmp_path, data)
+        # 清空
+        C.clear_candidates(tmp_path)
+        reloaded = C.load_candidates(tmp_path)
+        assert reloaded["candidates"] == []
 
 
 class TestPersistence:
@@ -83,4 +88,4 @@ class TestPersistence:
         C.save_candidates(skill_dir, data)
         loaded = C.load_candidates(skill_dir)
         assert loaded["candidates"][0]["atom_id"] == "atom_a"
-        assert loaded["candidates"][0]["weightscore_total"] == 5
+        assert loaded["candidates"][0]["weightscore"] == 5

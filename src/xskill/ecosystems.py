@@ -104,29 +104,65 @@ def install_to_claude_code(
     target_root: Path | str | None = None,
     side: str = "main",
 ) -> Path:
-    """Install one skill into ``<target_root>/.claude/skills/<name>/``.
+    """把一个 skill 以**目录级 symlink** 装到 ``<target_root>/.claude/skills/<name>``。
 
-    ``skill_path`` is a xskill skill directory (must contain ``SKILL.md``).
-    ``target_root`` defaults to ``Path.home()``. ``side`` selects which copy
-    to ship: ``main`` reads ``<skill_path>/SKILL.md``; ``staging`` reads
-    the canary-materialized copy under ``<skill_path>/../.canary/<name>/``.
+    ``side='main'``  → 链接到 ``<skill_path>/`` 整目录
+    ``side='staging'`` → 链接到 ``<skill_path>/../.canary/<name>/`` 整目录
 
-    The destination directory is created if absent. An existing ``SKILL.md``
-    is overwritten (Claude Code's discovery is content-driven; stale frontmatter
-    must not survive an update).
+    用 symlink 而非 copy 的两个好处：
+    1. **xskill 更新即时可见**：SkillEditAgent 写完 SKILL.md 或新增
+       scripts/foo.py，Claude Code 下次启动立刻看到，不必重启 daemon
+       触发重装。
+    2. **不冲掉用户手改**：用户若直接改 ``~/.claude/skills/<name>/SKILL.md``
+       实际改的是 xskill 源文件，下次 xskill 走 install 不会"覆盖"
+       他的修改——因为没有 copy 行为，就没有覆盖概念。
+
+    若 dest 已是 symlink 且指向相同 source，直接返回不动；
+    若 dest 是普通文件/目录或指向其他位置的 symlink，先删后链。
     """
-    skill_path = Path(skill_path)
+    skill_path = Path(skill_path).resolve()
     if not skill_path.is_dir():
         raise NotADirectoryError(f"skill_path is not a directory: {skill_path}")
 
-    src_md = _source_md_for_side(skill_path, side)
+    # 校验源是否齐备（main: SKILL.md 必须有；staging: .canary/<name>/SKILL.md 必须有）
+    _source_md_for_side(skill_path, side)
+
+    if side == "main":
+        src_dir = skill_path
+    elif side == "staging":
+        src_dir = (skill_path.parent / ".canary" / skill_path.name).resolve()
+    else:
+        raise ValueError(f"side must be 'main' or 'staging', got {side!r}")
+
     name = skill_path.name
     root = Path(target_root) if target_root else Path.home()
-    dest_dir = root / ".claude" / "skills" / name
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_md = dest_dir / "SKILL.md"
-    shutil.copyfile(src_md, dest_md)
-    return dest_md
+    skills_root = root / ".claude" / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    dest = skills_root / name
+
+    # 已有 symlink 且指向正确：no-op
+    if dest.is_symlink():
+        try:
+            cur = dest.resolve(strict=False)
+        except OSError:
+            cur = None
+        if cur == src_dir:
+            return dest / "SKILL.md"
+        # 指向别处的 symlink 或断链 → 删
+        dest.unlink()
+    elif dest.exists():
+        # 旧 install 留下的真实目录或文件 → 删（保留备份避免误删用户手写）
+        if dest.is_dir():
+            import shutil as _shutil
+            backup = skills_root / f".{name}.replaced-by-symlink"
+            if backup.exists():
+                _shutil.rmtree(backup)
+            dest.rename(backup)
+        else:
+            dest.unlink()
+
+    dest.symlink_to(src_dir, target_is_directory=True)
+    return dest / "SKILL.md"
 
 
 def _parse_iso_to_epoch(s: str) -> Optional[float]:

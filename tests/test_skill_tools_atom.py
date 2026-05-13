@@ -80,31 +80,65 @@ class TestReadTraj:
 class TestNewSkillFolder:
     def test_creates_directory_with_skeleton(self, tmp_path):
         skill_dir, _ = _setup(tmp_path)
-        msg = ST.new_skill_folder("my-new-skill")
+        msg = ST.new_skill_folder("my-new-skill", "stub desc")
         assert "created" in msg
         assert (skill_dir / "my-new-skill" / "scripts").is_dir()
         assert (skill_dir / "my-new-skill" / "references").is_dir()
 
     def test_repeated_call_returns_already_exists(self, tmp_path):
         _setup(tmp_path)
-        ST.new_skill_folder("dup-skill")
-        msg = ST.new_skill_folder("dup-skill")
+        ST.new_skill_folder("dup-skill", "stub desc")
+        msg = ST.new_skill_folder("dup-skill", "stub desc")
         assert "already exists" in msg
+
+    def test_description_required(self, tmp_path):
+        """无 description / 空白 desc 应被拒——避免 cluster agent 偷懒。"""
+        _setup(tmp_path)
+        for bad in ["", "   ", "\n\t"]:
+            msg = ST.new_skill_folder("no-desc-skill", bad)
+            assert msg.startswith("error"), f"空 desc ({bad!r}) 应被拒"
+
+    def test_description_written_to_stub_skill_md(self, tmp_path):
+        """v2: desc 落到 stub SKILL.md frontmatter；同时 baby 分支被初始化。"""
+        skill_dir, _ = _setup(tmp_path)
+        ST.new_skill_folder(
+            "django-migration-fix", "修复 Django manage.py migrate 冲突",
+        )
+        skill_md = skill_dir / "django-migration-fix" / "SKILL.md"
+        assert skill_md.is_file(), "stub SKILL.md 必须由 new_skill_folder 写出"
+        from xskill.frontmatter import parse as fm_parse
+        fm, body = fm_parse(skill_md.read_text(encoding="utf-8"))
+        assert fm["name"] == "django-migration-fix"
+        assert fm["description"] == "修复 Django manage.py migrate 冲突"
+        assert fm["metadata"]["state"] == "baby"
+        # git 仓库 + baby 分支
+        from xskill.git_lock import current_branch
+        assert (skill_dir / "django-migration-fix" / ".git").is_dir()
+        assert current_branch(str(skill_dir / "django-migration-fix")) == "baby"
+        # .gitignore 含 .candidates.yml
+        gi = (skill_dir / "django-migration-fix" / ".gitignore").read_text(encoding="utf-8")
+        assert ".candidates.yml" in gi
+        assert ".ux_scores.jsonl" in gi
+        assert ".canary/" in gi
 
 
 class TestAddTaskToSkill:
     def test_first_add_creates_entry(self, tmp_path):
         skill_dir, _ = _setup(tmp_path)
-        ST.new_skill_folder("auto-skill")
+        ST.new_skill_folder("auto-skill", "stub desc")
         msg = ST.add_task_to_skill("auto-skill", "atom_x_0001", 6)
-        assert "weightscore_total=6" in msg
+        assert "buffer_total=6" in msg
 
-    def test_repeated_add_sums(self, tmp_path):
+    def test_repeated_add_overwrites(self, tmp_path):
+        """v2.1: 同 atom 重复 add → 覆盖 weightscore（不累加）。"""
         _setup(tmp_path)
-        ST.new_skill_folder("auto-skill")
+        ST.new_skill_folder("auto-skill", "stub desc")
         ST.add_task_to_skill("auto-skill", "atom_x_0001", 4)
         msg = ST.add_task_to_skill("auto-skill", "atom_x_0001", 5)
-        assert "weightscore_total=9" in msg
+        assert "weightscore=5" in msg
+        # buffer 仍是单条 atom，total 是覆盖后的 5（不是 4+5=9）
+        assert "buffer_total=5" in msg
+        assert "overwrite" in msg
 
     def test_nonexistent_skill_returns_error(self, tmp_path):
         _setup(tmp_path)
@@ -113,7 +147,7 @@ class TestAddTaskToSkill:
 
     def test_weightscore_out_of_range_returns_error(self, tmp_path):
         _setup(tmp_path)
-        ST.new_skill_folder("auto-skill")
+        ST.new_skill_folder("auto-skill", "stub desc")
         for bad in [0, 11, -1, 100]:
             msg = ST.add_task_to_skill("auto-skill", "atom_x_0001", bad)
             assert msg.startswith("error")
@@ -136,13 +170,13 @@ class TestScoreTask:
 class TestSkillRead:
     def test_empty_skill_returns_placeholder(self, tmp_path):
         _setup(tmp_path)
-        ST.new_skill_folder("brand-new")
+        ST.new_skill_folder("brand-new", "stub desc")
         msg = ST.skill_read("brand-new")
         assert "no SKILL.md" in msg or "placeholder" in msg
 
     def test_existing_skill_returns_content(self, tmp_path):
         skill_dir, _ = _setup(tmp_path)
-        ST.new_skill_folder("has-content")
+        ST.new_skill_folder("has-content", "has content")
         (skill_dir / "has-content" / "SKILL.md").write_text(
             "---\nname: has-content\n---\n# body here\n", encoding="utf-8",
         )

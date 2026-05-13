@@ -66,6 +66,19 @@ _traj_dir: Path | None = None  # 兼容仍引用 _traj_dir 的代码路径
 _watcher_ref: dict = {}  # {"instance": DirectoryWatcher} — set in create_app startup
 _chat_agents: dict = {}   # session_id → Agno Agent instance
 
+# debug 模式：把生态扫描的 home_root 指向用户自选目录，不扫真正的 $HOME。
+# 用法：xskill serve --debug --home /tmp/test-home → 只扫
+# /tmp/test-home/.claude/projects/*.jsonl，install 也走 /tmp/test-home/.claude/skills/。
+_home_root_override: Path | None = None
+
+
+def _home_root() -> Path:
+    """生态层（ecosystems + ingester + install）应该用的 home root。
+
+    debug 模式下指向 ``--home`` 自选目录；否则就是真实 ``$HOME``。
+    """
+    return _home_root_override if _home_root_override is not None else Path.home()
+
 
 def _ensure_loaded() -> None:
     """幂等：第一次调用时载入配置 + 解析关键目录，之后是 no-op。
@@ -1272,10 +1285,19 @@ async def api_reindex():
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app() -> FastAPI:
+def create_app(home_root: Path | str | None = None) -> FastAPI:
     """Build the FastAPI app. Calls ``_ensure_loaded`` first so all module-level
     config globals (``_config``/``_skill_dir``/...) are populated before any
-    endpoint or startup hook reads them."""
+    endpoint or startup hook reads them.
+
+    Args:
+        home_root: 可选，覆盖生态扫描的 home root。debug 模式下设成自选目录
+                   （只扫描该目录下的 ``.claude/``），生产环境留 None 用真
+                   实 ``$HOME``。
+    """
+    global _home_root_override
+    if home_root is not None:
+        _home_root_override = Path(home_root).expanduser().resolve()
     _ensure_loaded()
     """Create and configure the FastAPI application."""
     app = FastAPI(
@@ -1407,7 +1429,7 @@ def create_app() -> FastAPI:
             install_history_path = _skill_dir / "install_history.jsonl"
             install_history = InstallHistory(install_history_path)
 
-            detections = detect_known_ecosystems()
+            detections = detect_known_ecosystems(home_root=_home_root())
             for det in detections:
                 bridge: Path = det["bridge"]
                 bridge.mkdir(parents=True, exist_ok=True)
@@ -1422,7 +1444,7 @@ def create_app() -> FastAPI:
                     # 见到新 session 才有依据查"那一刻装的是哪 side"。
                     try:
                         installed = install_all_to_claude_code(
-                            _skill_dir, target_root=Path.home(),
+                            _skill_dir, target_root=_home_root(),
                         )
                         for dest in installed:
                             install_history.record(
@@ -1438,10 +1460,10 @@ def create_app() -> FastAPI:
 
                     ingester = CCSessionIngester(
                         target_traj_dir=bridge,
-                        home_root=Path.home(),
+                        home_root=_home_root(),
                         poll_interval=float(_config.get("watcher", {}).get("poll_interval", 10)),
                         skill_dir=_skill_dir,
-                        target_root=Path.home(),
+                        target_root=_home_root(),
                         history_path=install_history_path,
                         assignments_path=_skill_dir / "session_assignments.jsonl",
                     )

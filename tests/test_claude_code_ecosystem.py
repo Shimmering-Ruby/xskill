@@ -248,6 +248,34 @@ class TestInstallToClaudeCode:
         fm, _ = fm_parse(text)
         assert fm["version"] == 2
 
+    def test_install_creates_directory_symlink_not_copy(self, tmp_path):
+        """install 应创建目录级 symlink → xskill 更新即时可见 + 不冲掉用户手改。"""
+        skill_path = _build_skill(tmp_path / "src_skills")
+        fake_home = tmp_path / "fake_home"
+        install_to_claude_code(skill_path, target_root=fake_home)
+        dest_dir = fake_home / ".claude" / "skills" / "list-py-files"
+        assert dest_dir.is_symlink(), "dest 必须是 symlink 而非真实目录"
+        assert dest_dir.resolve() == skill_path.resolve()
+        # 改源 → dest 立刻看到（symlink 语义）
+        (skill_path / "scripts").mkdir(exist_ok=True)
+        (skill_path / "scripts" / "new_script.sh").write_text("#!/bin/bash\necho hi\n", encoding="utf-8")
+        assert (dest_dir / "scripts" / "new_script.sh").is_file()
+
+    def test_install_replaces_old_directory_copy_with_symlink(self, tmp_path):
+        """旧 install 留下的真实目录（非 symlink）→ 重装时备份并替换为 symlink。"""
+        skill_path = _build_skill(tmp_path / "src_skills")
+        fake_home = tmp_path / "fake_home"
+        # 模拟旧 copy install 留下的真实目录
+        legacy_dest = fake_home / ".claude" / "skills" / "list-py-files"
+        legacy_dest.mkdir(parents=True)
+        (legacy_dest / "SKILL.md").write_text("legacy copy", encoding="utf-8")
+        install_to_claude_code(skill_path, target_root=fake_home)
+        assert legacy_dest.is_symlink()
+        # 旧目录被搬到隐藏备份
+        backup = fake_home / ".claude" / "skills" / ".list-py-files.replaced-by-symlink"
+        assert backup.is_dir()
+        assert (backup / "SKILL.md").read_text(encoding="utf-8") == "legacy copy"
+
     def test_install_missing_skill_md_raises(self, tmp_path):
         empty = tmp_path / "empty-skill"
         empty.mkdir()

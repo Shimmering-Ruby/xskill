@@ -590,26 +590,32 @@ def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
     return text[offset_start:offset_end]
 
 
-def new_skill_folder(skill_name: str) -> str:
-    """创建一个空 skill 目录骨架（scripts/ + references/）。
+def new_skill_folder(skill_name: str, description: str) -> str:
+    """v2: 创建 skill 目录 → git init → checkout baby 分支 → 首次 commit
+    （含 stub SKILL.md + .gitignore）。
 
-    与 v1 ``create_skill`` 的差异：不预生成 SKILL.md 占位骨架——v2 流程下
-    SkillEditAgent 在 candidates 攒到阈值后再自主写完整内容；中间态目录
-    只有 ``.candidates.yml``。
+    description 必填，落到 stub SKILL.md 的 frontmatter 中。后续：
+    - 路由表（``build_skill_catalog_block``）从 SKILL.md frontmatter 取 desc
+      展示
+    - state 由 git 分支决定（baby/main/staging），不再单写 .meta.yml
+    - 后续 SkillEditAgent 触发时拿到 candidates 来填正文，调
+      ``commit_baby_to_main`` graduate 到 main
     """
     skill_dir = _ctx_v2["skill_dir"]
     if skill_dir is None:
         return "error: v2 context not initialized"
+    desc = (description or "").strip()
+    if not desc:
+        return ("error: description 必填——简述这个 skill 服务于什么类型的 atom "
+                "（2-3 句中文，让后续 cluster agent 能判断同类）")
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if target.exists():
         return f"already exists: {target}"
-    target.mkdir(parents=True)
-    (target / "scripts").mkdir()
-    (target / "references").mkdir()
-    (target / "scripts" / ".gitkeep").write_text("", encoding="utf-8")
-    (target / "references" / ".gitkeep").write_text("", encoding="utf-8")
-    return f"created: {target}"
+    # 初始化 git + baby 分支 + stub SKILL.md
+    from xskill.git_lock import init_skill_repo_on_baby
+    init_skill_repo_on_baby(str(target), name=slug, description=desc)
+    return f"created on baby branch: {target}  desc={desc[:60]!r}"
 
 
 def skill_read(skill_name: str) -> str:
@@ -625,11 +631,10 @@ def skill_read(skill_name: str) -> str:
 
 
 def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
-    """把一个 atom 作为贡献追加到该 skill 的 .candidates.yml。
+    """v2.1: 把 atom 加进 skill 的 candidates buffer。
 
-    ``weightscore`` 必须 1-10。返回末尾追加 ``weightscore_total=<N>`` 让
-    agent 看到累计进度——达到 ``ATOM_PROMOTION_THRESHOLD`` (=10) 就会被
-    SkillEditAgent 拾起来生成/更新 SKILL.md。
+    同 atom 重复 add 时**覆盖**（不累加，cluster 可改主意）。返回末尾附该
+    atom 的 weightscore + buffer 总分 / 10，让 agent 看到"还差多少到阈值"。
     """
     from xskill import candidates as C
     skill_dir = _ctx_v2["skill_dir"]
@@ -648,11 +653,10 @@ def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
     data = C.load_candidates(target)
     data, was_new = C.add_atom_contribution(data, atom_id, ws)
     C.save_candidates(target, data)
-    total = next(
-        c["weightscore_total"] for c in data["candidates"] if c["atom_id"] == atom_id
-    )
-    verb = "new" if was_new else "merged"
-    return f"{verb}: skill={slug} atom={atom_id} weightscore_total={total}"
+    buffer_total = sum(int(c.get("weightscore", 0)) for c in data["candidates"])
+    verb = "new" if was_new else "overwrite"
+    return (f"{verb}: skill={slug} atom={atom_id} weightscore={ws} "
+            f"buffer_total={buffer_total}/10")
 
 
 def score_task(atom_id: str, score: int) -> str:
@@ -699,3 +703,164 @@ def add_task(
     )
     store.save(atom)
     return f"added: {atom_id}"
+
+
+def list_files(path: str) -> str:
+    """列目录下的文件 / 子目录。
+
+    给 SkillEditAgent 用来摸清当前 skill 已有什么文件（避免重复写、便于增量
+    更新）。路径必须在 skill_dir 范围内；越界返回 error。
+    """
+    p = Path(path)
+    skill_root = _ctx_v2["skill_dir"] if _ctx_v2["skill_dir"] is not None else _ctx["skill_dir"]
+    if skill_root is None:
+        return "error: skill_dir context not initialized"
+    try:
+        p.resolve().relative_to(skill_root.resolve())
+    except ValueError:
+        return f"error: list_files restricted to skill_dir (tried: {path})"
+    if not p.is_dir():
+        return f"error: not a directory: {path}"
+    entries = sorted(p.iterdir())
+    if not entries:
+        return "(empty)"
+    return "\n".join(
+        f"{'[dir] ' if e.is_dir() else ''}{e.name}" for e in entries
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SkillEditAgent 专用 commit 工具（不要给 ClusterAgent）
+# ═══════════════════════════════════════════════════════════════════
+
+def commit_baby_to_main(skill_name: str, message: str) -> str:
+    """SkillEditAgent 首次为某 skill 出版本时调用。
+
+    前提：该 skill 当前在 baby 分支（cluster 创建后未 graduate）。
+    行为：git add . + commit + git branch -m baby main → 该 skill 第一次
+    有 main 版本。**之后** SkillEditAgent 再触发只能调 commit_to_staging。
+
+    Args:
+        skill_name: 目标 skill 的 slug（如 ``django-fix``）
+        message: commit message，应该写明本次基于哪些 atom_id
+
+    Returns:
+        成功："graduated baby → main: <skill_name>"
+        失败："error: ..."
+    """
+    from xskill.git_lock import commit_baby_to_main_branch
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if not target.is_dir():
+        return f"error: skill {slug} not found"
+    if not (target / ".git").is_dir():
+        return f"error: skill {slug} 没 git 仓库（new_skill_folder 出问题？）"
+    msg = (message or "").strip()
+    if not msg:
+        return "error: commit message 必填"
+    ok = commit_baby_to_main_branch(str(target), msg)
+    if not ok:
+        return f"error: commit_baby_to_main 失败（不在 baby 分支？看 daemon 日志）"
+    return f"graduated baby → main: {slug}"
+
+
+def commit_to_staging(skill_name: str, message: str) -> str:
+    """SkillEditAgent 在 skill 已有 main 时调用——产出灰度候选。
+
+    前提：该 skill 当前在 main 且不存在 staging。
+    行为：从 main 切 staging 分支 + add . + commit + 物化到
+    ``<skill_dir>/../.canary/<name>/`` 让 install_to_claude_code(side='staging')
+    能装到。
+
+    Args:
+        skill_name: 目标 skill 的 slug
+        message: commit message
+
+    Returns:
+        成功："committed to staging: <skill_name>"
+        失败："error: ..."
+    """
+    from xskill.git_lock import commit_to_staging_branch
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if not target.is_dir():
+        return f"error: skill {slug} not found"
+    if not (target / ".git").is_dir():
+        return f"error: skill {slug} 没 git 仓库"
+    msg = (message or "").strip()
+    if not msg:
+        return "error: commit message 必填"
+    ok = commit_to_staging_branch(str(target), msg)
+    if not ok:
+        return ("error: commit_to_staging 失败"
+                "（不在 main 分支 / staging 已存在 / commit 出错——看日志）")
+    return f"committed to staging: {slug}"
+
+
+def absorb_user_edit_to_main(skill_name: str, message: str) -> str:
+    """UserEditAbsorbAgent 专用：把用户手改吸收为 main 分支一次 commit。
+
+    无论当前在 baby / main / staging：
+      - baby: rename baby→main 后 commit
+      - main: 直接 commit
+      - 同时存在 staging: 删除 staging (用户手改优先级压过灰度候选)
+    """
+    from xskill.git_lock import (
+        run_git, current_branch, commit_changes,
+    )
+    skill_dir = _ctx_v2["skill_dir"]
+    if skill_dir is None:
+        return "error: v2 context not initialized"
+    slug = _slugify(skill_name)
+    target = skill_dir / slug
+    if not target.is_dir() or not (target / ".git").is_dir():
+        return f"error: skill {slug} 没 git 仓库"
+    msg = (message or "").strip()
+    if not msg:
+        return "error: commit message 必填"
+    # 确保 message 含 "absorb user edit" 标记便于回流检测
+    if "absorb user edit" not in msg.lower():
+        msg = f"absorb user edit: {msg}"
+
+    cur = current_branch(str(target))
+    cwd = str(target)
+    if cur == "baby":
+        # baby 阶段被用户改了——直接 graduate + commit
+        run_git(["add", "-A"], cwd=cwd)
+        run_git(["commit", "-m", msg], cwd=cwd)
+        run_git(["branch", "-m", "baby", "main"], cwd=cwd)
+        result = f"absorbed on main (graduated from baby): {slug}"
+    elif cur == "main":
+        committed = commit_changes(cwd, msg)
+        if not committed:
+            return f"error: 没有改动可 commit ({slug})"
+        result = f"absorbed on main: {slug}"
+    elif cur == "staging":
+        # 用户改了 staging 内容？罕见但理论上可能。先切回 main 再 commit
+        # diff 不一定是从 main 来的，但策略仍是"用户改的 commit 到 main"。
+        run_git(["checkout", "main"], cwd=cwd)
+        run_git(["add", "-A"], cwd=cwd)
+        run_git(["commit", "-m", msg], cwd=cwd)
+        result = f"absorbed on main (was on staging): {slug}"
+    else:
+        return f"error: 异常分支 {cur!r}"
+
+    # 如果有 staging 分支也删——用户手改优先级压过灰度候选
+    code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=cwd)
+    if code == 0:
+        run_git(["checkout", "main"], cwd=cwd)
+        run_git(["branch", "-D", "staging"], cwd=cwd)
+        # .canary 物化目录也清
+        canary_md = target.parent / ".canary" / slug
+        if canary_md.is_dir():
+            import shutil
+            shutil.rmtree(canary_md, ignore_errors=True)
+        result += " (deleted in-flight staging)"
+
+    return result

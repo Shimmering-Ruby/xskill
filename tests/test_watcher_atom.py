@@ -18,33 +18,43 @@ from tests.test_task_agent import _SPLIT_XML, _StubLLM
 
 class _StubAgno:
     """根据 sysprompt 头分发：
-    - cluster agent → 调 add_task_to_skill 给 auto-skill 打 10 分
-    - edit agent    → 调 write_file 真写出 SKILL.md（验证 v2.1 真实落盘判据）
+    - cluster agent → 调 new_skill_folder + add_task_to_skill 给 auto-skill 打 10 分
+    - edit agent (baby)  → 写 SKILL.md + commit_baby_to_main
+    - edit agent (main)  → 写 SKILL.md + commit_to_staging
+    - absorb agent → 调 absorb_user_edit_to_main
     """
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = tools
+        self.tools = {getattr(t, "__name__", ""): t for t in tools}
 
     def run(self, user_msg, **kw):
         head = (self.instructions[0] if self.instructions else "")[:60]
-        tool_by_name = {getattr(t, "__name__", ""): t for t in self.tools}
         if "TaskClusterAgent" in head:
             import re
             m = re.search(r"atom_id:\s*(\S+)", user_msg)
             atom_id = m.group(1) if m else None
-            if "new_skill_folder" in tool_by_name:
-                tool_by_name["new_skill_folder"]("auto-skill")
-            if "add_task_to_skill" in tool_by_name and atom_id:
-                tool_by_name["add_task_to_skill"]("auto-skill", atom_id, 10)
+            if "new_skill_folder" in self.tools:
+                self.tools["new_skill_folder"]("auto-skill", "stub desc")
+            if "add_task_to_skill" in self.tools and atom_id:
+                self.tools["add_task_to_skill"]("auto-skill", atom_id, 10)
         elif "SkillEditAgent" in head:
-            # 真写 SKILL.md（让 v2.1 判据"真实落盘"成立）
             import re
             m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
-            if m and "write_file" in tool_by_name:
-                tool_by_name["write_file"](
+            if m and "write_file" in self.tools:
+                self.tools["write_file"](
                     m.group(1),
                     "---\nname: auto-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n",
                 )
+            # 根据当前分支决定调哪个 commit
+            if "baby" in user_msg:
+                if "commit_baby_to_main" in self.tools:
+                    self.tools["commit_baby_to_main"]("auto-skill", "stub baby")
+            elif "main" in user_msg:
+                if "commit_to_staging" in self.tools:
+                    self.tools["commit_to_staging"]("auto-skill", "stub staging")
+        elif "UserEditAbsorbAgent" in head:
+            if "absorb_user_edit_to_main" in self.tools:
+                self.tools["absorb_user_edit_to_main"]("auto-skill", "absorb user edit: test")
         class _R: pass
         r = _R(); r.content = "stub"; return r
 
@@ -173,38 +183,38 @@ class TestIndependentSkillEditScan:
     """
 
     def test_edit_triggers_even_when_cluster_fails(self, tmp_path):
-        """先手动在 buffer 写满候选 → cluster stub 抛异常 → edit 仍触发。"""
+        """先手动 seed baby 分支 + 候选满分 → cluster 抛异常 → edit 仍触发。"""
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
         (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
 
-        # 提前 seed：skill_dir 下创建 my-skill，buffer 累计满 10 分
         from xskill import candidates as C
+        from xskill.git_lock import init_skill_repo_on_baby
         my_skill = skill_dir / "my-skill"
-        my_skill.mkdir()
+        init_skill_repo_on_baby(str(my_skill), name="my-skill", description="stub")
         data = {"candidates": []}
         data, _ = C.add_atom_contribution(data, "atom_pre_0001", 10)
         C.save_candidates(my_skill, data)
 
-        # cluster + edit stub：cluster 抛异常；edit 写 SKILL.md
         class _MixedStub:
             def __init__(self, *, instructions, tools):
                 self.instructions = instructions
-                self.tools = tools
+                self.tools = {getattr(t, "__name__", ""): t for t in tools}
             def run(self, msg, **kw):
                 head = (self.instructions[0] if self.instructions else "")[:60]
                 if "TaskClusterAgent" in head:
                     raise RuntimeError("cluster LLM 402")
-                # edit agent：真写 SKILL.md
-                tool_by_name = {getattr(t, "__name__", ""): t for t in self.tools}
+                # SkillEditAgent on baby：写 SKILL.md + 调 commit_baby_to_main
                 import re
                 m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", msg)
-                if m and "write_file" in tool_by_name:
-                    tool_by_name["write_file"](
+                if m and "write_file" in self.tools:
+                    self.tools["write_file"](
                         m.group(1),
                         "---\nname: my-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n",
                     )
+                if "commit_baby_to_main" in self.tools:
+                    self.tools["commit_baby_to_main"]("my-skill", "stub commit")
                 class _R: pass
                 r = _R(); r.content = ""; return r
 
@@ -223,8 +233,6 @@ class TestIndependentSkillEditScan:
             agno_agent_factory=lambda **kw: _MixedStub(**kw),
         )
 
-        # 跑 _scan_once 几轮——_check_pending_skill_edits 应在某轮看到
-        # my-skill buffer 已满 + 跑 edit stub → 写 SKILL.md
         for _ in range(10):
             watcher._scan_once()
             for _ in range(20):
@@ -232,13 +240,19 @@ class TestIndependentSkillEditScan:
                     break
                 time.sleep(0.05)
                 watcher._harvest()
-            if (my_skill / "SKILL.md").is_file():
+            # v2.1: 检查 candidates 已清空 = edit 成功
+            data_check = C.load_candidates(my_skill)
+            if data_check["candidates"] == []:
                 break
 
-        assert (my_skill / "SKILL.md").is_file(), \
-            "Bug 1 回归：cluster 抛异常时 edit 应仍能独立触发"
+        # edit 成功 → SKILL.md 仍在（baby 阶段已有 stub，edit 后内容已更新）
+        assert (my_skill / "SKILL.md").is_file()
+        # v2.1: candidates 清空（取代 promoted=true 标记）
         data2 = C.load_candidates(my_skill)
-        assert any(c.get("promoted") for c in data2["candidates"])
+        assert data2["candidates"] == []
+        # baby graduate 到 main
+        from xskill.git_lock import current_branch
+        assert current_branch(str(my_skill)) == "main"
 
 
 class TestUxScoreAtomLevel:
@@ -404,11 +418,17 @@ class TestPipelineRun:
         # 索引文件存在
         assert (wd / "index.pkl").is_file()
 
-        # auto-skill 被创建且至少一次 SkillEdit 触发（promoted=true）
+        # v2.1: auto-skill 被创建（baby 分支 + git 仓库）；SkillEdit 触发
+        # 后会调 commit_baby_to_main → 分支变 main + candidates 清空
         assert (skill_dir / "auto-skill").is_dir()
+        assert (skill_dir / "auto-skill" / ".git").is_dir()
         from xskill import candidates as C
+        from xskill.git_lock import current_branch
         data = C.load_candidates(skill_dir / "auto-skill")
-        assert any(c.get("promoted") for c in data.get("candidates", []))
+        # candidates 清空（v2.1 替代 promoted 标记）
+        assert data["candidates"] == []
+        # 已 graduate 到 main
+        assert current_branch(str(skill_dir / "auto-skill")) == "main"
 
         # registry 中 last_offset / last_atom_id / tasks_extracted 已写
         from xskill.registry import get_connection

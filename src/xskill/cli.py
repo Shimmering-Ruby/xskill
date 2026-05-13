@@ -24,7 +24,20 @@ from xskill.config import set_overrides
 # ═══════════════════════════════════════════════════════════════
 
 def cmd_serve(args, xskill) -> int:
-    xskill.serve(host=args.host, port=args.port)
+    # --home 用于 debug 模式：生态扫描只看该目录下的 .claude/，不碰真实
+    # $HOME。要求顶层 --debug 同时打开，避免生产环境误用。
+    home_root = None
+    if args.home:
+        if not args.debug:
+            print("error: --home 仅在 --debug 模式下生效；加 --debug 或去掉 --home",
+                  file=sys.stderr)
+            return 2
+        from pathlib import Path
+        home_root = Path(args.home).expanduser().resolve()
+        if not home_root.is_dir():
+            print(f"error: --home 目录不存在: {home_root}", file=sys.stderr)
+            return 2
+    xskill.serve(host=args.host, port=args.port, home_root=home_root)
     return 0
 
 
@@ -98,6 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", help="Start daemon (FastAPI + watcher)")
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument(
+        "--home", type=str, default=None,
+        help="[debug only] 把生态扫描的 home 指向此目录，只看该目录下的 "
+             ".claude/projects/*.jsonl + 装 skill 到 .claude/skills/。"
+             "必须同时 --debug。用于隔离调试 (e.g. /tmp/xskill-test-home)。",
+    )
 
     p_reg = sub.add_parser("registry", help="Manage watched directories")
     p_reg.add_argument("registry_action", choices=["add", "remove", "list"])

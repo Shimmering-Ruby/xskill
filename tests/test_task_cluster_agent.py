@@ -9,13 +9,47 @@ from xskill.atom_task import AtomTask, AtomTaskStore
 from xskill.task_cluster_agent import TaskClusterAgent, build_skill_catalog_block
 
 
-def _make_skill(skill_dir: Path, name: str, desc: str):
+def _make_skill_on_main(skill_dir: Path, name: str, desc: str):
+    """模拟一个 main 状态的 skill：git init + main 分支 + SKILL.md。"""
+    from xskill.git_lock import run_git
     sd = skill_dir / name
     sd.mkdir(parents=True)
+    run_git(["init"], cwd=str(sd))
+    run_git(["checkout", "-b", "main"], cwd=str(sd))
+    run_git(["config", "user.email", "t@t"], cwd=str(sd))
+    run_git(["config", "user.name", "t"], cwd=str(sd))
     (sd / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: {desc}\nmetadata:\n  version: 1\n---\n# {name}\n",
         encoding="utf-8",
     )
+    run_git(["add", "."], cwd=str(sd))
+    run_git(["commit", "-m", "init"], cwd=str(sd))
+
+
+def _make_skill_on_baby(skill_dir: Path, name: str, desc: str):
+    """模拟一个 baby 状态的 skill（cluster 刚创建，还没 SkillEdit graduate）。"""
+    from xskill.git_lock import init_skill_repo_on_baby
+    sd = skill_dir / name
+    init_skill_repo_on_baby(str(sd), name=name, description=desc)
+
+
+def _make_skill_on_staging(skill_dir: Path, name: str, main_desc: str, staging_desc: str):
+    """模拟 main + staging 双态。"""
+    from xskill.git_lock import run_git
+    _make_skill_on_main(skill_dir, name, main_desc)
+    sd = skill_dir / name
+    run_git(["checkout", "-b", "staging"], cwd=str(sd))
+    (sd / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {staging_desc}\nmetadata:\n  version: 2\n---\n# {name} (staging)\n",
+        encoding="utf-8",
+    )
+    run_git(["add", "."], cwd=str(sd))
+    run_git(["commit", "-m", "staging variant"], cwd=str(sd))
+    run_git(["checkout", "main"], cwd=str(sd))
+
+
+# 兼容旧测试名（保留 main 创建 helper）
+_make_skill = _make_skill_on_main
 
 
 class TestSkillCatalogBudget:
@@ -24,8 +58,9 @@ class TestSkillCatalogBudget:
         for n, d in [("a-skill", "deals with A"), ("b-skill", "deals with B")]:
             _make_skill(skill_dir, n, d)
         block = build_skill_catalog_block(skill_dir, max_chars=20000)
-        assert "a-skill: deals with A" in block
-        assert "b-skill: deals with B" in block
+        # 新格式带 [state] 标识；两个 skill 都有 SKILL.md → main
+        assert "a-skill[main]: deals with A" in block
+        assert "b-skill[main]: deals with B" in block
 
     def test_overflow_truncates_descriptions(self, tmp_path):
         skill_dir = tmp_path / "skill"
@@ -48,6 +83,49 @@ class TestSkillCatalogBudget:
             assert f"big-{i:04d}" in block
         # 该模式下不留 desc
         assert "yyyy" not in block
+
+    def test_baby_skill_shown_with_buffer_count(self, tmp_path):
+        """baby 分支的 skill 也要进路由表，标 [baby] + N candidates 计数。"""
+        skill_dir = tmp_path / "skill"
+        _make_skill_on_baby(skill_dir, "baby-skill", "处理 baby case")
+        (skill_dir / "baby-skill" / ".candidates.yml").write_text(
+            "candidates:\n"
+            "- atom_id: atom_a\n  weightscore: 5\n"
+            "- atom_id: atom_b\n  weightscore: 4\n",
+            encoding="utf-8",
+        )
+        block = build_skill_catalog_block(skill_dir, max_chars=20000)
+        assert "baby-skill[baby]" in block
+        assert "处理 baby case" in block  # desc 从 stub SKILL.md 取
+        assert "2 cand" in block
+
+    def test_baby_skill_shows_stub_skill_md_description(self, tmp_path):
+        """baby 分支已有 stub SKILL.md，desc 从 frontmatter 取，配合 buffer 计数展示。
+
+        这是避免近义 slug 泛滥的关键：cluster agent 看 desc 判断 baby 是
+        否承接当前 atom。
+        """
+        skill_dir = tmp_path / "skill"
+        _make_skill_on_baby(skill_dir, "django-fix",
+                            "修复 Django manage.py migrate 冲突")
+        (skill_dir / "django-fix" / ".candidates.yml").write_text(
+            "candidates:\n- atom_id: atom_a\n  weightscore: 5\n",
+            encoding="utf-8",
+        )
+        block = build_skill_catalog_block(skill_dir, max_chars=20000)
+        assert "django-fix[baby]" in block
+        assert "修复 Django manage.py migrate 冲突" in block
+        assert "1 cand" in block
+
+    def test_staging_state_when_staging_branch_exists(self, tmp_path):
+        """main + staging 双分支 → state=staging（灰度中）。"""
+        skill_dir = tmp_path / "skill"
+        _make_skill_on_staging(skill_dir, "in-canary",
+                                main_desc="main 版本", staging_desc="staging 候选")
+        block = build_skill_catalog_block(skill_dir, max_chars=20000)
+        assert "in-canary[staging]" in block
+        # staging checkout 后回到 main，desc 从 main 取
+        assert "main 版本" in block
 
     def test_empty_skill_dir_returns_placeholder(self, tmp_path):
         skill_dir = tmp_path / "empty_skill"

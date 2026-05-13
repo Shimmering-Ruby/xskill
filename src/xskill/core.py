@@ -167,12 +167,21 @@ class XSkill:
         )
 
     # ─── daemon ────────────────────────────────────────────────
-    def serve(self, host: str = "0.0.0.0", port: int = 8000) -> None:
-        """启动 FastAPI server（含 watcher 后台线程）。阻塞。"""
+    def serve(self, host: str = "0.0.0.0", port: int = 8000,
+              *, home_root: Path | str | None = None) -> None:
+        """启动 FastAPI server（含 watcher 后台线程）。阻塞。
+
+        Args:
+            home_root: 可选，debug 模式下指向自选目录（只扫描该目录下的
+                       ``.claude/``）。生产环境留 None 用真实 ``$HOME``。
+        """
         import uvicorn
         from xskill.server import create_app
-        app = create_app()
-        print(f"xskill serve at http://{host}:{port}/")
+        app = create_app(home_root=home_root)
+        if home_root:
+            print(f"xskill serve at http://{host}:{port}/  [debug home: {home_root}]")
+        else:
+            print(f"xskill serve at http://{host}:{port}/")
         uvicorn.run(app, host=host, port=port)
 
     def __repr__(self) -> str:
