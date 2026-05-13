@@ -18,19 +18,24 @@
 > 你的 agent 其实早就知道怎么解决问题，只是每次会话结束就忘了。
 > **xskill** 在后台默默观察它们做了什么，把行之有效的模式蒸馏成 Skill 库，并通过 A/B 灰度只保留真正胜出的版本。
 
+> ⚠️ **v0.4.0a1 —— AtomTask 重构（alpha）。** 流水线粒度从"整条轨迹"下沉到 **AtomTask**（一次用户意图），每个 Skill 变成 `baby` → `main` → `staging` 三分支的状态机。对外 SDK 与 `SKILL.md` schema 不变；运行时 state（DB、磁盘 skill 仓）**不向后兼容** —— 从 `0.3.x` 升级请清掉 `~/.xskill/`。
+
 ## 为什么用 xskill
 
 LLM agent 一遍又一遍重复同样的解题过程，因为它们的"经验"在 session 结束时就蒸发了。手工维护 prompt 库是个常见解法，但维护成本高、容易过时，也无法捕捉"为什么这么做"。
 
-**xskill** 把每次 agent 执行（一个 `traj_*.md` 文件）都视为原材料：
+**xskill** 把每次 agent 执行（一个 `traj_*.md` 文件）都视为原材料 —— 但蒸馏的单位**不是**整条轨迹。一条轨迹会先被拆成若干 **AtomTask**（每个 atom = 一段用户意图），每个 atom 单独跟现有 skill 目录做聚类，命中的 Skill 会经过三条 git 分支才成熟：
 
 ```
-traj_*.md  ──►  抽 meta ──►  embed ──►  蒸馏 ──►  Skill (main)
-                                          │
-                                          └─►  Skill (staging) ──A/B──►  merge | discard
+traj_*.md  ──split──►  AtomTask*  ──cluster──►  候选 buffer        ──edit──►  Skill
+                                       │       （每个 skill 独立）              │
+                                       └── 复用 / 整合 / 新建                   │
+                                                                                ▼
+                          baby 分支  ──promoted──►  main  ──canary──►  staging  ──A/B──►  merge | discard
+                          (stub，CC 不可见)        (CC 可见)         (≥5 ux 样本)
 ```
 
-后台 daemon 监听你注册的轨迹目录。新轨迹会被 embed、聚类，然后蒸馏成一个有名字的 **Skill**。每个 Skill 是一个独立的小 git 仓，拥有 `main` 与 `staging` 两个分支；新候选通过灰度流量 + LLM 评审 UX 打分进行 A/B，赢了才合并到 main。
+聚类 agent 的优先级是**复用 > 整合 > 新建**，相似 atom 会收敛到同一个 Skill 而非生出近义副本。SkillEditAgent 只在某个 skill 的候选 buffer 累计权重过阈值时才触发。Canary 跑在独立的 watcher 轮次里 —— 不绑在 cluster 链上 —— 单个 Skill 评分阻塞不会拖累其他 Skill。
 
 ## 跨 code agent 兼容
 
@@ -127,24 +132,41 @@ x.serve(host="0.0.0.0", port=8000)
 
 ## 工作原理
 
+Watcher 是单一轮询循环（默认 30s），驱动 5 个**互相独立**的扫描阶段 —— 任一阶段故障都不会阻塞别的路径。
+
 ```
-                       ┌──────────────────────────────────────┐
-   traj_*.md  ────►    │  watcher（后台线程）                 │
-   （任意已注册目录） │     ├─ 抽 meta                         │
-                       │     ├─ embed + 入索引                │
-                       │     ├─ 蒸馏 / 更新 Skill             │
-                       │     └─ ux_score（LLM 当裁判）        │
-                       └──────────────┬───────────────────────┘
-                                      ▼
-                       ~/.xskill/skill/<name>/
-                          ├── SKILL.md              ← 形如 prompt 的产物
-                          ├── candidates/           ← 未升级的候选模式
-                          ├── source_trajs/         ← 证据
-                          └── .git/                 ← 单 skill 独立 git
-                                main  ⇄  staging   （灰度 A/B）
+                ┌─────────────────────────────── watcher（轮询：30s） ────────────────────────────────┐
+                │                                                                                    │
+  traj_*.md ──► │  1. 发现  →  2. split (TaskAgent)  →  3. embed  →  4. cluster                     │
+                │              （按用户意图切 atom）    （向量索引）   （TaskClusterAgent）           │
+                │                                                              │                     │
+                │                                                              ▼                     │
+                │                                                  ~/.xskill/skill/<name>/           │
+                │                                                  ├── .candidates.yml  ← buffer    │
+                │                                                  ├── SKILL.md         ← prompt    │
+                │                                                  ├── scripts/、references/         │
+                │                                                  └── .git              baby/main/  │
+                │                                                                        staging     │
+                │                                                                                    │
+                │  5. SkillEditAgent  ◄── 候选权重 ≥ 阈值（独立扫描，不依赖 cluster 成功）            │
+                │     ├─ 写 SKILL.md + 任意辅助文件（脚本、references）                              │
+                │     ├─ 在 baby： baby → main         （此刻才让 CC 看到）                          │
+                │     └─ 在 main： 基于 main fork staging 分支（进入 canary）                        │
+                │                                                                                    │
+                │  6. AtomCanary       ◄── 独立 polling，不被 cluster 失败阻塞                        │
+                │     ├─ 按 `canary.probability` 在 main / staging 间分流                            │
+                │     └─ 两侧各 ≥ `min_samples` → 比较 ux_avg → merge | discard                     │
+                │                                                                                    │
+                │  7. UserEditAbsorb   ◄── 检测 ~/.claude/skills/<name>/ 下的用户手改                 │
+                │     └─ 稳定 ≥3 分钟 → commit 用户改动回 main，作为 ground truth                   │
+                └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-当 chat agent 命中某个 Skill 时，请求按概率 `p` 走 staging，其余走 main。两侧各积累 ≥ N 条 UX 评分后，xskill 比较平均分，自动决定把 staging 合进 main 还是丢弃。**全程无人工干预。**
+**为什么三条分支。** Skill 新建时落在 `baby`（CC 不可见，只有一份 stub）。**只有当 edit 成功**才 graduate 到 `main` —— 这避免了空壳 / 半成品 skill 暴露给用户。`main` 上再生候选时，会 fork `staging` 走灰度，只有胜出的那一侧留下。
+
+**候选就是纯 buffer。** `.candidates.yml` 被 git 忽略。每条记录形如 `{atom_id, weightscore, note}`。聚类 agent 改主意时可以**覆盖**已有记录。SkillEditAgent 触发条件是权重**之和**过阈值 —— **不是**条数过 10，**不是**累计源轨迹数。
+
+**Symlink 安装。** Skill 升级到 `main` 时，xskill 会在 `~/.claude/skills/<name>/` 建一个软链指向 `~/.xskill/skill/<name>/`。skill 仓内任何改动 CC 立刻可见，无需 copy；用户手改也落在同一份仓里，由 `UserEditAbsorb` 自动 commit 回 `main`。
 
 ## 配置
 
@@ -166,9 +188,8 @@ embedding:
 
 canary:
   enabled:     true
-  probability: 0.2
-  min_samples: 5
-  max_days_hold: 14
+  probability: 0.2   # 路由到 staging 的流量占比
+  min_samples: 5     # 两侧各 ≥5 ux 样本后才 promote / reject
 
 watcher:
   poll_interval: 30   # 秒
@@ -191,10 +212,12 @@ watcher:
 | 术语         | 说明 |
 | ------------ | ---- |
 | **Trajectory** | 一次 agent 执行，落盘成 `traj_*.md`。可在头部嵌入 `<!-- xskill:skill=... side=... sha=... -->` 元注释，watcher 据此打 UX 分。 |
-| **Skill**      | 由 ≥ N 条支撑轨迹蒸馏出来的可复用 prompt 产物。落在 `~/.xskill/skill/<name>/`，全版本受控。 |
-| **Candidate**  | Skill 内部的未升级模式。攒够支撑轨迹后才会进入 `SKILL.md` 正文。 |
-| **Canary**     | 单 skill 级别的 main / staging 灰度。merge 还是 discard 由 UX 分决定，不靠人。 |
-| **UX score**   | LLM-as-judge 评分。从 chat 归档反馈中读取，给 skill 服务用户的效果打分。 |
+| **AtomTask**   | 最小用户意图单元，由 `TaskAgent` 从轨迹中拆出。一条 traj → 1..N 个 atom。聚类发生在 atom 粒度，不是 traj 粒度。 |
+| **Skill**      | 由聚类后的 atom 蒸馏成的可复用 prompt 产物。落在 `~/.xskill/skill/<name>/`，每个 skill 是独立 git 仓。 |
+| **baby / main / staging** | 单 skill 的三条分支状态机：`baby` = 隐藏 stub（刚建好还没 surface 到 CC）；`main` = 已上线 skill；`staging` = 从 main fork 出来跑 canary 的候选。 |
+| **候选 buffer** | 每个 skill 内的 `.candidates.yml`，git 忽略，**覆盖式**写入。聚类 agent 追加 `{atom_id, weightscore}`；SkillEditAgent 在 weightscore **求和**过阈值时触发。 |
+| **Canary**     | 单 skill 级别的 main / staging 灰度。**独立**于 cluster 链的 watcher 轮次跑，两侧各 ≥5 ux 样本后自动 promote / reject。 |
+| **UX score**   | 单 atom 粒度的 LLM-as-judge 评分，从 chat 归档反馈读取，给 skill 服务用户的效果打分。 |
 | **Registry**   | 已注册的监听目录列表。一旦 add，watcher 永久轮询。 |
 
 ## xskill 与同类项目对比

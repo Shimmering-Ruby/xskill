@@ -18,19 +18,24 @@
 > Your agents already know how to do things. They just forget every time.
 > **xskill** watches what they do, distills what works into a Skill library, and ships only the patterns that pass A/B grading.
 
+> ⚠️ **v0.4.0a1 — AtomTask refactor (alpha).** The pipeline now operates at the *atom* level (one user-intent unit per agent run) and each Skill is a three-branch state machine (`baby` → `main` → `staging`). API-level surface and `SKILL.md` schema are unchanged; runtime state (DB, on-disk skill repos) is not backward-compatible — wipe `~/.xskill/` if upgrading from `0.3.x`.
+
 ## Why xskill
 
 LLM agents repeat the same problem-solving over and over because their experience evaporates the moment a session ends. Hand-curated prompt libraries help, but they age fast and don't capture the *why*.
 
-**xskill** treats every agent run (a `traj_*.md` file) as raw material:
+**xskill** treats every agent run (a `traj_*.md` file) as raw material — but the unit of distillation is *not* the whole trajectory. A trajectory is split into **AtomTasks** (one user-intent unit each), each atom is clustered against the existing skill catalog, and a Skill graduates through three git branches:
 
 ```
-traj_*.md  ──►  meta ──►  embed ──►  distill ──►  Skill (main)
-                                          │
-                                          └─►  Skill (staging) ──A/B──►  merge | discard
+traj_*.md  ──split──►  AtomTask*  ──cluster──►  candidate buffer  ──edit──►  Skill
+                                       │              (per skill)               │
+                                       └──reuse / integrate / new               │
+                                                                                ▼
+                          baby branch  ──promoted──►  main  ──canary──►  staging  ──A/B──►  merge | discard
+                          (stub, hidden)              (visible to CC)   (≥5 ux samples)
 ```
 
-A daemon watches your trajectory directories. New trajectories get embedded, clustered, and turned into named **Skills**. Each Skill is its own tiny git repo with `main` and `staging` branches; new candidates are gated through canary traffic, scored by an LLM-as-judge UX rubric, and merged only when they win.
+The cluster agent prefers **reuse > integrate > create** so similar atoms collapse into one skill instead of spawning near-duplicates. The edit agent only fires when a skill's candidate buffer has accumulated enough weight (sum of per-atom scores). Canary runs as an independent watcher loop — not bound to the cluster chain — so a single Skill's grading never blocks others.
 
 ## Cross-agent compatibility
 
@@ -127,24 +132,41 @@ Advanced (rare): `from xskill import Registry, SkillRepo` for direct subsystem a
 
 ## How It Works
 
+The watcher is a single poll loop (default 30s) that drives five independent stages — each stage scans the world *every round*, so a failure in one path never starves the others.
+
 ```
-                       ┌──────────────────────────────────────┐
-   traj_*.md  ────►    │  watcher (background thread)         │
-   (any registered     │     ├─ meta extraction               │
-    directory)         │     ├─ embedding + index             │
-                       │     ├─ distill / update Skill        │
-                       │     └─ ux_score (LLM-as-judge)       │
-                       └──────────────┬───────────────────────┘
-                                      ▼
-                       ~/.xskill/skill/<name>/
-                          ├── SKILL.md              ← the prompt-shaped artifact
-                          ├── candidates/           ← unpromoted patterns
-                          ├── source_trajs/         ← evidence
-                          └── .git/                 ← per-skill versioning
-                                main  ⇄  staging   (canary A/B)
+                ┌─────────────────────────────── watcher (poll: 30s) ───────────────────────────────┐
+                │                                                                                   │
+  traj_*.md ──► │  1. discover  →  2. split (TaskAgent)  →  3. embed  →  4. cluster                │
+                │                  (atom by user intent)    (vector)     (TaskClusterAgent)         │
+                │                                                              │                    │
+                │                                                              ▼                    │
+                │                                                  ~/.xskill/skill/<name>/          │
+                │                                                  ├── .candidates.yml  ← buffer    │
+                │                                                  ├── SKILL.md         ← prompt    │
+                │                                                  ├── scripts/, references/        │
+                │                                                  └── .git              baby/main/ │
+                │                                                                        staging    │
+                │                                                                                   │
+                │  5. SkillEditAgent  ◄── candidate weight ≥ threshold (independent scan)           │
+                │     ├─ writes SKILL.md + arbitrary support files                                  │
+                │     ├─ on baby:  promotes baby → main      (visible to Claude Code)               │
+                │     └─ on main:  forks staging from main   (enters canary)                        │
+                │                                                                                   │
+                │  6. AtomCanary       ◄── independent polling, never blocked by cluster failure    │
+                │     ├─ traffic split by `canary.probability` (main vs staging)                    │
+                │     └─ ≥ `min_samples` per side → compare ux_avg → merge | discard                │
+                │                                                                                   │
+                │  7. UserEditAbsorb   ◄── detects out-of-band edits in ~/.claude/skills/<name>/    │
+                │     └─ stable ≥3 min → commit user changes back to main as ground truth          │
+                └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-When a chat agent retrieves a Skill, traffic is split: `p` of requests get `staging`, the rest get `main`. After ≥ N samples on each side, xskill compares average UX scores and either merges staging into main or discards it. No human intervention required.
+**Why the three branches.** A skill starts on `baby` (hidden from Claude Code, just a stub). It only graduates to `main` once an edit succeeds — preventing empty/half-baked skills from surfacing. Once on `main`, a new candidate forks `staging` for canary; only the winning side is kept.
+
+**Candidates as a pure buffer.** `.candidates.yml` is gitignored. Each entry is `{atom_id, weightscore, note}`. The cluster agent can overwrite an entry if it changes its mind. SkillEditAgent fires when the sum of weightscores crosses a threshold — *not* when count crosses 10, *not* when N source-trajs accumulate.
+
+**Symlink install.** When a skill is promoted to `main`, xskill creates a symlink at `~/.claude/skills/<name>/` pointing into `~/.xskill/skill/<name>/`. Changes inside the skill repo are immediately visible to Claude Code without a copy step; user hand-edits land inside the same repo and get absorbed back to `main` by `UserEditAbsorb`.
 
 ## Configuration
 
@@ -166,9 +188,8 @@ embedding:
 
 canary:
   enabled:     true
-  probability: 0.2
-  min_samples: 5
-  max_days_hold: 14
+  probability: 0.2   # share of traffic routed to staging
+  min_samples: 5     # ≥5 ux samples on each side before promote/reject
 
 watcher:
   poll_interval: 30   # seconds
@@ -191,10 +212,12 @@ Full template: [`examples/config.yaml.example`](examples/config.yaml.example).
 | Term         | What it is |
 | ------------ | ---------- |
 | **Trajectory** | A single agent run, written as `traj_*.md`. Embeds optional `<!-- xskill:skill=... side=... sha=... -->` metadata so the watcher can score it. |
-| **Skill**      | A reusable, prompt-shaped artifact distilled from ≥ N supporting trajectories. Lives at `~/.xskill/skill/<name>/`, version-controlled. |
-| **Candidate**  | An unpromoted pattern inside a Skill. Becomes `SKILL.md` content once enough trajs reinforce it. |
-| **Canary**     | Per-skill A/B between `main` and `staging` branches. Merge or discard is decided by UX score, not by hand. |
-| **UX score**   | LLM-as-judge rubric that grades how well a skill served the user, from chat archive feedback. |
+| **AtomTask**   | The minimal user-intent unit, extracted from a trajectory by `TaskAgent`. One traj → 1..N atoms. Clustering happens at the atom level, not traj level. |
+| **Skill**      | A reusable, prompt-shaped artifact built from clustered atoms. Lives at `~/.xskill/skill/<name>/`, version-controlled. Each skill is its own git repo. |
+| **baby / main / staging** | The three branches that form a skill's state machine. `baby` = hidden stub (just created, not surfaced to CC); `main` = the live skill; `staging` = a canary candidate forked from `main` for A/B grading. |
+| **Candidate buffer** | `.candidates.yml` inside each skill — gitignored, overwrite-on-rewrite. The cluster agent appends `{atom_id, weightscore}` entries; SkillEditAgent fires once the **sum** of weightscores crosses threshold. |
+| **Canary**     | Per-skill A/B between `main` and `staging`. Runs as an independent watcher loop — promote/reject decided by ≥5 ux samples on each side. |
+| **UX score**   | LLM-as-judge rubric on each atom — grades how well the resolved skill served the user from chat-archive feedback. |
 | **Registry**   | The list of watched directories. Add a path → the watcher polls it forever. |
 
 ## How xskill compares
