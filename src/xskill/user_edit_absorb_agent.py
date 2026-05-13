@@ -173,8 +173,12 @@ def detect_user_edits(skill_dir: Path, *, quiet_seconds: int = USER_EDIT_QUIET_S
         except (OSError, ValueError):
             continue
 
-    if max_mtime <= last_commit_ts:
-        return False  # 没新改动
+    # ``git log --format=%ct`` 返回**整数秒**（Unix ts truncate 掉小数部分），
+    # ``os.stat().st_mtime`` 返回**浮点秒**。同一秒内"write file → git commit"
+    # 时，file mtime = N.XXX 而 commit_ts = N → 浮点差 0.X 秒，会被误判为
+    # "用户编辑了文件"。要求 mtime 比 commit_ts 严格大 ≥1 秒才算真的编辑。
+    if max_mtime - last_commit_ts < 1.0:
+        return False  # 没新改动（或仅是 commit/mtime 浮点精度差）
     if (time.time() - max_mtime) < quiet_seconds:
         return False  # 改动太新，可能用户还在编辑
     return True
