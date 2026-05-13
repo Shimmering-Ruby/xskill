@@ -63,3 +63,6 @@ Thumbs.db
 /CLAUDE.md
 /claude.sh
 /docs/research/
+
+# Claude Code IDE 工作目录（本地 settings + 临时 worktree）
+/.claude/
