@@ -168,20 +168,32 @@ class XSkill:
 
     # ─── daemon ────────────────────────────────────────────────
     def serve(self, host: str = "0.0.0.0", port: int = 8000,
-              *, home_root: Path | str | None = None) -> None:
+              *, home_root: Path | str | None = None,
+              server_mode: bool = False) -> None:
         """启动 FastAPI server（含 watcher 后台线程）。阻塞。
 
         Args:
             home_root: 可选，debug 模式下指向自选目录（只扫描该目录下的
                        ``.claude/``）。生产环境留 None 用真实 ``$HOME``。
+            server_mode: True = team server 模式（收 client 上传、跑全部
+                       agent、提供 /api/v1/team/* 同步接口）。
         """
         import uvicorn
         from xskill.server import create_app
-        app = create_app(home_root=home_root)
-        if home_root:
+        app = create_app(home_root=home_root, team_server=server_mode)
+        if server_mode:
+            from xskill.team.server_state import ensure_join_token
+            from xskill.config import get_team_server_state_path
+            token = ensure_join_token(get_team_server_state_path())
+            print(f"xskill team server at http://{host}:{port}/")
+            print(f"  clients join with:")
+            print(f"    xskill connect <THIS_HOST>:{port} --token {token}")
+        elif home_root:
             print(f"xskill serve at http://{host}:{port}/  [debug home: {home_root}]")
         else:
             print(f"xskill serve at http://{host}:{port}/")
+            print(f"  standalone mode — skills 留在本机。team 共享用:"
+                  f" xskill serve --server")
         uvicorn.run(app, host=host, port=port)
 
     def __repr__(self) -> str:

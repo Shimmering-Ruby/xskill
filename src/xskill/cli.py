@@ -37,7 +37,8 @@ def cmd_serve(args, xskill) -> int:
         if not home_root.is_dir():
             print(f"error: --home 目录不存在: {home_root}", file=sys.stderr)
             return 2
-    xskill.serve(host=args.host, port=args.port, home_root=home_root)
+    xskill.serve(host=args.host, port=args.port, home_root=home_root,
+                 server_mode=args.server)
     return 0
 
 
@@ -116,6 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="[debug only] 把生态扫描的 home 指向此目录，只看该目录下的 "
              ".claude/projects/*.jsonl + 装 skill 到 .claude/skills/。"
              "必须同时 --debug。用于隔离调试 (e.g. /tmp/xskill-test-home)。",
+    )
+    p_serve.add_argument(
+        "--server", action="store_true",
+        help="team server 模式：收 client 上传轨迹、跑全部 agent、"
+             "提供 /api/v1/team/* 同步接口。不加则 standalone（仅本机）。",
     )
 
     p_reg = sub.add_parser("registry", help="Manage watched directories")
