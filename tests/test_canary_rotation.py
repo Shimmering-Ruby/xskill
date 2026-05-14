@@ -53,6 +53,13 @@ def _make_staging(path: Path, content: str = "v2-staging") -> None:
     run_git(["add", "-A"], cwd=str(path))
     run_git(["commit", "-m", "staging candidate"], cwd=str(path))
     run_git(["checkout", "main"], cwd=str(path))
+    # 工作树 mtime 压到 epoch 0——末尾 git checkout 抬升的 mtime 在负载高时
+    # 可能 ≥1s 触发 has_pending_user_edit 误判；这个 helper 造的是无手改的
+    # 灰度仓，reconcile 应当正常 checkout。
+    import os as _os
+    for f in path.rglob("*"):
+        if ".git" not in f.parts and f.is_file():
+            _os.utime(f, (0, 0))
 
 
 def _cur_branch(path: Path) -> str:

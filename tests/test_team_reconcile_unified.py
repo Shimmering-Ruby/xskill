@@ -4,6 +4,7 @@
 步骤 2/3/4 委托 team.reconcile.reconcile_skill_side——checkout 到 _active
 分支（指向 resolved sha），而非直接 checkout main/staging 分支名。
 """
+import os
 import subprocess
 from pathlib import Path
 
@@ -26,6 +27,11 @@ def _seed_skill_with_staging(skill_dir: Path, name: str) -> Path:
     (d / "SKILL.md").write_text("v2", encoding="utf-8")
     _git(["commit", "-q", "-am", "v2"], d)
     _git(["checkout", "-q", "main"], d)
+    # 工作树 mtime 压到 epoch 0——末尾 git checkout 抬升的 mtime 在负载高时
+    # 可能 ≥1s 触发 has_pending_user_edit 误判；freshly-seeded 仓库无真实手改。
+    for f in d.rglob("*"):
+        if ".git" not in f.parts and f.is_file():
+            os.utime(f, (0, 0))
     return d
 
 
