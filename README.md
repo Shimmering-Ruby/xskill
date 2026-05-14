@@ -82,16 +82,37 @@ xskill registry add /path/to/your/agent/trajectories
 
 ## CLI
 
-Five commands. Filtering and formatting belong to `grep` / `awk`, not flags.
+Filtering and formatting belong to `grep` / `awk`, not flags.
 
 ```bash
-xskill serve [--host 0.0.0.0] [--port 8000]
+xskill serve [--host 0.0.0.0] [--port 8000] [--server]
+xskill connect <host:port> --token <token> [--label NAME]
 xskill registry add    <abs-path> [--label NAME]
 xskill registry remove <abs-path>
 xskill registry list
 xskill search traj  <query> [--top-k 5]
 xskill search skill <query> [--top-k 5]
 ```
+
+## Team mode (C/S shared skills)
+
+xskill can share a skill library across an organization:
+
+- **server** — `xskill serve --server` starts a team server: it receives
+  trajectories uploaded by clients, runs the full agent pipeline server-side
+  (split / cluster / write / canary), and prints the command clients use to
+  join.
+- **client** — `xskill connect <host:port> --token <token>` is a thin client:
+  it collects this machine's code-agent trajectories, redacts them, uploads
+  them, and holds a working copy of the ≤100 skills the server picks for it,
+  checked out to the canary side the server assigns. Zero LLM calls, zero
+  writes to the public `main`.
+- **standalone** — `xskill serve` (no `--server`) stays single-host; skills
+  never leave the machine.
+
+Canary in team mode buckets by `client_id` for true concurrent A/B. A client's
+local hand-edits only ever land on an isolated `user-staging/<client_id>`
+branch — they can never touch the shared `main`.
 
 ## Agents inside xskill
 

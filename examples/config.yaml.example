@@ -56,6 +56,17 @@ canary:
   max_days_hold: 14                 # staging 最长存活；超时丢弃
   rotate_interval: 300              # 单机 canary 时间窗轮转周期（秒）
 
+# ===== Team C/S 模式（仅 `xskill serve --server` 读）=====
+# client 端不读 config.yaml——它的连接信息在 ~/.xskill/team_client.json，
+# 由 `xskill connect <host:port> --token <token>` 首次握手时写入。
+team:
+  server:
+    traj_root: ~/.xskill/team_trajectories   # client 上传轨迹的落盘根
+    skill_slots: 100                         # client 本地最多持有的 skill 数
+    ranked_slots: 80                         # 其中按 ux_score 滑窗取的数量；
+                                             # 余下 20 = recommended 桶
+                                             # （SP3 = 用户画像推荐，SP1 占位）
+
 # ===== Watcher（serve 内置的目录轮询）=====
 watcher:
   poll_interval: 30                 # 秒；每轮扫一次所有 watch_dir，发现 →
