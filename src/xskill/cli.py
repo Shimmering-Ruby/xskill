@@ -70,6 +70,68 @@ def cmd_registry(args, xskill) -> int:
     return 1
 
 
+def cmd_connect(args) -> int:
+    """team 瘦客户端：连上 server，跑采集/同步/对齐守护循环。
+
+    ``xskill connect <host:port> --token <t>``  首次握手 + 落盘连接信息
+    ``xskill connect``                          复用已存连接
+    """
+    import socket as _socket
+    from xskill.config import (
+        get_team_client_state_path, get_team_skills_dir, get_team_outbox_dir,
+        XSKILL_HOME,
+    )
+    from xskill.team.client_state import (
+        ClientState, load_client_state, save_client_state,
+    )
+    from xskill.team.client import TeamClient, register_with_server
+
+    state_path = get_team_client_state_path()
+
+    if args.address:
+        if not args.token:
+            print("error: 首次 connect 必须带 --token（server 启动时打印的 join token）",
+                  file=sys.stderr)
+            return 2
+        server_url = args.address
+        if not server_url.startswith("http"):
+            server_url = f"http://{server_url}"
+        import httpx
+        http = httpx.Client(base_url=server_url, timeout=30.0)
+        try:
+            client_id = register_with_server(
+                http, token=args.token,
+                label=args.label or _socket.gethostname(),
+                hostname=_socket.gethostname(),
+            )
+        except Exception as e:
+            print(f"error: 注册失败: {e}", file=sys.stderr)
+            return 1
+        state = ClientState(server_url=server_url, client_id=client_id,
+                            join_token=args.token)
+        save_client_state(state, state_path)
+        print(f"connected: client_id={client_id}  server={server_url}")
+    else:
+        try:
+            state = load_client_state(state_path)
+        except FileNotFoundError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        import httpx
+        http = httpx.Client(base_url=state.server_url, timeout=30.0)
+        print(f"reconnecting: client_id={state.client_id}  server={state.server_url}")
+
+    client = TeamClient(
+        state=state, http=http,
+        team_skills_dir=get_team_skills_dir(),
+        outbox_dir=get_team_outbox_dir(),
+        cursor_path=XSKILL_HOME / "team_client_cursor.json",
+        history_path=XSKILL_HOME / "install_history.jsonl",
+    )
+    client.run_forever()   # 阻塞
+    return 0
+
+
 def cmd_search(args, xskill) -> int:
     target = args.search_target
     if target == "traj":
@@ -138,6 +200,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query", type=str)
     p_search.add_argument("--top-k", "-k", type=int, default=5)
 
+    p_conn = sub.add_parser(
+        "connect", help="Join a team server as a thin client",
+    )
+    p_conn.add_argument(
+        "address", nargs="?", default=None,
+        help="server 地址 host:port。省略则复用已存连接（~/.xskill/team_client.json）。",
+    )
+    p_conn.add_argument("--token", default=None,
+                        help="join token（server 启动 `xskill serve --server` 时打印）")
+    p_conn.add_argument("--label", default="",
+                        help="本 client 的可读标签（默认主机名）")
+
     return p
 
 
@@ -150,8 +224,8 @@ def _setup_logging(debug: bool, quiet: bool, *, command: str = "") -> None:
     - 其他短命令（``search`` / ``registry``）：保留旧 basicConfig，stdout
       only，不创建文件 handler——这些命令几秒就退，没必要落日志。
     """
-    if command == "serve":
-        # serve 用 file-split 模式
+    if command in ("serve", "connect"):
+        # serve / connect 都是长跑守护，用 file-split 模式落文件日志
         from xskill.config import get_logs_dir
         from xskill.log_setup import configure_logging
         configure_logging(get_logs_dir(), debug=debug, quiet=quiet, stdout=True)
@@ -186,6 +260,10 @@ def main() -> int:
     if args.command == "registry" and args.registry_action in ("add", "remove"):
         if not args.path:
             parser.error(f"path is required for 'registry {args.registry_action}'")
+
+    # connect 是瘦客户端：不读 config.yaml / 不需要 llm.api_key / 不构造 XSkill 门面
+    if args.command == "connect":
+        return cmd_connect(args)
 
     from xskill import XSkill
     xskill = XSkill()
