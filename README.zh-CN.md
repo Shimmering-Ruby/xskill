@@ -107,19 +107,30 @@ xskill search skill <query> [--top-k 5]
 
 ## 跨 code agent 支持
 
-输入端"轨迹采集"和输出端"Skill 安装"都是可插拔的。当前的真实状态如下：
+输入端"轨迹采集"和输出端"Skill 安装"都是可插拔的。daemon 启动时自动发现你装了哪些
+agent，并在常青运行期间持续扫描——你之后再装一个新 agent，不重启也会被自动接管。当前
+真实状态：
 
 | Coding agent | 轨迹采集（输入） | Skill 安装（输出） |
 | ------------ | ---------------- | ------------------ |
-| **Claude Code** | 原生支持——`xskill serve` 启动时自动发现 `~/.claude/projects/`，把每条 session JSONL 桥成 xskill 轨迹；Skill 在灰度评估时还会自动注入 canary 标记。 | 原生支持——Skill 以 symlink 装到 `~/.claude/skills/<name>/`，更新随 Claude Code 下次启动即时生效，无需 copy。 |
-| **Codex CLI** | 暂未支持，欢迎 issue / PR。 | 暂未支持。 |
+| **Claude Code** | 原生支持——自动发现 `~/.claude/projects/`，把每条 session JSONL 桥成 xskill 轨迹；Skill 灰度评估时还会自动注入 canary 标记。 | 原生支持——Skill 以 symlink 装到 `~/.claude/skills/<name>/`。 |
+| **Codex CLI** | 原生支持——自动发现 `~/.codex/sessions/`，把每条 rollout JSONL 桥成轨迹。 | 原生支持——Skill 以 symlink 装到 `~/.agents/skills/<name>/`（Codex 读的跨生态共享 skill 目录）。 |
+| **OpenCode** | 原生支持——自动发现 `~/.local/share/opencode/opencode.db`（SQLite），把每条 session 桥成轨迹。 | 原生支持——Skill 以 symlink 装到 `~/.agents/skills/<name>/`（与 Codex 共享）。 |
 | **Cursor** | 暂未支持。 | 暂未支持。 |
 | **Trae** | 暂未支持。 | 暂未支持。 |
-| **OpenCode** | 暂未支持。 | 暂未支持。 |
 | **OpenClaw** | 暂未支持。 | 暂未支持。 |
 | **其他 agent** | 手动接入——用 SDK (`xskill.adapters.submit_trajectory`) 提交 `markdown` / `json` / `raw` 三种格式之一。 | 手动接入——每个 Skill 就是一个目录，含 Anthropic 风格 `SKILL.md` + YAML frontmatter；把它 copy / symlink 到你 agent 的发现路径里即可。 |
 
-输出格式遵循 Anthropic 的 `SKILL.md` schema——任何已经能读 Anthropic Skills 的 agent 都能直接读 xskill 的产物。我们正在逐个加原生 adapter——Codex、Cursor、OpenCode 等都在 [roadmap](#roadmap) 上，欢迎 PR。
+输出格式遵循 Anthropic 的 `SKILL.md` schema——任何已经能读 Anthropic Skills 的 agent 都能直接读 xskill 的产物。某个 agent 安装失败会被记录并跳过，绝不阻断其他 agent。Cursor、Trae、OpenClaw 在 [roadmap](#roadmap) 上，欢迎 PR。
+
+## 热更新 Skill
+
+Skill 是以 symlink 装出去的——所以你（或 agent）改装出去的 skill 文件，改的就是 xskill
+的源副本。改动**即时生效**：你的 agent 下次加载这个 skill 就能看到。
+
+xskill 随后会自己把这次改动吸收回去。该 skill 静默约 3 分钟（没有新改动）后，daemon
+就把你的手改 commit 到该 skill 的 `main` 分支，作为新的 ground truth。如果这个 skill
+当时正在灰度，**手改优先**——staging 候选直接丢弃，因为一次明确的编辑胜过一次 A/B 猜测。
 
 ## 操作系统支持
 

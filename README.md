@@ -107,19 +107,33 @@ A handful of LLM agents do the work, each with a single, narrow job:
 
 ## Cross-agent support
 
-The trajectory in / Skill out interfaces are pluggable. Here is the honest current state:
+The trajectory in / Skill out interfaces are pluggable. The daemon auto-detects
+which agents you have installed and keeps scanning them as long as it runs — install
+a new agent later and it gets picked up without a restart. Honest current state:
 
 | Coding agent | Trajectory ingest (input) | Skill install (output) |
 | ------------ | ------------------------- | ---------------------- |
-| **Claude Code** | Native — auto-detects `~/.claude/projects/` on `xskill serve`, bridges each session JSONL into a trajectory and (when a Skill is in evaluation) injects the canary marker. | Native — Skill is symlinked into `~/.claude/skills/<name>/`, so updates land in Claude Code on its next launch with no copy step. |
-| **Codex CLI** | Not yet — open an issue / PR. | Not yet. |
+| **Claude Code** | Native — auto-detects `~/.claude/projects/`, bridges each session JSONL into a trajectory and (when a Skill is in evaluation) injects the canary marker. | Native — Skill is symlinked into `~/.claude/skills/<name>/`. |
+| **Codex CLI** | Native — auto-detects `~/.codex/sessions/`, bridges each rollout JSONL into a trajectory. | Native — Skill is symlinked into `~/.agents/skills/<name>/` (the shared user-scope skills dir Codex reads). |
+| **OpenCode** | Native — auto-detects `~/.local/share/opencode/opencode.db` (SQLite), bridges each session into a trajectory. | Native — Skill is symlinked into `~/.agents/skills/<name>/` (shared with Codex). |
 | **Cursor** | Not yet. | Not yet. |
 | **Trae** | Not yet. | Not yet. |
-| **OpenCode** | Not yet. | Not yet. |
 | **OpenClaw** | Not yet. | Not yet. |
 | **Any other agent** | Manual — submit a trajectory in `markdown`, `json`, or `raw` format via the SDK (`xskill.adapters.submit_trajectory`). | Manual — every Skill is a directory with an Anthropic-style `SKILL.md` + YAML frontmatter; copy or symlink it into whatever discovery path your agent uses. |
 
-The output format is the same `SKILL.md` schema Anthropic uses, so any agent that already reads Anthropic Skills can read xskill's library verbatim. We are adding native adapters one agent at a time — Codex, Cursor, OpenCode and friends are on the [roadmap](#roadmap); PRs welcome.
+The output format is the same `SKILL.md` schema Anthropic uses, so any agent that already reads Anthropic Skills can read xskill's library verbatim. A failed install on one agent is logged and skipped — it never blocks the others. Cursor, Trae and OpenClaw are on the [roadmap](#roadmap); PRs welcome.
+
+## Editing skills live
+
+Skills install as symlinks, so editing an installed skill file — whether you do it
+by hand or let an agent do it — edits xskill's source copy directly. The change is
+**live immediately**: the next time your agent loads that skill, it sees your edit.
+
+xskill folds the edit back in on its own. Once the skill has stayed quiet for ~3
+minutes (no further changes), the daemon commits your edit to that skill's `main`
+branch as the new ground truth. If the skill happened to be mid-canary, the hand
+edit wins — the staging candidate is dropped, because a deliberate edit outranks
+an A/B guess.
 
 ## Platforms
 
