@@ -166,7 +166,10 @@ class TestRotateCanarySide:
         w = _make_watcher(skill_dir, tmp_path, probability=1.0)
         w._reconcile_skill_sides()
 
-        assert _cur_branch(sd) == "staging"
+        # 收敛后：checkout 到 _active 分支（指向 staging sha），不再直接切
+        # staging 分支名。工作树内容即 staging 内容。
+        assert _cur_branch(sd) == "_active"
+        assert (sd / "SKILL.md").read_text(encoding="utf-8") == "v2-staging"
         from xskill.install_history import InstallHistory
         recs = InstallHistory(tmp_path / "xhome" / "install_history.jsonl").all_records()
         assert len(recs) == 1
@@ -189,7 +192,9 @@ class TestRotateCanarySide:
         w = _make_watcher(skill_dir, tmp_path, probability=0.0)
         w._reconcile_skill_sides()
 
-        assert _cur_branch(sd) == "main"
+        # 收敛后：checkout 到 _active 分支（指向 main sha）。工作树即 main 内容。
+        assert _cur_branch(sd) == "_active"
+        assert (sd / "SKILL.md").read_text(encoding="utf-8") == "v1"
         from xskill.install_history import InstallHistory
         recs = InstallHistory(tmp_path / "xhome" / "install_history.jsonl").all_records()
         assert len(recs) == 1
@@ -207,8 +212,10 @@ class TestRotateCanarySide:
         monkeypatch.setattr(_cfg, "XSKILL_HOME", tmp_path / "xhome")
 
         w = _make_watcher(skill_dir, tmp_path, probability=1.0)
-        # mock has_pending_user_edit → True：模拟用户正在改它
-        with patch("xskill.user_edit_absorb_agent.has_pending_user_edit",
+        # mock has_pending_user_edit → True：模拟用户正在改它。
+        # 收敛后 _reconcile_skill_sides 走 team.reconcile.reconcile_skill_side，
+        # 它从 xskill.team.reconcile 引用 has_pending_user_edit——patch 该处。
+        with patch("xskill.team.reconcile.has_pending_user_edit",
                    return_value=True):
             w._reconcile_skill_sides()
 
@@ -253,11 +260,11 @@ class TestRotateCanarySide:
 
         w = _make_watcher(skill_dir, tmp_path, probability=1.0)
 
-        # 第一次：真跑，切到 staging
+        # 第一次：真跑，checkout 到 _active（指向 staging sha）
         w._reconcile_skill_sides()
-        assert _cur_branch(sd) == "staging"
+        assert _cur_branch(sd) == "_active"
 
-        # 手动切回 main，模拟"如果第二次真跑会再切 staging"
+        # 手动切回 main，模拟"如果第二次真跑会再切 _active"
         run_git(["checkout", "main"], cwd=str(sd))
         assert _cur_branch(sd) == "main"
 

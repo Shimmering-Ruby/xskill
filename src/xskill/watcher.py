@@ -66,7 +66,7 @@ class DirectoryWatcher:
                  skill_dir=None, poll_interval=30.0, max_concurrent=30,
                  max_retries=3, db_path=None, cold_start_threshold=3,
                  store=None, agno_agent_factory=None, home_root=None,
-                 server_mode=False):
+                 server_mode=False, install_history_path=None):
         self.llm = llm
         self.embed_client = embed_client
         self.config = config or {}
@@ -80,6 +80,12 @@ class DirectoryWatcher:
         # push-edit → user-staging/<client_id> 分支）。只跑 agent 流水线
         # （split/cluster/SkillEdit/canary 判定）+ CS 归因打分。
         self.server_mode = bool(server_mode)
+        # install_history 路径可注入（测试用 tmp，生产回退 ~/.xskill/）。
+        from xskill.config import XSKILL_HOME
+        self.install_history_path = (
+            Path(install_history_path) if install_history_path
+            else XSKILL_HOME / "install_history.jsonl"
+        )
         self.poll_interval = poll_interval
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
@@ -456,40 +462,32 @@ class DirectoryWatcher:
             except Exception:
                 logger.exception("check_and_decide failed: %s", d.name)
 
+    def _install_history(self):
+        from xskill.install_history import InstallHistory
+        return InstallHistory(self.install_history_path)
+
     def _reconcile_skill_sides(self):
         """单机 canary 流量入口：周期性按概率把有 staging 的 skill 子仓
         checkout 到 main / staging。
 
-        为什么需要这一步
-        ================
-        单机环境下 Claude Code 直接读磁盘上一份 SKILL.md。``route_main_history
-        _to_staging`` 把新 commit 挪到 staging 分支后，install 路径写死
-        ``side="main"`` —— staging 永远不会被真正发出去，拿不到任何真实
-        ux_score 样本 → ``check_and_decide`` 永远 ``waiting`` → 最终
-        ``timeout_discarded``。本方法给 staging 一个真实流量入口。
+        调谐契约（与 client TeamClient.reconcile_skill_sides 同契约）：
+          步骤 1（本方法独有）：rotate_interval 节流 + 时间窗伪随机定 target side
+          步骤 2/3/4（共享）  ：team.reconcile.reconcile_skill_side
+                                （手改优先 / 已对齐跳过 / checkout+记账）
 
-        节流
-        ====
-        按 ``canary.rotate_interval``（默认 300s）节流——不是每个 poll 轮
-        （默认 30s）都跑。距上次真跑 < rotate_interval 直接 skip。
+        单机 bucket = 时间窗（int(now // rotate_interval)）；CS bucket =
+        client_id。两模式唯一差别就是步骤 1 的 bucket key 来源。
 
-        每次真跑时遍历每个有 staging 分支的 skill：
-
-        - **分支 A · 用户手改优先**：``has_pending_user_edit`` 为 True →
-          skip 这个 skill，不 checkout。理由：用户正在改它，git checkout
-          切分支会冲掉未吸收的改动。让路给 ``_check_user_edits`` 链路
-          （它静默满 3min 会触发 UserEditAbsorbAgent commit 到 main）。
-        - **分支 B · 正常轮转**：无 pending 手改 → 掷骰子选 side。伪随机源
-          用 ``<时间窗 id>:<skill_name>``（时间窗 id = ``int(now //
-          rotate_interval)``），保证同一窗口同一 skill 决定一致、跨窗口
-          重新掷。选中 side 后 ``git checkout <side>`` + 落一条
-          ``install_history.record``。
+        为什么需要这一步：单机环境下 ``route_main_history_to_staging`` 把新
+        commit 挪到 staging 分支后，staging 没有真实流量入口 → ux_score 永远
+        集不齐 → check_and_decide 永远 waiting。本方法给 staging 真实流量。
         """
         if self.skill_dir is None or not self.skill_dir.is_dir():
             return
-        from xskill.canary import CanaryConfig, has_staging, pick_side
-        from xskill.git_lock import run_git
-        from xskill.user_edit_absorb_agent import has_pending_user_edit
+        from xskill.canary import (
+            CanaryConfig, has_staging, main_sha, pick_side, staging_sha,
+        )
+        from xskill.team.reconcile import reconcile_skill_side
 
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
         rotate_interval = canary_cfg.rotate_interval
@@ -505,10 +503,7 @@ class DirectoryWatcher:
 
         # 时间窗 id：同一窗口内同一 skill 的伪随机决定一致，跨窗口重新掷。
         window_id = int(now // rotate_interval) if rotate_interval > 0 else 0
-
-        from xskill.install_history import InstallHistory
-        from xskill.config import XSKILL_HOME
-        history = InstallHistory(XSKILL_HOME / "install_history.jsonl")
+        history = self._install_history()
 
         for d in sorted(self.skill_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("."):
@@ -517,26 +512,16 @@ class DirectoryWatcher:
                 continue
             if not has_staging(d):
                 continue
-            # 分支 A：用户正在手改 → skip，不 checkout（切分支会冲掉未吸收改动）
-            if has_pending_user_edit(d):
-                logger.info("skip rotate: %s has pending user edit", d.name)
-                continue
-            # 分支 B：正常轮转。伪随机源 = "<window_id>:<skill_name>"。
+            # 步骤 1：时间窗伪随机定 target side（单机 bucket = window_id）
             side = pick_side(str(window_id), d.name, canary_cfg.probability)
-            try:
-                code, _, err = run_git(["checkout", side], cwd=str(d))
-                if code != 0:
-                    logger.warning(
-                        "rotate checkout failed: %s -> %s: %s",
-                        d.name, side, err,
-                    )
-                    continue
-                code, sha, _ = run_git(["rev-parse", "HEAD"], cwd=str(d))
-                sha = sha.strip() if code == 0 else ""
-                history.record(skill=d.name, side=side, sha=sha)
-                logger.info("rotate: %s -> %s", d.name, side)
-            except Exception:
-                logger.exception("rotate failed: %s", d.name)
+            target_sha = staging_sha(d) if side == "staging" else main_sha(d)
+            if not target_sha:
+                continue
+            # 步骤 2/3/4：共享调谐助手
+            reconcile_skill_side(
+                repo_dir=d, target_side=side, target_sha=target_sha,
+                history=history, on_changed=None,
+            )
 
     # ───────────────────────────────────────────────────────────
     # 收割：检查所有 in-flight futures
