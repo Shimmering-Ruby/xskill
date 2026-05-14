@@ -825,7 +825,10 @@ class DirectoryWatcher:
         logger.info("%s → clustered (%d/%d atoms ok)", fname, n_ok, n_total)
         # cluster 完成后该 traj 的所有 atom 都已落盘——这是 ux_score 应当
         # 跑的时机（旧 _score_new 在 traj 发现时跑会看到空 atom 列表）。
-        self._score_atoms_for_traj(wd_id, fname, **kw)
+        if self.server_mode:
+            self._score_atoms_for_traj_server(wd_id, fname, **kw)
+        else:
+            self._score_atoms_for_traj(wd_id, fname, **kw)
 
     # ───────────────────────────────────────────────────────────
     # ux_score
@@ -902,3 +905,68 @@ class DirectoryWatcher:
         # _check_canary_decisions() 独立轮询，保证灰度系统自治不依赖
         # traj 触发。这里只负责打分落盘。
         mark_skill_used(wd_id, fname, skill_name, header["side"], **kw)
+
+    def _score_atoms_for_traj_server(self, wd_id, fname, **kw):
+        """CS 模式打分：遍历每个 atom 的 used_skills，对每个用到的 team skill
+        用 pick_side(client_id, ...) 现算 side，逐个 score + AtomCanary.append。
+
+        与单机 _score_atoms_for_traj 的差异：
+        - 不读 traj header（一条上传轨迹可能用多个 team skill）
+        - client_id 从 watch_dir 的 label 取（upload 端点注册时 label=client_id）
+        - side 由 pick_side 现算，不是 header 里写死的
+        """
+        if self.llm is None or self.skill_dir is None:
+            return
+        from xskill.atom_canary import AtomCanary
+        from xskill.canary import (
+            CanaryConfig, has_staging, main_sha, pick_side, staging_sha,
+        )
+        from xskill.ux_score import score_atom
+
+        # 找到该 wd 的 dir_path + client_id（label）
+        client_id = None
+        dir_path = None
+        for wd in list_watch_dirs(**kw):
+            if wd["id"] == wd_id:
+                dir_path = Path(wd["path"])
+                client_id = wd.get("label") or ""
+                break
+        if dir_path is None or not client_id:
+            return
+        md_path = dir_path / fname
+        if not md_path.is_file():
+            return
+        traj_id = md_path.stem
+        store = self._store_for(dir_path)
+        atoms = store.list_by_traj(traj_id)
+        if not atoms:
+            return
+        canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
+        used_any = False
+        for atom in atoms:
+            for skill_name in (atom.used_skills or []):
+                skill_sub = self.skill_dir / skill_name
+                if not (skill_sub / ".git").is_dir():
+                    continue
+                if has_staging(skill_sub):
+                    side = pick_side(client_id, skill_name, canary_cfg.probability)
+                    sha = staging_sha(skill_sub) if side == "staging" else main_sha(skill_sub)
+                else:
+                    side = "main"
+                    sha = main_sha(skill_sub)
+                try:
+                    result = score_atom(llm=self.llm, atom=atom, side=side)
+                    if result["score"] is None:
+                        continue
+                    AtomCanary(skill_dir=skill_sub).append(
+                        atom_id=atom.atom_id, skill_name=skill_name,
+                        side=side, commit_sha=sha or "",
+                        score=result["score"], reasons=result["reasons"],
+                    )
+                    self._stats["scores"] += 1
+                    used_any = True
+                except Exception:
+                    logger.exception("CS score_atom failed: %s/%s/%s",
+                                     fname, atom.atom_id, skill_name)
+        if used_any:
+            logger.info("CS attribution done: %s (client=%s)", fname, client_id)
