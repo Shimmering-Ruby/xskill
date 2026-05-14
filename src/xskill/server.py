@@ -1285,7 +1285,8 @@ async def api_reindex():
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(home_root: Path | str | None = None) -> FastAPI:
+def create_app(home_root: Path | str | None = None,
+               *, team_server: bool = False) -> FastAPI:
     """Build the FastAPI app. Calls ``_ensure_loaded`` first so all module-level
     config globals (``_config``/``_skill_dir``/...) are populated before any
     endpoint or startup hook reads them.
@@ -1294,6 +1295,9 @@ def create_app(home_root: Path | str | None = None) -> FastAPI:
         home_root: 可选，覆盖生态扫描的 home root。debug 模式下设成自选目录
                    （只扫描该目录下的 ``.claude/``），生产环境留 None 用真
                    实 ``$HOME``。
+        team_server: True = team server 模式。挂 /api/v1/team/* 路由、跳过
+                   本机生态自动探测（纯 server 不采集自己的轨迹）、watcher
+                   开 server_mode。
     """
     global _home_root_override
     if home_root is not None:
@@ -1306,6 +1310,11 @@ def create_app(home_root: Path | str | None = None) -> FastAPI:
         version=__version__,
     )
     app.include_router(router)
+
+    # team server 模式：挂 /api/v1/team/* 路由
+    if team_server:
+        from xskill.team.server_api import router as team_router
+        app.include_router(team_router)
 
     # SSE 长耗时接口
     from xskill.tasks import sse_router
@@ -1418,7 +1427,12 @@ def create_app(home_root: Path | str | None = None) -> FastAPI:
         # paired bridge dir (~/.xskill/cc_sessions) and start an ingester
         # thread that periodically mirrors native sessions into it as
         # traj_*.md. After that the regular watcher takes over.
+        # team server 模式跳过整段——纯 server 不采集自己这台机器的本地轨迹。
+        class _SkipEcosystemBridge(Exception):
+            pass
         try:
+            if team_server:
+                raise _SkipEcosystemBridge()
             from xskill.ecosystems import (
                 detect_known_ecosystems,
                 CCSessionIngester, JsonlIngester, SqliteIngester,
@@ -1551,15 +1565,56 @@ def create_app(home_root: Path | str | None = None) -> FastAPI:
                     "ecosystem %s detected: source=%s bridge=%s",
                     det["ecosystem"], det["source"], bridge,
                 )
+        except _SkipEcosystemBridge:
+            logger.info("team server mode: skip local ecosystem auto-detect")
         except Exception:
             logger.warning("ecosystem auto-detect failed", exc_info=True)
 
-        # Start watcher if any dirs are registered
+        # team server：初始化 team 上下文 + 注册 traj_root 为 watch_dir 基。
+        if team_server:
+            try:
+                from xskill.team.client_registry import ClientRegistry
+                from xskill.team.server_api import init_team_context
+                from xskill.team.server_state import ensure_join_token
+                from xskill.config import (
+                    get_team_clients_db_path, get_team_server_state_path,
+                    get_team_trajectories_dir,
+                )
+                from xskill.registry import register_dir as _register_dir
+                from xskill.canary import CanaryConfig
+
+                join_token = ensure_join_token(get_team_server_state_path())
+                client_registry = ClientRegistry(get_team_clients_db_path())
+                traj_root = get_team_trajectories_dir()
+                team_cfg = _config.get("team", {}).get("server", {})
+                canary_cfg = CanaryConfig.from_dict(_config.get("canary", {}))
+
+                def _team_register_dir(path, label):
+                    # team_client 生态标签：watcher 的 CS 归因靠 wd.label 反查 client
+                    _register_dir(path, label=label, ecosystem="team_client")
+
+                init_team_context(
+                    join_token=join_token,
+                    client_registry=client_registry,
+                    skill_dir=_skill_dir,
+                    traj_root=traj_root,
+                    probability=canary_cfg.probability,
+                    ranked_slots=int(team_cfg.get("ranked_slots", 80)),
+                    total_slots=int(team_cfg.get("skill_slots", 100)),
+                    register_dir=_team_register_dir,
+                )
+                logger.info("team server context ready (traj_root=%s)", traj_root)
+            except Exception:
+                logger.warning("team server context init failed", exc_info=True)
+
+        # Start watcher if any dirs are registered.
+        # team server 模式即使当前没 client 桶也要起 watcher——_scan_once 每轮
+        # 重新 list_watch_dirs()，首个 client upload 后下一轮就被扫到。
         try:
             from xskill.registry import list_watch_dirs
             from xskill.watcher import DirectoryWatcher
             dirs = list_watch_dirs()
-            if dirs:
+            if dirs or team_server:
                 watcher_cfg = _config.get("watcher", {})
                 watcher = DirectoryWatcher(
                     llm=llm, embed_client=embed, config=_config,
@@ -1567,10 +1622,12 @@ def create_app(home_root: Path | str | None = None) -> FastAPI:
                     poll_interval=float(watcher_cfg.get("poll_interval", 30)),
                     max_concurrent=int(watcher_cfg.get("max_concurrent", 30)),
                     cold_start_threshold=int(watcher_cfg.get("cold_start_threshold", 3)),
+                    server_mode=team_server,
                 )
                 watcher.start()
                 _watcher_ref["instance"] = watcher
-                logger.info("watcher started, monitoring %d directories", len(dirs))
+                logger.info("watcher started, monitoring %d directories (team_server=%s)",
+                            len(dirs), team_server)
         except Exception:
             logger.warning("watcher startup failed", exc_info=True)
 
