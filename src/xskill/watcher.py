@@ -65,7 +65,8 @@ class DirectoryWatcher:
     def __init__(self, *, llm=None, embed_client=None, config=None,
                  skill_dir=None, poll_interval=30.0, max_concurrent=30,
                  max_retries=3, db_path=None, cold_start_threshold=3,
-                 store=None, agno_agent_factory=None, home_root=None):
+                 store=None, agno_agent_factory=None, home_root=None,
+                 server_mode=False):
         self.llm = llm
         self.embed_client = embed_client
         self.config = config or {}
@@ -74,6 +75,11 @@ class DirectoryWatcher:
         # 传（None）→ 落到 server._home_root() (默认 Path.home())。测试
         # 必须显式传 tmp_path 防止污染真实 ~/.claude/skills/。
         self.home_root = Path(home_root) if home_root else None
+        # server_mode：team server 模式。server 是纯 server——不装 skill 到
+        # 本机生态、不做单机灰度轮转、不做本地手改回流（手改走 client
+        # push-edit → user-staging/<client_id> 分支）。只跑 agent 流水线
+        # （split/cluster/SkillEdit/canary 判定）+ CS 归因打分。
+        self.server_mode = bool(server_mode)
         self.poll_interval = poll_interval
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
@@ -201,14 +207,20 @@ class DirectoryWatcher:
         # 用户改 ~/.claude/skills/<name>/* (symlink 指向源仓库) 后 ≥3 分钟
         # 没新改动 → 触发 UserEditAbsorbAgent 把手改吸回 main，并删除任何
         # 在飞 staging（用户改是 ground truth，优先级压过灰度）。
-        self._check_user_edits()
+        # server 模式跳过：server 本机没有 symlink 出去的 skill 给用户改；
+        # client 手改走 push-edit 进 user-staging/<client_id> 分支。
+        if not self.server_mode:
+            self._check_user_edits()
 
         # ── Step 8: 单机 canary 流量入口轮转 ──
         # 周期性（每 canary.rotate_interval 秒）按概率把每个有 staging 分支
         # 的 skill 子仓 checkout 到 main 或 staging——这是 staging 拿到真实
         # ux_score 样本的唯一入口。否则 staging 永远没流量 → check_and_decide
         # 永远 waiting → 最终 timeout_discarded，灰度形同虚设。
-        self._reconcile_skill_sides()
+        # server 模式跳过：server 不装 skill 到本机，无"流量入口"概念。
+        # CS 模式的分桶在 client 的 reconcile_skill_sides 里按 client_id 做。
+        if not self.server_mode:
+            self._reconcile_skill_sides()
 
     def _check_pending_skill_edits(self):
         """遍历每个 skill 目录调 SkillEditAgent.maybe_run()。
@@ -301,6 +313,9 @@ class DirectoryWatcher:
             dict[str, Path | Exception]: agent → 安装结果（成功为 dest 路径，
             失败为异常对象）。便于调用方 / 测试断言。
         """
+        # server 模式：纯 server 不装 skill 到本机生态，直接 no-op。
+        if self.server_mode:
+            return {}
         from xskill.ecosystems import (
             detect_known_ecosystems,
             install_to_claude_code,
