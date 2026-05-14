@@ -100,6 +100,54 @@ def get_chat_db_path() -> Path:
     return CHAT_DB
 
 
+# ─── team (C/S 模式) 路径 ───────────────────────────────────────
+# 纯路径运算，不读 config.yaml——client 瘦客户端无 llm.api_key，
+# get_config() 会抛 KeyError。get_team_trajectories_dir() 是唯一例外
+# （只 server 调，server 一定有 key）。
+
+def get_team_server_state_path() -> Path:
+    """server join token 落盘位置（~/.xskill/team_server.json，0600）。"""
+    return XSKILL_HOME / "team_server.json"
+
+
+def get_team_clients_db_path() -> Path:
+    """server 端 client 注册表 SQLite。"""
+    return XSKILL_HOME / "team_clients.db"
+
+
+def get_team_client_state_path() -> Path:
+    """client 端连接信息（server_url / client_id / join_token）。"""
+    return XSKILL_HOME / "team_client.json"
+
+
+def get_team_skills_dir() -> Path:
+    """client 端 skill working copies 根目录。"""
+    p = XSKILL_HOME / "team_skills"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_team_outbox_dir() -> Path:
+    """client 端生态轨迹镜像 outbox 根目录。"""
+    p = XSKILL_HOME / "team_outbox"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_team_trajectories_dir() -> Path:
+    """server 端收下的 client 上传轨迹根目录。
+
+    读 config.yaml ``team.server.traj_root``，缺省 ~/.xskill/team_trajectories。
+    仅 server 调用。
+    """
+    cfg = get_config()
+    raw = (cfg.get("team", {}).get("server", {}).get("traj_root")
+           or str(XSKILL_HOME / "team_trajectories"))
+    p = Path(raw).expanduser()
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 # ─── 调试 flag ──────────────────────────────────────────────────
 def is_debug() -> bool:
     return _overrides.get("debug", False)
