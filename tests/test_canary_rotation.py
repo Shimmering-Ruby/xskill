@@ -192,6 +192,12 @@ class TestRotateCanarySide:
         # 先 checkout 到 staging，验证 rotate 真把它切回 main
         run_git(["checkout", "staging"], cwd=str(sd))
         assert _cur_branch(sd) == "staging"
+        # 这次 checkout 把 SKILL.md mtime 抬回到 now，会让 has_pending_user_edit
+        # 在负载高时（diff ≥1s）误判——再压回 epoch 0 保证测试稳定。
+        import os as _os
+        for f in sd.rglob("*"):
+            if ".git" not in f.parts and f.is_file():
+                _os.utime(f, (0, 0))
 
         from xskill import config as _cfg
         monkeypatch.setattr(_cfg, "XSKILL_HOME", tmp_path / "xhome")

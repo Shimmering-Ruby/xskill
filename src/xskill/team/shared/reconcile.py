@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Literal
 
-from xskill.git_lock import run_git
+from xskill.git_lock import run_git, skill_repo_lock
 from xskill.install_history import InstallHistory
 from xskill.user_edit_absorb_agent import has_pending_user_edit
 
@@ -40,29 +40,33 @@ def reconcile_skill_side(
     返回四种结果之一；只有 "checked_out" 会调 on_changed（用于 install）。
     """
     repo_dir = Path(repo_dir)
-    # 步骤 2：用户正在手改 → 不碰，让路给 absorb / push-edit 链路
-    if has_pending_user_edit(repo_dir):
-        logger.info("reconcile skip (pending user edit): %s", repo_dir.name)
-        return "skipped_user_edit"
+    # 整段持 skill repo 锁——避免 has_pending_user_edit / rev-parse / checkout
+    # 三个 git 步骤之间被别的线程（cluster pool 的 init_skill_repo_on_baby、
+    # 同 watcher 的 canary 合并等）插队改 .git 状态。
+    with skill_repo_lock(repo_dir):
+        # 步骤 2：用户正在手改 → 不碰，让路给 absorb / push-edit 链路
+        if has_pending_user_edit(repo_dir):
+            logger.info("reconcile skip (pending user edit): %s", repo_dir.name)
+            return "skipped_user_edit"
 
-    # 步骤 3：已对齐 → 不 checkout，但**仍记一条 install_history**。
-    # install_history 是"此刻盘上是哪 side"的时间序列——CS 归因 /
-    # CCSessionIngester 靠 lookup(t) 反查 session 当时用的哪 side。只在
-    # 真 checkout 时记会让"首次 reconcile 恰好已对齐"的场景留不下任何
-    # 记录，下游 lookup 全 None。"不动"指不动工作区，不指不记账。
-    code, cur, _ = run_git(["rev-parse", "HEAD"], cwd=str(repo_dir))
-    if code == 0 and cur.strip() == target_sha:
+        # 步骤 3：已对齐 → 不 checkout，但**仍记一条 install_history**。
+        # install_history 是"此刻盘上是哪 side"的时间序列——CS 归因 /
+        # CCSessionIngester 靠 lookup(t) 反查 session 当时用的哪 side。只在
+        # 真 checkout 时记会让"首次 reconcile 恰好已对齐"的场景留不下任何
+        # 记录，下游 lookup 全 None。"不动"指不动工作区，不指不记账。
+        code, cur, _ = run_git(["rev-parse", "HEAD"], cwd=str(repo_dir))
+        if code == 0 and cur.strip() == target_sha:
+            history.record(skill=repo_dir.name, side=target_side, sha=target_sha)
+            return "already_aligned"
+
+        # 步骤 4：checkout 到 target + 记账
+        code, _, err = run_git(["checkout", "-B", "_active", target_sha], cwd=str(repo_dir))
+        if code != 0:
+            logger.warning("reconcile checkout failed: %s -> %s: %s",
+                           repo_dir.name, target_sha[:8], err)
+            return "error"
         history.record(skill=repo_dir.name, side=target_side, sha=target_sha)
-        return "already_aligned"
-
-    # 步骤 4：checkout 到 target + 记账
-    code, _, err = run_git(["checkout", "-B", "_active", target_sha], cwd=str(repo_dir))
-    if code != 0:
-        logger.warning("reconcile checkout failed: %s -> %s: %s",
-                       repo_dir.name, target_sha[:8], err)
-        return "error"
-    history.record(skill=repo_dir.name, side=target_side, sha=target_sha)
-    logger.info("reconcile: %s -> %s (%s)", repo_dir.name, target_side, target_sha[:8])
+        logger.info("reconcile: %s -> %s (%s)", repo_dir.name, target_side, target_sha[:8])
     if on_changed is not None:
         on_changed(repo_dir)
     return "checked_out"
