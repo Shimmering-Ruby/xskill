@@ -49,9 +49,16 @@ def build_manifest(
     ranked_slots: int = 80,
     total_slots: int = 100,
 ) -> SyncResponse:
-    """为 ``client_id`` 现算 manifest。skill 总数不足 total_slots 时全发。"""
+    """为 ``client_id`` 现算 manifest。skill 总数不足 total_slots 时全发。
+
+    只分发**已 graduate 到 main 分支**的 skill。``baby`` 分支上的 stub
+    （cluster 建了目录但 SkillEditAgent 还没跑过、没正文）没有 main，本来
+    就不该下发给 client——这里直接过滤掉，不是 fallback 而是正确的可分发
+    集合判定。
+    """
     repo = SkillRepo(Path(skill_dir))
-    skills = sorted(repo, key=_rank_key, reverse=True)
+    distributable = [s for s in repo if main_sha(s.path)]
+    skills = sorted(distributable, key=_rank_key, reverse=True)
     chosen = skills[:total_slots]
     slots: list[SkillSlot] = []
     for idx, skill in enumerate(chosen):

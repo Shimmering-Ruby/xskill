@@ -32,6 +32,37 @@ def _make_skill(root: Path, name: str, *, with_staging: bool = False) -> Path:
     return d
 
 
+def _make_baby_skill(root: Path, name: str) -> Path:
+    """造一个还在 baby 分支的 stub skill——cluster 建了但 SkillEditAgent
+    还没跑过，没有 main 分支。"""
+    d = root / name
+    d.mkdir(parents=True)
+    _git(["init", "-q"], d)
+    _git(["checkout", "-q", "-b", "baby"], d)
+    _git(["config", "user.email", "t@t"], d)
+    _git(["config", "user.name", "t"], d)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: stub\nmetadata:\n  version: 0\n---\n# {name}\n",
+        encoding="utf-8",
+    )
+    _git(["add", "."], d)
+    _git(["commit", "-q", "-m", "init baby"], d)
+    return d
+
+
+def test_manifest_skips_baby_skill_without_main(tmp_path):
+    """baby-state stub 没有 main 分支 → 不进 manifest，不抛错。"""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    _make_skill(skill_dir, "graduated")
+    _make_baby_skill(skill_dir, "still-baby")
+    resp = build_manifest(client_id="cid-1", skill_dir=skill_dir,
+                          probability=0.2, ranked_slots=80, total_slots=100)
+    names = [s.skill_name for s in resp.slots]
+    assert names == ["graduated"]            # 只发已 graduate 的
+    assert "still-baby" not in names
+
+
 def test_manifest_caps_total_slots(tmp_path):
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
