@@ -92,6 +92,28 @@ def test_upload_sends_pending_trajectory(server_app, tmp_path):
     assert tc.collect_and_upload() == 0
 
 
+def test_push_user_edits_skips_when_no_real_diff(server_app, tmp_path):
+    """reconcile 后工作树跟 HEAD 一致就不该推：mtime 启发式会因为 git
+    checkout 把 SKILL.md mtime 抬到 now 误判，但 git status --porcelain
+    看的是内容差异，准。回归"reconcile 后每个 skill 每轮都被刷一次 commit
+    尝试和警告日志"的 bug。"""
+    import subprocess
+
+    tc = _client(server_app, tmp_path)
+    manifest = tc.sync()
+    tc.reconcile_skill_sides(manifest)
+    # 工作树跟 HEAD 一致（reconcile 刚 checkout），不该推任何东西
+    pushed = tc.push_user_edits()
+    assert pushed == 0
+    # 也不该产生 _useredit 分支（说明早早被 git status --porcelain 门挡掉了）
+    repo = tmp_path / "client_home" / ".xskill" / "skill" / "fix-foo"
+    branches = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--list", "_useredit"],
+        capture_output=True, text=True).stdout
+    assert "_useredit" not in branches, (
+        "push_user_edits 创建了 _useredit 分支——门没挡住，会刷屏")
+
+
 def test_cleanup_removes_skill_not_in_manifest(server_app, tmp_path):
     tc = _client(server_app, tmp_path)
     # 本地有个 manifest 里没有的 stale skill
