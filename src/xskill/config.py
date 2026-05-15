@@ -120,18 +120,11 @@ def get_team_client_state_path() -> Path:
     return XSKILL_HOME / "team_client.json"
 
 
-def get_team_skills_dir() -> Path:
-    """client 端 skill working copies 根目录。"""
-    p = XSKILL_HOME / "team_skills"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def get_team_outbox_dir() -> Path:
-    """client 端生态轨迹镜像 outbox 根目录。"""
-    p = XSKILL_HOME / "team_outbox"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+# 注：team client 不另开 team_skills/ / team_outbox/ 目录——
+#  - skill working copies 复用标准 skill_dir（~/.xskill/skill/），与
+#    standalone 模式同位置；
+#  - 采集的轨迹复用标准 bridge 目录（~/.xskill/<eco>_sessions/），即
+#    detect_known_ecosystems 返回的 bridge 路径。
 
 
 def get_team_trajectories_dir() -> Path:

@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from xskill.team.skill_manifest import build_manifest
+from xskill.team.server.skill_manifest import build_manifest
 
 
 def _git(args, cwd):

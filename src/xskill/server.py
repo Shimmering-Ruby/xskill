@@ -1313,7 +1313,7 @@ def create_app(home_root: Path | str | None = None,
 
     # team server 模式：挂 /api/v1/team/* 路由
     if team_server:
-        from xskill.team.server_api import router as team_router
+        from xskill.team.server.api import router as team_router
         app.include_router(team_router)
 
     # SSE 长耗时接口
@@ -1573,9 +1573,9 @@ def create_app(home_root: Path | str | None = None,
         # team server：初始化 team 上下文 + 注册 traj_root 为 watch_dir 基。
         if team_server:
             try:
-                from xskill.team.client_registry import ClientRegistry
-                from xskill.team.server_api import init_team_context
-                from xskill.team.server_state import ensure_join_token
+                from xskill.team.server.client_registry import ClientRegistry
+                from xskill.team.server.api import init_team_context
+                from xskill.team.server.state import ensure_join_token
                 from xskill.config import (
                     get_team_clients_db_path, get_team_server_state_path,
                     get_team_trajectories_dir,

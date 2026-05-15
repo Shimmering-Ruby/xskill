@@ -5,10 +5,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from xskill.team import server_api
-from xskill.team.client import TeamClient, register_with_server
-from xskill.team.client_registry import ClientRegistry
-from xskill.team.client_state import ClientState
+from xskill.team.server import api as server_api
+from xskill.team.client.daemon import TeamClient, register_with_server
+from xskill.team.server.client_registry import ClientRegistry
+from xskill.team.client.state import ClientState
 
 
 def _git(args, cwd):
@@ -55,8 +55,7 @@ def _client(server_app, tmp_path) -> TeamClient:
     state = ClientState(server_url="http://testserver", client_id=cid, join_token="tok")
     return TeamClient(
         state=state, http=http,
-        team_skills_dir=tmp_path / "team_skills",
-        outbox_dir=tmp_path / "outbox",
+        skill_dir=tmp_path / "client_home" / ".xskill" / "skill",
         cursor_path=tmp_path / "cursor.json",
         history_path=tmp_path / "history.jsonl",
         home_root=tmp_path / "client_home",
@@ -68,15 +67,15 @@ def test_sync_and_reconcile_materializes_skill(server_app, tmp_path):
     manifest = tc.sync()
     assert any(s.skill_name == "fix-foo" for s in manifest.slots)
     tc.reconcile_skill_sides(manifest)
-    repo = tmp_path / "team_skills" / "fix-foo"
+    repo = tmp_path / "client_home" / ".xskill" / "skill" / "fix-foo"
     assert (repo / ".git").is_dir()
     assert (repo / "SKILL.md").read_text(encoding="utf-8").startswith("---")
 
 
 def test_upload_sends_pending_trajectory(server_app, tmp_path):
     tc = _client(server_app, tmp_path)
-    # 造一个静默够久的 outbox traj
-    bridge = (tmp_path / "outbox" / "cc_sessions")
+    # 造一个静默够久的 traj，落在标准 bridge 目录 <home>/.xskill/cc_sessions/
+    bridge = tmp_path / "client_home" / ".xskill" / "cc_sessions"
     bridge.mkdir(parents=True)
     md = bridge / "traj_cc_x_001.md"
     md.write_text("# body", encoding="utf-8")
@@ -96,11 +95,11 @@ def test_upload_sends_pending_trajectory(server_app, tmp_path):
 def test_cleanup_removes_skill_not_in_manifest(server_app, tmp_path):
     tc = _client(server_app, tmp_path)
     # 本地有个 manifest 里没有的 stale skill
-    stale = tmp_path / "team_skills" / "stale-skill"
+    stale = tmp_path / "client_home" / ".xskill" / "skill" / "stale-skill"
     stale.mkdir(parents=True)
     (stale / "SKILL.md").write_text("# stale", encoding="utf-8")
     manifest = tc.sync()
     tc.reconcile_skill_sides(manifest)
     tc.cleanup(manifest)
     assert not stale.exists()
-    assert (tmp_path / "team_skills" / "fix-foo").is_dir()   # manifest 里的保留
+    assert (tmp_path / "client_home" / ".xskill" / "skill" / "fix-foo").is_dir()   # manifest 里的保留

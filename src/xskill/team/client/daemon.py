@@ -1,4 +1,4 @@
-"""client.py — TeamClient 瘦客户端守护（SP1）
+"""daemon.py — TeamClient 瘦客户端守护（SP1）
 
 client 只干三件事：采集本地轨迹脱敏上传、持有 server 算出的 skill
 working copy 并对齐 side、把本地手改推成 user-staging/<client_id> 分支。
@@ -16,11 +16,11 @@ from pathlib import Path
 
 from xskill.git_lock import run_git
 from xskill.install_history import InstallHistory
-from xskill.team.client_state import ClientState
-from xskill.team.collector import TeamCollector
-from xskill.team.git_bundle import apply_repo_bundle, make_branch_bundle
-from xskill.team.reconcile import reconcile_skill_side
-from xskill.team.sync_protocol import (
+from xskill.team.client.state import ClientState
+from xskill.team.client.collector import TeamCollector
+from xskill.team.shared.git_bundle import apply_repo_bundle, make_branch_bundle
+from xskill.team.shared.reconcile import reconcile_skill_side
+from xskill.team.shared.protocol import (
     SyncResponse, UploadRequest, UploadTrajectory,
 )
 from xskill.user_edit_absorb_agent import has_pending_user_edit
@@ -48,8 +48,7 @@ class TeamClient:
         *,
         state: ClientState,
         http,
-        team_skills_dir: Path,
-        outbox_dir: Path,
+        skill_dir: Path,
         cursor_path: Path,
         history_path: Path,
         home_root: Path | None = None,
@@ -58,13 +57,16 @@ class TeamClient:
     ):
         self.state = state
         self.http = http
-        self.team_skills_dir = Path(team_skills_dir)
-        self.team_skills_dir.mkdir(parents=True, exist_ok=True)
+        # skill working copies 落标准 skill_dir（= ~/.xskill/skill/）——与
+        # standalone 模式同一个位置，不另开 team_skills/。一台机器要么
+        # standalone 要么 client，这个目录谁来管取决于模式。
+        self.skill_dir = Path(skill_dir)
+        self.skill_dir.mkdir(parents=True, exist_ok=True)
         self.home_root = Path(home_root) if home_root else Path.home()
         self.poll_interval = poll_interval
         self.history = InstallHistory(history_path)
         self.collector = TeamCollector(
-            outbox_dir=Path(outbox_dir), cursor_path=Path(cursor_path),
+            cursor_path=Path(cursor_path),
             quiet_seconds=quiet_seconds, home_root=self.home_root,
         )
         self._stop = threading.Event()
@@ -116,7 +118,7 @@ class TeamClient:
         reconcile_skill_side。
         """
         for slot in manifest.slots:
-            repo_dir = self.team_skills_dir / slot.skill_name
+            repo_dir = self.skill_dir / slot.skill_name
             # 拉 bundle 落地/刷新本地 working copy
             r = self.http.get(f"/api/v1/team/skill/{slot.skill_name}/bundle",
                               headers=self._hdr())
@@ -164,7 +166,7 @@ class TeamClient:
         只能进隔离分支，永远碰不到 main。
         """
         pushed = 0
-        for repo_dir in sorted(self.team_skills_dir.iterdir()):
+        for repo_dir in sorted(self.skill_dir.iterdir()):
             if not (repo_dir / ".git").is_dir():
                 continue
             if not has_pending_user_edit(repo_dir):
@@ -202,7 +204,7 @@ class TeamClient:
         某 skill 移出 100 → 下次 sync 后本地也删，不自留。
         """
         keep = {s.skill_name for s in manifest.slots}
-        for repo_dir in sorted(self.team_skills_dir.iterdir()):
+        for repo_dir in sorted(self.skill_dir.iterdir()):
             if not repo_dir.is_dir() or repo_dir.name in keep:
                 continue
             # 先摘生态里的安装（symlink），再删本地仓

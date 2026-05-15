@@ -487,7 +487,7 @@ class DirectoryWatcher:
         from xskill.canary import (
             CanaryConfig, has_staging, main_sha, pick_side, staging_sha,
         )
-        from xskill.team.reconcile import reconcile_skill_side
+        from xskill.team.shared.reconcile import reconcile_skill_side
 
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
         rotate_interval = canary_cfg.rotate_interval

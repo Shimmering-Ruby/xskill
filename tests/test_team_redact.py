@@ -1,4 +1,4 @@
-from xskill.team.redact import redact_text
+from xskill.team.client.redact import redact_text
 
 
 def test_redacts_sk_style_keys():

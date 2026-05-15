@@ -2,7 +2,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from xskill.team.reconcile import reconcile_skill_side
+from xskill.team.shared.reconcile import reconcile_skill_side
 from xskill.install_history import InstallHistory
 
 
@@ -68,7 +68,7 @@ def test_already_aligned_records_history_but_no_checkout(tmp_path):
 def test_skips_pending_user_edit(tmp_path, monkeypatch):
     repo, main_sha, staging_sha = _seed(tmp_path / "fix-foo")
     hist = InstallHistory(tmp_path / "history.jsonl")
-    monkeypatch.setattr("xskill.team.reconcile.has_pending_user_edit", lambda d: True)
+    monkeypatch.setattr("xskill.team.shared.reconcile.has_pending_user_edit", lambda d: True)
     res = reconcile_skill_side(repo_dir=repo, target_side="staging",
                                target_sha=staging_sha, history=hist, on_changed=None)
     assert res == "skipped_user_edit"

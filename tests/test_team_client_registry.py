@@ -1,4 +1,4 @@
-from xskill.team.client_registry import ClientRegistry
+from xskill.team.server.client_registry import ClientRegistry
 
 
 def test_register_returns_unique_ids(tmp_path):

@@ -2,13 +2,19 @@ import os
 import time
 from pathlib import Path
 
-from xskill.team.collector import TeamCollector
+from xskill.team.client.collector import TeamCollector
+
+
+def _bridge(home_root: Path) -> Path:
+    """标准 bridge 目录：<home_root>/.xskill/cc_sessions/。"""
+    b = home_root / ".xskill" / "cc_sessions"
+    b.mkdir(parents=True, exist_ok=True)
+    return b
 
 
 def test_pending_returns_quiet_unuploaded_md(tmp_path):
-    outbox = tmp_path / "outbox"
-    bridge = outbox / "cc_sessions"
-    bridge.mkdir(parents=True)
+    home = tmp_path / "home"
+    bridge = _bridge(home)
     # 一个"静默已久"的 traj_*.md
     old = bridge / "traj_cc_x_001.md"
     old.write_text("# old body", encoding="utf-8")
@@ -18,8 +24,8 @@ def test_pending_returns_quiet_unuploaded_md(tmp_path):
     fresh = bridge / "traj_cc_x_002.md"
     fresh.write_text("# fresh", encoding="utf-8")
 
-    col = TeamCollector(outbox_dir=outbox, cursor_path=tmp_path / "cursor.json",
-                        quiet_seconds=180)
+    col = TeamCollector(cursor_path=tmp_path / "cursor.json",
+                        quiet_seconds=180, home_root=home)
     pending = col.pending()
     ids = {p.traj_id for p in pending}
     assert "traj_cc_x_001" in ids        # 静默够久
@@ -27,16 +33,15 @@ def test_pending_returns_quiet_unuploaded_md(tmp_path):
 
 
 def test_mark_uploaded_excludes_next_time(tmp_path):
-    outbox = tmp_path / "outbox"
-    bridge = outbox / "cc_sessions"
-    bridge.mkdir(parents=True)
+    home = tmp_path / "home"
+    bridge = _bridge(home)
     md = bridge / "traj_cc_x_001.md"
     md.write_text("# body", encoding="utf-8")
     old = time.time() - 600
     os.utime(md, (old, old))
 
-    col = TeamCollector(outbox_dir=outbox, cursor_path=tmp_path / "cursor.json",
-                        quiet_seconds=180)
+    col = TeamCollector(cursor_path=tmp_path / "cursor.json",
+                        quiet_seconds=180, home_root=home)
     p = col.pending()[0]
     col.mark_uploaded(p.traj_id, p.sha256)
     assert col.pending() == []           # 已上传，不再吐
@@ -48,15 +53,14 @@ def test_mark_uploaded_excludes_next_time(tmp_path):
 
 
 def test_redaction_applied_to_content(tmp_path):
-    outbox = tmp_path / "outbox"
-    bridge = outbox / "cc_sessions"
-    bridge.mkdir(parents=True)
+    home = tmp_path / "home"
+    bridge = _bridge(home)
     md = bridge / "traj_cc_x_001.md"
     md.write_text('key = "sk-abcdEFGH1234567890wxyz"', encoding="utf-8")
     old = time.time() - 600
     os.utime(md, (old, old))
-    col = TeamCollector(outbox_dir=outbox, cursor_path=tmp_path / "cursor.json",
-                        quiet_seconds=180)
+    col = TeamCollector(cursor_path=tmp_path / "cursor.json",
+                        quiet_seconds=180, home_root=home)
     p = col.pending()[0]
     assert "sk-abcdEFGH1234567890wxyz" not in p.content
     assert "[REDACTED]" in p.content

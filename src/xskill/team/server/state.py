@@ -1,4 +1,4 @@
-"""server_state.py — team server 的 join token（SP1）
+"""state.py — team server 的 join token（SP1）
 
 join token 是 client 接入的唯一门槛（单一共享 token，见设计决策）。
 client 完全信任 server；token 只用来挡住组织外的随机接入。真正的防呆

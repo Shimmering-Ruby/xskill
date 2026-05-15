@@ -1,4 +1,4 @@
-from xskill.team.sync_protocol import (
+from xskill.team.shared.protocol import (
     RegisterRequest, RegisterResponse,
     UploadTrajectory, UploadRequest, UploadResponse,
     SkillSlot, SyncResponse, PushEditResponse,

@@ -221,8 +221,8 @@ class TestRotateCanarySide:
         w = _make_watcher(skill_dir, tmp_path, probability=1.0)
         # mock has_pending_user_edit → True：模拟用户正在改它。
         # 收敛后 _reconcile_skill_sides 走 team.reconcile.reconcile_skill_side，
-        # 它从 xskill.team.reconcile 引用 has_pending_user_edit——patch 该处。
-        with patch("xskill.team.reconcile.has_pending_user_edit",
+        # 它从 xskill.team.shared.reconcile 引用 has_pending_user_edit——patch 该处。
+        with patch("xskill.team.shared.reconcile.has_pending_user_edit",
                    return_value=True):
             w._reconcile_skill_sides()
 

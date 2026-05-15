@@ -1,6 +1,6 @@
 import pytest
 
-from xskill.team.client_state import ClientState, save_client_state, load_client_state
+from xskill.team.client.state import ClientState, save_client_state, load_client_state
 
 
 def test_save_then_load_roundtrip(tmp_path):

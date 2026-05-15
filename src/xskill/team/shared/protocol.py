@@ -1,4 +1,4 @@
-"""sync_protocol.py — C/S 线协议模型（SP1）
+"""protocol.py — C/S 线协议模型（SP1）
 
 C 与 S 之间所有 HTTP body 的单一事实源。端点：
 

@@ -1,4 +1,4 @@
-"""client_state.py — client 端连接信息持久化（SP1）
+"""state.py — team client 端连接信息持久化（SP1）
 
 瘦客户端不读 config.yaml（无 llm.api_key）。它要记住的只有连上谁：
 server_url / client_id / join_token，落 ~/.xskill/team_client.json。

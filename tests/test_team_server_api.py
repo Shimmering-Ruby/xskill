@@ -6,8 +6,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from xskill.team import server_api
-from xskill.team.client_registry import ClientRegistry
+from xskill.team.server import api as server_api
+from xskill.team.server.client_registry import ClientRegistry
 
 
 def _git(args, cwd):

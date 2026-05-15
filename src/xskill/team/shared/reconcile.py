@@ -19,7 +19,7 @@ from xskill.git_lock import run_git
 from xskill.install_history import InstallHistory
 from xskill.user_edit_absorb_agent import has_pending_user_edit
 
-logger = logging.getLogger("xskill.team.reconcile")
+logger = logging.getLogger("xskill.team.shared.reconcile")
 
 ReconcileResult = Literal["skipped_user_edit", "already_aligned", "checked_out", "error"]
 

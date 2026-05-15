@@ -77,14 +77,11 @@ def cmd_connect(args) -> int:
     ``xskill connect``                          复用已存连接
     """
     import socket as _socket
-    from xskill.config import (
-        get_team_client_state_path, get_team_skills_dir, get_team_outbox_dir,
-        XSKILL_HOME,
-    )
-    from xskill.team.client_state import (
+    from xskill.config import get_team_client_state_path, XSKILL_HOME
+    from xskill.team.client.state import (
         ClientState, load_client_state, save_client_state,
     )
-    from xskill.team.client import TeamClient, register_with_server
+    from xskill.team.client.daemon import TeamClient, register_with_server
 
     state_path = get_team_client_state_path()
 
@@ -121,10 +118,11 @@ def cmd_connect(args) -> int:
         http = httpx.Client(base_url=state.server_url, timeout=30.0)
         print(f"reconnecting: client_id={state.client_id}  server={state.server_url}")
 
+    # skill working copies 复用标准 skill_dir（~/.xskill/skill/）——瘦客户端
+    # 没有 config.yaml，直接用默认路径，不走 get_skill_dir()（那会 load_config）。
     client = TeamClient(
         state=state, http=http,
-        team_skills_dir=get_team_skills_dir(),
-        outbox_dir=get_team_outbox_dir(),
+        skill_dir=XSKILL_HOME / "skill",
         cursor_path=XSKILL_HOME / "team_client_cursor.json",
         history_path=XSKILL_HOME / "install_history.jsonl",
     )

@@ -1,4 +1,4 @@
-"""server_api.py — /api/v1/team/* 路由（SP1）
+"""api.py — team server 的 /api/v1/team/* 路由（SP1）
 
 team server 的 5 个端点。鉴权：除 register 外都校验
 ``X-Xskill-Token`` == join token 且 ``X-Xskill-Client`` 在注册表里。
@@ -18,15 +18,15 @@ from typing import Callable
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import Response
 
-from xskill.team.client_registry import ClientRegistry
-from xskill.team.git_bundle import fetch_branch_from_bundle, make_repo_bundle
-from xskill.team.skill_manifest import build_manifest
-from xskill.team.sync_protocol import (
+from xskill.team.server.client_registry import ClientRegistry
+from xskill.team.shared.git_bundle import fetch_branch_from_bundle, make_repo_bundle
+from xskill.team.server.skill_manifest import build_manifest
+from xskill.team.shared.protocol import (
     PushEditResponse, RegisterRequest, RegisterResponse,
     UploadRejection, UploadRequest, UploadResponse,
 )
 
-logger = logging.getLogger("xskill.team.server_api")
+logger = logging.getLogger("xskill.team.server.api")
 router = APIRouter(prefix="/api/v1/team")
 
 

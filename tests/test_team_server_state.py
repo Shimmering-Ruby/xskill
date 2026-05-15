@@ -1,6 +1,6 @@
 import stat
 
-from xskill.team.server_state import ensure_join_token, load_join_token
+from xskill.team.server.state import ensure_join_token, load_join_token
 
 
 def test_ensure_generates_and_persists(tmp_path):

@@ -269,8 +269,8 @@ def test_team_cs_full_loop(tmp_path, team_server):
     client_home.mkdir()
     _seed_fake_cc_session(client_home)
 
-    from xskill.team.client import TeamClient, register_with_server
-    from xskill.team.client_state import ClientState
+    from xskill.team.client.daemon import TeamClient, register_with_server
+    from xskill.team.client.state import ClientState
 
     http = httpx.Client(base_url=base_url, timeout=30.0)
     cid = register_with_server(http, token=token, label="e2e", hostname="e2e")
@@ -279,8 +279,7 @@ def test_team_cs_full_loop(tmp_path, team_server):
     client = TeamClient(
         state=ClientState(server_url=base_url, client_id=cid, join_token=token),
         http=http,
-        team_skills_dir=client_home / ".xskill" / "team_skills",
-        outbox_dir=client_home / ".xskill" / "team_outbox",
+        skill_dir=client_home / ".xskill" / "skill",
         cursor_path=client_home / ".xskill" / "cursor.json",
         history_path=client_home / ".xskill" / "install_history.jsonl",
         home_root=client_home,
@@ -307,7 +306,7 @@ def test_team_cs_full_loop(tmp_path, team_server):
 
         # ── 4. reconcile + install ────────────────────────────────
         client.reconcile_skill_sides(manifest)
-        repo = client_home / ".xskill" / "team_skills" / "fix-foo"
+        repo = client_home / ".xskill" / "skill" / "fix-foo"
         assert (repo / ".git").is_dir(), "fix-foo working copy 未物化"
         assert (repo / "SKILL.md").read_text(encoding="utf-8").startswith("---")
         installed = client_home / ".claude" / "skills" / "fix-foo"
@@ -341,7 +340,7 @@ def test_team_cs_full_loop(tmp_path, team_server):
         assert "user tweak by e2e" not in main_body, "client 手改污染了公共 main"
 
         # ── 6. cleanup ────────────────────────────────────────────
-        stale = client_home / ".xskill" / "team_skills" / "stale-skill"
+        stale = client_home / ".xskill" / "skill" / "stale-skill"
         stale.mkdir(parents=True)
         (stale / "SKILL.md").write_text("# stale", encoding="utf-8")
         client.cleanup(client.sync())

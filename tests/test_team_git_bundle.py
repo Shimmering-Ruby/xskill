@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from xskill.team.git_bundle import (
+from xskill.team.shared.git_bundle import (
     make_repo_bundle, apply_repo_bundle, make_branch_bundle, fetch_branch_from_bundle,
 )
 
