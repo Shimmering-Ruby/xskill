@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xskill.git_lock import run_git
+from xskill.git_lock import run_git, skill_repo_lock
 
 logger = logging.getLogger("canary")
 
@@ -121,25 +121,26 @@ def route_main_history_to_staging(
     返回 True 当且仅当确实发生了分流（有新 commit 可挪）。
     """
     cwd = str(skill_dir)
-    code, new_sha, _ = run_git(["rev-parse", "HEAD"], cwd=cwd)
-    if code != 0 or not new_sha.strip():
-        return False
-    new_sha = new_sha.strip()
-    if new_sha == initial_main_sha:
-        return False  # 无新 commit
+    with skill_repo_lock(skill_dir):
+        code, new_sha, _ = run_git(["rev-parse", "HEAD"], cwd=cwd)
+        if code != 0 or not new_sha.strip():
+            return False
+        new_sha = new_sha.strip()
+        if new_sha == initial_main_sha:
+            return False  # 无新 commit
 
-    code, _, err = run_git(["reset", "--hard", initial_main_sha], cwd=cwd)
-    if code != 0:
-        logger.error(f"{Path(skill_dir).name}: reset main failed: {err}")
-        return False
+        code, _, err = run_git(["reset", "--hard", initial_main_sha], cwd=cwd)
+        if code != 0:
+            logger.error(f"{Path(skill_dir).name}: reset main failed: {err}")
+            return False
 
-    if has_staging(Path(skill_dir)):
-        code, _, err = run_git(["branch", "-f", STAGING_BRANCH, new_sha], cwd=cwd)
-    else:
-        code, _, err = run_git(["branch", STAGING_BRANCH, new_sha], cwd=cwd)
-    if code != 0:
-        logger.error(f"{Path(skill_dir).name}: route to staging failed: {err}")
-        return False
+        if has_staging(Path(skill_dir)):
+            code, _, err = run_git(["branch", "-f", STAGING_BRANCH, new_sha], cwd=cwd)
+        else:
+            code, _, err = run_git(["branch", STAGING_BRANCH, new_sha], cwd=cwd)
+        if code != 0:
+            logger.error(f"{Path(skill_dir).name}: route to staging failed: {err}")
+            return False
     logger.info(
         f"{Path(skill_dir).name}: routed new commits to staging (head={new_sha[:8]})"
     )
@@ -167,37 +168,39 @@ def skill_existed_on(skill_dir: Path, ref: str, skill_name: str) -> bool:
 def merge_staging_to_main(skill_dir: Path) -> bool:
     """将 staging 分支合入 main，然后删除 staging。"""
     cwd = str(skill_dir)
-    if not has_staging(skill_dir):
-        return False
+    with skill_repo_lock(skill_dir):
+        if not has_staging(skill_dir):
+            return False
 
-    run_git(["checkout", "main"], cwd=cwd)
-    code, _, err = run_git(
-        ["merge", "--ff", STAGING_BRANCH, "-m", "canary: promote staging to main"],
-        cwd=cwd,
-    )
-    if code != 0:
-        # 非 ff 情况降级为 --no-ff
-        code2, _, err2 = run_git(
-            ["merge", "--no-ff", STAGING_BRANCH, "-m", "canary: promote staging to main"],
+        run_git(["checkout", "main"], cwd=cwd)
+        code, _, err = run_git(
+            ["merge", "--ff", STAGING_BRANCH, "-m", "canary: promote staging to main"],
             cwd=cwd,
         )
-        if code2 != 0:
-            logger.error(f"{skill_dir.name}: merge staging failed: {err or err2}")
-            return False
-    run_git(["branch", "-D", STAGING_BRANCH], cwd=cwd)
+        if code != 0:
+            # 非 ff 情况降级为 --no-ff
+            code2, _, err2 = run_git(
+                ["merge", "--no-ff", STAGING_BRANCH, "-m", "canary: promote staging to main"],
+                cwd=cwd,
+            )
+            if code2 != 0:
+                logger.error(f"{skill_dir.name}: merge staging failed: {err or err2}")
+                return False
+        run_git(["branch", "-D", STAGING_BRANCH], cwd=cwd)
     logger.info(f"{skill_dir.name}: staging merged to main and deleted")
     return True
 
 
 def discard_staging(skill_dir: Path) -> bool:
     cwd = str(skill_dir)
-    if not has_staging(skill_dir):
-        return False
-    run_git(["checkout", "main"], cwd=cwd)
-    code, _, err = run_git(["branch", "-D", STAGING_BRANCH], cwd=cwd)
-    if code != 0:
-        logger.error(f"{skill_dir.name}: discard staging failed: {err}")
-        return False
+    with skill_repo_lock(skill_dir):
+        if not has_staging(skill_dir):
+            return False
+        run_git(["checkout", "main"], cwd=cwd)
+        code, _, err = run_git(["branch", "-D", STAGING_BRANCH], cwd=cwd)
+        if code != 0:
+            logger.error(f"{skill_dir.name}: discard staging failed: {err}")
+            return False
     logger.info(f"{skill_dir.name}: staging discarded")
     return True
 

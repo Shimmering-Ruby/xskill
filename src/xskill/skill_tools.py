@@ -374,9 +374,16 @@ def write_file(path: str, content: str) -> str:
         skill_dir = _ctx["skill_dir"]
 
     try:
-        p.resolve().relative_to(skill_dir.resolve())
+        resolved = p.resolve()
+        resolved.relative_to(skill_dir.resolve())
     except ValueError:
         return f"error: writes restricted to ./skill/ (tried: {path})"
+
+    # 拒写 .git/ —— agent LLM 撞到 git 错误时会试图"自己修 git"，把可恢复
+    # 的 index race 变成永久 repo 损坏（实跑遇到 3 个 skill 仓被 LLM 写进
+    # .git/HEAD / .git/refs / .git/config 而毁掉）。.git 严格归 git 自己管。
+    if ".git" in resolved.parts:
+        return f"error: writes into .git/ are forbidden (tried: {path})"
 
     p.parent.mkdir(parents=True, exist_ok=True)
     # 写 SKILL.md：消毒 frontmatter 日期（防止 LLM 写未来日期 / 不合法 ISO）

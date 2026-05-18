@@ -14,10 +14,50 @@ v2 (AtomTask 流水线) 引入 baby 分支：ClusterAgent 调 new_skill_folder �
 - SkillEditAgent 后续跑 → 调 commit_to_staging(message) → 从 main 切 staging
 """
 
-import os, subprocess, logging
+import os, subprocess, logging, threading
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger("git_lock")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Per-skill-repo 串行化
+# ═══════════════════════════════════════════════════════════════════
+# git_lock 之前名为 lock 实则无锁：watcher 线程（SkillEditAgent）与线程池
+# （cluster → init_skill_repo_on_baby）会并发对同一个 skill 的 .git 跑
+# git 命令，撞坏 .git/index 和 refs。这里用 per-repo RLock 串行化：
+#   - run_git 对每个 cwd 取该 repo 的 RLock——任意两个 git 进程不会同时
+#     操作同一个 repo；不同 repo 仍可并行。
+#   - skill_repo_lock(repo_dir) 给"必须原子的复合操作"（add+commit+branch）
+#     用，RLock 让其内部的 run_git 调用可重入不死锁。
+_repo_locks: dict[str, threading.RLock] = {}
+_repo_locks_meta = threading.Lock()
+
+
+def _repo_lock_for(cwd: str | Path) -> threading.RLock:
+    key = str(Path(cwd).resolve())
+    with _repo_locks_meta:
+        lk = _repo_locks.get(key)
+        if lk is None:
+            lk = threading.RLock()
+            _repo_locks[key] = lk
+        return lk
+
+
+@contextmanager
+def skill_repo_lock(repo_dir: str | Path):
+    """串行化一个 skill 子仓的复合 git 操作（add+commit+branch 等必须原子）。
+
+    与 ``run_git`` 用同一把 per-repo RLock——复合操作持锁期间内部的
+    ``run_git`` 调用可重入，不会自死锁。
+    """
+    lk = _repo_lock_for(repo_dir)
+    lk.acquire()
+    try:
+        yield
+    finally:
+        lk.release()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -44,7 +84,10 @@ SKILL_GITIGNORE = """# xskill v2 skill 仓库的 ignore 规则
 
 
 def run_git(args: list[str], cwd: str) -> tuple[int, str, str]:
-    r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
+    # per-repo 串行化：同一个 .git 同时只跑一个 git 进程，杜绝 index/refs
+    # 被并发写坏。不同 repo 仍并行（锁 keyed by cwd）。
+    with _repo_lock_for(cwd):
+        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
@@ -64,41 +107,44 @@ def init_skill_repo_on_baby(skill_dir: str, name: str, description: str) -> None
     """
     p = Path(skill_dir)
     p.mkdir(parents=True, exist_ok=True)
-    run_git(["init"], cwd=skill_dir)
-    run_git(["checkout", "-b", "baby"], cwd=skill_dir)
-    run_git(["config", "user.email", "xskill@local"], cwd=skill_dir)
-    run_git(["config", "user.name", "xskill"], cwd=skill_dir)
+    # 整段加锁：init + 写文件 + add + commit 必须原子，否则 watcher 线程的
+    # SkillEditAgent 可能在半初始化的 repo 上跑 commit_baby_to_main。
+    with skill_repo_lock(skill_dir):
+        run_git(["init"], cwd=skill_dir)
+        run_git(["checkout", "-b", "baby"], cwd=skill_dir)
+        run_git(["config", "user.email", "xskill@local"], cwd=skill_dir)
+        run_git(["config", "user.name", "xskill"], cwd=skill_dir)
 
-    (p / ".gitignore").write_text(SKILL_GITIGNORE, encoding="utf-8")
+        (p / ".gitignore").write_text(SKILL_GITIGNORE, encoding="utf-8")
 
-    from datetime import date as _date
-    today = _date.today().isoformat()
-    stub_md = (
-        f"---\n"
-        f"name: {name}\n"
-        f"description: {description}\n"
-        f"metadata:\n"
-        f"  version: 0\n"
-        f"  state: baby\n"
-        f"  created: \"{today}\"\n"
-        f"  last_updated: \"{today}\"\n"
-        f"  source_atoms: []\n"
-        f"---\n"
-        f"\n"
-        f"# {name}\n"
-        f"\n"
-        f"(placeholder — SkillEditAgent 在 candidates 攒满阈值后会用真实 atom 内容填充正文)\n"
-    )
-    (p / "SKILL.md").write_text(stub_md, encoding="utf-8")
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        stub_md = (
+            f"---\n"
+            f"name: {name}\n"
+            f"description: {description}\n"
+            f"metadata:\n"
+            f"  version: 0\n"
+            f"  state: baby\n"
+            f"  created: \"{today}\"\n"
+            f"  last_updated: \"{today}\"\n"
+            f"  source_atoms: []\n"
+            f"---\n"
+            f"\n"
+            f"# {name}\n"
+            f"\n"
+            f"(placeholder — SkillEditAgent 在 candidates 攒满阈值后会用真实 atom 内容填充正文)\n"
+        )
+        (p / "SKILL.md").write_text(stub_md, encoding="utf-8")
 
-    (p / "scripts").mkdir(exist_ok=True)
-    (p / "references").mkdir(exist_ok=True)
-    (p / "scripts" / ".gitkeep").write_text("", encoding="utf-8")
-    (p / "references" / ".gitkeep").write_text("", encoding="utf-8")
+        (p / "scripts").mkdir(exist_ok=True)
+        (p / "references").mkdir(exist_ok=True)
+        (p / "scripts" / ".gitkeep").write_text("", encoding="utf-8")
+        (p / "references" / ".gitkeep").write_text("", encoding="utf-8")
 
-    run_git(["add", "."], cwd=skill_dir)
-    run_git(["commit", "-m", f"init({name}): baby branch with stub SKILL.md"],
-            cwd=skill_dir)
+        run_git(["add", "."], cwd=skill_dir)
+        run_git(["commit", "-m", f"init({name}): baby branch with stub SKILL.md"],
+                cwd=skill_dir)
     logger.info(f"🌱 init skill on baby branch: {skill_dir}")
 
 
@@ -111,20 +157,21 @@ def commit_baby_to_main_branch(skill_dir: str, message: str) -> bool:
 
     返回 True 表示成功 graduate。
     """
-    cur = current_branch(skill_dir)
-    if cur != "baby":
-        logger.warning(f"commit_baby_to_main_branch 拒绝：当前不在 baby (在 {cur})")
-        return False
-    run_git(["add", "-A"], cwd=skill_dir)
-    code, _, err = run_git(["commit", "-m", message], cwd=skill_dir)
-    if code != 0 and "nothing to commit" not in err:
-        logger.warning(f"baby commit 失败: {err}")
-        return False
-    # 即便 nothing to commit，仍然 graduate 分支名（baby → main）
-    code, _, err = run_git(["branch", "-m", "baby", "main"], cwd=skill_dir)
-    if code != 0:
-        logger.warning(f"branch rename baby → main 失败: {err}")
-        return False
+    with skill_repo_lock(skill_dir):
+        cur = current_branch(skill_dir)
+        if cur != "baby":
+            logger.warning(f"commit_baby_to_main_branch 拒绝：当前不在 baby (在 {cur})")
+            return False
+        run_git(["add", "-A"], cwd=skill_dir)
+        code, _, err = run_git(["commit", "-m", message], cwd=skill_dir)
+        if code != 0 and "nothing to commit" not in err:
+            logger.warning(f"baby commit 失败: {err}")
+            return False
+        # 即便 nothing to commit，仍然 graduate 分支名（baby → main）
+        code, _, err = run_git(["branch", "-m", "baby", "main"], cwd=skill_dir)
+        if code != 0:
+            logger.warning(f"branch rename baby → main 失败: {err}")
+            return False
     logger.info(f"🎓 baby → main graduated: {Path(skill_dir).name}: {message}")
     return True
 
@@ -142,36 +189,37 @@ def commit_to_staging_branch(skill_dir: str, message: str) -> bool:
     返回 True 表示成功创建 staging 候选。
     """
     p = Path(skill_dir)
-    cur = current_branch(skill_dir)
-    if cur != "main":
-        logger.warning(f"commit_to_staging_branch 拒绝：当前不在 main (在 {cur})")
-        return False
-    code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=skill_dir)
-    if code == 0:
-        logger.warning(f"commit_to_staging_branch 拒绝：staging 已存在（灰度中）")
-        return False
-    code, _, err = run_git(["checkout", "-b", "staging"], cwd=skill_dir)
-    if code != 0:
-        logger.warning(f"checkout -b staging 失败: {err}")
-        return False
-    run_git(["add", "-A"], cwd=skill_dir)
-    code, _, err = run_git(["commit", "-m", message], cwd=skill_dir)
-    if code != 0 and "nothing to commit" not in err:
-        logger.warning(f"staging commit 失败: {err}")
+    with skill_repo_lock(skill_dir):
+        cur = current_branch(skill_dir)
+        if cur != "main":
+            logger.warning(f"commit_to_staging_branch 拒绝：当前不在 main (在 {cur})")
+            return False
+        code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=skill_dir)
+        if code == 0:
+            logger.warning(f"commit_to_staging_branch 拒绝：staging 已存在（灰度中）")
+            return False
+        code, _, err = run_git(["checkout", "-b", "staging"], cwd=skill_dir)
+        if code != 0:
+            logger.warning(f"checkout -b staging 失败: {err}")
+            return False
+        run_git(["add", "-A"], cwd=skill_dir)
+        code, _, err = run_git(["commit", "-m", message], cwd=skill_dir)
+        if code != 0 and "nothing to commit" not in err:
+            logger.warning(f"staging commit 失败: {err}")
+            run_git(["checkout", "main"], cwd=skill_dir)
+            run_git(["branch", "-D", "staging"], cwd=skill_dir)
+            return False
+        # 物化 staging 内容到 .canary/<name>/，给 install_to_claude_code(side='staging')
+        # 用。在 staging 分支上直接拷 SKILL.md 等文件——比从 git tree 抽更可靠
+        # 也不需要 worktree。
+        from xskill.canary import materialize_staging
+        canary_root = p.parent / ".canary"
+        try:
+            materialize_staging(p, canary_root)
+        except Exception:
+            logger.exception(f"materialize_staging 失败: {Path(skill_dir).name}")
+        # 回到 main，让后续 cluster / SkillEdit 默认在 main 上工作
         run_git(["checkout", "main"], cwd=skill_dir)
-        run_git(["branch", "-D", "staging"], cwd=skill_dir)
-        return False
-    # 物化 staging 内容到 .canary/<name>/，给 install_to_claude_code(side='staging')
-    # 用。在 staging 分支上直接拷 SKILL.md 等文件——比从 git tree 抽更可靠
-    # 也不需要 worktree。
-    from xskill.canary import materialize_staging
-    canary_root = p.parent / ".canary"
-    try:
-        materialize_staging(p, canary_root)
-    except Exception:
-        logger.exception(f"materialize_staging 失败: {Path(skill_dir).name}")
-    # 回到 main，让后续 cluster / SkillEdit 默认在 main 上工作
-    run_git(["checkout", "main"], cwd=skill_dir)
     logger.info(f"🚦 staging candidate committed: {Path(skill_dir).name}: {message}")
     return True
 
