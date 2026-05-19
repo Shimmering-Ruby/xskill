@@ -68,6 +68,9 @@ def adapt_trajectory(
     if format == "openclaw_trajectory_jsonl":
         return _adapt_openclaw_trajectory_jsonl(content, metadata)
 
+    if format == "cursor_transcripts_jsonl":
+        return _adapt_cursor_transcripts_jsonl(content, metadata)
+
     raise ValueError(f"unsupported trajectory format: {format!r}")
 
 
@@ -708,6 +711,102 @@ def _adapt_openclaw_trajectory_jsonl(content: str, metadata: dict) -> tuple[str,
     meta["tool_calls"] = tool_calls
     meta["tool_names"] = tool_names
     meta["total_tool_calls"] = len(tool_calls)
+    meta["total_turns"] = len(timeline)
+    if first_user_query:
+        meta.setdefault("query", first_user_query)
+
+    return md, meta
+
+
+def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, dict]:
+    """Convert a Cursor agent-transcript JSONL (``~/.cursor/projects/<encoded-cwd>/
+    agent-transcripts/<sid>.jsonl``) to markdown + metadata.
+
+    每行格式（实测 + ``scripts/cursor_import.py:_jsonl_to_markdown`` 推断）：
+
+    ```json
+    {"role": "user|assistant", "message": {"content": [
+        {"type": "text", "text": "..."},
+        {"type": "tool_use", "name": "..."},
+        ...
+    ]}}
+    ```
+
+    Cursor 没有显式 ``sessionId`` / ``cwd`` 字段——sid 在文件名，cwd 在父目录名
+    （encoded slug，本 adapter 不反解）。所以 meta 里 ``session_id`` / ``cwd``
+    都为空，由上层 ingester 用 ``source_jsonl`` 推断（如有需要）。
+    """
+    timeline: list[dict] = []
+    tool_names: list[str] = []
+    first_user_query = ""
+    t = 0
+
+    for raw_line in content.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+
+        role = event.get("role", "unknown")
+        msg = event.get("message") or {}
+        parts = msg.get("content") or []
+        if not isinstance(parts, list):
+            continue
+
+        text_chunks: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype == "text":
+                tx = part.get("text") or ""
+                if tx:
+                    text_chunks.append(str(tx))
+            elif ptype == "tool_use":
+                name = part.get("name", "tool")
+                if name not in tool_names:
+                    tool_names.append(name)
+                text_chunks.append(f"[tool_use: {name}]")
+
+        body = "\n".join(text_chunks).strip()
+        if not body:
+            continue
+
+        if role == "user" and not first_user_query:
+            first_user_query = body[:500]
+
+        timeline.append({
+            "t": t, "role": role, "content": body[:2000],
+        })
+        t += 1
+
+    lines: list[str] = ["# Cursor Agent Trajectory", ""]
+    if first_user_query:
+        lines.append("## Initial Query")
+        lines.append("")
+        lines.append(first_user_query)
+        lines.append("")
+    for entry in timeline:
+        role = entry["role"]
+        if role == "user":
+            lines.append("## User")
+        elif role == "assistant":
+            lines.append("## Assistant")
+        else:
+            lines.append(f"## {str(role).capitalize()}")
+        lines.append("")
+        lines.append(entry["content"])
+        lines.append("")
+    md = "\n".join(lines)
+
+    meta = dict(metadata)
+    meta.setdefault("source", "cursor_transcripts_jsonl")
+    meta.setdefault("category", "cursor_session")
+    meta["timeline"] = timeline
+    meta["tool_names"] = tool_names
     meta["total_turns"] = len(timeline)
     if first_user_query:
         meta.setdefault("query", first_user_query)

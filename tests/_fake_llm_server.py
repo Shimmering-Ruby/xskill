@@ -74,6 +74,7 @@ class FakeLLMServer:
             "/v1/messages": [],
             "/chat/completions": [],
             "/embeddings/multimodal": [],
+            "/embeddings": [],
         }
         self._app = self._build_app()
         self._server: uvicorn.Server | None = None
@@ -155,7 +156,14 @@ class FakeLLMServer:
 
         @app.post("/embeddings/multimodal")
         async def embed(request: Request):
-            return await self._handle(request, "/embeddings/multimodal", self._default_embedding)
+            return await self._handle(request, "/embeddings/multimodal", self._default_embedding_multimodal)
+
+        @app.post("/embeddings")
+        async def embed_openai(request: Request):
+            # cursor 引入的 ARK 分流：text 模型走 /embeddings (openai 风格，
+            # data 是 list)，vision 模型走 /embeddings/multimodal (data 是
+            # dict)。fake server 两路都得给，且响应 shape 不同。
+            return await self._handle(request, "/embeddings", self._default_embedding_openai)
 
         return app
 
@@ -226,19 +234,35 @@ class FakeLLMServer:
         }
 
     @staticmethod
-    def _default_embedding(body: dict) -> dict:
-        # Deterministic 8-dim vector for the input text.
+    def _make_vec(body: dict) -> list[float]:
+        """Deterministic 8-dim vector for the input text，跨 path 共用。"""
         text = ""
         inp = body.get("input")
         if isinstance(inp, list) and inp and isinstance(inp[0], dict):
             text = inp[0].get("text", "") or ""
-        # Cheap hash-based fingerprint so different texts get different vectors.
+        elif isinstance(inp, str):
+            text = inp
         seed = sum(ord(c) for c in text[:64])
-        vec = [((seed + i * 7) % 97) / 97.0 for i in range(8)]
+        return [((seed + i * 7) % 97) / 97.0 for i in range(8)]
+
+    @classmethod
+    def _default_embedding_multimodal(cls, body: dict) -> dict:
+        """ARK multimodal `/embeddings/multimodal`：data 是 dict。"""
         return {
             "model": body.get("model", "fake-embed"),
-            "data": {"embedding": vec},
+            "data": {"embedding": cls._make_vec(body)},
         }
+
+    @classmethod
+    def _default_embedding_openai(cls, body: dict) -> dict:
+        """OpenAI-compatible `/embeddings`：data 是 list of {embedding}。"""
+        return {
+            "model": body.get("model", "fake-embed"),
+            "data": [{"embedding": cls._make_vec(body), "index": 0}],
+        }
+
+    # 兼容 backwards：老测试可能直接调 _default_embedding(body)
+    _default_embedding = _default_embedding_multimodal
 
 
 # ─────────────────────────────────────────────────────────────────

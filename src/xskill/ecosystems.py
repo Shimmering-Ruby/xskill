@@ -100,6 +100,26 @@ def _openclaw_agents_path(home: Path) -> Path:
     return home / ".openclaw" / "agents"
 
 
+def _cursor_projects_path(home: Path) -> Path:
+    """Cursor agent-transcripts 根目录：``<home>/.cursor/projects``。
+
+    实际文件在 ``<this>/<encoded-cwd>/agent-transcripts/<sid>.jsonl``——
+    Cursor 把每个 project 按 encoded-cwd 分目录（slug 形如
+    ``c-yzj-entrepreneurship-XSKILL-xskill``，是工作目录路径替换分隔符 + 小写）。
+    """
+    return home / ".cursor" / "projects"
+
+
+def _cursor_skills_path(home: Path) -> Path:
+    """Cursor skill discovery 根目录：``<home>/.cursor/skills``。
+
+    每个 skill 落到 ``<this>/<name>/SKILL.md``。``scripts/cursor_setup.ps1``
+    用 Windows junction 把这个目录链到 xskill 源仓 ``~/.xskill/skill/``——
+    POSIX 上等效就是 ``install_to_cursor`` 给每个 skill 单独建 symlink。
+    """
+    return home / ".cursor" / "skills"
+
+
 # ─────────────────────────────────────────────────────────────────
 # Ecosystem spec — JsonlIngester 的参数化形态
 # ─────────────────────────────────────────────────────────────────
@@ -182,6 +202,13 @@ _KNOWN_ECOSYSTEMS: list[dict] = [
         # OpenClaw 写 <home>/.openclaw/agents/<agent>/sessions/<sid>.trajectory.jsonl
         "source_subpath": ".openclaw/agents",
         "bridge_subpath": ".xskill/openclaw_sessions",
+        "source_kind": "dir",
+    },
+    {
+        "id": "cursor",
+        # Cursor 写 <home>/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>.jsonl
+        "source_subpath": ".cursor/projects",
+        "bridge_subpath": ".xskill/cursor_sessions",
         "source_kind": "dir",
     },
 ]
@@ -382,6 +409,30 @@ def install_to_codex(
 
 
 _OPENCLAW_INSTALL_META = ".xskill-install-meta.json"
+
+
+def install_to_cursor(
+    skill_path: Path | str,
+    target_root: Path | str | None = None,
+    side: str = "main",
+) -> Path:
+    """把一个 skill 装到 ``<target_root>/.cursor/skills/<name>``——Cursor 的
+    skill 目录。
+
+    ``scripts/cursor_setup.ps1`` 在 Windows 上用 ``mklink /J``（NTFS junction）
+    把整个 ``~/.cursor/skills/`` 链到 ``~/.xskill/skill/``。本函数走 per-skill
+    symlink-first 三阶 fallback（与 ``install_to_claude_code`` 同形），dest
+    是 ``~/.cursor/skills/<name>`` 这一层而不是整个目录。两种方案不互相干扰
+    —— Windows 用户跑 cursor_setup.ps1 是预装版（整目录 junction），daemon
+    起来后这函数对每个 skill 重新装一次 symlink 等效更精细。
+    """
+    root = Path(target_root) if target_root else Path.home()
+    return _install_skill_into(
+        Path(skill_path),
+        _cursor_skills_path(root),
+        side,
+        ecosystem_label="cursor",
+    )
 
 
 def install_to_openclaw(
@@ -786,6 +837,22 @@ def _openclaw_session_id_from_path(jsonl_path: Path) -> str:
     return jsonl_path.name.split(".trajectory.")[0]
 
 
+def _cursor_session_id_from_path(jsonl_path: Path) -> str:
+    """``<sid>.jsonl`` → ``<sid>``。"""
+    return jsonl_path.stem
+
+
+def _read_cwd_from_cursor_jsonl(content: str) -> str:
+    """Cursor JSONL 每行只有 ``{role, message}``，**没有 cwd 字段**——cwd 被
+    encoded 进父目录名 ``<encoded-cwd>/agent-transcripts/``，content 看不到。
+
+    返回空串让 traj_id 退化到 ``traj_cursor_unknown_<sid8>``。功能上不影响，
+    只是 traj_id 里 project 段不可读。如果以后要从 encoded slug 反解 cwd，
+    需要扩 spec 协议让 cwd_from_content 也接 path（暂不动）。
+    """
+    return ""
+
+
 def _read_workspace_dir_from_openclaw_jsonl(content: str) -> str:
     """从 OpenClaw trajectory JSONL 抽 cwd 替身（workspaceDir）。
 
@@ -851,6 +918,19 @@ OPENCLAW_SPEC = EcosystemSpec(
     traj_id_prefix="traj_oc_",
     skills_install_path=_agents_skills_path,  # 与 codex/opencode 共用 ~/.agents/skills
     label="openclaw",
+)
+
+CURSOR_SPEC = EcosystemSpec(
+    name="cursor",
+    source_kind="jsonl",
+    sessions_path=_cursor_projects_path,
+    sessions_glob="*/agent-transcripts/*.jsonl",  # <encoded-cwd>/agent-transcripts/<sid>.jsonl
+    session_id_from_path=_cursor_session_id_from_path,
+    cwd_from_content=_read_cwd_from_cursor_jsonl,
+    adapter_format="cursor_transcripts_jsonl",
+    traj_id_prefix="traj_cursor_",
+    skills_install_path=_cursor_skills_path,  # ~/.cursor/skills/ — Cursor 自己的 skill 目录
+    label="cursor",
 )
 
 
@@ -1118,6 +1198,26 @@ def ingest_openclaw_sessions(
     ``<sid>.jsonl.bak-*`` 备份和 ``<sid>.jsonl.reset.*Z`` reset 留档。
     """
     return JsonlIngester(OPENCLAW_SPEC).scan_and_bridge(
+        target_traj_dir=Path(target_traj_dir),
+        home_root=Path(home_root) if home_root else None,
+        seen_sessions=seen_sessions,
+    )
+
+
+def ingest_cursor_sessions(
+    target_traj_dir: Path | str,
+    *,
+    home_root: Path | str | None = None,
+    seen_sessions: Optional[set[str]] = None,
+) -> list[dict]:
+    """Bridge Cursor agent-transcripts JSONLs into xskill's trajectory directory.
+
+    Scans ``<home_root>/.cursor/projects/<encoded-cwd>/agent-transcripts/*.jsonl``
+    and submits any session whose stem is not in ``seen_sessions`` as a new
+    trajectory under ``target_traj_dir`` using the
+    ``cursor_transcripts_jsonl`` adapter.
+    """
+    return JsonlIngester(CURSOR_SPEC).scan_and_bridge(
         target_traj_dir=Path(target_traj_dir),
         home_root=Path(home_root) if home_root else None,
         seen_sessions=seen_sessions,
@@ -1432,6 +1532,18 @@ def install_all_to_openclaw(
     会先 unlink 后重链。
     """
     return _install_all_with(install_to_openclaw, skill_dir, target_root, names)
+
+
+def install_all_to_cursor(
+    skill_dir: Path | str,
+    target_root: Path | str | None = None,
+    names: Iterable[str] | None = None,
+) -> list[Path]:
+    """Install every skill under ``skill_dir`` (each subdir = one skill) to
+    Cursor's skill root (``<target_root>/.cursor/skills``). If ``names`` is
+    given, restrict to those.
+    """
+    return _install_all_with(install_to_cursor, skill_dir, target_root, names)
 
 
 def _install_all_with(

@@ -1431,11 +1431,12 @@ def create_app(home_root: Path | str | None = None,
                 from xskill.ecosystems import (
                     detect_known_ecosystems,
                     CCSessionIngester, JsonlIngester, SqliteIngester,
-                    CODEX_SPEC, OPENCODE_SPEC, OPENCLAW_SPEC,
+                    CODEX_SPEC, OPENCODE_SPEC, OPENCLAW_SPEC, CURSOR_SPEC,
                     install_all_to_claude_code,
                     install_all_to_codex,
                     install_all_to_opencode,
                     install_all_to_openclaw,
+                    install_all_to_cursor,
                     make_openclaw_canary_flip_hook,
                 )
                 from xskill.canary import CanaryConfig
@@ -1603,6 +1604,39 @@ def create_app(home_root: Path | str | None = None,
                             home_root=_home_root(),
                             poll_interval=poll_interval,
                             on_new_sessions=flip_hook,
+                        )
+                        ingester.start()
+                        _watcher_ref[ingester_key] = ingester
+
+                    elif eco == "cursor":
+                        # Cursor 也有 skill 目录（~/.cursor/skills/），跟 CC 同形：
+                        # symlink-first 三阶 fallback。Cursor 的 agent-transcripts
+                        # JSONL 走 JsonlIngester 采集，没有特殊的灰度 hook。
+                        try:
+                            installed = install_all_to_cursor(
+                                _skill_dir, target_root=_home_root(),
+                            )
+                            for dest in installed:
+                                install_history.record(
+                                    skill=dest.parent.name, side="main", sha="",
+                                )
+                            logger.info(
+                                "startup install_all_to_cursor: %d skills installed to ~/.cursor/skills/",
+                                len(installed),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "startup install_all_to_cursor failed", exc_info=True,
+                            )
+                            install_history.record_fail(
+                                skill="<startup_all>", agent="cursor",
+                                reason=str(e)[:200],
+                            )
+                        ingester = JsonlIngester(
+                            CURSOR_SPEC,
+                            target_traj_dir=bridge,
+                            home_root=_home_root(),
+                            poll_interval=poll_interval,
                         )
                         ingester.start()
                         _watcher_ref[ingester_key] = ingester
