@@ -66,7 +66,8 @@ class DirectoryWatcher:
                  skill_dir=None, poll_interval=30.0, max_concurrent=30,
                  max_retries=3, db_path=None, cold_start_threshold=3,
                  store=None, agno_agent_factory=None, home_root=None,
-                 server_mode=False, install_history_path=None):
+                 server_mode=False, install_history_path=None,
+                 on_poll_hook=None):
         self.llm = llm
         self.embed_client = embed_client
         self.config = config or {}
@@ -90,6 +91,11 @@ class DirectoryWatcher:
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
         self.db_path = db_path
+        # 每轮 _loop 在 _scan_once 之前调一次的钩子，用来让 server 端的"生态
+        # 检测 + ingester 启动"逻辑每轮都跑（pick up daemon 运行中新装的 agent）。
+        # 钩子幂等通过 server._watcher_ref[f"ingester_{eco}"] in-check 保证。
+        # 钩子抛异常不应导致 watcher 死循环退出——catch 后只记日志。
+        self.on_poll_hook = on_poll_hook
         # Cold-start 门控：当某 wd 还有 ≥ N 条 traj 处于"未 indexed"状态时，
         # 本轮 scan 不提交任何 clustering。设计动机：cluster agent 调
         # AtomTaskSearch 找相关 atom 共识，如果向量索引还没建完就跑，看到的
@@ -173,6 +179,11 @@ class DirectoryWatcher:
     def _loop(self):
         while not self._stop.is_set():
             if not self._pause.is_set():
+                if self.on_poll_hook is not None:
+                    try:
+                        self.on_poll_hook()
+                    except Exception:
+                        logger.exception("watcher on_poll_hook failed")
                 try:
                     self._scan_once()
                 except Exception:
@@ -327,6 +338,7 @@ class DirectoryWatcher:
             install_to_claude_code,
             install_to_codex,
             install_to_opencode,
+            install_to_openclaw,
         )
 
         target_root = self._resolve_target_root()
@@ -340,6 +352,7 @@ class DirectoryWatcher:
             "claude_code": install_to_claude_code,
             "codex": install_to_codex,
             "opencode": install_to_opencode,
+            "openclaw": install_to_openclaw,  # copy 模式，详见 install_to_openclaw docstring
         }
 
         results: dict = {}
@@ -405,17 +418,31 @@ class DirectoryWatcher:
         return self._install_skill_to_all_detected(skill_path)
 
     def _check_user_edits(self):
-        """检测每个 skill 是否有用户手改且静默 ≥3 分钟 → 触发 absorb agent。"""
+        """检测每个 skill 是否有用户手改且静默 ≥3 分钟 → 触发 absorb agent。
+
+        对每个 skill 先扫一遍 openclaw dest 看有没有用户改要回流——openclaw
+        装的 skill 是 copy 不是 symlink，dest 跟源仓解耦。reverse_sync 把 dest
+        改动灌回源仓 + touch source mtime，让 detect_user_edits 在**同一轮**内
+        看到 pending edit，直接走原有 absorb 链路。
+        """
         if self.skill_dir is None or not self.skill_dir.is_dir():
             return
         from xskill.user_edit_absorb_agent import (
-            UserEditAbsorbAgent, detect_user_edits,
+            UserEditAbsorbAgent, detect_user_edits, reverse_sync_openclaw_dest,
         )
+        target_root = self._resolve_target_root()
         factory = self._factory()
         for d in sorted(self.skill_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("."):
                 continue
             try:
+                # openclaw 回流（dest → source）— 没装 openclaw / dest 不存在
+                # / dest 没改 → no-op。返回 True 意味着 source mtime 刚被 touch，
+                # 下面 detect_user_edits 会立刻看到 pending edit。
+                if target_root is not None:
+                    dest_dir = target_root / ".agents" / "skills" / d.name
+                    reverse_sync_openclaw_dest(dest_dir, d)
+
                 if not detect_user_edits(d):
                     continue
                 logger.info("user edit detected (stable for 3+ min): %s", d.name)

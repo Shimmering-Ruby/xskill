@@ -18,10 +18,13 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from xskill import candidates as C
 
@@ -204,3 +207,137 @@ def detect_user_edits(skill_dir: Path, *, quiet_seconds: int = USER_EDIT_QUIET_S
     if (time.time() - max_mtime) < quiet_seconds:
         return False  # 改动太新，可能用户还在编辑
     return True
+
+
+# ──────────────────────────────────────────────────────────────────
+# openclaw dest → source 回流桥
+# ──────────────────────────────────────────────────────────────────
+#
+# openclaw 装 skill 走 copy（symlink 被 openclaw 拒收，详见 docs/ecosystem/
+# openclaw-install-fix.md）。dest 是真目录，跟源仓解耦，用户改 dest 不会
+# 被 absorb agent 看到。本函数把 dest 用户改灌回源仓，让 source mtime 看起
+# 来"刚被改过"，后续原有 absorb / push-edit 链路就能像处理普通源仓改动一样
+# 收编。
+
+_OPENCLAW_INSTALL_META = ".xskill-install-meta.json"
+_REVERSE_SYNC_EXCLUDE = {_OPENCLAW_INSTALL_META, ".git"}
+
+
+def _read_install_meta_ts(dest_dir: Path) -> Optional[float]:
+    """读 dest 里 .xskill-install-meta.json 的 installed_at。读不到返回 None。"""
+    meta_path = dest_dir / _OPENCLAW_INSTALL_META
+    if not meta_path.is_file():
+        return None
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        ts = data.get("installed_at")
+        if isinstance(ts, (int, float)):
+            return float(ts)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return None
+
+
+def _dest_user_edit_mtime(dest_dir: Path) -> float:
+    """扫 dest 下所有用户内容文件的 max mtime，跳过 _REVERSE_SYNC_EXCLUDE。
+
+    .git 跳过——dest 理论上不该有 .git，但万一有（用户自己 git init）也别
+    把 git 内部状态当用户改算。
+    """
+    max_mtime = 0.0
+    for p in dest_dir.rglob("*"):
+        try:
+            rel = p.relative_to(dest_dir)
+            parts = rel.parts
+            if not parts:
+                continue
+            if parts[0] in _REVERSE_SYNC_EXCLUDE:
+                continue
+            m = p.stat().st_mtime
+            if m > max_mtime:
+                max_mtime = m
+        except (OSError, ValueError):
+            continue
+    return max_mtime
+
+
+def has_pending_dest_edit(
+    dest_dir: Path, *, quiet_seconds: int = USER_EDIT_QUIET_SECONDS,
+) -> bool:
+    """dest 里是否有用户手改、且静默时间已过 quiet_seconds？
+
+    判据：
+    - dest 存在
+    - 能读到 install-meta 里的 installed_at
+    - dest 某文件 mtime > installed_at + 1 秒（用户改过）
+    - now - max_mtime >= quiet_seconds（停手 ≥3 分钟）
+    """
+    if not dest_dir.is_dir():
+        return False
+    installed_at = _read_install_meta_ts(dest_dir)
+    if installed_at is None:
+        return False
+    max_mtime = _dest_user_edit_mtime(dest_dir)
+    if max_mtime - installed_at < 1.0:
+        return False
+    if (time.time() - max_mtime) < quiet_seconds:
+        return False
+    return True
+
+
+def reverse_sync_openclaw_dest(
+    dest_dir: Path, source_dir: Path,
+    *, quiet_seconds: int = USER_EDIT_QUIET_SECONDS,
+) -> bool:
+    """把 dest 里的用户改灌回 source，让 source mtime 看起来"刚被改过"。
+
+    返回 True 表示真有内容被灌回去（这一轮 watcher 下一步应该看到 source
+    有 pending edit）；False 表示 dest 没改 / 还在静默期 / 出错跳过。
+
+    流程：
+    1. ``has_pending_dest_edit`` 检查（dest 有改且静默 ≥3 分钟）
+    2. 抢源仓 ``skill_repo_lock``——跟 CC absorb / canary flip 用同一把锁
+    3. 遍历 dest 文件（跳 ``.xskill-install-meta.json`` / ``.git``），
+       对每个文件 copy 到 source 对应路径（覆盖；新文件自动 mkdir）
+    4. 留意：**不删** source 里 dest 没有的文件（避免误删源仓里 ``.canary``
+       等 xskill 自己产物；用户要删请在源仓直接删）
+    5. touch source 里同名文件的 mtime（让 ``_max_workspace_mtime`` 下一轮
+       看到 source 有 pending edit）
+
+    并发：copytree 期间 dest 也可能被 openclaw 装 / 用户继续改。锁只保护
+    source 的一致性。dest 在 copytree 中途变了，最坏情况是漏掉这次新改动，
+    下一轮 watcher 再扫到再回流。
+    """
+    if not has_pending_dest_edit(dest_dir, quiet_seconds=quiet_seconds):
+        return False
+
+    from xskill.git_lock import skill_repo_lock
+
+    skill_name = source_dir.name
+    logger.info("openclaw reverse_sync start: %s (dest=%s → source=%s)",
+                skill_name, dest_dir, source_dir)
+
+    with skill_repo_lock(source_dir):
+        touched_any = False
+        for src_file in dest_dir.rglob("*"):
+            try:
+                rel = src_file.relative_to(dest_dir)
+            except ValueError:
+                continue
+            parts = rel.parts
+            if not parts or parts[0] in _REVERSE_SYNC_EXCLUDE:
+                continue
+            if src_file.is_dir():
+                continue
+            dst_file = source_dir / rel
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)  # copy2 保 mtime
+            touched_any = True
+
+        if touched_any:
+            # touch source 让 watcher 下一轮看见 (max_mtime > last_commit_ts ≥ 1s)
+            (source_dir / "SKILL.md").touch()
+
+    logger.info("openclaw reverse_sync done: %s (synced=%s)",
+                skill_name, touched_any)
+    return touched_any

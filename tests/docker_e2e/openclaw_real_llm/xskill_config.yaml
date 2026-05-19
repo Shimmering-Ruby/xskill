@@ -1,0 +1,23 @@
+# xskill config — 真 LLM e2e
+# llm 仍走 fake server，daemon 自己不需要打真 LLM；只验"装好的 skill 被 openclaw 看到"。
+skill_dir: /home/xtest/.xskill/skill
+llm:
+  base_url: http://127.0.0.1:19999
+  model: fake-llm
+  api_key: fake-key
+embedding:
+  base_url: http://127.0.0.1:19999
+  model: fake-embed
+  api_key: fake-key
+  dim: 0
+watcher:
+  poll_interval: 3
+candidates:
+  threshold: 3
+  stale_days: 60
+  min_source_trajs: 2
+sandbox:
+  enabled: false
+  trigger_threshold: 999
+canary:
+  enabled: false

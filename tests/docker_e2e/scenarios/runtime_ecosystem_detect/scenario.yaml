@@ -1,0 +1,11 @@
+name: runtime_ecosystem_detect
+description: |
+  Bug #5 regression — daemon 启动后才装的 agent（这里以 Claude Code 为例）
+  应该被 watcher._loop 里的 on_poll_hook 自动接管，不用重启 daemon。
+  scenario 流程：
+    1. 启动空 home 的 daemon，确认 registry 里没有 claude_code
+    2. mkdir ~/.claude/projects/foo + 丢 fake jsonl
+    3. 等 poll_interval × 2 + 8s
+    4. 断言 registry 出现 claude_code 条目 + bridge 目录有 traj_cc_*.md
+timeout_seconds: 90
+requires_llm: false   # 用 rig 自带的 fake LLM/embed server，不需要外部 API key

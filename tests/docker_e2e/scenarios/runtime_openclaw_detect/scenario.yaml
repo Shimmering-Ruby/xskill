@@ -1,0 +1,10 @@
+name: runtime_openclaw_detect
+description: |
+  OpenClaw 接入端到端：
+    1. 空 home daemon 启动，registry 里没有 openclaw
+    2. mkdir ~/.openclaw/agents/main/sessions + 丢一份真实 trajectory.jsonl
+    3. 等 poll_interval × 2 + 8s
+    4. 断言 registry 出现 openclaw + bridge dir 有 traj_oc_*.md
+    5. ~/.agents/skills/demo-skill/SKILL.md 存在（install_all_to_openclaw 跑通）
+timeout_seconds: 90
+requires_llm: false

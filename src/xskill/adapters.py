@@ -65,6 +65,9 @@ def adapt_trajectory(
     if format == "codex_rollout_jsonl":
         return _adapt_codex_rollout_jsonl(content, metadata)
 
+    if format == "openclaw_trajectory_jsonl":
+        return _adapt_openclaw_trajectory_jsonl(content, metadata)
+
     raise ValueError(f"unsupported trajectory format: {format!r}")
 
 
@@ -458,6 +461,254 @@ def _adapt_codex_rollout_jsonl(content: str, metadata: dict) -> tuple[str, dict]
     meta["timeline"] = timeline
     meta["total_turns"] = len(timeline)
     meta["response_items"] = response_count
+    if first_user_query:
+        meta.setdefault("query", first_user_query)
+
+    return md, meta
+
+
+def _adapt_openclaw_trajectory_jsonl(content: str, metadata: dict) -> tuple[str, dict]:
+    """Convert an OpenClaw trajectory JSONL (``~/.openclaw/agents/<agent>/sessions/<sid>.trajectory.jsonl``)
+    to markdown + metadata.
+
+    Trajectory file 是结构化时间线（事件类型：``session.started`` /
+    ``trace.metadata`` / ``context.compiled`` / ``prompt.submitted`` /
+    ``model.completed`` / ``model.fallback_step`` / ``trace.artifacts`` /
+    ``session.ended``）。Transcript 唯一权威源是 **最后一条 ``model.completed``
+    的 ``data.messagesSnapshot``** —— 每次 model.completed 都带从 session 起点到
+    当前 turn 的完整 snapshot，拿最后一条等于拿完整 transcript。
+
+    messagesSnapshot 里每条消息是 ``{role: user|assistant|custom, content: list|str,
+    timestamp}``。content 是 Anthropic 风格 content blocks: ``text`` /
+    ``tool_use`` / ``tool_result``。
+    """
+    session_id = ""
+    agent_id = ""
+    workspace_dir = ""
+    provider = ""
+    model_id = ""
+    message_provider = ""
+    final_status = ""
+    last_snapshot: list = []
+    eligible_skills: list[str] = []
+
+    for raw_line in content.splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            # 截断行（256 KiB 限制）容忍
+            continue
+
+        if event.get("traceSchema") != "openclaw-trajectory":
+            continue
+
+        ev_type = event.get("type")
+        data = event.get("data") or {}
+
+        if ev_type == "session.started":
+            session_id = session_id or event.get("sessionId", "") or ""
+            agent_id = agent_id or data.get("agentId", "") or ""
+            workspace_dir = workspace_dir or event.get("workspaceDir") or data.get("workspaceDir") or ""
+            provider = provider or event.get("provider", "") or ""
+            model_id = model_id or event.get("modelId", "") or ""
+            message_provider = message_provider or data.get("messageProvider", "") or ""
+
+        elif ev_type == "trace.metadata":
+            skills_meta = data.get("skills")
+            if isinstance(skills_meta, list):
+                for s in skills_meta:
+                    if isinstance(s, dict):
+                        nm = s.get("name") or s.get("id")
+                        if nm and nm not in eligible_skills:
+                            eligible_skills.append(str(nm))
+                    elif isinstance(s, str):
+                        if s not in eligible_skills:
+                            eligible_skills.append(s)
+
+        elif ev_type == "model.completed":
+            snap = data.get("messagesSnapshot")
+            if isinstance(snap, list) and snap:
+                last_snapshot = snap
+
+        elif ev_type == "trace.artifacts":
+            fs = data.get("finalStatus")
+            if fs:
+                final_status = str(fs)
+
+    # 从 messagesSnapshot 构 timeline
+    timeline: list[dict] = []
+    tool_calls: list[dict] = []
+    tool_names: list[str] = []
+    first_user_query = ""
+    pending_tool_by_id: dict[str, str] = {}
+    t = 0
+    step = 0
+
+    for msg in last_snapshot:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role") or ""
+        msg_content = msg.get("content")
+
+        # content 是 str（custom messages 常见）
+        if isinstance(msg_content, str):
+            if role == "user" and not first_user_query:
+                first_user_query = msg_content[:500]
+            timeline.append({
+                "t": t, "role": role or "custom",
+                "content": msg_content[:2000],
+            })
+            t += 1
+            continue
+
+        # content 是 list of blocks
+        if isinstance(msg_content, list):
+            for part in msg_content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type")
+                if ptype == "text":
+                    text = (part.get("text") or "").strip()
+                    if not text:
+                        continue
+                    if role == "user" and not first_user_query:
+                        first_user_query = text[:500]
+                    timeline.append({
+                        "t": t, "role": role or "custom",
+                        "content": text[:2000],
+                    })
+                    t += 1
+                elif ptype == "tool_use":
+                    tc_id = part.get("id", "") or ""
+                    tool_name = part.get("name", "unknown")
+                    tool_input = part.get("input") or {}
+                    if tool_name not in tool_names:
+                        tool_names.append(tool_name)
+                    pending_tool_by_id[tc_id] = tool_name
+                    timeline.append({
+                        "t": t, "role": "tool_call",
+                        "tool": tool_name,
+                        "input": tool_input,
+                    })
+                    tool_calls.append({
+                        "step": step,
+                        "tool": tool_name,
+                        "input": tool_input,
+                        "output": "",
+                        "output_available": False,
+                        "_tc_id": tc_id,
+                    })
+                    step += 1
+                    t += 1
+                elif ptype == "tool_result":
+                    tc_id = part.get("tool_use_id", "") or ""
+                    tool_name = pending_tool_by_id.get(tc_id, "unknown")
+                    result_content = part.get("content")
+                    if isinstance(result_content, list):
+                        parts_text = []
+                        for rp in result_content:
+                            if isinstance(rp, dict) and rp.get("type") == "text":
+                                parts_text.append(rp.get("text") or "")
+                        output_text = "\n".join(parts_text)
+                    else:
+                        output_text = str(result_content) if result_content else ""
+                    output_text = output_text[:2000]
+                    timeline.append({
+                        "t": t, "role": "tool_output",
+                        "tool": tool_name,
+                        "output": output_text,
+                        "is_error": bool(part.get("is_error")),
+                    })
+                    for entry in reversed(tool_calls):
+                        if entry.get("_tc_id") == tc_id:
+                            entry["output"] = output_text
+                            entry["output_available"] = True
+                            break
+                    t += 1
+
+    for entry in tool_calls:
+        entry.pop("_tc_id", None)
+
+    # Build markdown body
+    lines: list[str] = ["# OpenClaw Session Trajectory", ""]
+    if session_id:
+        lines.append(f"**session_id**: {session_id}")
+    if agent_id:
+        lines.append(f"**agent_id**: {agent_id}")
+    if workspace_dir:
+        lines.append(f"**workspace_dir**: {workspace_dir}")
+    if provider:
+        lines.append(f"**provider**: {provider}")
+    if model_id:
+        lines.append(f"**model_id**: {model_id}")
+    lines.append("")
+    if first_user_query:
+        lines.append("## Initial Query")
+        lines.append("")
+        lines.append(first_user_query)
+        lines.append("")
+
+    for entry in timeline:
+        role = entry["role"]
+        if role == "user":
+            lines.append("## User")
+            lines.append("")
+            lines.append(entry["content"])
+            lines.append("")
+        elif role == "assistant":
+            lines.append("## Assistant")
+            lines.append("")
+            lines.append(entry["content"])
+            lines.append("")
+        elif role == "custom":
+            lines.append("## System Note")
+            lines.append("")
+            lines.append(entry["content"])
+            lines.append("")
+        elif role == "tool_call":
+            lines.append(f"## Tool Call: {entry['tool']}")
+            lines.append("```json")
+            lines.append(json.dumps(entry["input"], ensure_ascii=False)[:1000])
+            lines.append("```")
+            lines.append("")
+        elif role == "tool_output":
+            err_tag = " (error)" if entry.get("is_error") else ""
+            lines.append(f"## Tool Output: {entry['tool']}{err_tag}")
+            lines.append("```")
+            lines.append(entry["output"])
+            lines.append("```")
+            lines.append("")
+
+    md = "\n".join(lines)
+
+    meta = dict(metadata)
+    meta.setdefault("source", "openclaw_trajectory_jsonl")
+    meta.setdefault("category", "openclaw_session")
+    if session_id:
+        meta.setdefault("session_id", session_id)
+    if workspace_dir:
+        meta.setdefault("cwd", workspace_dir)
+        meta.setdefault("workspace_dir", workspace_dir)
+    if agent_id:
+        meta.setdefault("agent_id", agent_id)
+    if provider:
+        meta.setdefault("provider", provider)
+    if model_id:
+        meta.setdefault("model_id", model_id)
+    if message_provider:
+        meta.setdefault("message_provider", message_provider)
+    if final_status:
+        meta.setdefault("final_status", final_status)
+    if eligible_skills:
+        meta.setdefault("eligible_skills", eligible_skills)
+    meta["timeline"] = timeline
+    meta["tool_calls"] = tool_calls
+    meta["tool_names"] = tool_names
+    meta["total_tool_calls"] = len(tool_calls)
+    meta["total_turns"] = len(timeline)
     if first_user_query:
         meta.setdefault("query", first_user_query)
 

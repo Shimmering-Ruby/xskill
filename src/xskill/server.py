@@ -1386,33 +1386,30 @@ def create_app(home_root: Path | str | None = None,
 
     @app.on_event("startup")
     async def _startup():
-        """Initialize skill_tools context so search_skills / rebuild_skill_index work."""
-        llm = None
-        embed = None
-        try:
-            llm = create_llm_client(_config)
-        except Exception:
-            logger.warning("LLM client not configured", exc_info=True)
-        try:
-            embed = create_embed_client(_config)
-        except Exception:
-            logger.warning("Embed client not configured — indexing will be skipped", exc_info=True)
-        try:
-            init_context(
-                skill_dir=_skill_dir,
-                data_dir=_traj_dir,
-                llm_client=llm,
-                embed_client=embed,
-                config=_config,
+        """Initialize skill_tools context so search_skills / rebuild_skill_index work.
+
+        无 fallback：LLM/embed 客户端构造失败一律 raise，daemon 启动失败而不是
+        带 None client 带病跑（CLAUDE.md 第 1 条）。create_llm_client 内部仍可能
+        返回 None（其它调用方依赖此语义），所以在 daemon startup 处显式断言。
+        """
+        llm = create_llm_client(_config)
+        if llm is None:
+            raise RuntimeError(
+                "LLM client could not be created — check ~/.xskill/config.yaml: "
+                "llm.base_url / llm.model / llm.api_key must all be valid"
             )
-            logger.info(
-                "xskill server ready  skill_dir=%s  traj_dir=%s  llm=%s  embed=%s",
-                _skill_dir, _traj_dir,
-                "ok" if llm else "NONE",
-                "ok" if embed else "NONE",
-            )
-        except Exception:
-            logger.warning("init_context failed", exc_info=True)
+        embed = create_embed_client(_config)
+        init_context(
+            skill_dir=_skill_dir,
+            data_dir=_traj_dir,
+            llm_client=llm,
+            embed_client=embed,
+            config=_config,
+        )
+        logger.info(
+            "xskill server ready  skill_dir=%s  traj_dir=%s  llm=ok  embed=ok",
+            _skill_dir, _traj_dir,
+        )
 
         # Auto-register chat archive directory
         try:
@@ -1423,152 +1420,203 @@ def create_app(home_root: Path | str | None = None,
             logger.warning("failed to register chat archive dir", exc_info=True)
 
         # Auto-detect known agent ecosystems on this host and bridge them in.
-        # For each detected source (e.g. ~/.claude/projects), we register a
-        # paired bridge dir (~/.xskill/cc_sessions) and start an ingester
-        # thread that periodically mirrors native sessions into it as
-        # traj_*.md. After that the regular watcher takes over.
-        # team server 模式跳过整段——纯 server 不采集自己这台机器的本地轨迹。
-        class _SkipEcosystemBridge(Exception):
-            pass
-        try:
+        # 抽成闭包：startup 跑一次（初始状态），同时挂到 watcher._loop 每轮跑
+        # 一次（运行中新装的 agent 也能自动接管，无需重启 daemon）。幂等通过
+        # _watcher_ref[f"ingester_{eco}"] 字典 in-check 保证。
+        # team server 模式整段跳过——纯 server 不采集自己这台机器的本地轨迹。
+        def _ensure_ingesters_for_detected_ecosystems():
             if team_server:
-                raise _SkipEcosystemBridge()
-            from xskill.ecosystems import (
-                detect_known_ecosystems,
-                CCSessionIngester, JsonlIngester, SqliteIngester,
-                CODEX_SPEC, OPENCODE_SPEC,
-                install_all_to_claude_code,
-                install_all_to_codex,
-                install_all_to_opencode,
-            )
-            from xskill.config import XSKILL_HOME
-            from xskill.install_history import InstallHistory
-            from xskill.registry import register_dir
-
-            # install_history.jsonl 是 daemon 全局状态（与 registry.db 同级），
-            # 不属于任一 skill；落到 ~/.xskill/ 根而不是 skill_dir。否则 ls
-            # ~/.xskill/skill/ 会把它误识成 skill 名（实跑遇到的 bug）。
-            install_history_path = XSKILL_HOME / "install_history.jsonl"
-            install_history = InstallHistory(install_history_path)
-
-            detections = detect_known_ecosystems(home_root=_home_root())
-            poll_interval = float(_config.get("watcher", {}).get("poll_interval", 10))
-
-            for det in detections:
-                bridge: Path = det["bridge"]
-                bridge.mkdir(parents=True, exist_ok=True)
-                register_dir(
-                    bridge,
-                    label=f"{det['ecosystem']} sessions",
-                    ecosystem=det["ecosystem"],
+                return
+            try:
+                from xskill.ecosystems import (
+                    detect_known_ecosystems,
+                    CCSessionIngester, JsonlIngester, SqliteIngester,
+                    CODEX_SPEC, OPENCODE_SPEC, OPENCLAW_SPEC,
+                    install_all_to_claude_code,
+                    install_all_to_codex,
+                    install_all_to_opencode,
+                    install_all_to_openclaw,
+                    make_openclaw_canary_flip_hook,
                 )
+                from xskill.canary import CanaryConfig
+                from xskill.config import XSKILL_HOME
+                from xskill.install_history import InstallHistory
+                from xskill.registry import register_dir
 
-                if det["ecosystem"] == "claude_code":
-                    # 启动时先把现有 skill 全部装 main 到 ~/.claude/skills/，
-                    # 同时往 install_history append 起始记录。后续 ingester
-                    # 见到新 session 才有依据查"那一刻装的是哪 side"。
-                    try:
-                        installed = install_all_to_claude_code(
-                            _skill_dir, target_root=_home_root(),
-                        )
-                        for dest in installed:
-                            install_history.record(
-                                skill=dest.parent.name, side="main",
-                                sha="",  # 启动时不取 sha，避免硬依赖 git 状态
+                install_history_path = XSKILL_HOME / "install_history.jsonl"
+                install_history = InstallHistory(install_history_path)
+
+                detections = detect_known_ecosystems(home_root=_home_root())
+                poll_interval = float(_config.get("watcher", {}).get("poll_interval", 10))
+
+                for det in detections:
+                    eco = det["ecosystem"]
+                    ingester_key = f"ingester_{eco}"
+                    if ingester_key in _watcher_ref:
+                        continue  # 该生态的 ingester 已起，幂等跳过
+
+                    bridge: Path = det["bridge"]
+                    bridge.mkdir(parents=True, exist_ok=True)
+                    register_dir(
+                        bridge,
+                        label=f"{eco} sessions",
+                        ecosystem=eco,
+                    )
+
+                    if eco == "claude_code":
+                        # 启动时先把现有 skill 全部装 main 到 ~/.claude/skills/，
+                        # 同时往 install_history append 起始记录。后续 ingester
+                        # 见到新 session 才有依据查"那一刻装的是哪 side"。
+                        try:
+                            installed = install_all_to_claude_code(
+                                _skill_dir, target_root=_home_root(),
                             )
-                        logger.info(
-                            "startup install_all_to_claude_code: %d skills installed (side=main)",
-                            len(installed),
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "startup install_all_to_claude_code failed", exc_info=True,
-                        )
-                        install_history.record_fail(
-                            skill="<startup_all>", agent="claude_code",
-                            reason=str(e)[:200],
-                        )
+                            for dest in installed:
+                                install_history.record(
+                                    skill=dest.parent.name, side="main",
+                                    sha="",  # 启动时不取 sha，避免硬依赖 git 状态
+                                )
+                            logger.info(
+                                "startup install_all_to_claude_code: %d skills installed (side=main)",
+                                len(installed),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "startup install_all_to_claude_code failed", exc_info=True,
+                            )
+                            install_history.record_fail(
+                                skill="<startup_all>", agent="claude_code",
+                                reason=str(e)[:200],
+                            )
 
-                    # CCSessionIngester 是 CC 专属（处理灰度翻牌 + header 注入），
-                    # 不是普通 JsonlIngester——它在 _loop 里干的事更多。
-                    ingester = CCSessionIngester(
-                        target_traj_dir=bridge,
-                        home_root=_home_root(),
-                        poll_interval=poll_interval,
-                        skill_dir=_skill_dir,
-                        target_root=_home_root(),
-                        history_path=install_history_path,
-                        assignments_path=_skill_dir / "session_assignments.jsonl",
+                        # CCSessionIngester 是 CC 专属（处理灰度翻牌 + header 注入），
+                        # 不是普通 JsonlIngester——它在 _loop 里干的事更多。
+                        ingester = CCSessionIngester(
+                            target_traj_dir=bridge,
+                            home_root=_home_root(),
+                            poll_interval=poll_interval,
+                            skill_dir=_skill_dir,
+                            target_root=_home_root(),
+                            history_path=install_history_path,
+                            assignments_path=_skill_dir / "session_assignments.jsonl",
+                        )
+                        ingester.start()
+                        _watcher_ref[ingester_key] = ingester
+
+                    elif eco == "codex":
+                        # Codex 一次性同步 + 起 daemon 线程；后续 codex session 新写入
+                        # 会被 daemon poll 实时桥接，不必重启 daemon。
+                        try:
+                            installed = install_all_to_codex(
+                                _skill_dir, target_root=_home_root(),
+                            )
+                            logger.info(
+                                "startup install_all_to_codex: %d skills installed to ~/.agents/skills/",
+                                len(installed),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "startup install_all_to_codex failed", exc_info=True,
+                            )
+                            install_history.record_fail(
+                                skill="<startup_all>", agent="codex",
+                                reason=str(e)[:200],
+                            )
+                        ingester = JsonlIngester(
+                            CODEX_SPEC,
+                            target_traj_dir=bridge,
+                            home_root=_home_root(),
+                            poll_interval=poll_interval,
+                        )
+                        ingester.start()
+                        _watcher_ref[ingester_key] = ingester
+
+                    elif eco == "opencode":
+                        # OpenCode SQLite + WAL：SqliteIngester 用 immutable=1 打开
+                        # 避免 daemon poll 撞 OpenCode 写端的 WAL 锁。
+                        # Skill install 走 ~/.agents/skills/ (Codex 共享；重复 install
+                        # 是 idempotent)。
+                        try:
+                            installed = install_all_to_opencode(
+                                _skill_dir, target_root=_home_root(),
+                            )
+                            logger.info(
+                                "startup install_all_to_opencode: %d skills installed to ~/.agents/skills/",
+                                len(installed),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "startup install_all_to_opencode failed", exc_info=True,
+                            )
+                            install_history.record_fail(
+                                skill="<startup_all>", agent="opencode",
+                                reason=str(e)[:200],
+                            )
+                        ingester = SqliteIngester(
+                            target_traj_dir=bridge,
+                            home_root=_home_root(),
+                            spec=OPENCODE_SPEC,
+                            poll_interval=poll_interval,
+                        )
+                        ingester.start()
+                        _watcher_ref[ingester_key] = ingester
+
+                    elif eco == "openclaw":
+                        # OpenClaw 走 JSONL（每个 session 一个 .trajectory.jsonl）。
+                        # Skill install 走 ~/.agents/skills/，与 codex/opencode 共享
+                        # 目录但用 copy 而非 symlink（openclaw 拒收 escape-root
+                        # 的 symlink，详见 docs/ecosystem/openclaw-install-fix.md）。
+                        try:
+                            installed = install_all_to_openclaw(
+                                _skill_dir, target_root=_home_root(),
+                            )
+                            for dest in installed:
+                                install_history.record(
+                                    skill=dest.parent.name, side="main", sha="",
+                                )
+                            logger.info(
+                                "startup install_all_to_openclaw: %d skills installed (copy mode) to ~/.agents/skills/",
+                                len(installed),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "startup install_all_to_openclaw failed", exc_info=True,
+                            )
+                            install_history.record_fail(
+                                skill="<startup_all>", agent="openclaw",
+                                reason=str(e)[:200],
+                            )
+                        # canary flip hook：每轮 ingester 桥出新 session 后，
+                        # pick_side + 跟 install_history 比对 + 必要时重 copy
+                        # 切版本到 dest。无 staging 的 skill 永远 main，hook
+                        # 是 no-op；有 staging 时按 probability 比例哈希分流。
+                        canary_cfg = CanaryConfig.from_dict(_config.get("canary", {}))
+                        flip_hook = make_openclaw_canary_flip_hook(
+                            skill_dir=_skill_dir,
+                            target_root=_home_root(),
+                            history=install_history,
+                            probability=canary_cfg.probability,
+                        )
+                        ingester = JsonlIngester(
+                            OPENCLAW_SPEC,
+                            target_traj_dir=bridge,
+                            home_root=_home_root(),
+                            poll_interval=poll_interval,
+                            on_new_sessions=flip_hook,
+                        )
+                        ingester.start()
+                        _watcher_ref[ingester_key] = ingester
+
+                    logger.info(
+                        "ecosystem %s detected: source=%s bridge=%s",
+                        eco, det["source"], bridge,
                     )
-                    ingester.start()
-                    _watcher_ref[f"ingester_{det['ecosystem']}"] = ingester
+            except Exception:
+                logger.warning("ecosystem auto-detect failed", exc_info=True)
 
-                elif det["ecosystem"] == "codex":
-                    # Codex 一次性同步 + 起 daemon 线程；后续 codex session 新写入
-                    # 会被 daemon poll 实时桥接，不必重启 daemon。
-                    try:
-                        installed = install_all_to_codex(
-                            _skill_dir, target_root=_home_root(),
-                        )
-                        logger.info(
-                            "startup install_all_to_codex: %d skills installed to ~/.agents/skills/",
-                            len(installed),
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "startup install_all_to_codex failed", exc_info=True,
-                        )
-                        install_history.record_fail(
-                            skill="<startup_all>", agent="codex",
-                            reason=str(e)[:200],
-                        )
-                    ingester = JsonlIngester(
-                        CODEX_SPEC,
-                        target_traj_dir=bridge,
-                        home_root=_home_root(),
-                        poll_interval=poll_interval,
-                    )
-                    ingester.start()
-                    _watcher_ref[f"ingester_{det['ecosystem']}"] = ingester
-
-                elif det["ecosystem"] == "opencode":
-                    # OpenCode SQLite + WAL：SqliteIngester 用 immutable=1 打开
-                    # 避免 daemon poll 撞 OpenCode 写端的 WAL 锁。
-                    # Skill install 走 ~/.agents/skills/ (Codex 共享；重复 install
-                    # 是 idempotent)。
-                    try:
-                        installed = install_all_to_opencode(
-                            _skill_dir, target_root=_home_root(),
-                        )
-                        logger.info(
-                            "startup install_all_to_opencode: %d skills installed to ~/.agents/skills/",
-                            len(installed),
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "startup install_all_to_opencode failed", exc_info=True,
-                        )
-                        install_history.record_fail(
-                            skill="<startup_all>", agent="opencode",
-                            reason=str(e)[:200],
-                        )
-                    ingester = SqliteIngester(
-                        target_traj_dir=bridge,
-                        home_root=_home_root(),
-                        spec=OPENCODE_SPEC,
-                        poll_interval=poll_interval,
-                    )
-                    ingester.start()
-                    _watcher_ref[f"ingester_{det['ecosystem']}"] = ingester
-
-                logger.info(
-                    "ecosystem %s detected: source=%s bridge=%s",
-                    det["ecosystem"], det["source"], bridge,
-                )
-        except _SkipEcosystemBridge:
-            logger.info("team server mode: skip local ecosystem auto-detect")
-        except Exception:
-            logger.warning("ecosystem auto-detect failed", exc_info=True)
+        # startup 跑一次确保初始状态正确；watcher._loop 里会通过 on_poll_hook
+        # 每轮再跑一次，以便 daemon 运行中新装的 agent 也能被自动接管。
+        _ensure_ingesters_for_detected_ecosystems()
 
         # team server：初始化 team 上下文 + 注册 traj_root 为 watch_dir 基。
         if team_server:
@@ -1623,6 +1671,7 @@ def create_app(home_root: Path | str | None = None,
                     max_concurrent=int(watcher_cfg.get("max_concurrent", 30)),
                     cold_start_threshold=int(watcher_cfg.get("cold_start_threshold", 3)),
                     server_mode=team_server,
+                    on_poll_hook=_ensure_ingesters_for_detected_ecosystems,
                 )
                 watcher.start()
                 _watcher_ref["instance"] = watcher

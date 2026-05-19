@@ -81,10 +81,23 @@ def _agents_skills_path(home: Path) -> Path:
 
     Codex 0.130 的 ``core-skills/src/loader.rs`` 把这条路径列为 user scope 的
     **首选**（``$CODEX_HOME/skills/`` 已被标 deprecated）；OpenCode 的
-    ``packages/opencode/src/skill/index.ts::discoverSkills`` 同样扫这里。
-    xskill 装 Codex / OpenCode 都写这一处，不再 per-agent 各写一份。
+    ``packages/opencode/src/skill/index.ts::discoverSkills`` 同样扫这里；
+    OpenClaw 把 ``~/.agents/skills`` 列为 personal-agent tier。
+    xskill 装 Codex / OpenCode / OpenClaw 都写这一处，不再 per-agent 各写一份。
     """
     return home / ".agents" / "skills"
+
+
+def _openclaw_agents_path(home: Path) -> Path:
+    """OpenClaw trajectory 根目录：``<home>/.openclaw/agents``。
+
+    实际文件在 ``<this>/<agent-id>/sessions/<sid>.trajectory.jsonl``——OpenClaw
+    把每个 agent 的 session 单独成目录，``main`` 是默认 agent id。
+    同目录下还有 ``<sid>.jsonl``（runtime session）、``.jsonl.bak-*``（周期
+    备份）、``.jsonl.reset.*Z``（reset 留档）、``.trajectory-path.json``（指针
+    json），glob 必须用 ``*.trajectory.jsonl`` 精确锁定才不会扫错。
+    """
+    return home / ".openclaw" / "agents"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -163,6 +176,13 @@ _KNOWN_ECOSYSTEMS: list[dict] = [
         "source_subpath": ".local/share/opencode/opencode.db",
         "bridge_subpath": ".xskill/opencode_sessions",
         "source_kind": "file",
+    },
+    {
+        "id": "openclaw",
+        # OpenClaw 写 <home>/.openclaw/agents/<agent>/sessions/<sid>.trajectory.jsonl
+        "source_subpath": ".openclaw/agents",
+        "bridge_subpath": ".xskill/openclaw_sessions",
+        "source_kind": "dir",
     },
 ]
 
@@ -359,6 +379,168 @@ def install_to_codex(
         side,
         ecosystem_label="codex",
     )
+
+
+_OPENCLAW_INSTALL_META = ".xskill-install-meta.json"
+
+
+def install_to_openclaw(
+    skill_path: Path | str,
+    target_root: Path | str | None = None,
+    side: str = "main",
+) -> Path:
+    """把一个 skill **拷贝**到 ``<target_root>/.agents/skills/<name>``——OpenClaw
+    的 personal-agent tier skill 目录。
+
+    与 install_to_codex / install_to_opencode 不同：openclaw 走 ``shutil.copytree``
+    不走 symlink。原因：openclaw skill discovery 对 personal-agent / workspace /
+    extra-dir 都做 realpath 安全检查（resolved 路径必须留在 configured root
+    内），xskill 源仓在 ``~/.xskill/skill/<name>/`` 跑出 ``~/.agents/skills/``
+    root，symlink 会被 openclaw skip。copy dest 是真目录，过检查。
+
+    dest 里会落一份 ``.xskill-install-meta.json``，记 ``{source_sha, side,
+    installed_at}``，给 canary flip 判定和 dest→source 用户改回流检测用。
+
+    与共享 ``~/.agents/skills/`` 的 codex / opencode symlink dest **并存不冲突**——
+    openclaw dest 是真目录，三家 install 路径在同一父目录下不同 name 即可。
+    """
+    skill_path = Path(skill_path).resolve()
+    if not skill_path.is_dir():
+        raise NotADirectoryError(f"skill_path is not a directory: {skill_path}")
+
+    _source_md_for_side(skill_path, side)  # 抛 FileNotFoundError 若 main / staging 不齐
+
+    src_dir = (
+        skill_path if side == "main"
+        else (skill_path.parent / ".canary" / skill_path.name).resolve()
+    )
+
+    root = Path(target_root) if target_root else Path.home()
+    skills_root = _agents_skills_path(root)
+    skills_root.mkdir(parents=True, exist_ok=True)
+    name = skill_path.name
+    dest = skills_root / name
+
+    # 回流保护：dest 可能有用户改没回流到源仓——比如 canary flip 刚刚被
+    # JsonlIngester hook 触发，dest 是 main 内容用户已经改了一些东西，现在
+    # 要换装 staging。先调 reverse_sync 把改灌回源仓再覆盖；reverse_sync
+    # 没改 / dest 不存在 → no-op。
+    if dest.is_dir() and not dest.is_symlink():
+        try:
+            from xskill.user_edit_absorb_agent import reverse_sync_openclaw_dest
+            reverse_sync_openclaw_dest(dest, skill_path)
+        except Exception:
+            logger.warning(
+                "install_to_openclaw(%s): reverse_sync before copy failed; "
+                "proceeding with overwrite",
+                name, exc_info=True,
+            )
+
+    # 删旧 dest（symlink / file / dir 都干掉）；ignore 之前 codex / opencode 装的
+    # 同名 symlink——它们在共用目录里同名时会被覆盖；用户应该靠 install_to_codex
+    # / install_to_opencode 各自重装来恢复（启动 hook 会跑）
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.is_dir():
+        shutil.rmtree(dest)
+
+    # copytree —— ignore xskill 自己塞的 meta 文件（避免源仓里被 reverse_sync 灌
+    # 进去后又被 install 再拷出来）和 .git 目录（源仓是 git 仓，不应拷进 dest）
+    shutil.copytree(
+        src_dir, dest,
+        ignore=shutil.ignore_patterns(_OPENCLAW_INSTALL_META, ".git", ".git/*"),
+    )
+
+    # 落 install-meta 给 canary flip / reverse_sync 比对用
+    source_sha = _read_skill_head_sha(skill_path)
+    meta = {
+        "source_sha": source_sha,
+        "side": side,
+        "installed_at": time.time(),
+        "ecosystem": "openclaw",
+    }
+    (dest / _OPENCLAW_INSTALL_META).write_text(
+        json.dumps(meta, indent=2), encoding="utf-8",
+    )
+
+    return dest / "SKILL.md"
+
+
+def make_openclaw_canary_flip_hook(
+    skill_dir: Path,
+    target_root: Path,
+    history: "InstallHistory",  # forward ref; imported lazily where called
+    probability: float,
+) -> Callable[[list[dict]], None]:
+    """生成 JsonlIngester ``on_new_sessions`` 回调：每条新 session 跑 pick_side
+    + 跟 install_history 比对，需要翻牌就调 ``install_to_openclaw`` 重 copy。
+
+    用法：server openclaw 分支起 ingester 时传：
+        ``on_new_sessions=make_openclaw_canary_flip_hook(skill_dir, target_root,
+                                                         history, canary_cfg.probability)``
+
+    只对**已有 staging 分支**的 skill 做 flip——无 staging 的 skill 没东西可
+    分流，每次 pick_side 都返回 main，跟当前装的 main 一致，no-op。
+
+    翻牌之后 ``install_history`` 记一条新 side——下一条 session 进来 lookup
+    时能反查到当前装的是哪 side。
+    """
+    def _flip(submitted: list[dict]) -> None:
+        if probability <= 0 or not skill_dir.is_dir():
+            return
+        from xskill.canary import has_staging, pick_side
+
+        for rec in submitted:
+            traj_id = rec.get("traj_id") or rec.get("session_id") or ""
+            if not traj_id:
+                continue
+            for sk_path in sorted(skill_dir.iterdir()):
+                if not sk_path.is_dir() or sk_path.name.startswith("."):
+                    continue
+                if not (sk_path / ".git").is_dir():
+                    continue
+                if not has_staging(sk_path):
+                    continue  # 无 staging：分流没意义，永远 main
+                target_side = pick_side(traj_id, sk_path.name, probability)
+                # 当前装的哪 side：查 install_history 最近一条
+                cur_rec = history.lookup(time.time(), skill=sk_path.name) if history else None
+                cur_side = (cur_rec or {}).get("side", "main")
+                if cur_side == target_side:
+                    continue  # 已对齐，no-op
+                try:
+                    install_to_openclaw(
+                        sk_path, target_root=target_root, side=target_side,
+                    )
+                    if history is not None:
+                        history.record(skill=sk_path.name, side=target_side, sha="")
+                    logger.info(
+                        "openclaw canary flip: %s %s -> %s (traj=%s)",
+                        sk_path.name, cur_side, target_side, traj_id[:8],
+                    )
+                except Exception:
+                    logger.exception(
+                        "openclaw canary flip failed: %s -> %s",
+                        sk_path.name, target_side,
+                    )
+    return _flip
+
+
+def _read_skill_head_sha(skill_path: Path) -> str:
+    """读 skill 仓当前 HEAD 的 sha。读不到（非 git 仓 / 没有 HEAD）就返回空串——
+    用于 install-meta 记录，缺失不影响 install 本身。
+    """
+    head = skill_path / ".git" / "HEAD"
+    if not head.is_file():
+        return ""
+    try:
+        ref = head.read_text(encoding="utf-8").strip()
+        if ref.startswith("ref: "):
+            ref_path = skill_path / ".git" / ref[5:]
+            if ref_path.is_file():
+                return ref_path.read_text(encoding="utf-8").strip()
+        return ref  # detached HEAD
+    except OSError:
+        return ""
 
 
 def _parse_iso_to_epoch(s: str) -> Optional[float]:
@@ -599,6 +781,35 @@ def _read_cwd_from_cc_jsonl_content(content: str) -> str:
     return ""
 
 
+def _openclaw_session_id_from_path(jsonl_path: Path) -> str:
+    """``<sid>.trajectory.jsonl`` → ``<sid>``。glob 已经保证 .trajectory. 中缀存在。"""
+    return jsonl_path.name.split(".trajectory.")[0]
+
+
+def _read_workspace_dir_from_openclaw_jsonl(content: str) -> str:
+    """从 OpenClaw trajectory JSONL 抽 cwd 替身（workspaceDir）。
+
+    每条 event 顶层都带 ``workspaceDir``；首行通常是 ``session.started``，
+    其 ``data.workspaceDir`` 也有。两者都不存在则返回空（让上层退化为 "unknown"）。
+    """
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ws = ev.get("workspaceDir")
+        if ws:
+            return str(ws)
+        data = ev.get("data") or {}
+        ws = data.get("workspaceDir")
+        if ws:
+            return str(ws)
+    return ""
+
+
 # ─────────────────────────────────────────────────────────────────
 # Concrete ecosystem specs
 # ─────────────────────────────────────────────────────────────────
@@ -627,6 +838,19 @@ CODEX_SPEC = EcosystemSpec(
     traj_id_prefix="traj_codex_",
     skills_install_path=_agents_skills_path,
     label="codex",
+)
+
+OPENCLAW_SPEC = EcosystemSpec(
+    name="openclaw",
+    source_kind="jsonl",
+    sessions_path=_openclaw_agents_path,
+    sessions_glob="*/sessions/*.trajectory.jsonl",  # <agent>/sessions/<sid>.trajectory.jsonl
+    session_id_from_path=_openclaw_session_id_from_path,
+    cwd_from_content=_read_workspace_dir_from_openclaw_jsonl,
+    adapter_format="openclaw_trajectory_jsonl",
+    traj_id_prefix="traj_oc_",
+    skills_install_path=_agents_skills_path,  # 与 codex/opencode 共用 ~/.agents/skills
+    label="openclaw",
 )
 
 
@@ -665,6 +889,7 @@ class JsonlIngester:
         target_traj_dir: Path | str | None = None,
         home_root: Path | str | None = None,
         poll_interval: float = 10.0,
+        on_new_sessions: Callable[[list[dict]], None] | None = None,
     ):
         if spec.source_kind != "jsonl":
             # SQLite ingester 用单独的 SqliteIngester；早 fail 避免走错路。
@@ -676,6 +901,12 @@ class JsonlIngester:
         self.target_traj_dir = Path(target_traj_dir) if target_traj_dir else None
         self.home_root = Path(home_root) if home_root else None
         self.poll_interval = poll_interval
+        # on_new_sessions: 可选 hook，每轮 scan 桥接到新 session 后调
+        # 一次（参数是 submitted records）。openclaw 用这个 hook 做 canary
+        # flip——发现新 session → pick_side → 跟 install_history 对比 →
+        # 触发 copy-overwrite。codex / claude_code 不用（它们走 symlink，
+        # 灰度由 CCSessionIngester / 老逻辑负责）。
+        self.on_new_sessions = on_new_sessions
         # daemon thread 内部用：seen_sessions 持久化在 instance 上避免每轮
         # _scan_seen_sessions 重扫（thread 跑期间 traj_*.json 自己也在生成）。
         self._seen: set[str] = set()
@@ -750,6 +981,14 @@ class JsonlIngester:
                         "JsonlIngester(%s): bridged %d new session(s) → %s",
                         self.spec.name, len(submitted), self.target_traj_dir,
                     )
+                    if self.on_new_sessions is not None:
+                        try:
+                            self.on_new_sessions(submitted)
+                        except Exception:
+                            logger.exception(
+                                "JsonlIngester(%s) on_new_sessions hook failed",
+                                self.spec.name,
+                            )
             except Exception:
                 self._stats["errors"] += 1
                 logger.exception("JsonlIngester(%s) scan error", self.spec.name)
@@ -856,6 +1095,29 @@ def ingest_codex_sessions(
     只是 spec 不同。
     """
     return JsonlIngester(CODEX_SPEC).scan_and_bridge(
+        target_traj_dir=Path(target_traj_dir),
+        home_root=Path(home_root) if home_root else None,
+        seen_sessions=seen_sessions,
+    )
+
+
+def ingest_openclaw_sessions(
+    target_traj_dir: Path | str,
+    *,
+    home_root: Path | str | None = None,
+    seen_sessions: Optional[set[str]] = None,
+) -> list[dict]:
+    """Bridge OpenClaw trajectory JSONLs into xskill's trajectory directory.
+
+    Scans ``<home_root>/.openclaw/agents/<agent>/sessions/*.trajectory.jsonl``
+    and submits any session whose id is not in ``seen_sessions`` as a new
+    trajectory under ``target_traj_dir`` using the
+    ``openclaw_trajectory_jsonl`` adapter.
+
+    glob 显式带 ``.trajectory.`` 中缀，自动避开同目录下的 runtime ``<sid>.jsonl``、
+    ``<sid>.jsonl.bak-*`` 备份和 ``<sid>.jsonl.reset.*Z`` reset 留档。
+    """
+    return JsonlIngester(OPENCLAW_SPEC).scan_and_bridge(
         target_traj_dir=Path(target_traj_dir),
         home_root=Path(home_root) if home_root else None,
         seen_sessions=seen_sessions,
@@ -1155,6 +1417,21 @@ def install_all_to_opencode(
     同一 skill 是 idempotent（install_fallback.install_dir 会先 unlink 后重链）。
     """
     return _install_all_with(install_to_opencode, skill_dir, target_root, names)
+
+
+def install_all_to_openclaw(
+    skill_dir: Path | str,
+    target_root: Path | str | None = None,
+    names: Iterable[str] | None = None,
+) -> list[Path]:
+    """Install every skill under ``skill_dir`` (each subdir = one skill) to
+    OpenClaw's personal-agent skill root (``<target_root>/.agents/skills``——
+    与 codex / opencode 共享). If ``names`` is given, restrict to those.
+
+    重复 install 同名 skill 是 idempotent——三个生态走同一目录，install_fallback
+    会先 unlink 后重链。
+    """
+    return _install_all_with(install_to_openclaw, skill_dir, target_root, names)
 
 
 def _install_all_with(

@@ -136,16 +136,21 @@ class TeamClient:
         """把一个已 checkout 好的 skill working copy 装到本机所有生态。
 
         working tree 已是 server 指定 side 的内容，所以一律用 side='main'
-        语义（= 链接整个 working tree 目录）。
+        语义（= 链接 / 拷贝整个 working tree 目录）。
+
+        注意 openclaw 走 copy 不是 symlink（openclaw 拒收 escape-root 的
+        symlink，详见 docs/ecosystem/openclaw-install-fix.md）。其他生态保持
+        symlink-first 三阶 fallback。
         """
         from xskill.ecosystems import (
             detect_known_ecosystems, install_to_claude_code,
-            install_to_codex, install_to_opencode,
+            install_to_codex, install_to_opencode, install_to_openclaw,
         )
         installer = {
             "claude_code": install_to_claude_code,
             "codex": install_to_codex,
             "opencode": install_to_opencode,
+            "openclaw": install_to_openclaw,
         }
         for det in detect_known_ecosystems(home_root=self.home_root):
             fn = installer.get(det["ecosystem"])
@@ -163,11 +168,26 @@ class TeamClient:
 
         返回推送成功的 skill 数。client 是愚蠢且可能恶意的——它推过去的
         只能进隔离分支，永远碰不到 main。
+
+        openclaw 用户改的是 dest copy（``~/.agents/skills/<name>/``），不会
+        自动到 working copy。每个 skill 先跑 reverse_sync_openclaw_dest 把
+        dest 改灌回 working copy，下面 git status 才能看到。
         """
+        from xskill.user_edit_absorb_agent import reverse_sync_openclaw_dest
+
         pushed = 0
         for repo_dir in sorted(self.skill_dir.iterdir()):
             if not (repo_dir / ".git").is_dir():
                 continue
+
+            # openclaw 回流（dest → working copy）— 没装到 openclaw 时 no-op
+            dest_dir = self.home_root / ".agents" / "skills" / repo_dir.name
+            try:
+                reverse_sync_openclaw_dest(dest_dir, repo_dir)
+            except Exception:
+                logger.warning("openclaw reverse_sync failed: %s",
+                               repo_dir.name, exc_info=True)
+
             # 用 git status 当门——直接看工作树相对 HEAD 的真实差异（含
             # untracked）。不用 has_pending_user_edit 的 mtime 启发式：
             # reconcile 刚做的 git checkout 会把 SKILL.md mtime 抬到 now，

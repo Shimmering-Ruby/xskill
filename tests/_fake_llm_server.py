@@ -301,3 +301,21 @@ def make_openai_chat_response(text: str, model: str = "fake-model") -> dict:
         ],
         "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
     }
+
+
+# ─────────────────────────────────────────────────────────────────
+# CLI entry — docker_e2e rig 把本文件当独立可执行 python 脚本启动。
+# 用法: python _fake_llm_server.py <port>
+# 仅启默认 responders（identity 兜底），scenario 不需要更复杂逻辑。
+# ─────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+    port_arg = int(sys.argv[1]) if len(sys.argv) > 1 else 19999
+    srv = FakeLLMServer(host="0.0.0.0", port=port_arg)
+    srv.start(timeout=10.0)
+    print(f"[fake-llm] listening on http://0.0.0.0:{port_arg}", flush=True)
+    # 主线程 join 让 process 不退出
+    try:
+        srv._thread.join()
+    except KeyboardInterrupt:
+        srv.stop()
