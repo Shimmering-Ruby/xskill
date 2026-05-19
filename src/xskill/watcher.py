@@ -339,6 +339,7 @@ class DirectoryWatcher:
             install_to_codex,
             install_to_opencode,
             install_to_openclaw,
+            install_to_cursor,
         )
 
         target_root = self._resolve_target_root()
@@ -353,6 +354,7 @@ class DirectoryWatcher:
             "codex": install_to_codex,
             "opencode": install_to_opencode,
             "openclaw": install_to_openclaw,  # copy 模式，详见 install_to_openclaw docstring
+            "cursor": install_to_cursor,
         }
 
         results: dict = {}

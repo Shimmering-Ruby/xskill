@@ -145,12 +145,14 @@ class TeamClient:
         from xskill.ecosystems import (
             detect_known_ecosystems, install_to_claude_code,
             install_to_codex, install_to_opencode, install_to_openclaw,
+            install_to_cursor,
         )
         installer = {
             "claude_code": install_to_claude_code,
             "codex": install_to_codex,
             "opencode": install_to_opencode,
             "openclaw": install_to_openclaw,
+            "cursor": install_to_cursor,
         }
         for det in detect_known_ecosystems(home_root=self.home_root):
             fn = installer.get(det["ecosystem"])

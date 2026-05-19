@@ -1,0 +1,4 @@
+{"role": "user", "message": {"content": [{"type": "text", "text": "Fix the bug in foo.py line 42"}]}}
+{"role": "assistant", "message": {"content": [{"type": "text", "text": "I'll look at foo.py"}, {"type": "tool_use", "name": "read_file"}]}}
+{"role": "assistant", "message": {"content": [{"type": "text", "text": "Found the issue, fixing"}, {"type": "tool_use", "name": "edit_file"}]}}
+{"role": "user", "message": {"content": [{"type": "text", "text": "Thanks"}]}}
