@@ -84,11 +84,24 @@ SKILL_GITIGNORE = """# xskill v2 skill 仓库的 ignore 规则
 
 
 def run_git(args: list[str], cwd: str) -> tuple[int, str, str]:
-    # per-repo 串行化：同一个 .git 同时只跑一个 git 进程，杜绝 index/refs
-    # 被并发写坏。不同 repo 仍并行（锁 keyed by cwd）。
+    """Run git in *cwd*；per-repo 串行化 + Windows utf-8 解码安全。
+
+    - ``_repo_lock_for(cwd)``：同一个 .git 同时只跑一个 git 进程，杜绝
+      index/refs 被并发写坏。不同 repo 仍并行（锁 keyed by cwd）。
+    - ``encoding="utf-8" errors="replace"``：Windows 默认 GBK 在 git 输出含
+      非 ASCII 时会炸；subprocess 解码失败时可能把 stdout/stderr 置为 None，
+      调用方统一当空串处理。
+    """
     with _repo_lock_for(cwd):
-        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
-    return r.returncode, r.stdout.strip(), r.stderr.strip()
+        r = subprocess.run(
+            ["git"] + args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
 
 
 def init_skill_repo_on_baby(skill_dir: str, name: str, description: str) -> None:
