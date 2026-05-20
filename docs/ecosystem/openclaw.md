@@ -138,7 +138,7 @@ metadata:
   "traceSchema": "openclaw-trajectory-pointer",
   "schemaVersion": 1,
   "sessionId": "06401578-04d1-492d-b225-c11d5d4437f9",
-  "runtimeFile": "/home/admin/.openclaw/agents/main/sessions/06401578-04d1-492d-b225-c11d5d4437f9.trajectory.jsonl"
+  "runtimeFile": "/home/user/.openclaw/agents/main/sessions/06401578-04d1-492d-b225-c11d5d4437f9.trajectory.jsonl"
 }
 ```
 
@@ -178,7 +178,7 @@ env 覆盖（官方 `docs/tools/trajectory.md`）：
   "sessionId": "06401578-04d1-492d-b225-c11d5d4437f9",
   "sessionKey": "agent:main:main",
   "runId": "b30a7490-5cc7-405b-b64b-55eba093be8a",
-  "workspaceDir": "/home/admin/.openclaw/workspace",
+  "workspaceDir": "/home/user/.openclaw/workspace",
   "provider": "deepseek",
   "modelId": "deepseek-v4-pro",
   "modelApi": "openai-completions",

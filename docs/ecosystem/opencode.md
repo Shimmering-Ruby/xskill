@@ -1,6 +1,6 @@
 # OpenCode 接入面
 
-> [`opencode`](https://github.com/sst/opencode)（`sst/opencode`，Bun + Effect-TS）。本文档基于本机 clone `/home/admin/learn/opencode/`（commit 时间 2025-Q4） + 本机实际 `~/.local/share/opencode/opencode.db` 实测。
+> [`opencode`](https://github.com/sst/opencode)（`sst/opencode`，Bun + Effect-TS）。本文档基于本机 clone `/home/user/learn/opencode/`（commit 时间 2025-Q4） + 本机实际 `~/.local/share/opencode/opencode.db` 实测。
 >
 > OpenCode 在三大维度都跟 Claude Code / Gemini CLI 不一样：**路径走 XDG 而非 `~/.<app>/`、轨迹存 SQLite 而非 JSONL、skill 加载入口多源合并**。是 xskill 接入难度最高的生态。
 

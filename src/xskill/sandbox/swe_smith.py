@@ -209,7 +209,7 @@ class SweSmithSandbox(Sandbox):
                 return TrialResult(task_id=task.task_id, passed=False,
                                    error=f"failed to pull {image_name}")
 
-        container_name = f"t2s_trial_{uuid.uuid4().hex[:12]}"
+        container_name = f"xskill_trial_{uuid.uuid4().hex[:12]}"
         start_time = time.time()
 
         try:

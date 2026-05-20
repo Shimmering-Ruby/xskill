@@ -53,7 +53,7 @@ class TestSanitize:
 class TestCCTrajId:
     def test_uses_cwd_basename_and_sid_short(self, tmp_path):
         jsonl = _write_jsonl(tmp_path, [
-            {"type": "user", "cwd": "/home/admin/dataharness", "sessionId": "..."}
+            {"type": "user", "cwd": "/home/user/dataharness", "sessionId": "..."}
         ])
         traj_id = _cc_traj_id(jsonl, "f2eb54d4-0a5c-4f2f-97ec-bacf397fbde4")
         assert traj_id == "traj_cc_dataharness_f2eb54d4"
@@ -75,15 +75,15 @@ class TestCCTrajId:
         """JSONL 多事件，取**第一个**带 cwd 的事件——CC 一个 session 内 cwd 不变。"""
         jsonl = _write_jsonl(tmp_path, [
             {"type": "queue-operation"},
-            {"type": "user", "cwd": "/home/admin/projA"},
-            {"type": "assistant", "cwd": "/home/admin/projA"},
+            {"type": "user", "cwd": "/home/user/projA"},
+            {"type": "assistant", "cwd": "/home/user/projA"},
         ])
         traj_id = _cc_traj_id(jsonl, "12345678-...")
         assert traj_id == "traj_cc_projA_12345678"
 
     def test_chinese_project_name_sanitized(self, tmp_path):
         jsonl = _write_jsonl(tmp_path, [
-            {"type": "user", "cwd": "/home/admin/测试项目"},
+            {"type": "user", "cwd": "/home/user/测试项目"},
         ])
         traj_id = _cc_traj_id(jsonl, "deadbeef-...")
         # 不该有中文，会被规整为 _

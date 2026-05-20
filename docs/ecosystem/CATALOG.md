@@ -38,7 +38,7 @@
 | 生态 | 版本 | 来源 | 本机数据 |
 |---|---|---|---|
 | Claude Code | （CLI 自带，未单独标版本） | `~/.claude/projects/` | ✅ 多个项目 trajectory |
-| Gemini CLI | `0.44.0-nightly.20260512.g022e8baef`（`/home/admin/learn/gemini-cli/package.json:3`） | clone 上游 | ✅ `~/.gemini/tmp/work/...` |
+| Gemini CLI | `0.44.0-nightly.20260512.g022e8baef`（`/home/user/learn/gemini-cli/package.json:3`） | clone 上游 | ✅ `~/.gemini/tmp/work/...` |
 | OpenCode | `bun@1.3.13`、跟随 dev branch（commit 时间 2025-Q4） | clone 上游 | ✅ `~/.local/share/opencode/opencode.db`（3 session） |
 | Codex | nightly `codex-rs/` 工作区（package.json 未单独标 npm 版本） | clone 上游 | ❌ 本机未安装 codex CLI |
 | **OpenClaw** | **`2026.5.7 (eeef486)`** | npm 全局：`~/.nvm/versions/node/v24.14.1/lib/node_modules/openclaw/`；源码 repo `github.com/openclaw/openclaw`（MIT，已确认存在）；本机部分 clone `~/openclaw/`（root + apps + .agents/skills；src/packages/extensions 因网络限制未完整拉取） | ✅ `~/.openclaw/agents/main/sessions/*.trajectory.jsonl`（3 个 session，56 / 84 / 175 events，event types: `session.started / trace.metadata / context.compiled / prompt.submitted / model.completed / trace.artifacts / session.ended`） |
@@ -50,7 +50,7 @@
 
 | OS | `home_dir` 取值 | 覆盖方式 |
 |---|---|---|
-| Linux | `$HOME`，例 `/home/admin` | — |
+| Linux | `$HOME`，例 `/home/user` | — |
 | macOS | `$HOME`，例 `/Users/admin` | — |
 | Windows | `%USERPROFILE%`，例 `C:\Users\admin` | — |
 
@@ -89,7 +89,7 @@
 
 ## 数据可信度声明
 
-- **Linux 行**：claude-code / gemini-cli / opencode / openclaw / hermes 五者路径均在本机实测（`~/.claude/projects/-home-admin-traj2skill/...`、`~/.gemini/tmp/work/chats/...`、`~/.local/share/opencode/opencode.db` 含 3 真实 session、`~/.openclaw/agents/main/sessions/*.trajectory.jsonl`、`~/.hermes/state.db` 含 216 session）。**Codex 本机未安装**，路径均基于上游 Rust 源码（`codex-rs/`）静态推导。
+- **Linux 行**：claude-code / gemini-cli / opencode / openclaw / hermes 五者路径均在本机实测（`~/.claude/projects/-home-user-traj2skill/...`、`~/.gemini/tmp/work/chats/...`、`~/.local/share/opencode/opencode.db` 含 3 真实 session、`~/.openclaw/agents/main/sessions/*.trajectory.jsonl`、`~/.hermes/state.db` 含 216 session）。**Codex 本机未安装**，路径均基于上游 Rust 源码（`codex-rs/`）静态推导。
 - **macOS 行**：未在 Mac 上亲验，按"POSIX 同 Linux"外推，与 README "Platforms" 章节口径一致。OpenCode 注意 xdg-basedir 在 macOS 不走 `~/Library/Application Support`；OpenClaw 在 mac 是主战场（大量 mac-only skill）。
 - **Windows 行**：**未在 Windows 上亲验**。路径基于代码（Gemini 见 `packages/core/src/utils/paths.ts:18-27`，OpenCode 依赖 xdg-basedir 在 Win 上行为非标，Claude Code / OpenClaw / Hermes 路径基于 `os.homedir()` / `Path.home()` 标准行为推断）。生产部署前需在 Win 实测一次。
 

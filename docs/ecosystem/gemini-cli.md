@@ -2,7 +2,7 @@
 
 > Google 的 `gemini-cli`（`@google/gemini-cli`）。本文档基于上游仓库源码 + 本机 `~/.gemini/` 实际状态。
 >
-> 调研基线：gemini-cli `0.44.0-nightly.20260512`（`/home/admin/learn/gemini-cli`）；本机数据 `~/.gemini/projects.json`、`~/.gemini/tmp/work/chats/session-2026-04-23T06-25-183b8d5f.jsonl` 等。
+> 调研基线：gemini-cli `0.44.0-nightly.20260512`（`/home/user/learn/gemini-cli`）；本机数据 `~/.gemini/projects.json`、`~/.gemini/tmp/work/chats/session-2026-04-23T06-25-183b8d5f.jsonl` 等。
 
 ## 1. 背景：与 CC 同构的 Skill 模型
 
@@ -70,13 +70,13 @@ xskill 自己装 skill 时不必走 CLI，直接落文件即可（与 CC 同款 
 $ cat ~/.gemini/projects.json
 {
   "projects": {
-    "/home/admin/work": "work",
-    "/home/admin/traj2skill": "traj2skill"
+    "/home/user/work": "work",
+    "/home/user/traj2skill": "traj2skill"
   }
 }
 
 $ cat ~/.gemini/tmp/work/.project_root
-/home/admin/work
+/home/user/work
 ```
 
 > **历史背景修正**：早期版本（hash-based）的 storage.ts 用 `sha256(projectRoot)` 做目录名（`paths.ts:318` `getProjectHash` 仍存在但被 `Storage.initialize()` 旁路），新版改为 slug + 注册表 + 每目录 `.project_root` marker（`storage.ts:154-244`），cwd 是**可逆推的**。本文档定稿口径以新版为准。

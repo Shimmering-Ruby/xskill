@@ -1,7 +1,7 @@
 # Codex / OpenCode 适配器调研
 
 > 任务目标:为主 agent 设计 xskill 的 ingester / installer 抽象提供事实依据。
-> 数据来源:本机 clone `/home/admin/learn/codex/` (Rust 工作区 `codex-rs/`)、`/home/admin/learn/opencode/` (Bun + Effect-TS) 静态源码;本机 `~/.local/share/opencode/opencode.db` 运行时实测;以及上游官方文档/GitHub。
+> 数据来源:本机 clone `/home/user/learn/codex/` (Rust 工作区 `codex-rs/`)、`/home/user/learn/opencode/` (Bun + Effect-TS) 静态源码;本机 `~/.local/share/opencode/opencode.db` 运行时实测;以及上游官方文档/GitHub。
 > 相关已有文档:[`docs/ecosystem/codex.md`](../ecosystem/codex.md)、[`docs/ecosystem/opencode.md`](../ecosystem/opencode.md)、[`docs/ecosystem/CATALOG.md`](../ecosystem/CATALOG.md)。本文是面向 adapter 接口设计的精简提取 + CI 验证可行性新章。
 
 ---
@@ -303,5 +303,5 @@ CI matrix 跑:`pytest tests/test_codex_adapter.py tests/test_opencode_adapter.py
 4. **OpenCode `event` 表**:本机实测该表 0 行,可能是某种 event sourcing 模式仅在特定 channel / config 启用。如果是 source-of-truth 的话 ingester 要改写。但当前 `message` 表已经够用,未深挖。
 5. **OpenCode Windows 行为**:xdg-basedir 在 Windows 上若 `$XDG_DATA_HOME` 未设的回退行为是 npm `xdg-basedir` 包决定的,**未亲验**。最坏情况:OpenCode 在 Win 上根本不能正常工作,xskill 也就不必支持 Win 上的 OpenCode 接入(或要求用户预设 env)。
 6. **`~/.agents/skills/` 共享目录的实战兼容**:Codex / OpenCode / openclaw 三家源码都扫这个路径,但**没在同一台机器上同时验证过冲突情况**。例如同一 skill name 在 `~/.agents/skills/foo` 和 `~/.codex/skills/foo` 都存在时各 agent 的去重行为。建议主 agent 设计 `install_*` 时统一只写 `~/.agents/skills/`,避免多写。
-7. **Codex npm `@openai/codex` 实际是否对应 codex-rs**:`codex-rs/` 是 Rust 工作区,但 `codex-cli/` 目录也存在(本机 clone 的 `/home/admin/learn/codex/codex-cli`)。npm 上的 `@openai/codex` 究竟是哪一份?如果是 codex-cli (JS) 而非 codex-rs,那 adapter 设计要重做。需要装一次 `npm i -g @openai/codex` 看 `codex --version` + `which codex` + `find ~/.codex -newer ...` 来确认。
+7. **Codex npm `@openai/codex` 实际是否对应 codex-rs**:`codex-rs/` 是 Rust 工作区,但 `codex-cli/` 目录也存在(本机 clone 的 `/home/user/learn/codex/codex-cli`)。npm 上的 `@openai/codex` 究竟是哪一份?如果是 codex-cli (JS) 而非 codex-rs,那 adapter 设计要重做。需要装一次 `npm i -g @openai/codex` 看 `codex --version` + `which codex` + `find ~/.codex -newer ...` 来确认。
 8. **OpenCode 在跑时持 WAL 锁**:xskill 读 `opencode.db` 必须用 `?mode=ro&immutable=1` 或类似 connection string,避免触发写锁。需要在 adapter 实现时实测 `sqlite3.connect("file:...?mode=ro", uri=True)` 在 OpenCode 同时跑时是否真不会触发 `database is locked`。

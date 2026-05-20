@@ -1,6 +1,6 @@
 # Codex 接入面
 
-> OpenAI 官方 [`codex`](https://github.com/openai/codex) CLI（Rust 实现）。本文档基于本机 clone `/home/admin/learn/codex/` 源码（`codex-rs/` 工作区）。
+> OpenAI 官方 [`codex`](https://github.com/openai/codex) CLI（Rust 实现）。本文档基于本机 clone `/home/user/learn/codex/` 源码（`codex-rs/` 工作区）。
 >
 > 本机未安装 codex CLI（`~/.codex/` 不存在），所有路径口径来自源码 + `docs/research/ecosystem-integration-survey.md` 的早期调研，**Linux 实测列待 codex 实际运行后补**。
 

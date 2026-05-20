@@ -59,14 +59,14 @@ description: 一句话讲清楚什么时候用，给 LLM 判断用的
 
 | 原 cwd | encoded |
 |---|---|
-| `/home/admin/traj2skill` | `-home-admin-traj2skill` |
-| `/home/admin/work` | `-home-admin-work` |
+| `/home/user/traj2skill` | `-home-user-traj2skill` |
+| `/home/user/work` | `-home-user-work` |
 
 本机实测：
 ```
-~/.claude/projects/-home-admin-traj2skill/
-~/.claude/projects/-home-admin-claude-code/
-~/.claude/projects/-home-admin-dataharness/
+~/.claude/projects/-home-user-traj2skill/
+~/.claude/projects/-home-user-claude-code/
+~/.claude/projects/-home-user-dataharness/
 ...
 ```
 
@@ -134,6 +134,6 @@ Windows 上路径变成 `%USERPROFILE%\.claude\projects\<encoded-cwd>\<sid>.json
 
 ## 6. 已知坑
 
-1. **CC analysis 目录**：`~/.claude/projects/-home-admin-claude-code-claude-code-analysis/` 这种"项目内套项目"的路径会出现多个独立的 encoded slug，watcher 不会混淆，但人在 grep 时容易看花。
+1. **CC analysis 目录**：`~/.claude/projects/-home-user-claude-code-claude-code-analysis/` 这种"项目内套项目"的路径会出现多个独立的 encoded slug，watcher 不会混淆，但人在 grep 时容易看花。
 2. **session 复用**：CC 在同一个 sessionId 下可能多次写入（resume 场景）；xskill 用 `(session_id, file_mtime)` 做 dedup，重启不会重复消费 — 见 `seen_sessions` 状态。
 3. **subagent**：CC 子代理 trajectory 路径多一层 `<sid>/subagents/agent-<id>.jsonl`，xskill 当前扫描通配 `*/*.jsonl` 是否覆盖了这一层？需要确认 watcher 的 glob 深度（如果不够，xskill 会漏掉 subagent 数据）。

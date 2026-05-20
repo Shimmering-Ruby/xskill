@@ -44,4 +44,4 @@ deterministic：固定 timestamp `2026-01-15T10:00:00 UTC` + 固定 UUID
 ## codex 实地安装确认
 
 - `npm i -g @openai/codex` → `codex-cli 0.130.0`
-- 安装路径：`/home/admin/.nvm/versions/node/v24.14.1/bin/codex`
+- 安装路径：`/home/user/.nvm/versions/node/v24.14.1/bin/codex`

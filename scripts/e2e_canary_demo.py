@@ -152,7 +152,7 @@ def main():
         print("[FATAL] LLM 未配置", file=sys.stderr)
         sys.exit(1)
 
-    tmp = Path(tempfile.mkdtemp(prefix="t2s_canary_e2e_"))
+    tmp = Path(tempfile.mkdtemp(prefix="xskill_canary_e2e_"))
     log.info(f"tempdir: {tmp}")
 
     skill_dir = tmp / "skill"

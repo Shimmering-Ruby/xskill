@@ -734,7 +734,7 @@ def _cc_traj_id(jsonl_path: Path, session_id: str) -> str:
     ``unknown``；``sid8`` 是 session UUID 前 8 字符（碰撞概率极低）。
 
     例：
-      cwd=/home/admin/dataharness, sid=f2eb54d4-... → traj_cc_dataharness_f2eb54d4
+      cwd=/home/user/dataharness, sid=f2eb54d4-... → traj_cc_dataharness_f2eb54d4
       cwd 不存在,                  sid=abc-...       → traj_cc_unknown_abc12345
     """
     cwd = _read_cwd_from_jsonl(jsonl_path)
