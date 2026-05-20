@@ -11,7 +11,12 @@
     from xskill import Registry, SkillRepo
 """
 
-__version__ = "0.3.0"
+# 版本号唯一真源是 setuptools_scm 生成的 _version.py（git tag 派生）。
+# 安装包里一定有 _version.py；源码 checkout 没 build 过时 fallback。
+try:
+    from xskill._version import __version__
+except ImportError:  # 未经 build 的源码树
+    __version__ = "0.0.0+unknown"
 
 # 顶级公开面：4 个核心类
 from xskill.core import XSkill

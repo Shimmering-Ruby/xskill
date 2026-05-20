@@ -1,85 +1,93 @@
-# xskill 配置模板 — 复制到 ~/.xskill/config.yaml，按需修改
+# xskill config template — copy to ~/.xskill/config.yaml and edit.
 #
-# 安装后首次使用：
+# First run after install:
 #   mkdir -p ~/.xskill
 #   cp examples/config.yaml.example ~/.xskill/config.yaml
-#   # 编辑 llm.api_key / embedding.api_key
+#   # then edit llm.api_key / embedding.api_key
 #
-# 不读环境变量、不读 ~/.aikey；缺失字段直接抛 FileNotFoundError / KeyError。
+# xskill does NOT read environment variables or any key file. Missing
+# required fields raise FileNotFoundError / KeyError loudly — no silent
+# fallback.
 
-# ===== Skill 仓库 =====
-skill_dir: ~/.xskill/skill            # 全局唯一 skill repo（可改任意绝对路径）
+# ===== Skill repository =====
+skill_dir: ~/.xskill/skill            # the single global skill repo (any absolute path works)
 
-# ===== LLM（生成 / 评分 / chat 用）=====
+# ===== LLM (used for generation / scoring / chat) =====
+# Any OpenAI-compatible chat-completions endpoint. Examples:
+#   OpenAI      https://api.openai.com/v1
+#   DeepSeek    https://api.deepseek.com
+#   OpenRouter  https://openrouter.ai/api/v1
+#   (local)     http://127.0.0.1:11434/v1   (Ollama, etc.)
 llm:
-  base_url: https://api.deepseek.com           # 或 dashscope / openai 兼容 endpoint
-  model:    deepseek-v4-flash
+  base_url: https://api.openai.com/v1
+  model:    gpt-4o-mini
   api_key:  PUT_YOUR_LLM_API_KEY_HERE
-  max_tokens: 10000      # 可选；thinking model（如 deepseek-v4-flash）需要给
-                         # reasoning_tokens + content 足够预算，太小会让 meta
-                         # 抽取返回空 / 截断 → fallback 到 rule extractor
-  # temperature: 0.0     # 可选；默认 0（确定性）
+  max_tokens: 10000      # optional. A "thinking" model needs enough budget for
+                         # reasoning_tokens + content; too small makes meta
+                         # extraction return empty / truncated → rule fallback.
+  # temperature: 0.0     # optional; default 0 (deterministic)
 
-# ===== Embedding（向量检索用）=====
+# ===== Embedding (used for vector retrieval) =====
+# Any OpenAI-compatible embeddings endpoint. `dim: 0` auto-probes the
+# dimension on first call.
 embedding:
-  base_url: https://ark.cn-beijing.volces.com/api/v3
-  model:    doubao-embedding-vision-251215   # 或 doubao-embedding-large-text-250515
+  base_url: https://api.openai.com/v1
+  model:    text-embedding-3-small
   api_key:  PUT_YOUR_EMBEDDING_API_KEY_HERE
-  dim:      0                      # 0 = 自动探测；large-text 可写 2048
-  # api: openai | multimodal      # 可选；默认 vision 模型→multimodal，text 模型→/embeddings
+  dim:      0                      # 0 = auto-probe
+  # api: openai | multimodal       # optional; default openai. Set "multimodal"
+                                   # for vision-style embedding endpoints.
 
-# ===== L2 沙箱评估（SWE-bench docker 跑 A/B/C；单测 / 评估精度脚本用）=====
+# ===== L2 sandbox eval (runs SWE-bench A/B/C in docker; used by eval scripts) =====
 sandbox:
   enabled:           true
-  max_instances:     5              # 单次 eval 跑几个 instance
-  n_trials:          10             # 每 instance 重复次数（pass@1 的 N）
-  timeout_per_trial: 300            # 单 trial 墙钟超时（秒）
-  trigger_threshold: 3              # skill 至少关联 N 条 SWE instance 才触发
+  max_instances:     5              # instances per eval run
+  n_trials:          10             # repeats per instance (the N in pass@1)
+  timeout_per_trial: 300            # wall-clock timeout per trial (seconds)
+  trigger_threshold: 3              # a skill needs ≥ N linked SWE instances to trigger
 
-# ===== Skill 候选门控（决定 .candidates.yml 中的 candidate 何时升 SKILL.md）=====
+# ===== Skill candidate gating (when a .candidates.yml entry is promoted to SKILL.md) =====
 candidates:
-  threshold:        3               # supporting_trajs ≥ N 才升级
-  stale_days:       60              # 超过 N 天仍不足 → 沉到 references/
-  min_source_trajs: 2               # 新建 skill 至少要 N 条 source_trajs
+  threshold:        3               # promote once supporting_trajs ≥ N
+  stale_days:       60              # after N days still short → demote to references/
+  min_source_trajs: 2               # a new skill needs ≥ N source_trajs
 
-# ===== Skill 编辑 Agent（PromotionAgent 子 agent 的上限）=====
+# ===== Skill edit agent (limits for the promotion sub-agent) =====
 skill_edit_agent:
-  tool_call_limit:     20           # 单次 promote 最多调几次工具
-  timeout_seconds:     600          # 墙钟超时（保留已写入部分，不抛异常）
-  read_file_max_bytes: 15000        # read_file 单次截断字节数
+  tool_call_limit:     20           # max tool calls per promote
+  timeout_seconds:     600          # wall-clock timeout (keeps partial writes, no raise)
+  read_file_max_bytes: 15000        # read_file truncation per call
 
-# ===== Canary（灰度发布：staging 分支按概率替换 main，
-#       两侧各 ≥ min_samples 条 UX 分后比较，胜出 merge / 落败 discard）=====
+# ===== Canary (gradual rollout: a staging branch probabilistically replaces
+#       main; once both sides have ≥ min_samples UX scores, compare and
+#       merge the winner / discard the loser) =====
 canary:
   enabled:       true
-  probability:   0.2                # 检索命中时以 p 概率走 staging
-  min_samples:   5                  # 两侧各 ≥ N 条 UX 分才判定
-  max_days_hold: 14                 # staging 最长存活；超时丢弃
-  rotate_interval: 300              # 单机 canary 时间窗轮转周期（秒）
+  probability:   0.2                # on a retrieval hit, route to staging with prob p
+  min_samples:   5                  # need ≥ N UX scores on each side to decide
+  max_days_hold: 14                 # max staging lifetime; discarded on timeout
+  rotate_interval: 300              # standalone-mode canary time-window rotation (seconds)
 
-# ===== Team C/S 模式（仅 `xskill serve --server` 读）=====
-# client 端不读 config.yaml——它的连接信息在 ~/.xskill/team_client.json，
-# 由 `xskill connect <host:port> --token <token>` 首次握手时写入。
+# ===== Team C/S mode (only read by `xskill serve --server`) =====
+# The client does NOT read config.yaml — its connection info lives in
+# ~/.xskill/team_client.json, written on first `xskill connect <host:port>
+# --token <token>` handshake.
 team:
   server:
-    traj_root: ~/.xskill/team_trajectories   # client 上传轨迹的落盘根
-    skill_slots: 100                         # client 本地最多持有的 skill 数
-    ranked_slots: 80                         # 其中按 ux_score 滑窗取的数量；
-                                             # 余下 20 = recommended 桶
-                                             # （SP3 = 用户画像推荐，SP1 占位）
+    traj_root: ~/.xskill/team_trajectories   # root where client-uploaded trajectories land
+    skill_slots: 100                         # max skills a client holds locally
+    ranked_slots: 80                         # of which N are the ux_score sliding-window
+                                             # top picks; the remaining 20 = recommended bucket
 
-# ===== Watcher（serve 内置的目录轮询）=====
+# ===== Watcher (the directory poller built into `serve`) =====
 watcher:
-  poll_interval: 30                 # 秒；每轮扫一次所有 watch_dir，发现 →
-                                    # meta → embed → process → ux_score 流水
-  max_concurrent: 30                # ThreadPoolExecutor 大小；4N 个 worker
-                                    # 同时跑 meta 抽取（LLM I/O 阻塞，多并发
-                                    # 真能加速）。冷启动批量上索引时 30 比
-                                    # 默认 5 显著加速。受 LLM provider 的
-                                    # RPM 限制；deepseek 几千 RPM 够任意调，
-                                    # doubao 看账户配额。
-  cold_start_threshold: 3           # 同一 wd 还有 ≥N 条 traj 未 indexed 时
-                                    # 推迟 process_traj 到下一轮——保证 agent
-                                    # 调 search_similar_trajs 时能看到全量
-                                    # 索引快照，避免 path-B 共识搜空。
-                                    # 1 = 完全顺序串行；999 ≈ 禁用门控。
+  poll_interval: 30                 # seconds; each round scans every watch_dir,
+                                    # new files flow meta → embed → process → ux_score
+  max_concurrent: 30                # ThreadPoolExecutor size. Meta extraction is
+                                    # LLM-I/O-bound so high concurrency really helps
+                                    # cold-start bulk indexing. Bounded by your LLM
+                                    # provider's RPM limit.
+  cold_start_threshold: 3           # if a watch_dir still has ≥ N un-indexed trajectories,
+                                    # defer process_traj to the next round so the agent
+                                    # sees a full index snapshot. 1 = fully sequential;
+                                    # 999 ≈ gate disabled.

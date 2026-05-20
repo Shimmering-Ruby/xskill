@@ -130,19 +130,22 @@ A handful of LLM agents do the work, each with a single, narrow job:
 
 The trajectory in / Skill out interfaces are pluggable. The daemon auto-detects
 which agents you have installed and keeps scanning them as long as it runs — install
-a new agent later and it gets picked up without a restart. Honest current state:
+a new agent later and it gets picked up without a restart.
 
-| Coding agent | Trajectory ingest (input) | Skill install (output) |
-| ------------ | ------------------------- | ---------------------- |
-| **Claude Code** | Native — auto-detects `~/.claude/projects/`, bridges each session JSONL into a trajectory and (when a Skill is in evaluation) injects the canary marker. | Native — Skill is symlinked into `~/.claude/skills/<name>/`. |
-| **Codex CLI** | Native — auto-detects `~/.codex/sessions/`, bridges each rollout JSONL into a trajectory. | Native — Skill is symlinked into `~/.agents/skills/<name>/` (the shared user-scope skills dir Codex reads). |
-| **OpenCode** | Native — auto-detects `~/.local/share/opencode/opencode.db` (SQLite), bridges each session into a trajectory. | Native — Skill is symlinked into `~/.agents/skills/<name>/` (shared with Codex). |
-| **Cursor** | Not yet. | Not yet. |
-| **Trae** | Not yet. | Not yet. |
-| **OpenClaw** | Not yet. | Not yet. |
-| **Any other agent** | Manual — submit a trajectory in `markdown`, `json`, or `raw` format via the SDK (`xskill.adapters.submit_trajectory`). | Manual — every Skill is a directory with an Anthropic-style `SKILL.md` + YAML frontmatter; copy or symlink it into whatever discovery path your agent uses. |
+**Status legend:** ✅ verified end-to-end · 🟡 implemented, not yet verified end-to-end
 
-The output format is the same `SKILL.md` schema Anthropic uses, so any agent that already reads Anthropic Skills can read xskill's library verbatim. A failed install on one agent is logged and skipped — it never blocks the others. Cursor, Trae and OpenClaw are on the [roadmap](#roadmap); PRs welcome.
+| Coding agent | Status | Trajectory ingest (input) | Skill install (output) |
+| ------------ | ------ | ------------------------- | ---------------------- |
+| **Claude Code** | ✅ | Native — auto-detects `~/.claude/projects/`, bridges each session JSONL into a trajectory and (when a Skill is in evaluation) injects the canary marker. | Native — Skill is symlinked into `~/.claude/skills/<name>/`. |
+| **OpenClaw** | ✅ | Native — auto-detects `~/.openclaw/agents/`, bridges each `*.trajectory.jsonl`. | Native — Skill is **copied** into `~/.agents/skills/<name>/` (OpenClaw rejects escape-root symlinks; see [docs](docs/ecosystem/openclaw.md)). |
+| **Codex CLI** | 🟡 | Native — auto-detects `~/.codex/sessions/`, bridges each rollout JSONL. | Native — Skill is symlinked into `~/.agents/skills/<name>/` (shared user-scope skills dir). |
+| **OpenCode** | 🟡 | Native — auto-detects `~/.local/share/opencode/opencode.db` (SQLite). | Native — Skill is symlinked into `~/.agents/skills/<name>/` (shared with Codex). |
+| **Cursor** | 🟡 | Native — auto-detects `~/.cursor/projects/*/agent-transcripts/`. | Native — Skill is symlinked into `~/.cursor/skills/<name>/`. |
+| **Any other agent** | — | Manual — submit a trajectory in `markdown`, `json`, or `raw` format via the SDK (`xskill.adapters.submit_trajectory`). | Manual — every Skill is a directory with an Anthropic-style `SKILL.md` + YAML frontmatter; copy or symlink it into whatever discovery path your agent uses. |
+
+The output format is the same `SKILL.md` schema Anthropic uses, so any agent that already reads Anthropic Skills can read xskill's library verbatim. A failed install on one agent is logged and skipped — it never blocks the others.
+
+**Platforms:** developed and verified on **Linux**; **Windows** is supported (a `scripts/cursor_setup.ps1` helper is provided). macOS is expected to work (POSIX) but is not yet verified end-to-end.
 
 ## Editing skills live
 

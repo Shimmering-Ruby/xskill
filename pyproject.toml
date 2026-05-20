@@ -57,9 +57,6 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-xskill = ["web/dist/**/*"]
-
 [tool.setuptools_scm]
 version_file = "src/xskill/_version.py"
 fallback_version = "0.0.0+unknown"

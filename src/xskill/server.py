@@ -24,7 +24,6 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from xskill import __version__
@@ -1352,38 +1351,6 @@ def create_app(home_root: Path | str | None = None,
         return {"running": False, "message": "watcher not started"}
 
     # ------------------------------------------------------------------
-    # Static UI mount (SPA) -- must be registered AFTER all /api/* routes
-    # ------------------------------------------------------------------
-    _dist_dir = Path(__file__).parent / "web" / "dist"
-    _ui_disabled = os.environ.get("T2S_NO_UI", "").lower() in ("1", "true", "yes")
-
-    if _dist_dir.is_dir() and not _ui_disabled:
-        _index_file = _dist_dir / "index.html"
-        _dist_root = _dist_dir.resolve()
-
-        from starlette.exceptions import HTTPException as StarletteHTTPException
-
-        class _SPAStaticFiles(StaticFiles):
-            async def get_response(self, path: str, scope):
-                request_path = scope.get("path", "") or ""
-                if request_path.startswith("/api/") or request_path == "/api":
-                    raise StarletteHTTPException(status_code=404)
-                try:
-                    response = await super().get_response(path, scope)
-                except StarletteHTTPException as exc:
-                    if exc.status_code == 404 and _index_file.is_file():
-                        return FileResponse(str(_index_file))
-                    raise
-                if response.status_code == 404 and _index_file.is_file():
-                    return FileResponse(str(_index_file))
-                return response
-
-        app.mount(
-            "/",
-            _SPAStaticFiles(directory=str(_dist_dir), html=True),
-            name="ui",
-        )
-
     @app.on_event("startup")
     async def _startup():
         """Initialize skill_tools context so search_skills / rebuild_skill_index work.
