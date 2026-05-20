@@ -40,16 +40,18 @@ pip install xskill
 
 PyPI 包名是 [`xskill`](https://pypi.org/project/xskill/)，CLI 入口也叫 `xskill`。需要 Python 3.11+。
 
-然后在 `~/.xskill/config.yaml` 放一份配置：
+**首次运行**会自动在 `~/.xskill/config.yaml` 写一份带注释的配置模板，并提示你填写：
 
 ```bash
-mkdir -p ~/.xskill
-curl -fsSL https://raw.githubusercontent.com/SkillNerds/xskill/main/examples/config.yaml.example \
-  -o ~/.xskill/config.yaml
-# 编辑 llm.api_key 和 embedding.api_key
+xskill serve
+#  Created a config template at ~/.xskill/config.yaml
+#  Edit it — fill in llm.api_key and embedding.api_key — then run `xskill serve` again.
+
+# 编辑 ~/.xskill/config.yaml，填入 llm.api_key 和 embedding.api_key，然后：
+xskill serve
 ```
 
-最小 `config.yaml`：
+最小 `config.yaml` 就是两个 endpoint：
 
 ```yaml
 skill_dir: ~/.xskill/skill
@@ -60,19 +62,13 @@ llm:
   api_key:  YOUR_KEY
 
 embedding:
-  base_url: https://ark.cn-beijing.volces.com/api/v3
-  model:    doubao-embedding-vision-251215
+  base_url: https://api.deepseek.com
+  model:    deepseek-embedding
   api_key:  YOUR_KEY
   dim:      0
 ```
 
-任何 OpenAI 兼容 endpoint 都行（DeepSeek、Qwen / Ark、OpenAI 等）。字段缺失直接抛错，不读环境变量。完整模板见 [`examples/config.yaml.example`](examples/config.yaml.example)。
-
-启动 daemon：
-
-```bash
-xskill serve            # FastAPI + watcher + Web UI，监听 :8000
-```
+任何 OpenAI 兼容 endpoint 都行（DeepSeek、OpenAI、Qwen/DashScope、OpenRouter、本地 Ollama 等）。字段缺失直接抛错，不读环境变量。auto-init 写出的 `~/.xskill/config.yaml` 本身就是完整模板——canary、watcher、team、sandbox 各段都有行内注释。
 
 如果你用 Claude Code，到此就够了——daemon 启动时会自动发现 `~/.claude/projects/` 并开始监听。其他 agent 则把它写轨迹的目录注册进来：
 
@@ -80,12 +76,24 @@ xskill serve            # FastAPI + watcher + Web UI，监听 :8000
 xskill registry add /path/to/your/agent/trajectories
 ```
 
-## CLI
+## 团队模式
 
-只有 5 条命令。筛选与格式化交给 `grep` / `awk`，不内置 flag。
+一台机器当 server，其他机器作为瘦客户端加入，共享它的 Skill 库：
 
 ```bash
-xskill serve [--host 0.0.0.0] [--port 8000]
+# server —— 启动时打印一个 join token
+xskill serve --server
+
+# client —— 首次带 token，之后直接 xskill connect 复用连接
+xskill connect <host:port> --token <token>
+xskill connect
+```
+
+`xskill serve` 不带 `--server` 就是单机模式（skill 不出本机）。server 端跑完整 agent 流水（切分 / 聚类 / 撰写 / 灰度）；client 只负责采集 + 脱敏 + 上传本机轨迹，并持有 server 分配给它的那批 skill 的工作副本。灰度按 `client_id` 分桶做真正的用户级 A/B；client 的本地手改只会进隔离分支 `user-staging/<client_id>`，永远碰不到共享的 `main`。
+
+## 辅助 CLI
+
+```bash
 xskill registry add    <绝对路径> [--label NAME]
 xskill registry remove <绝对路径>
 xskill registry list
@@ -100,37 +108,39 @@ xskill search skill <query> [--top-k 5]
 | Agent | 一句话职责 |
 | ----- | ---------- |
 | **TaskAgent** | 读一条原始轨迹，按"用户意图"切成若干 Atom（一个 Atom = 用户实际想做的一件事）。 |
-| **TaskClusterAgent** | 给每个新 Atom 拍板：命中已有 Skill、并入已有 Skill，还是新开一个 Skill。优先复用，不轻易新建。 |
+| **TaskClusterAgent** | 给每个新 Atom 拍板：关联已有 Skill、并入已有 Skill，还是新开一个 Skill。优先复用，不轻易新建。 |
 | **SkillEditAgent** | 当某个 Skill 累计到了足够多的相关 Atom 时，撰写或重写它的 `SKILL.md`（连带必要的脚本 / references）并提交。 |
 | **UserEditAbsorbAgent** | 监听你对装出去的 Skill 文件做的手改，把这些改动作为 ground truth 吸回 Skill 库。 |
-| **AtomCanary** | 把现有 Skill 和新候选并行跑在真实流量上，根据每个 Atom 的用户体验分判定谁留下。 |
 
-## 跨 code agent 支持
+## 跨 coding agent 支持
 
-输入端"轨迹采集"和输出端"Skill 安装"都是可插拔的。daemon 启动时自动发现你装了哪些
-agent，并在常青运行期间持续扫描——你之后再装一个新 agent，不重启也会被自动接管。当前
-真实状态：
+输入端"轨迹采集"和输出端"Skill 安装"都是可插拔的。daemon 启动时自动发现你装了哪些 agent，并在常青运行期间持续扫描——你之后再装一个新 agent，不重启也会被自动接管。
 
-| Coding agent | 轨迹采集（输入） | Skill 安装（输出） |
-| ------------ | ---------------- | ------------------ |
-| **Claude Code** | 原生支持——自动发现 `~/.claude/projects/`，把每条 session JSONL 桥成 xskill 轨迹；Skill 灰度评估时还会自动注入 canary 标记。 | 原生支持——Skill 以 symlink 装到 `~/.claude/skills/<name>/`。 |
-| **Codex CLI** | 原生支持——自动发现 `~/.codex/sessions/`，把每条 rollout JSONL 桥成轨迹。 | 原生支持——Skill 以 symlink 装到 `~/.agents/skills/<name>/`（Codex 读的跨生态共享 skill 目录）。 |
-| **OpenCode** | 原生支持——自动发现 `~/.local/share/opencode/opencode.db`（SQLite），把每条 session 桥成轨迹。 | 原生支持——Skill 以 symlink 装到 `~/.agents/skills/<name>/`（与 Codex 共享）。 |
-| **Cursor** | 暂未支持。 | 暂未支持。 |
-| **Trae** | 暂未支持。 | 暂未支持。 |
-| **OpenClaw** | 暂未支持。 | 暂未支持。 |
-| **其他 agent** | 手动接入——用 SDK (`xskill.adapters.submit_trajectory`) 提交 `markdown` / `json` / `raw` 三种格式之一。 | 手动接入——每个 Skill 就是一个目录，含 Anthropic 风格 `SKILL.md` + YAML frontmatter；把它 copy / symlink 到你 agent 的发现路径里即可。 |
+**状态图例：** ✅ 端到端验证过 · 🟡 已实现，尚未端到端验证 · 📋 在 roadmap 上
 
-输出格式遵循 Anthropic 的 `SKILL.md` schema——任何已经能读 Anthropic Skills 的 agent 都能直接读 xskill 的产物。某个 agent 安装失败会被记录并跳过，绝不阻断其他 agent。Cursor、Trae、OpenClaw 在 [roadmap](#roadmap) 上，欢迎 PR。
+| Coding agent | 状态 | 轨迹采集（输入） | Skill 安装（输出） |
+| ------------ | :--: | ---------------- | ------------------ |
+| **Claude Code** | ✅ | 原生——自动发现 `~/.claude/projects/`，把每条 session JSONL 桥成轨迹；灰度评估时还会注入 canary 标记。 | 原生——Skill 以 symlink 装到 `~/.claude/skills/<name>/`。 |
+| **OpenClaw** | ✅ | 原生——自动发现 `~/.openclaw/agents/`，桥接每个 `*.trajectory.jsonl`。 | 原生——Skill 以**拷贝**方式装到 `~/.agents/skills/<name>/`（OpenClaw 拒收跑出 root 的 symlink，详见 [docs](docs/ecosystem/openclaw.md)）。 |
+| **Codex CLI** | 🟡 | 原生——自动发现 `~/.codex/sessions/`，桥接每条 rollout JSONL。 | 原生——Skill 以 symlink 装到 `~/.agents/skills/<name>/`（跨生态共享的 user-scope skill 目录）。 |
+| **OpenCode** | 🟡 | 原生——自动发现 `~/.local/share/opencode/opencode.db`（SQLite）。 | 原生——Skill 以 symlink 装到 `~/.agents/skills/<name>/`（与 Codex 共享）。 |
+| **Cursor** | 🟡 | 原生——自动发现 `~/.cursor/projects/*/agent-transcripts/`。 | 原生——Skill 以 symlink 装到 `~/.cursor/skills/<name>/`。 |
+| **Trae** | 📋 | 暂未支持。 | 暂未支持。 |
+| **其他任意 agent** | — | 手动——通过 SDK（`xskill.adapters.submit_trajectory`）提交 `markdown` / `json` / `raw` 格式轨迹。 | 手动——每个 Skill 是一个带 Anthropic 风格 `SKILL.md` + YAML frontmatter 的目录，拷贝或 symlink 到你 agent 的发现目录即可。 |
+
+输出格式遵循 Anthropic 的 `SKILL.md` schema——任何已经能读 Anthropic Skills 的 agent 都能直接读 xskill 的产物。某个 agent 安装失败会被记录并跳过，绝不阻断其他 agent。
 
 ## 热更新 Skill
 
-Skill 是以 symlink 装出去的——所以你（或 agent）改装出去的 skill 文件，改的就是 xskill
-的源副本。改动**即时生效**：你的 agent 下次加载这个 skill 就能看到。
+### 单机模式下手动更新 Skill
 
-xskill 随后会自己把这次改动吸收回去。该 skill 静默约 3 分钟（没有新改动）后，daemon
-就把你的手改 commit 到该 skill 的 `main` 分支，作为新的 ground truth。如果这个 skill
-当时正在灰度，**手改优先**——staging 候选直接丢弃，因为一次明确的编辑胜过一次 A/B 猜测。
+对 Claude Code / Codex / OpenCode / Cursor，Skill 是以 symlink 装出去的——所以你（或 agent）改装出去的 skill 文件，改的就是 xskill 的源副本，改动**即时生效**。（OpenClaw 例外：它走拷贝安装，改动要等下一次 install / 灰度切版本才同步——xskill 会自动把你对 OpenClaw 那侧的手改回流到源仓。）
+
+xskill 随后会自己把这次改动吸收回去。该 skill 静默约 3 分钟（没有新改动）后，daemon 就把你的手改 commit 到该 skill 的 `main` 分支，作为新的 ground truth。如果这个 skill 当时正在灰度，**手改优先**——staging 候选直接丢弃，因为一次明确的编辑胜过一次 A/B 猜测。
+
+### 团队模式下手动更新 Skill
+
+团队模式下你的本地改动**不被信任**：它会被 commit 成一个 `user-staging/<client_id>` 分支传到远端 server，在下一轮版本迭代时作为参考信息被纳入考虑，但永远不会直接落到共享 `main`。
 
 ## 操作系统支持
 
@@ -139,8 +149,8 @@ xskill 是纯 Python (3.11+)，daemon / watcher / SDK 原则上跨平台。当�
 | 平台 | 状态 | 备注 |
 | ---- | :--: | ---- |
 | **Linux** (x86_64) | 已测试 ✅ | 开发与 CI 环境。 |
-| **macOS** | 应可运行 | 同 POSIX 表面——symlink、`~/.claude/` 路径、`git` subprocess 与 Linux 一致。尚未纳入 CI，遇到问题欢迎反馈。 |
-| **Windows 10 / 11** | 部分支持 ⚠️ | 轨迹采集与 Skill 搜索可用，但 Skill 安装要创建**目录级 symlink**，Windows 需要**开发者模式**或以管理员身份运行；否则 install 那一步会失败。尚未纳入 CI，欢迎社区反馈。 |
+| **Windows 10 / 11** | 支持 ⚠️ | 提供 `scripts/cursor_setup.ps1` 辅助脚本。Skill 安装要创建**目录级 symlink**，Windows 需要**开发者模式**或以管理员身份运行；否则 install 那一步会失败。尚未纳入 CI，欢迎社区反馈。 |
+| **macOS** | 应可运行 | 同 POSIX 表面，预期与 Linux 一致，但尚未端到端验证。 |
 
 如果你在 Windows 上想避开 symlink，可以在 `~/.xskill/config.yaml` 里把 `skill_dir` 直接设成你 agent 的 skill 发现目录，跳过自动 install 那步。
 
@@ -150,32 +160,27 @@ xskill 是纯 Python (3.11+)，daemon / watcher / SDK 原则上跨平台。当�
 | ---- | ---- |
 | **Trajectory（轨迹）** | 一次 agent 执行，通常是一个 session 的对话记录，xskill 以 `traj_*.md` 形式存盘。 |
 | **Atom** | 轨迹中"一个用户意图"对应的最小片段。一条轨迹会切出 1 个或多个 Atom。所有归类判断都发生在 Atom 粒度上。 |
-| **Skill** | 一个可被 agent 加载的、prompt 形态的产物：一份 `SKILL.md` + 可选的脚本和 references。每个 Skill 在 `~/.xskill/skill/` 下有独立的版本化目录。 |
-| **Canary（灰度）** | 在真实流量上把现有 Skill 与新候选版本并行比较，根据用户体验分留下更好的那个。 |
+| **Skill** | 一个可复用、prompt 形态的产物：一个 `SKILL.md` 文件 + 可选脚本 / references。每个 Skill 是 `~/.xskill/skill/` 下一个独立带版本的目录。 |
 | **Registry** | xskill 监听的目录列表。add 一条路径，daemon 就会一直轮询它。 |
-| **UX score** | LLM 充当裁判，对 Skill 在某个 Atom 上的实际服务效果打分；canary 据此判输赢。 |
+| **Canary（灰度）** | 在真实流量上把现有 Skill 与新候选版本并行比较，根据用户体验分留下更好的那个。 |
+| **UX score** | LLM 充当裁判，对 Skill 在某个 Atom 上的实际服务效果打分；据此判输赢。 |
 
 ## xskill 与同类项目对比
 
-动手之前，我们调研了 10 个学术 / 开源的 trajectory-to-skill 系统（Hermes、OpenSpace、EvoSkill、AutoSkill、AgentEvolver、MemSkill、EvoAgentX、SE-Agent、SkillRL、GEPA）。完整矩阵在 [`docs/research/related-work-survey.md`](docs/research/related-work-survey.md)，每格都带 `path:line` 代码证据。
-
-xskill 借鉴的：
-
-- **`SKILL.md` 作为跨 agent 共同单位**——OpenSpace / EvoSkill / AutoSkill 已在此收敛，xskill 沿用同一份 Anthropic frontmatter schema，保证可移植。
-- **LLM-as-judge 的 UX 评分**——受 AutoSkill 的 per-turn `relevant / used` 信号启发。
-- **每个 Skill 独立版本**——每个 Skill 是独立 git 仓库，历史 / diff / 回滚都是一等公民。
+动手之前，我们调研了 10 个学术 / 开源的 trajectory-to-skill 系统（Hermes、OpenSpace、EvoSkill、AutoSkill、AgentEvolver、MemSkill、EvoAgentX、SE-Agent、SkillRL、GEPA），完整对比见 [`docs/research/related-work-survey.md`](docs/research/related-work-survey.md)。
 
 xskill 做了同类项目都没做的：
 
-- **真正的 A/B 灰度**——chat 流量按概率分流，两侧 UX 评分判赢家，全程无人。
-- **对称的两端入口**——per-session 流式接入（丢一条轨迹 → watcher 自动接住）与批量回填（`xskill registry add /archive` 把整段历史全量入库）同等优先。
+- **用真正的 A/B 灰度驱动 Skill 进化**——chat 流量按概率分流，两侧 UX 评分判赢家，全程无人。
+- **每个 Skill 独立版本**——每个 Skill 是独立 git 仓库，`staging` 灰度分支 / `main` 主分支分离。
+- **团队部署模式**——开箱即用地在组织内共享 skill，兼容多种 coding agent。
 
 ## Roadmap
 
-- [ ] **更多 coding-agent adapter**：Codex CLI、Cursor、Trae、OpenCode、OpenClaw、Goose、OpenHands、Aider 的双向支持（轨迹采集 + Skill 安装）
-- [ ] 原生 MCP server 接口（Skill 即工具）
-- [ ] Web UI：浏览 Skill 库、查看灰度数据、手动放行 / 丢弃
+- [ ] **更多 coding-agent adapter**：Trae、Goose、OpenHands、Aider 的双向支持（轨迹采集 + Skill 安装）
+- [ ] 原生 MCP server 接口（Skill 暴露为 tool）
 - [ ] 基于使用情况的自动淘汰（被检索很多但从未被实际用到的 Skill 自动下线）
+- [ ] Web UI：浏览 Skill 库、查看灰度数据、手动放行 / 丢弃
 - [ ] Skill marketplace：导入 / 导出可移植的 Skill bundle
 - [ ] 多租户 Skill 库（每个团队一个 `skill_dir`）
 
@@ -186,7 +191,7 @@ xskill 做了同类项目都没做的：
 ```bash
 git clone https://github.com/SkillNerds/xskill
 cd xskill
-pip install -e .[dev]
+pip install -e ".[dev]"
 pytest -q
 ```
 
@@ -195,9 +200,12 @@ pytest -q
 ## 贡献
 
 欢迎 PR，请遵守：
+
 1. 先开 issue 描述问题。
 2. 加测试或扩展现有测试（无测试不合并）。
 3. 公开 API 增量请保持 `xskill/__init__.py` 极简——这一层我们守得很严。
+
+完整贡献流程（含 bug triage 责任田划分）见 [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md)。
 
 ## License
 

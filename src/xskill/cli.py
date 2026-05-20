@@ -263,6 +263,18 @@ def main() -> int:
     if args.command == "connect":
         return cmd_connect(args)
 
+    # 首次运行 auto-init：serve / registry / search 都需要 config.yaml。
+    # 不存在就写一份模板并要求用户填 key 后重跑——比直接抛 traceback 友好。
+    from xskill.config import CONFIG_PATH, ensure_config_exists
+    if not ensure_config_exists():
+        print(
+            f"\n  Created a config template at {CONFIG_PATH}\n"
+            f"  Edit it — fill in llm.api_key and embedding.api_key — "
+            f"then run `xskill {args.command}` again.\n",
+            file=sys.stderr,
+        )
+        return 0
+
     from xskill import XSkill
     xskill = XSkill()
 

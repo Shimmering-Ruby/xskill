@@ -9,7 +9,6 @@ $SkillStore = Join-Path $XskillHome "skill"
 $CursorImport = Join-Path $XskillHome "cursor_import"
 $CursorSkills = Join-Path $env:USERPROFILE ".cursor\skills"
 $ConfigPath = Join-Path $XskillHome "config.yaml"
-$ExampleConfig = Join-Path $RepoRoot "examples\config.yaml.example"
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $XskillExe = Join-Path $RepoRoot ".venv\Scripts\xskill.exe"
 
@@ -17,10 +16,10 @@ Write-Host "`n[Step 1] Create directories"
 New-Item -ItemType Directory -Force -Path $XskillHome, $SkillStore, $CursorImport | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".cursor") | Out-Null
 
-Write-Host "`n[Step 2] Copy config.yaml if missing"
+Write-Host "`n[Step 2] config.yaml"
 if (-not (Test-Path $ConfigPath)) {
-    Copy-Item $ExampleConfig $ConfigPath
-    Write-Host "Edit $ConfigPath and set llm.api_key / embedding.api_key"
+    Write-Host "No config yet — `xskill serve` will auto-create a template at $ConfigPath."
+    Write-Host "After this script finishes, edit it and set llm.api_key / embedding.api_key."
 }
 
 Write-Host "`n[Step 3] Junction: .cursor\skills -> .xskill\skill"

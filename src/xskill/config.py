@@ -33,14 +33,101 @@ def set_overrides(**kwargs):
             _overrides[k] = v
 
 
+# 首次运行 auto-init 写出的配置模板。这是配置格式的**唯一真源**——
+# 不再单独维护 examples/config.yaml.example，避免两份漂移。
+CONFIG_TEMPLATE = """\
+# xskill config — fill in the api keys below, then run `xskill serve` again.
+#
+# xskill does NOT read environment variables or any key file. Missing required
+# fields (llm.api_key / embedding.api_key) raise loudly — no silent fallback.
+
+# ===== Skill repository =====
+skill_dir: ~/.xskill/skill            # the single global skill repo
+
+# ===== LLM (generation / scoring / chat) =====
+# Any OpenAI-compatible chat-completions endpoint works (DeepSeek, OpenAI,
+# Qwen/DashScope, OpenRouter, a local Ollama, ...).
+llm:
+  base_url: https://api.deepseek.com
+  model:    deepseek-v4-flash
+  api_key:  PUT_YOUR_LLM_API_KEY_HERE
+  max_tokens: 10000      # optional; a "thinking" model needs enough budget for
+                         # reasoning_tokens + content, or meta extraction
+                         # returns empty/truncated and falls back to rules.
+  # temperature: 0.0     # optional; default 0 (deterministic)
+
+# ===== Embedding (vector retrieval) =====
+# Any OpenAI-compatible embeddings endpoint. dim: 0 auto-probes on first call.
+embedding:
+  base_url: https://api.deepseek.com
+  model:    deepseek-embedding
+  api_key:  PUT_YOUR_EMBEDDING_API_KEY_HERE
+  dim:      0
+  # api: openai | multimodal   # optional; default openai. "multimodal" for
+                               # vision-style embedding endpoints.
+
+# ===== Skill candidate gating =====
+candidates:
+  threshold:        3           # promote once supporting_trajs >= N
+  stale_days:       60          # after N days still short -> demote to references/
+  min_source_trajs: 2           # a new skill needs >= N source_trajs
+
+# ===== Canary (gradual rollout) =====
+canary:
+  enabled:       true
+  probability:   0.2            # on a retrieval hit, route to staging with prob p
+  min_samples:   5              # need >= N UX scores on each side to decide
+  max_days_hold: 14             # max staging lifetime; discarded on timeout
+  rotate_interval: 300          # standalone canary time-window rotation (seconds)
+
+# ===== Watcher (the directory poller inside `serve`) =====
+watcher:
+  poll_interval:  30            # seconds between scans of every watch_dir
+  max_concurrent: 30            # ThreadPoolExecutor size for meta extraction
+  cold_start_threshold: 3       # defer process while >= N trajectories un-indexed
+
+# ===== Sandbox eval (optional; SWE-bench A/B/C in docker) =====
+sandbox:
+  enabled:           false
+  trigger_threshold: 3
+
+# ===== Team C/S mode (only read by `xskill serve --server`) =====
+team:
+  server:
+    traj_root:    ~/.xskill/team_trajectories
+    skill_slots:  100
+    ranked_slots: 80
+"""
+
+
+def ensure_config_exists(path: Optional[Path] = None) -> bool:
+    """首次运行 auto-init：config.yaml 不存在时写出 CONFIG_TEMPLATE。
+
+    返回值：
+        True  —— 配置已存在（什么都没做）
+        False —— 刚刚创建了模板（调用方应提示用户填 key 后重跑）
+    """
+    cfg_path = Path(path) if path else CONFIG_PATH
+    if cfg_path.exists():
+        return True
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    return False
+
+
 def load_config(path: Optional[Path] = None) -> dict:
-    """加载 ~/.xskill/config.yaml；不存在直接抛 FileNotFoundError。"""
+    """加载 ~/.xskill/config.yaml；不存在直接抛 FileNotFoundError。
+
+    正常路径下 CLI 会先调 ``ensure_config_exists`` auto-init，不会走到这个
+    FileNotFoundError；保留它作为 SDK 直接调用时的 fail-loud 兜底。
+    """
     global _config
     cfg_path = Path(path) if path else CONFIG_PATH
     if not cfg_path.exists():
         raise FileNotFoundError(
             f"xskill config not found: {cfg_path}\n"
-            f"Create it manually (see docs)."
+            f"Run `xskill serve` once to auto-create a template, "
+            f"or call config.ensure_config_exists()."
         )
     with open(cfg_path, encoding="utf-8") as f:
         _config = yaml.safe_load(f) or {}

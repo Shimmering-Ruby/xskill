@@ -10,7 +10,7 @@ git clone https://github.com/SkillNerds/xskill.git
 cd xskill
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp examples/config.yaml.example ~/.xskill/config.yaml   # then edit the api keys
+xskill serve   # first run writes a ~/.xskill/config.yaml template; fill in the api keys
 ```
 
 - Unit tests: `make test`

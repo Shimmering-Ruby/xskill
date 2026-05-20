@@ -40,16 +40,19 @@ pip install xskill
 
 The PyPI package is [`xskill`](https://pypi.org/project/xskill/); the CLI entry point is also `xskill`. Python 3.11+.
 
-Then drop a config file at `~/.xskill/config.yaml`:
+The first time you run xskill it writes an annotated config template to
+`~/.xskill/config.yaml` and asks you to fill it in:
 
 ```bash
-mkdir -p ~/.xskill
-curl -fsSL https://raw.githubusercontent.com/SkillNerds/xskill/main/examples/config.yaml.example \
-  -o ~/.xskill/config.yaml
-# edit llm.api_key and embedding.api_key
+xskill serve
+#  Created a config template at ~/.xskill/config.yaml
+#  Edit it — fill in llm.api_key and embedding.api_key — then run `xskill serve` again.
+
+# edit ~/.xskill/config.yaml, then:
+xskill serve
 ```
 
-Minimal `config.yaml`:
+A minimal `config.yaml` is just the two endpoints:
 
 ```yaml
 skill_dir: ~/.xskill/skill
@@ -60,19 +63,13 @@ llm:
   api_key:  YOUR_KEY
 
 embedding:
-  base_url: https://ark.cn-beijing.volces.com/api/v3
-  model:    doubao-embedding-vision-251215
+  base_url: https://api.deepseek.com
+  model:    deepseek-embedding
   api_key:  YOUR_KEY
   dim:      0
 ```
 
-Any OpenAI-compatible endpoint works (DeepSeek, Qwen / Ark, OpenAI, etc.). Missing fields raise — there are no environment-variable fallbacks. Full template: [`examples/config.yaml.example`](examples/config.yaml.example).
-
-Start the daemon:
-
-```bash
-xskill serve            # FastAPI + watcher + Web UI on :8000
-```
+Any OpenAI-compatible endpoint works (DeepSeek, OpenAI, Qwen/DashScope, OpenRouter, a local Ollama, …). Missing fields raise — there are no environment-variable fallbacks. The auto-created `~/.xskill/config.yaml` is the full annotated template (canary, watcher, team, sandbox sections all documented inline).
 
 If you use Claude Code, that is it — the daemon detects `~/.claude/projects/` on startup and starts watching your sessions. Otherwise, register the directory your agent writes trajectories to:
 
@@ -80,39 +77,30 @@ If you use Claude Code, that is it — the daemon detects `~/.claude/projects/` 
 xskill registry add /path/to/your/agent/trajectories
 ```
 
-## CLI
+## Team mode (shared skill library)
 
-Filtering and formatting belong to `grep` / `awk`, not flags.
+One machine is the server, other machines join as thin clients and share its skill library:
 
 ```bash
-xskill serve [--host 0.0.0.0] [--port 8000] [--server]
-xskill connect <host:port> --token <token> [--label NAME]
+# server — prints a join token on startup
+xskill serve --server
+
+# client — first time: pass the token; afterwards just `xskill connect`
+xskill connect <host:port> --token <token>
+xskill connect
+```
+
+`xskill serve` without `--server` stays standalone (single host, skills never leave the machine). On the server the full agent pipeline runs (split / cluster / write / canary); a client only collects + redacts + uploads its trajectories and holds a working copy of the skills the server picks for it. Canary buckets by `client_id` for true per-user A/B; a client's hand-edits only ever reach an isolated `user-staging/<client_id>` branch, never the shared `main`.
+
+## Helper CLI
+
+```bash
 xskill registry add    <abs-path> [--label NAME]
 xskill registry remove <abs-path>
 xskill registry list
 xskill search traj  <query> [--top-k 5]
 xskill search skill <query> [--top-k 5]
 ```
-
-## Team mode (C/S shared skills)
-
-xskill can share a skill library across an organization:
-
-- **server** — `xskill serve --server` starts a team server: it receives
-  trajectories uploaded by clients, runs the full agent pipeline server-side
-  (split / cluster / write / canary), and prints the command clients use to
-  join.
-- **client** — `xskill connect <host:port> --token <token>` is a thin client:
-  it collects this machine's code-agent trajectories, redacts them, uploads
-  them, and holds a working copy of the ≤100 skills the server picks for it,
-  checked out to the canary side the server assigns. Zero LLM calls, zero
-  writes to the public `main`.
-- **standalone** — `xskill serve` (no `--server`) stays single-host; skills
-  never leave the machine.
-
-Canary in team mode buckets by `client_id` for true concurrent A/B. A client's
-local hand-edits only ever land on an isolated `user-staging/<client_id>`
-branch — they can never touch the shared `main`.
 
 ## Agents inside xskill
 
@@ -199,7 +187,7 @@ What xskill does that none of the surveyed projects do:
 
 ## Roadmap
 
-- [ ] **More coding-agent adapters** — Codex CLI, Cursor, Trae, OpenCode, OpenClaw, Goose, OpenHands, Aider on both ends (trajectory ingest + Skill install)
+- [ ] **More coding-agent adapters** — Trae, Goose, OpenHands, Aider on both ends (trajectory ingest + Skill install)
 - [ ] Native MCP server interface (Skills exposed as tools)
 - [ ] Web UI for browsing the Skill library, viewing canary stats, manual approve / discard
 - [ ] Usage-driven auto-prune (delete Skills that are retrieved often but never actually used)
