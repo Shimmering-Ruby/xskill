@@ -2,7 +2,7 @@
 log_setup.py — 按 component 把 logging 拆到独立文件
 ======================================================
 
-daemon 跑起来同一个 stdout 里 watcher / agent / index / canary / ux_score
+daemon 跑起来同一个 stdout 里 watcher / canary / ux_score / ecosystems
 / agno / httpx 各种东西交错刷，根本看不清谁在干啥。这个模块给每个 logger
 namespace 单独开一份 RotatingFileHandler，写到 ~/.xskill/logs/<name>.log。
 
@@ -11,8 +11,6 @@ namespace 单独开一份 RotatingFileHandler，写到 ~/.xskill/logs/<name>.log
   xskill.log                  — 全部 xskill.* + agno + httpx 的合并视图
   xskill.watcher.log          — watcher 流水线（discover/meta/embed/process）
   xskill.server.log           — FastAPI 路由 + startup hook
-  xskill.agent.log            — agno-based skill 整理 agent 的多轮决策
-  xskill.index.log            — meta 抽取 + 向量索引构建
   xskill.canary.log           — 灰度路由 / staging 分支管理
   xskill.ux_score.log         — LLM 评分员每条 traj 给的分 + reasons
   xskill.ecosystems.log       — CCSessionIngester / 翻牌子 / install
@@ -39,15 +37,13 @@ from pathlib import Path
 _PER_LOGGER_FILES: dict[str, str] = {
     "xskill.watcher":    "xskill.watcher.log",
     "xskill.server":     "xskill.server.log",
-    "xskill.agent":      "xskill.agent.log",        # 见 src/xskill/agent.py
     "xskill":            "xskill.log",              # 兜底（含其它子 logger）
     "xskill.canary":     "xskill.canary.log",
     "xskill.ux_score":   "xskill.ux_score.log",
     "xskill.ecosystems": "xskill.ecosystems.log",
     "xskill.registry":   "xskill.registry.log",
-    "index":             "xskill.index.log",        # src/xskill/index.py 用 "index"
     "ux_score":          "xskill.ux_score.log",     # src/xskill/ux_score.py 用 "ux_score"
-    "skill_tools":       "xskill.skill_tools.log",
+    "skill_tools":       "xskill.agents.skill_tools.log",
     "git_lock":          "xskill.git_lock.log",
     "agno":              "agno.log",                # agno 内部，单独隔离免污染
     "httpx":             "httpx.log",

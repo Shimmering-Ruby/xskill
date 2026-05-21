@@ -29,21 +29,21 @@ def test_creates_log_files_for_each_component(tmp_path):
     configure_logging(tmp_path, debug=False, quiet=False, stdout=False)
 
     logging.getLogger("xskill.watcher").info("watcher said hi")
-    logging.getLogger("xskill.agent").info("agent said hi")
+    logging.getLogger("xskill.canary").info("canary said hi")
     logging.getLogger("agno").warning("agno noise")
-    logging.getLogger("index").info("index meta done")
+    logging.getLogger("xskill.ecosystems").info("ecosystems said hi")
 
     # 强制 flush（RotatingFileHandler 用 buffered IO）
     for h in logging.getLogger().handlers:
         h.flush()
-    for name in ("xskill.watcher", "xskill.agent", "agno", "index"):
+    for name in ("xskill.watcher", "xskill.canary", "agno", "xskill.ecosystems"):
         for h in logging.getLogger(name).handlers:
             h.flush()
 
     assert (tmp_path / "xskill.watcher.log").read_text(encoding="utf-8").find("watcher said hi") >= 0
-    assert (tmp_path / "xskill.agent.log").read_text(encoding="utf-8").find("agent said hi") >= 0
+    assert (tmp_path / "xskill.canary.log").read_text(encoding="utf-8").find("canary said hi") >= 0
     assert (tmp_path / "agno.log").read_text(encoding="utf-8").find("agno noise") >= 0
-    assert (tmp_path / "xskill.index.log").read_text(encoding="utf-8").find("index meta done") >= 0
+    assert (tmp_path / "xskill.ecosystems.log").read_text(encoding="utf-8").find("ecosystems said hi") >= 0
 
 
 def test_xskill_log_aggregates_all_xskill_messages(tmp_path):
@@ -52,17 +52,17 @@ def test_xskill_log_aggregates_all_xskill_messages(tmp_path):
     configure_logging(tmp_path, debug=False, quiet=False, stdout=False)
 
     logging.getLogger("xskill.watcher").info("from watcher")
-    logging.getLogger("xskill.agent").info("from agent")
+    logging.getLogger("xskill.canary").info("from canary")
 
     for h in logging.getLogger().handlers:
         h.flush()
-    for name in ("xskill", "xskill.watcher", "xskill.agent"):
+    for name in ("xskill", "xskill.watcher", "xskill.canary"):
         for h in logging.getLogger(name).handlers:
             h.flush()
 
     aggregate = (tmp_path / "xskill.log").read_text(encoding="utf-8")
     assert "from watcher" in aggregate
-    assert "from agent" in aggregate
+    assert "from canary" in aggregate
 
 
 def test_idempotent_no_duplicate_handlers(tmp_path):
