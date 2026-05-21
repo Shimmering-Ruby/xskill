@@ -748,10 +748,12 @@ def test_canary_flip_promote_and_install_new_version(sandbox, xskill_daemon):
     cc_skill_dir = sandbox.home / ".claude" / "skills" / SKILL_NAME
     cc_skill_dir.mkdir(parents=True, exist_ok=True)
     (cc_skill_dir / "SKILL.md").write_text(SKILL_V1_BODY, encoding="utf-8")
-    # 起始 install_history 记一条 main——daemon 看不到这条但 ingester
-    # 翻牌子 helper 同份 history file 共享 (写 ~/.xskill/skill/install_history.jsonl)
+    # 起始 install_history 记一条 main——daemon 的 CCSessionIngester 靠这条
+    # 反查 session 启动时的 side。路径必须是 daemon 实际读写的
+    # XSKILL_HOME/install_history.jsonl（server.py: XSKILL_HOME /
+    # "install_history.jsonl"），即 sandbox.xhome 下，不是 skill_dir 下。
     import time as _time
-    history_path = sandbox.skill_dir / "install_history.jsonl"
+    history_path = sandbox.xhome / "install_history.jsonl"
     history_path.write_text(
         json.dumps({"t": _time.time() - 1, "skill": SKILL_NAME,
                     "side": "main", "sha": ""}, ensure_ascii=False) + "\n",
