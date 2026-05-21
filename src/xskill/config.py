@@ -145,27 +145,25 @@ def get_logs_dir() -> Path:
     return LOGS_DIR
 
 
-def get_chat_archive_dir() -> Path:
-    """chat 归档轨迹基目录。serve 启动时会自动 register_dir 进 watcher。"""
-    p = XSKILL_HOME / "chat_archive"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
 def get_traj_dir() -> Path:
-    """**已废弃**：dataset 应通过 ``xskill registry add <abs-path>`` 注册。
+    """默认轨迹目录 = 第一个已注册的 watch dir。
 
-    保留这个函数仅为给"无显式路径"的内部调用兜底——返回第一个已注册的 watch_dir，
-    或退回 chat_archive_dir。新代码不要用；改为通过 Registry / explicit path。"""
-    # 避免 import 循环
-    try:
-        from xskill.registry import list_watch_dirs
-        dirs = list_watch_dirs()
-        if dirs:
-            return Path(dirs[0]["path"])
-    except Exception:
-        pass
-    return get_chat_archive_dir()
+    轨迹来源的真源是 Registry——dataset 通过 ``xskill registry add <abs-path>``
+    注册，daemon 启动时也会自动探测并注册各生态的 session 目录。本函数仅给
+    "无显式路径" 的内部调用取一个默认目录用；新代码优先走 Registry / 显式 path。
+
+    一个 watch dir 都没注册时直接抛错——不兜底到某个魔术目录（CLAUDE.md：
+    遇到问题 throw error，不写 fallback）。
+    """
+    # 函数内 import：registry 反过来依赖 config，模块级 import 会成环。
+    from xskill.registry import list_watch_dirs
+    dirs = list_watch_dirs()
+    if not dirs:
+        raise RuntimeError(
+            "没有已注册的 watch dir——先 `xskill registry add <abs-path>`，"
+            "或让 daemon 启动时自动探测生态目录后再调用 get_traj_dir()。"
+        )
+    return Path(dirs[0]["path"])
 
 
 def get_registry_db_path() -> Path:

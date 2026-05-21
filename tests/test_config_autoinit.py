@@ -5,9 +5,12 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 import yaml
 
-from xskill.config import CONFIG_TEMPLATE, ensure_config_exists
+from xskill.config import CONFIG_TEMPLATE, ensure_config_exists, get_traj_dir
 
 
 def test_creates_template_when_missing(tmp_path):
@@ -53,3 +56,19 @@ def test_template_top_level_keys_are_exactly_live_set():
     assert set(parsed.keys()) == {
         "skill_dir", "llm", "embedding", "canary", "watcher", "team",
     }, f"模板顶层键漂移：{sorted(parsed.keys())}"
+
+
+def test_get_traj_dir_returns_first_registered_watch_dir(monkeypatch):
+    """get_traj_dir 取第一个已注册 watch dir——轨迹来源真源是 Registry。"""
+    monkeypatch.setattr(
+        "xskill.registry.list_watch_dirs",
+        lambda: [{"path": "/tmp/wd-a"}, {"path": "/tmp/wd-b"}],
+    )
+    assert get_traj_dir() == Path("/tmp/wd-a")
+
+
+def test_get_traj_dir_raises_when_no_watch_dir_registered(monkeypatch):
+    """一个 watch dir 都没注册时直接抛错——不兜底到魔术目录（CLAUDE.md no-fallback）。"""
+    monkeypatch.setattr("xskill.registry.list_watch_dirs", lambda: [])
+    with pytest.raises(RuntimeError, match="watch dir"):
+        get_traj_dir()

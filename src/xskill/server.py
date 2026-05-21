@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from xskill import __version__
-from xskill.config import load_config, get_skill_dir, get_chat_archive_dir
+from xskill.config import load_config, get_skill_dir
 from xskill.search import search as search_trajs, search_all as search_trajs_all
 from xskill.skill_manager import (
     list_skills,
@@ -60,8 +60,6 @@ logger = logging.getLogger("xskill.server")
 # 完全不读 config。
 _config: dict | None = None
 _skill_dir: Path | None = None
-_chat_archive_dir: Path | None = None
-_traj_dir: Path | None = None  # 兼容仍引用 _traj_dir 的代码路径
 _watcher_ref: dict = {}  # {"instance": DirectoryWatcher} — set in create_app startup
 
 # debug 模式：把生态扫描的 home_root 指向用户自选目录，不扫真正的 $HOME。
@@ -84,13 +82,11 @@ def _ensure_loaded() -> None:
     server 内部的 endpoint / startup / chat 等代码路径都通过模块级
     ``_config`` / ``_skill_dir`` 等访问，这里只负责把 None 占位填上。
     """
-    global _config, _skill_dir, _chat_archive_dir, _traj_dir
+    global _config, _skill_dir
     if _config is not None:
         return
     _config = load_config()
     _skill_dir = get_skill_dir()
-    _chat_archive_dir = get_chat_archive_dir()
-    _traj_dir = _chat_archive_dir
 
 # ---------------------------------------------------------------------------
 # Pydantic request / response models
@@ -179,7 +175,6 @@ class HealthResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     skill_dir: str
-    traj_dir: str
     skill_count: int
     git_branch: str
 
@@ -261,8 +256,6 @@ async def api_trajectory_content(path: str):
             if str(resolved).startswith(str(Path(d["path"]).resolve())):
                 allowed = True
                 break
-        if not allowed and str(resolved).startswith(str(_traj_dir.resolve())):
-            allowed = True
         if not allowed:
             raise HTTPException(status_code=403, detail="Access denied")
     except HTTPException:
@@ -732,7 +725,6 @@ async def api_status():
         branch = current_branch(str(_skill_dir))
         return StatusResponse(
             skill_dir=str(_skill_dir),
-            traj_dir=str(_traj_dir),
             skill_count=len(skills),
             git_branch=branch,
         )
@@ -816,18 +808,19 @@ def create_app(home_root: Path | str | None = None,
     @app.post("/api/v1/trajectories/submit")
     async def api_submit_trajectory(req: _SubmitRequest):
         try:
+            # traj_dir 不传 → submit_trajectory 落到 get_traj_dir()
+            # （第一个已注册的 watch dir）；没注册目录会抛错。
             result = submit_trajectory(
                 content=req.content,
                 format=req.format,
                 metadata=req.metadata or {},
                 traj_id=req.traj_id,
-                traj_dir=_traj_dir,
             )
             return result
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    # -- Watcher status endpoint (must be before SPA mount) --
+    # -- Watcher status endpoint --
     @app.get("/api/v1/watcher/status")
     async def api_watcher_status():
         if _watcher_ref.get("instance"):
@@ -850,25 +843,19 @@ def create_app(home_root: Path | str | None = None,
                 "llm.base_url / llm.model / llm.api_key must all be valid"
             )
         embed = create_embed_client(_config)
+        # data_dir 在 server 端点路径上不被消费（trajectory 搜索走 Registry），
+        # 传 _skill_dir 占位即可——同 core.py 的 init_context 调用。
         init_context(
             skill_dir=_skill_dir,
-            data_dir=_traj_dir,
+            data_dir=_skill_dir,
             llm_client=llm,
             embed_client=embed,
             config=_config,
         )
         logger.info(
-            "xskill server ready  skill_dir=%s  traj_dir=%s  llm=ok  embed=ok",
-            _skill_dir, _traj_dir,
+            "xskill server ready  skill_dir=%s  llm=ok  embed=ok",
+            _skill_dir,
         )
-
-        # Auto-register chat archive directory
-        try:
-            from xskill.registry import register_dir
-            register_dir(_chat_archive_dir, label="chat_archive", ecosystem="manual")
-            logger.info("chat archive dir registered: %s", _chat_archive_dir)
-        except Exception:
-            logger.warning("failed to register chat archive dir", exc_info=True)
 
         # Auto-detect known agent ecosystems on this host and bridge them in.
         # 抽成闭包：startup 跑一次（初始状态），同时挂到 watcher._loop 每轮跑

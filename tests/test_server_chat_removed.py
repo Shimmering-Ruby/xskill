@@ -17,10 +17,7 @@ def client(tmp_path):
     from xskill import server as srv
     srv._config = {"llm": {}, "embedding": {}, "watcher": {"poll_interval": 30}}
     srv._skill_dir = tmp_path / "skill"
-    srv._chat_archive_dir = tmp_path / "chat_archive"
-    srv._traj_dir = srv._chat_archive_dir
     srv._skill_dir.mkdir(exist_ok=True)
-    srv._chat_archive_dir.mkdir(exist_ok=True)
     try:
         with patch("xskill.server.create_embed_client"), \
              patch("xskill.server.init_context"):
@@ -31,8 +28,6 @@ def client(tmp_path):
     finally:
         srv._config = None
         srv._skill_dir = None
-        srv._chat_archive_dir = None
-        srv._traj_dir = None
 
 
 @pytest.mark.parametrize("method,path", [
