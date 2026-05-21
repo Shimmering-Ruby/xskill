@@ -32,14 +32,6 @@ src/xskill/_version.py
 *-snapshot.yml
 *.png
 
-# DO commit the packaged web UI build output (needed for `t2s serve`)
-!src/traj2skill/web/dist/
-!src/traj2skill/web/dist/**
-
-# Web source (Vite) local build artifacts
-web/node_modules/
-web/dist/
-
 # pip editable install
 src/*.egg-info/
 
