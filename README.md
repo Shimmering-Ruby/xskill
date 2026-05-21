@@ -69,7 +69,7 @@ embedding:
   dim:      0
 ```
 
-Any OpenAI-compatible endpoint works (DeepSeek, OpenAI, Qwen/DashScope, OpenRouter, a local Ollama, …). Missing fields raise — there are no environment-variable fallbacks. The auto-created `~/.xskill/config.yaml` is the full annotated template (canary, watcher, team, sandbox sections all documented inline).
+Any OpenAI-compatible endpoint works (DeepSeek, OpenAI, Qwen/DashScope, OpenRouter, a local Ollama, …). Missing fields raise — there are no environment-variable fallbacks. The auto-created `~/.xskill/config.yaml` is the full annotated template (canary, watcher, team sections all documented inline).
 
 If you use Claude Code, that is it — the daemon detects `~/.claude/projects/` on startup and starts watching your sessions. Otherwise, register the directory your agent writes trajectories to:
 

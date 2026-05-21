@@ -68,7 +68,7 @@ embedding:
   dim:      0
 ```
 
-任何 OpenAI 兼容 endpoint 都行（DeepSeek、OpenAI、Qwen/DashScope、OpenRouter、本地 Ollama 等）。字段缺失直接抛错，不读环境变量。auto-init 写出的 `~/.xskill/config.yaml` 本身就是完整模板——canary、watcher、team、sandbox 各段都有行内注释。
+任何 OpenAI 兼容 endpoint 都行（DeepSeek、OpenAI、Qwen/DashScope、OpenRouter、本地 Ollama 等）。字段缺失直接抛错，不读环境变量。auto-init 写出的 `~/.xskill/config.yaml` 本身就是完整模板——canary、watcher、team 各段都有行内注释。
 
 如果你用 Claude Code，到此就够了——daemon 启动时会自动发现 `~/.claude/projects/` 并开始监听。其他 agent 则把它写轨迹的目录注册进来：
 

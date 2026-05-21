@@ -168,21 +168,6 @@
 
 ---
 
-## 11. Sandbox（SWE-bench A/B 评估）
-
-当前 v2 流水线**不走** sandbox 评估（旧 `process_traj` 已删）。`config.yaml` 中
-`sandbox.*` 配置项仍存但默认 `enabled: true` 时由 `skill_eval.run_eval` 在被
-显式调用时使用（例如 web UI 的 `/skills/{name}/eval` endpoint），对常态流水线无影响。
-
-| 项 | 取值 | 含义 |
-|---|---|---|
-| `sandbox.max_instances` | 5 | 单次 eval 跑几个 SWE-bench instance |
-| `sandbox.n_trials` | 10 | 每 instance 重复次数（pass@1 的 N） |
-| `sandbox.timeout_per_trial` | 300s | 单 trial 墙钟超时 |
-| `sandbox.trigger_threshold` | 3 | skill 至少关联 N 条 SWE instance 才走沙箱 |
-
----
-
 ## 修订记录
 
 - 2026-05-12 AtomTask 重构（v2）：废弃旧 `source_trajs ≥ 3` gate / `path B`

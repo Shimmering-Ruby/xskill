@@ -41,3 +41,15 @@ def test_template_is_valid_yaml_with_required_sections():
     # llm / embedding 带 api_key 占位符（用户要填）
     assert parsed["llm"]["api_key"] == "PUT_YOUR_LLM_API_KEY_HERE"
     assert parsed["embedding"]["api_key"] == "PUT_YOUR_EMBEDDING_API_KEY_HERE"
+
+
+def test_template_top_level_keys_are_exactly_live_set():
+    """顶层键锁定为「真有代码消费的配置段」集合——防死配置回潮。
+
+    candidates.* 从不被代码读取（实际用硬编码 ATOM_PROMOTION_THRESHOLD），
+    sandbox 段随 SWE 沙箱子系统一并删除。两者都不得再出现在模板里。
+    """
+    parsed = yaml.safe_load(CONFIG_TEMPLATE)
+    assert set(parsed.keys()) == {
+        "skill_dir", "llm", "embedding", "canary", "watcher", "team",
+    }, f"模板顶层键漂移：{sorted(parsed.keys())}"

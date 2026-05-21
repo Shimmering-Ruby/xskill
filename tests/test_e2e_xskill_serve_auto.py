@@ -529,8 +529,6 @@ def sandbox(tmp_path, fake_server):
             "api_key": "fake-key",
             "dim": 0,
         },
-        "candidates": {"threshold": 3, "stale_days": 60, "min_source_trajs": 2},
-        "sandbox": {"enabled": False, "trigger_threshold": 999},
         "canary": {
             "enabled": True, "probability": 0.5,
             "min_samples": CANARY_MIN_SAMPLES, "max_days_hold": 14,

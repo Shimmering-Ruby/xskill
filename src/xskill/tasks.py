@@ -5,7 +5,6 @@ Provides SSE (Server-Sent Events) endpoints for long-running operations:
   - /api/v1/trajectories/index   -- build/update trajectory index
   - /api/v1/skills/process       -- process a single trajectory into skill
   - /api/v1/skills/batch         -- batch process trajectories
-  - /api/v1/skills/{name}/eval   -- evaluate a skill
 
 Each endpoint runs the heavy work in a ThreadPoolExecutor and streams
 progress, log, and result events back to the client via SSE.
@@ -119,11 +118,6 @@ class BatchRequest(BaseModel):
     dataset: Optional[str] = None
     max: Optional[int] = None
     dry_run: bool = False
-
-
-class EvalRequest(BaseModel):
-    n_runs: int = 3
-    sandbox: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -415,75 +409,6 @@ async def api_batch(req: BatchRequest):
                             "trajectories": total})
         except Exception as exc:
             logger.error("batch task failed: %s", exc, exc_info=True)
-            _fail(queue, f"{type(exc).__name__}: {exc}")
-
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(_executor, run)
-
-    return EventSourceResponse(_event_generator(queue))
-
-
-# ===================================================================
-# POST /api/v1/skills/{name}/eval
-# ===================================================================
-
-@sse_router.post("/skills/{name}/eval")
-async def api_eval(name: str, req: EvalRequest):
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def run():
-        try:
-            from xskill.skill_eval import run_eval
-            from xskill.skill_tools import init_context
-
-            config = load_config()
-            log_fn = make_sse_log(queue)
-            skill_dir = get_skill_dir()
-            skill_path = skill_dir / name
-
-            if not skill_path.is_dir():
-                _fail(queue, f"skill not found: {name}")
-                return
-
-            llm = create_llm_client(config)
-            embed = create_embed_client(config)
-
-            # init_context is needed so skill_tools has references
-            data_dir = get_traj_dir()
-            init_context(skill_dir, data_dir, llm, embed, config)
-
-            _push(queue, "progress", {
-                "step": "eval",
-                "current": 0,
-                "total": req.n_runs,
-                "detail": f"evaluating skill '{name}'",
-            })
-
-            # run_eval accepts a log_fn with (msg, tag) signature — our
-            # make_sse_log produces exactly that.
-            result = run_eval(
-                skill_dir=skill_path,
-                llm_client=llm,
-                n_runs=req.n_runs,
-                log_fn=log_fn,
-                config=config,
-                force_sandbox=req.sandbox,
-                force_no_sandbox=not req.sandbox,
-            )
-
-            _push(queue, "progress", {
-                "step": "eval",
-                "current": req.n_runs,
-                "total": req.n_runs,
-            })
-
-            _finish(queue, {
-                "status": "done",
-                "skill": name,
-                **result,
-            })
-        except Exception as exc:
-            logger.error("eval task failed: %s", exc, exc_info=True)
             _fail(queue, f"{type(exc).__name__}: {exc}")
 
     loop = asyncio.get_event_loop()

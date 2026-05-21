@@ -48,7 +48,6 @@ _PER_LOGGER_FILES: dict[str, str] = {
     "index":             "xskill.index.log",        # src/xskill/index.py 用 "index"
     "ux_score":          "xskill.ux_score.log",     # src/xskill/ux_score.py 用 "ux_score"
     "skill_tools":       "xskill.skill_tools.log",
-    "skill_eval":        "xskill.skill_eval.log",
     "git_lock":          "xskill.git_lock.log",
     "agno":              "agno.log",                # agno 内部，单独隔离免污染
     "httpx":             "httpx.log",

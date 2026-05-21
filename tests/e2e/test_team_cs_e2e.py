@@ -206,8 +206,6 @@ def team_server(tmp_path, fake_server):
                 "api_key": "fake-key"},
         "embedding": {"base_url": fake_server.base_url, "model": "fake-embed",
                       "api_key": "fake-key", "dim": 0},
-        "candidates": {"threshold": 3, "stale_days": 60, "min_source_trajs": 2},
-        "sandbox": {"enabled": False, "trigger_threshold": 999},
         "canary": {"enabled": True, "probability": 0.5, "min_samples": 5,
                    "max_days_hold": 14, "rotate_interval": 300},
         "watcher": {"poll_interval": 2},

@@ -6,7 +6,7 @@ types.py — SDK dataclass 集中地
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
@@ -55,24 +55,6 @@ class Candidate:
     promoted: bool
 
 
-# ─── Evaluator ────────────────────────────────────────────────────
-@dataclass
-class EvalScore:
-    """两种 tier 共用。tier 决定哪些字段有值。"""
-    tier: Literal["llm", "sandbox"]
-    eval_score: float
-
-    # tier="llm"
-    scores: Optional[dict[str, int]] = None
-    runs: Optional[int] = None
-
-    # tier="sandbox"
-    baseline_pass_rate: Optional[float] = None
-    skill_pass_rate: Optional[float] = None
-    delta: Optional[float] = None
-    instances: Optional[list[str]] = None
-
-
 # ─── UX Score ─────────────────────────────────────────────────────
 @dataclass
 class UxScoreResult:
@@ -80,17 +62,3 @@ class UxScoreResult:
     score: Optional[int]              # 1-10
     reasons: str
     decision: dict                    # canary.check_and_decide 输出
-
-
-# ─── Pipeline ─────────────────────────────────────────────────────
-@dataclass
-class DistillResult:
-    """PipelineRunner.run_distill 返回值（本期暂不创建 PipelineRunner，
-    保留 dataclass 给将来 watcher 改造时用）。"""
-    action: Literal[
-        "merged", "staged", "rejected", "skip",
-        "updated_metadata", "dry_run", "error",
-    ]
-    changed_skills: list[str] = field(default_factory=list)
-    eval_scores: dict[str, "EvalScore"] = field(default_factory=dict)
-    error: Optional[str] = None

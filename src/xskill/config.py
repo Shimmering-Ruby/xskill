@@ -66,12 +66,6 @@ embedding:
   # api: openai | multimodal   # optional; default openai. "multimodal" for
                                # vision-style embedding endpoints.
 
-# ===== Skill candidate gating =====
-candidates:
-  threshold:        3           # promote once supporting_trajs >= N
-  stale_days:       60          # after N days still short -> demote to references/
-  min_source_trajs: 2           # a new skill needs >= N source_trajs
-
 # ===== Canary (gradual rollout) =====
 canary:
   enabled:       true
@@ -85,11 +79,6 @@ watcher:
   poll_interval:  30            # seconds between scans of every watch_dir
   max_concurrent: 30            # ThreadPoolExecutor size for meta extraction
   cold_start_threshold: 3       # defer process while >= N trajectories un-indexed
-
-# ===== Sandbox eval (optional; SWE-bench A/B/C in docker) =====
-sandbox:
-  enabled:           false
-  trigger_threshold: 3
 
 # ===== Team C/S mode (only read by `xskill serve --server`) =====
 team:
