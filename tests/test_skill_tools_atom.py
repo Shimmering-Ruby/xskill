@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from xskill.atom_task import AtomTask, AtomTaskStore
-from xskill import skill_tools as ST
+from xskill.agents import skill_tools as ST
 from tests.test_atom_task_store import _FakeEmbed
 
 

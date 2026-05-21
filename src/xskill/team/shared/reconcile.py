@@ -17,7 +17,7 @@ from typing import Callable, Literal
 
 from xskill.git_lock import run_git, skill_repo_lock
 from xskill.install_history import InstallHistory
-from xskill.user_edit_absorb_agent import has_pending_user_edit
+from xskill.agents.user_edit_absorb_agent import has_pending_user_edit
 
 logger = logging.getLogger("xskill.team.shared.reconcile")
 

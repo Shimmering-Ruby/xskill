@@ -41,7 +41,7 @@ from xskill.skill_manager import (
     export_skill,
     import_skill,
 )
-from xskill.skill_tools import init_context, search_skills, rebuild_skill_index
+from xskill.agents.skill_tools import init_context, search_skills, rebuild_skill_index
 from xskill.llm_client import create_llm_client, create_embed_client
 from xskill.git_lock import ensure_repo, current_branch
 

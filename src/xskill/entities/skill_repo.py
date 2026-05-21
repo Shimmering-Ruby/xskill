@@ -67,7 +67,7 @@ class SkillRepo:
     # ─── 索引 ──────────────────────────────────────────────────
     def rebuild_index(self) -> None:
         """重建 .skill_index.pkl（向量检索用）。"""
-        from xskill import skill_tools
+        from xskill.agents import skill_tools
         from xskill.config import get_config
         from xskill.llm_client import create_embed_client
         cfg = get_config()

@@ -252,7 +252,7 @@ class DirectoryWatcher:
         """
         if self.skill_dir is None or not self.skill_dir.is_dir():
             return
-        from xskill.skill_edit_agent import SkillEditAgent
+        from xskill.agents.skill_edit_agent import SkillEditAgent
         factory = self._factory()
         # store 选哪个：edit agent 工具 (atom_task_read/read_traj) 需要
         # store + traj_root 来工作；从已注册的第一个 wd 取（生产环境通常
@@ -269,7 +269,7 @@ class DirectoryWatcher:
         if store is None:
             return
         # 初始化 v2 工具 ctx（SkillEditAgent 工具用）
-        from xskill import skill_tools as ST
+        from xskill.agents import skill_tools as ST
         ST.init_context_v2(
             skill_dir=self.skill_dir, store=store,
             embed_client=self.embed_client, traj_root=traj_root,
@@ -429,7 +429,7 @@ class DirectoryWatcher:
         """
         if self.skill_dir is None or not self.skill_dir.is_dir():
             return
-        from xskill.user_edit_absorb_agent import (
+        from xskill.agents.user_edit_absorb_agent import (
             UserEditAbsorbAgent, detect_user_edits, reverse_sync_openclaw_dest,
         )
         target_root = self._resolve_target_root()
@@ -715,7 +715,7 @@ class DirectoryWatcher:
         """返回 agno agent 工厂；优先 inject 的，否则用默认 deepseek 工厂。"""
         if self.agno_agent_factory is not None:
             return self.agno_agent_factory
-        from xskill.agno_factory import make_default_factory
+        from xskill.agents.agno_factory import make_default_factory
         if not hasattr(self, "_default_factory_cache"):
             self._default_factory_cache = make_default_factory(self.config)
         return self._default_factory_cache
@@ -728,7 +728,7 @@ class DirectoryWatcher:
 
     def _do_split(self, dir_path, fname):
         """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id, err)。"""
-        from xskill.task_agent import TaskAgent
+        from xskill.agents.task_agent import TaskAgent
         md_path = dir_path / fname
         if not md_path.is_file():
             return (fname, 0, 0, None, "file not found")

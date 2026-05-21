@@ -207,7 +207,7 @@ class SkillEditAgent:
         return any(s.get("side") == "main" for s in scores)
 
     def _run(self, ready: list[dict], current_branch_name: str) -> None:
-        from xskill import skill_tools as ST
+        from xskill.agents import skill_tools as ST
         from xskill.frontmatter import parse as fm_parse
 
         # 构造 scenario_block + branch_now 给 prompt 用

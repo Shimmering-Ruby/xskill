@@ -175,7 +175,7 @@ class TeamClient:
         自动到 working copy。每个 skill 先跑 reverse_sync_openclaw_dest 把
         dest 改灌回 working copy，下面 git status 才能看到。
         """
-        from xskill.user_edit_absorb_agent import reverse_sync_openclaw_dest
+        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest
 
         pushed = 0
         for repo_dir in sorted(self.skill_dir.iterdir()):

@@ -142,7 +142,7 @@ async def api_index(req: IndexRequest):
     def run():
         try:
             from xskill.atom_task import AtomTaskStore
-            from xskill.task_agent import TaskAgent
+            from xskill.agents.task_agent import TaskAgent
 
             config = load_config()
             log_fn = make_sse_log(queue)
@@ -230,9 +230,9 @@ async def api_process(req: ProcessRequest):
     def run():
         try:
             from xskill.atom_task import AtomTaskStore
-            from xskill.task_agent import TaskAgent
+            from xskill.agents.task_agent import TaskAgent
             from xskill.process import process_atom_task
-            from xskill.agno_factory import make_default_factory
+            from xskill.agents.agno_factory import make_default_factory
             from xskill.git_lock import ensure_repo
 
             config = load_config()
@@ -318,9 +318,9 @@ async def api_batch(req: BatchRequest):
     def run():
         try:
             from xskill.atom_task import AtomTaskStore
-            from xskill.task_agent import TaskAgent
+            from xskill.agents.task_agent import TaskAgent
             from xskill.process import process_atom_task
-            from xskill.agno_factory import make_default_factory
+            from xskill.agents.agno_factory import make_default_factory
             from xskill.git_lock import ensure_repo
 
             config = load_config()

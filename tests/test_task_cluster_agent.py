@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from xskill.atom_task import AtomTask, AtomTaskStore
-from xskill.task_cluster_agent import TaskClusterAgent, build_skill_catalog_block
+from xskill.agents.task_cluster_agent import TaskClusterAgent, build_skill_catalog_block
 
 
 def _make_skill_on_main(skill_dir: Path, name: str, desc: str):

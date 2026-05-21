@@ -25,7 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from xskill.git_lock import run_git
-from xskill.user_edit_absorb_agent import detect_user_edits, has_pending_user_edit
+from xskill.agents.user_edit_absorb_agent import detect_user_edits, has_pending_user_edit
 from xskill.watcher import DirectoryWatcher
 
 

@@ -168,7 +168,7 @@ team 客户端跟 standalone 共用上面这套逻辑——回流的"source"在 
 
 ### 关键文件改动
 
-- `src/xskill/user_edit_absorb_agent.py` 加一个新函数
+- `src/xskill/agents/user_edit_absorb_agent.py` 加一个新函数
   `reverse_sync_openclaw_dest(dest, source) -> bool` 实现回流操作（return
   True 表示真的有改动 synced 回去）
 - `src/xskill/watcher.py` 的 poll 循环里，扫 `~/.xskill/skill/` 之前先扫
@@ -189,7 +189,7 @@ team 客户端跟 standalone 共用上面这套逻辑——回流的"source"在 
      新 session 文件出现 → pick_side → 跟 install_history 对比 → 调
      `install_to_openclaw(side=new_side)` 触发 copy（内部已包含回流保护）
 
-3. `src/xskill/user_edit_absorb_agent.py`
+3. `src/xskill/agents/user_edit_absorb_agent.py`
    - 新增 `reverse_sync_openclaw_dest(dest_dir, source_dir) -> bool`：扫 dest
      mtime，发现用户改 → 抢 source 锁 → 灌回 source → touch source 让 watcher
      下轮看到 → 返回 True

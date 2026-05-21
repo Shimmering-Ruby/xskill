@@ -478,7 +478,7 @@ def install_to_openclaw(
     # 没改 / dest 不存在 → no-op。
     if dest.is_dir() and not dest.is_symlink():
         try:
-            from xskill.user_edit_absorb_agent import reverse_sync_openclaw_dest
+            from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest
             reverse_sync_openclaw_dest(dest, skill_path)
         except Exception:
             logger.warning(

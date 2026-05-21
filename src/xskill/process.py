@@ -39,8 +39,8 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
     Returns:
         dict 含 keys: action / atom_id / cluster_log
     """
-    from xskill.task_cluster_agent import TaskClusterAgent
-    from xskill import skill_tools as ST
+    from xskill.agents.task_cluster_agent import TaskClusterAgent
+    from xskill.agents import skill_tools as ST
 
     atom = store.load(atom_id)
     traj_root = store.root

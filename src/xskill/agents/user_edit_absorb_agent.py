@@ -85,7 +85,7 @@ class UserEditAbsorbAgent:
         if not diff_out and not status_out:
             return False
 
-        from xskill import skill_tools as ST
+        from xskill.agents import skill_tools as ST
         skill_name = self.skill_dir.name
 
         # 构造 user_msg：含 skill_name + 当前分支 + 完整 diff + 未追踪文件列表

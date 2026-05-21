@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from xskill import candidates as C
-from xskill.skill_edit_agent import SkillEditAgent
+from xskill.agents.skill_edit_agent import SkillEditAgent
 from xskill.git_lock import init_skill_repo_on_baby, run_git
 
 
@@ -104,7 +104,7 @@ def _staging_factory(*, instructions, tools):
 @pytest.fixture(autouse=True)
 def _init_v2_ctx(tmp_path):
     """每个 case 把 _ctx_v2 指到 tmp_path/skill，让 commit_*/write_file 工具可用。"""
-    from xskill import skill_tools as ST
+    from xskill.agents import skill_tools as ST
     from xskill.atom_task import AtomTaskStore
     (tmp_path / "skill").mkdir(parents=True, exist_ok=True)
     (tmp_path / "store").mkdir(parents=True, exist_ok=True)

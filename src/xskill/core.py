@@ -90,7 +90,7 @@ class XSkill:
     def search_skills(self, query: str, top_k: int = 5) -> list[SkillHit]:
         """跨 skill_repo 搜索 skill。"""
         import json
-        from xskill import skill_tools
+        from xskill.agents import skill_tools
         # data_dir 在 skill 搜索路径上不读，传 skill_repo.root 占位
         skill_tools.init_context(
             self.skill_repo.root, self.skill_repo.root,

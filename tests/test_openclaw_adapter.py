@@ -322,7 +322,7 @@ class TestReverseSyncOpenClawDest:
         return sk
 
     def test_no_user_edit_returns_false(self, tmp_path):
-        from xskill.user_edit_absorb_agent import reverse_sync_openclaw_dest
+        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest
         sk = self._build_real_skill_repo(tmp_path)
         home = tmp_path / "home"
         dest_md = install_to_openclaw(sk, target_root=home)
@@ -331,7 +331,7 @@ class TestReverseSyncOpenClawDest:
 
     def test_user_edit_in_dest_synced_back_to_source(self, tmp_path):
         import time as _t
-        from xskill.user_edit_absorb_agent import reverse_sync_openclaw_dest
+        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest
         sk = self._build_real_skill_repo(tmp_path)
         home = tmp_path / "home"
         dest_md = install_to_openclaw(sk, target_root=home)
@@ -352,7 +352,7 @@ class TestReverseSyncOpenClawDest:
 
     def test_install_meta_skipped_during_sync(self, tmp_path):
         """install-meta 不算用户改，本身的 mtime 不应触发回流。"""
-        from xskill.user_edit_absorb_agent import (
+        from xskill.agents.user_edit_absorb_agent import (
             reverse_sync_openclaw_dest, has_pending_dest_edit,
         )
         sk = self._build_real_skill_repo(tmp_path)
@@ -399,9 +399,9 @@ class TestInstallToOpenClawProtectsPendingDestEdits:
         dest_md = install_to_openclaw(sk, target_root=home)
 
         # 让 reverse_sync 跳过静默检查（测试用，免等 3 分钟）
-        from xskill.user_edit_absorb_agent import reverse_sync_openclaw_dest as _orig
+        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest as _orig
         monkeypatch.setattr(
-            "xskill.user_edit_absorb_agent.reverse_sync_openclaw_dest",
+            "xskill.agents.user_edit_absorb_agent.reverse_sync_openclaw_dest",
             lambda d, s, **k: _orig(d, s, quiet_seconds=0),
         )
 

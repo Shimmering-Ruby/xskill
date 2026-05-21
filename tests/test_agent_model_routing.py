@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from xskill.agno_factory import build_chat_model as _build_chat_model
+from xskill.agents.agno_factory import build_chat_model as _build_chat_model
 from xskill.log import StreamLog
 
 

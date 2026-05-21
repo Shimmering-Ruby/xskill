@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from xskill import skill_tools
+from xskill.agents import skill_tools
 
 
 @pytest.fixture

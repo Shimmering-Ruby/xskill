@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from xskill.atom_task import AtomTaskStore
-from xskill.task_agent import TaskAgent
+from xskill.agents.task_agent import TaskAgent
 
 
 class _StubLLM:

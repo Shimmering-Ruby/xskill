@@ -13,7 +13,7 @@ def test_freshly_inited_baby_skill_is_not_user_edit(tmp_path):
     commit_ts 大一点小数 → 误判为 user_edit_detected。
     """
     from xskill.git_lock import init_skill_repo_on_baby
-    from xskill.user_edit_absorb_agent import detect_user_edits
+    from xskill.agents.user_edit_absorb_agent import detect_user_edits
 
     skill = tmp_path / "fresh-skill"
     init_skill_repo_on_baby(str(skill), name="fresh-skill", description="stub")
@@ -27,7 +27,7 @@ def test_freshly_inited_baby_skill_is_not_user_edit(tmp_path):
 def test_real_user_edit_after_init_detected(tmp_path):
     """init 后真正改文件 + 等够 quiet_seconds → 返回 True。"""
     from xskill.git_lock import init_skill_repo_on_baby
-    from xskill.user_edit_absorb_agent import detect_user_edits
+    from xskill.agents.user_edit_absorb_agent import detect_user_edits
 
     skill = tmp_path / "edited-skill"
     init_skill_repo_on_baby(str(skill), name="edited-skill", description="stub")
