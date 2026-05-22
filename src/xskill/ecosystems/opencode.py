@@ -79,6 +79,94 @@ OPENCODE_SPEC = SqliteEcosystemSpec(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Session → markdown 渲染（读 part 表还原真实对话内容）
+# ─────────────────────────────────────────────────────────────────
+#
+# OpenCode 数据模型：``message`` 表只存信封（role / model / cost / tokens），
+# 真实内容在 ``part`` 表——一条 message 对应多条 part。``part.data`` 的 type：
+#
+#   text         真实文本（user 提问 / assistant 回复）
+#   reasoning    assistant 思考
+#   tool         工具调用 + 输入/输出（state.status: completed | error）
+#   step-start / step-finish   step 边界 + 计费，噪声，渲染时丢弃
+#   patch        一次 patch（文件列表）
+#
+# 渲染成与 CC bridged 轨迹同构的 ``## User`` / ``## Assistant`` /
+# ``## Tool Call`` 结构，让 TaskAgent 能按 ``## User`` 切 atom。
+
+_NOISE_PART_TYPES = {"step-start", "step-finish"}
+
+
+def _render_tool_part(part: dict) -> str:
+    """一个 ``tool`` part → ``## Tool Call: <tool>`` 段。"""
+    tool = part.get("tool") or "?"
+    state = part.get("state") or {}
+    status = state.get("status", "?")
+    head = f"## Tool Call: {tool}" + (" [ERROR]" if status == "error" else "")
+    lines = [head, "", "input:", "```json",
+             json.dumps(state.get("input", {}), ensure_ascii=False, indent=2),
+             "```", ""]
+    if status == "error":
+        lines += ["error:", "```", str(state.get("error") or ""), "```"]
+    else:
+        lines += ["output:", "```", str(state.get("output") or ""), "```"]
+    return "\n".join(lines)
+
+
+def _render_patch_part(part: dict) -> str:
+    """一个 ``patch`` part → ``## Patch`` 段（文件列表）。"""
+    files = part.get("files") or []
+    body = "\n".join(f"- `{f}`" for f in files) or "(no files)"
+    return f"## Patch\n\n{body}"
+
+
+def _render_message(role: str, parts: list[dict]) -> list[str]:
+    """一条 message + 它的 parts → 若干 markdown 段（保持 part 时间顺序）。"""
+    if role == "user":
+        texts = [str(p.get("text") or "").strip()
+                 for p in parts if p.get("type") == "text"]
+        texts = [t for t in texts if t]
+        return [f"## User\n\n{chr(10).join(texts)}"] if texts else []
+
+    # assistant（及其他非 user role）：reasoning / text 累积成 ## Assistant，
+    # 遇到 tool / patch 就先 flush 再单独成段，保持真实时间线。
+    sections: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        if buf:
+            sections.append("## Assistant\n\n" + "\n\n".join(buf))
+            buf.clear()
+
+    for p in parts:
+        ptype = p.get("type")
+        if ptype in _NOISE_PART_TYPES:
+            continue
+        if ptype == "reasoning":
+            txt = str(p.get("text") or "").strip()
+            if txt:
+                buf.append(f"_(reasoning)_\n\n{txt}")
+        elif ptype == "text":
+            txt = str(p.get("text") or "").strip()
+            if txt:
+                buf.append(txt)
+        elif ptype == "tool":
+            flush()
+            sections.append(_render_tool_part(p))
+        elif ptype == "patch":
+            flush()
+            sections.append(_render_patch_part(p))
+        else:
+            # 未知 part type：不静默丢，原样留个 JSON 块
+            flush()
+            sections.append(
+                f"## Part: {ptype}\n\n```json\n"
+                + json.dumps(p, ensure_ascii=False, indent=2) + "\n```")
+    flush()
+    return sections
+
+
+# ─────────────────────────────────────────────────────────────────
 # SqliteIngester (独立新类——不复用 / 不耦合 JsonlIngester)
 # ─────────────────────────────────────────────────────────────────
 
@@ -240,12 +328,29 @@ class SqliteIngester:
                         self._cursor_ms = time_updated
                     continue
 
-                # 抽这条 session 的所有 message
+                # 抽这条 session 的所有 message（含 id —— 用来关联 part 表）
                 cur.execute(
-                    "SELECT data FROM message WHERE session_id = ? ORDER BY time_created",
+                    "SELECT id, data FROM message WHERE session_id = ? "
+                    "ORDER BY time_created",
                     (sid,),
                 )
-                messages = [self._parse_message_data(row[0]) for row in cur.fetchall()]
+                msg_rows = cur.fetchall()
+                # OpenCode 把消息内容存在 part 表（message 只是信封）。一次取
+                # 全 session 的 part，按 message_id 分组挂回各 message。
+                cur.execute(
+                    "SELECT message_id, data FROM part WHERE session_id = ? "
+                    "ORDER BY time_created",
+                    (sid,),
+                )
+                parts_by_msg: dict[str, list[dict]] = {}
+                for mid, pdata in cur.fetchall():
+                    parts_by_msg.setdefault(mid, []).append(
+                        self._parse_json_col(pdata))
+                messages = []
+                for mid, mdata in msg_rows:
+                    msg = self._parse_json_col(mdata)
+                    msg["_parts"] = parts_by_msg.get(mid, [])
+                    messages.append(msg)
 
                 # 生成 traj_id：含 project basename + sid8（同 CC 命名风格）
                 traj_id = self._opencode_traj_id(sid, directory)
@@ -297,54 +402,38 @@ class SqliteIngester:
         return sqlite3.connect(uri, uri=True)
 
     @staticmethod
-    def _parse_message_data(data_text: str) -> dict:
-        """把 `message.data` (JSON-in-text) 解出来抽 role / content / cwd 等。
+    def _parse_json_col(data_text: str) -> dict:
+        """``message.data`` / ``part.data`` 都是 JSON-in-text（drizzle
+        ``text({ mode: "json" })`` 裸 JSON）。
 
-        OpenCode `message.data` 没有固定 schema——drizzle 端是 `text({ mode: "json" })`
-        裸 JSON。我们关心的字段：
-
-        * `role`: "user" | "assistant" | ...
-        * `path.cwd`: assistant message 上才有，是实际 cwd（与 session.directory
-          冗余但有时不同）
-        * `agent`: "build" | "plan" | ...
-        * `model`: {providerID, modelID}
-
-        其余字段透传到 metadata，给下游 task agent 看。
+        解析失败直接抛——data 列 NOT NULL，OpenCode 自己反序列化也会炸；
+        抛上去由 daemon 层 logger.exception 记录，不做容错的容错。
         """
-        try:
-            obj = json.loads(data_text)
-        except json.JSONDecodeError:
-            # 不做容错的容错——data 列 NOT NULL 且 OpenCode 自己反序列化也会炸；
-            # 抛上去，daemon 层 logger.exception 记下来。
-            raise
-        return obj
+        return json.loads(data_text)
 
     @staticmethod
     def _render_session_md(
         *, sid: str, directory: str, messages: list[dict],
     ) -> str:
-        """把一条 OpenCode session 拼成 xskill watcher 能消费的 trajectory markdown。
+        """把一条 OpenCode session 渲染成 xskill watcher 能消费的 trajectory
+        markdown —— 读每条 message 的 ``_parts``，还原真实对话内容。
 
-        不走 `_adapt_opencode_*` adapter 是故意的——P3 scope 只做 ingester，
-        不动 adapters。用 ``format="raw"`` 让 submit_trajectory 直接落盘，
-        待 P4 / 未来再加专用 adapter（如果发现 raw 的语义损失太大）。
+        产出与 CC bridged 轨迹同构的 ``## User`` / ``## Assistant`` /
+        ``## Tool Call`` 结构（详见模块上方 ``_render_message`` 一节），让
+        TaskAgent 能按 ``## User`` 切 atom。
         """
-        lines = [
+        out: list[str] = [
             f"# OpenCode session {sid}",
             "",
             f"- cwd: `{directory}`",
-            f"- messages: {len(messages)}",
             "",
         ]
-        for i, msg in enumerate(messages):
+        for msg in messages:
             role = msg.get("role", "?")
-            lines.append(f"## msg {i} (role={role})")
-            lines.append("")
-            lines.append("```json")
-            lines.append(json.dumps(msg, ensure_ascii=False, indent=2))
-            lines.append("```")
-            lines.append("")
-        return "\n".join(lines)
+            for section in _render_message(role, msg.get("_parts", [])):
+                out.append(section)
+                out.append("")
+        return "\n".join(out)
 
     @staticmethod
     def _opencode_traj_id(sid: str, directory: str) -> str:

@@ -46,9 +46,11 @@ FIXTURE_DB = Path(__file__).parent / "fixtures" / "opencode" / "sample.db"
 
 
 def _seed_opencode_home(home: Path) -> Path:
-    """把 fixture sample.db 复制到 ``<home>/.local/share/opencode/opencode.db``。
+    """把入仓 fixture sample.db 复制到 ``<home>/.local/share/opencode/opencode.db``。
 
-    返回 db 路径。模拟 OpenCode 在该 home 下跑过的 layout。
+    sample.db 由 ``tests/fixtures/opencode/generate.py`` 按真实 OpenCode schema
+    （session / message / part 三表）生成；改 fixture 内容请改 generate.py 后
+    重新生成,不要手改二进制。
     """
     target_dir = home / ".local" / "share" / "opencode"
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -73,7 +75,13 @@ def _make_skill(skill_root: Path, name: str = "test-skill") -> Path:
 # ────────────────────────────────────────────────────────────────
 
 
-def test_ingester_extracts_session_and_messages(tmp_path):
+def test_ingester_renders_real_content_from_part_table(tmp_path):
+    """T1: ingester 读 part 表，渲染出真实对话内容。
+
+    回归锚点：旧实现只 dump message 信封（``## msg N (role=...)`` + 一坨
+    cost/tokens JSON），轨迹里**没有任何对话内容**。新实现读 part 表，渲染
+    成 ``## User`` / ``## Assistant`` / ``## Tool Call`` 结构。
+    """
     home = tmp_path / "home"
     home.mkdir()
     _seed_opencode_home(home)
@@ -86,24 +94,34 @@ def test_ingester_extracts_session_and_messages(tmp_path):
     assert rec["session_id"] == "ses_bbbbbbbbbbbb"
     assert rec["session_directory"] == "/tmp/opencode-test-workspace"
     assert rec["session_time_updated"] == 1777530090000
+    assert ing.cursor_ms == 1777530090000
 
-    # 抽取两条 message，role 分别是 user / assistant
+    # message 抽取 + part 挂载
     msgs = rec["messages"]
     assert len(msgs) == 2
-    assert msgs[0]["role"] == "user"
-    assert msgs[1]["role"] == "assistant"
-    # assistant message 的 path.cwd 抽出来与 session.directory 一致
+    assert msgs[0]["role"] == "user" and len(msgs[0]["_parts"]) == 1
+    assert msgs[1]["role"] == "assistant" and len(msgs[1]["_parts"]) == 7
     assert msgs[1]["path"]["cwd"] == "/tmp/opencode-test-workspace"
 
-    # traj 文件落盘成功
-    traj_md = Path(rec["path"])
-    assert traj_md.is_file()
-    body = traj_md.read_text()
-    assert "ses_bbbbbbbbbbbb" in body
-    assert "/tmp/opencode-test-workspace" in body
-
-    # cursor 卡到这条 session 的 time_updated
-    assert ing.cursor_ms == 1777530090000
+    body = Path(rec["path"]).read_text(encoding="utf-8")
+    # 真实内容 —— 不再是信封 dump
+    assert "## User" in body and "列出所有 skill" in body
+    assert "## Assistant" in body
+    assert "用户想列出 skill" in body              # reasoning part
+    assert "已为你列出 3 个 skill。" in body          # assistant text part
+    # 工具调用 + 输出
+    assert "## Tool Call: skill" in body
+    assert "skill A / skill B / skill C" in body
+    # 错误工具：标 [ERROR] + 错误文本
+    assert "## Tool Call: edit [ERROR]" in body
+    assert "No changes to apply" in body
+    # patch part
+    assert "## Patch" in body and "/tmp/x/a.py" in body
+    # 噪声 part（step-start / step-finish）被丢弃
+    assert "step-start" not in body
+    assert "step-finish" not in body
+    # 旧 bug 回归锚点：不再有 "## msg N (role=...)" 信封 dump
+    assert "(role=" not in body
 
 
 # ────────────────────────────────────────────────────────────────

@@ -158,7 +158,7 @@ class TestSqliteIngesterDaemonThread:
 
     def _make_opencode_db(self, home_root: Path) -> Path:
         """在 ``<home>/.local/share/opencode/opencode.db`` 造一个最小 schema 的
-        SQLite，含一条 session + 一条 message。
+        SQLite，含一条 session + 一条 message + 一条 text part。
         """
         db_dir = home_root / ".local" / "share" / "opencode"
         db_dir.mkdir(parents=True, exist_ok=True)
@@ -180,14 +180,31 @@ class TestSqliteIngesterDaemonThread:
                     data TEXT
                 )
             """)
+            # OpenCode 把消息内容存在 part 表（见 ecosystems/opencode.py）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT,
+                    session_id TEXT,
+                    time_created INTEGER,
+                    data TEXT
+                )
+            """)
+            ts = int(time.time() * 1000)
             conn.execute(
                 "INSERT INTO session (id, directory, time_updated) VALUES (?, ?, ?)",
-                ("ses_abcd1234", "/tmp/oc_proj", int(time.time() * 1000)),
+                ("ses_abcd1234", "/tmp/oc_proj", ts),
             )
             conn.execute(
                 "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
-                ("msg_1", "ses_abcd1234", int(time.time() * 1000),
-                 json.dumps({"role": "user", "content": "hello opencode"})),
+                ("msg_1", "ses_abcd1234", ts,
+                 json.dumps({"role": "user", "time": {"created": ts}})),
+            )
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, data) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("prt_1", "msg_1", "ses_abcd1234", ts,
+                 json.dumps({"type": "text", "text": "hello opencode"})),
             )
             conn.commit()
         finally:
