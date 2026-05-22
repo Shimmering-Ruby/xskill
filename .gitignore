@@ -11,6 +11,8 @@ output/
 # 密钥
 .key
 config.yaml
+# 例外：e2e fixture 的 pre_state/ 是测试夹具，必须入仓（否则干净 clone 跑不过 e2e）
+!tests/docker_e2e/scenarios/**/pre_state/**
 
 # Python
 __pycache__/

@@ -1,0 +1,24 @@
+# xskill config — Bug #5 scenario
+# llm / embedding 都指向 rig 内置的 _fake_llm_server.py（监听 :19999）。
+# scenario 不会触发真 LLM 调用——只验"生态自动检测"路径，所以 fake 后端足够。
+skill_dir: /home/xtest/testhome/.xskill/skill
+llm:
+  base_url: http://127.0.0.1:19999
+  model: fake-llm
+  api_key: fake-key
+embedding:
+  base_url: http://127.0.0.1:19999
+  model: fake-embed
+  api_key: fake-key
+  dim: 0
+watcher:
+  poll_interval: 3      # 短 poll 让 scenario 不用等太久
+candidates:
+  threshold: 3
+  stale_days: 60
+  min_source_trajs: 2
+sandbox:
+  enabled: false
+  trigger_threshold: 999
+canary:
+  enabled: false
