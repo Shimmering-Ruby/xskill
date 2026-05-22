@@ -1127,28 +1127,27 @@ def create_app(home_root: Path | str | None = None,
             except Exception:
                 logger.warning("team server context init failed", exc_info=True)
 
-        # Start watcher if any dirs are registered.
-        # team server 模式即使当前没 client 桶也要起 watcher——_scan_once 每轮
-        # 重新 list_watch_dirs()，首个 client upload 后下一轮就被扫到。
+        # watcher 无条件启动——即便此刻 registry 为空。
+        # 它的 _loop 每轮 _scan_once 重新 list_watch_dirs()、跑 on_poll_hook
+        # 做生态再检测；daemon 运行中新装的 agent 全靠这个 poll 循环接管
+        # （Bug #5）。历史上这里有个 `if dirs` 门，靠 startup 必注册
+        # chat_archive 凑出 ≥1 dir 才不踩坑——chat_archive 随 web 面板移除后，
+        # 该门会让空 home 启动的 daemon 永远起不了 watcher，故直接去掉。
         try:
-            from xskill.registry import list_watch_dirs
             from xskill.watcher import DirectoryWatcher
-            dirs = list_watch_dirs()
-            if dirs or team_server:
-                watcher_cfg = _config.get("watcher", {})
-                watcher = DirectoryWatcher(
-                    llm=llm, embed_client=embed, config=_config,
-                    skill_dir=_skill_dir,
-                    poll_interval=float(watcher_cfg.get("poll_interval", 30)),
-                    max_concurrent=int(watcher_cfg.get("max_concurrent", 30)),
-                    cold_start_threshold=int(watcher_cfg.get("cold_start_threshold", 3)),
-                    server_mode=team_server,
-                    on_poll_hook=_ensure_ingesters_for_detected_ecosystems,
-                )
-                watcher.start()
-                _watcher_ref["instance"] = watcher
-                logger.info("watcher started, monitoring %d directories (team_server=%s)",
-                            len(dirs), team_server)
+            watcher_cfg = _config.get("watcher", {})
+            watcher = DirectoryWatcher(
+                llm=llm, embed_client=embed, config=_config,
+                skill_dir=_skill_dir,
+                poll_interval=float(watcher_cfg.get("poll_interval", 30)),
+                max_concurrent=int(watcher_cfg.get("max_concurrent", 30)),
+                cold_start_threshold=int(watcher_cfg.get("cold_start_threshold", 3)),
+                server_mode=team_server,
+                on_poll_hook=_ensure_ingesters_for_detected_ecosystems,
+            )
+            watcher.start()
+            _watcher_ref["instance"] = watcher
+            logger.info("watcher started (team_server=%s)", team_server)
         except Exception:
             logger.warning("watcher startup failed", exc_info=True)
 
