@@ -183,15 +183,15 @@ FAKE_LLM_SCORE_PROFILE = {
 
 
 # ── D. AtomTask 拆分假数据 ────────────────────────────────────────
-# v0.5.0a4 起 TaskAgent 不再用 char offset：预处理给 ``## User`` 行打
-# ``[L<行号>]`` 标记，LLM 只报 atom 起始行号 start_line。fake server 的拆分
-# 应答因此必须动态——扫 prompt 里的 [L] 标记，按真实行号回应；固定假数据
-# 会因 start_line 不是被标记的 ## User 行而被 TaskAgent 严格校验拒掉。
+# v0.5.0a4 起 TaskAgent 用行号坐标:预处理给 ``## User`` 行打
+# ``[line:<行号>]`` 标记，LLM 只报 atom 起始行号 start_line。fake server 的
+# 拆分应答因此必须动态——扫 prompt 里的 [line:] 标记，按真实行号回应；固定
+# 假数据会因 start_line 不是被标记的 ## User 行而被 TaskAgent 严格校验拒掉。
 # bridged CC 轨迹是单 prompt → 单 user turn，回 1 个覆盖全程的 atom。
 def _atom_split_build(b: dict) -> dict:
-    marks = re.findall(r"\[L(\d+)\]", _msg_user_text(b))
+    marks = re.findall(r"\[line:(\d+)\]", _msg_user_text(b))
     if not marks:
-        raise AssertionError("atom-split responder: prompt 里没有 [L] 标记")
+        raise AssertionError("atom-split responder: prompt 里没有 [line:] 标记")
     xml = (
         "<atoms>\n<atom>\n"
         f"  <start_line>{int(marks[0])}</start_line>\n"

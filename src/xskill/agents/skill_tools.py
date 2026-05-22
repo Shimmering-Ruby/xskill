@@ -574,11 +574,12 @@ def atom_task_search(query: str, top_k: int = 5) -> str:
 
 
 def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
-    """按字符 offset 读 traj.md 片段。
+    """按**行号**读 traj.md 片段。
 
-    用法：agent 看了 atom 摘要后想确认细节时，传 atom 的 offset_start/end
-    回来取原文。校验区间合法（``offset_end > offset_start`` 且区间在文件
-    长度内），违反直接返回 error。
+    用法：agent 看了 atom 摘要后想确认细节时，传 atom 的 offset_start /
+    offset_end（都是 1-based 行号，半开区间 ``[start, end)``）回来取原文。
+    校验区间合法（``offset_end > offset_start`` 且区间在文件行数内），
+    违反直接返回 error。
     """
     traj_root = _ctx_v2["traj_root"]
     if traj_root is None:
@@ -588,13 +589,15 @@ def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
         return f"error: traj file not found: {p}"
     if offset_end <= offset_start:
         return f"error: offset_end ({offset_end}) must be > offset_start ({offset_start})"
-    text = p.read_text(encoding="utf-8")
-    if offset_start < 0 or offset_end > len(text):
+    lines = p.read_text(encoding="utf-8").splitlines(keepends=True)
+    total = len(lines)
+    # offset_end 是半开上界（行号），末 atom 可达 total + 1
+    if offset_start < 1 or offset_end > total + 1:
         return (
-            f"error: offsets [{offset_start}..{offset_end}] outside file "
-            f"length {len(text)}"
+            f"error: line range [{offset_start}..{offset_end}) outside file "
+            f"line count {total}"
         )
-    return text[offset_start:offset_end]
+    return "".join(lines[offset_start - 1:offset_end - 1])
 
 
 def new_skill_folder(skill_name: str, description: str) -> str:

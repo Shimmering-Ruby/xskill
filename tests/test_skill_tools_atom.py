@@ -18,7 +18,7 @@ def _setup(tmp_path: Path) -> tuple[Path, AtomTaskStore]:
     store = AtomTaskStore(root=store_root)
     atom = AtomTask(
         atom_id="atom_x_0001", traj_id="x",
-        offset_start=0, offset_end=10,
+        offset_start=1, offset_end=3,        # 1-based 行号,半开
         intent="修 django migration", summary="跑了 makemigrations 找冲突",
         tags=["django"], used_skills=[], ux_score=7,
         pre_atom_id=None, post_atom_id=None,
@@ -26,8 +26,9 @@ def _setup(tmp_path: Path) -> tuple[Path, AtomTaskStore]:
     )
     store.save(atom)
     store.rebuild_vector_index(_FakeEmbed())
-    # 一条 traj.md，给 read_traj 测试用
-    (store_root / "x.md").write_text("0123456789ABCDEFGHIJ" * 5, encoding="utf-8")
+    # 一条 5 行的 traj.md，给 read_traj 测试用（read_traj 按行号取片段）
+    (store_root / "x.md").write_text(
+        "L1\nL2\nL3\nL4\nL5\n", encoding="utf-8")
     ST.init_context_v2(
         skill_dir=skill_dir, store=store,
         embed_client=_FakeEmbed(), traj_root=store_root,
@@ -57,23 +58,36 @@ class TestAtomTaskSearch:
 
 class TestReadTraj:
     def test_returns_slice(self, tmp_path):
+        """按行号半开区间取片段:[1,3) = 第 1、2 行。"""
         _setup(tmp_path)
-        out = ST.read_traj("x", offset_start=0, offset_end=5)
-        assert out == "01234"
+        out = ST.read_traj("x", offset_start=1, offset_end=3)
+        assert out == "L1\nL2\n"
+
+    def test_last_line_reachable(self, tmp_path):
+        """末 atom 的 offset_end = 末行号+1,要能取到最后一行。"""
+        _setup(tmp_path)  # x.md 共 5 行
+        out = ST.read_traj("x", offset_start=5, offset_end=6)
+        assert out == "L5\n"
 
     def test_invalid_range_returns_error(self, tmp_path):
         _setup(tmp_path)
         out = ST.read_traj("x", offset_start=10, offset_end=5)
         assert out.startswith("error")
 
+    def test_zero_start_line_returns_error(self, tmp_path):
+        """行号是 1-based,offset_start < 1 非法。"""
+        _setup(tmp_path)
+        out = ST.read_traj("x", offset_start=0, offset_end=2)
+        assert out.startswith("error")
+
     def test_out_of_bounds_returns_error(self, tmp_path):
         _setup(tmp_path)
-        out = ST.read_traj("x", offset_start=0, offset_end=999999)
+        out = ST.read_traj("x", offset_start=1, offset_end=999999)
         assert out.startswith("error")
 
     def test_nonexistent_traj_returns_error(self, tmp_path):
         _setup(tmp_path)
-        out = ST.read_traj("doesnt-exist", offset_start=0, offset_end=5)
+        out = ST.read_traj("doesnt-exist", offset_start=1, offset_end=3)
         assert out.startswith("error")
 
 

@@ -1,8 +1,9 @@
-"""TaskAgent —— 行号锚定切分:stub LLM 验证首轮 / 增量 / 严格解析
+"""TaskAgent —— 行号坐标切分:stub LLM 验证首轮 / 增量 / 严格解析
 
-v0.5.0a4 起,TaskAgent 不再让 LLM 裸眼猜 char offset。预处理给轨迹里每个
-``## User`` 标题行打 ``[L<行号>]`` 标记,LLM 只报每个 atom 的起始行号
-``start_line``(半开区间,只报起点),char offset 由程序按行号精确回填。
+v0.5.0a4 起,TaskAgent 全程用行号坐标:预处理给轨迹里每个 ``## User`` 标题行
+打 ``[line:<行号>]`` 标记,LLM 只报每个 atom 的起始行号 ``start_line``(半开
+区间 [start, end),只报起点)。AtomTask 的 ``offset_start`` / ``offset_end``
+存的就是 1-based 行号,不再是字符 offset。
 """
 from __future__ import annotations
 
@@ -32,8 +33,8 @@ class _StubLLM:
 
 
 class _AutoSplitLLM:
-    """动态 split stub:扫 prompt 里的 ``[L<n>]`` 标记,每个 ``## User`` 行产
-    一个 atom。与轨迹的具体行偏移解耦——任何含 ``## User`` 的轨迹都能直接用,
+    """动态 split stub:扫 prompt 里的 ``[line:<n>]`` 标记,每个 ``## User`` 行
+    产一个 atom。与轨迹的具体行号解耦——任何含 ``## User`` 的轨迹都能直接用,
     不必为每条轨迹手算行号。watcher 等下游测试用它喂 TaskAgent。"""
     model = "stub-autosplit"
 
@@ -44,9 +45,9 @@ class _AutoSplitLLM:
     def chat(self, prompt: str, system: str = "") -> str:
         self.calls.append(prompt)
         self.systems.append(system)
-        marks = [int(n) for n in re.findall(r"\[L(\d+)\]", prompt)]
+        marks = [int(n) for n in re.findall(r"\[line:(\d+)\]", prompt)]
         if not marks:
-            raise RuntimeError("_AutoSplitLLM: prompt 里没有 [L] 标记")
+            raise RuntimeError("_AutoSplitLLM: prompt 里没有 [line:] 标记")
         atoms = "\n".join(
             f"<atom><start_line>{ln}</start_line>"
             f"<intent>stub intent</intent>"
@@ -59,7 +60,7 @@ class _AutoSplitLLM:
         return f"<atoms>\n{atoms}\n</atoms>"
 
 
-# 真实形态的小轨迹:`## User` 在第 5、17 行。
+# 真实形态的小轨迹:`## User` 在第 5、17 行,共 23 行。
 _TRAJ_MD = """## System
 
 You are Claude Code.
@@ -106,14 +107,10 @@ _SPLIT_XML = """<atoms>
 </atoms>"""
 
 
-def _line_offset(text: str, line_no: int) -> int:
-    """返回 text 中第 line_no 行(1-based)起始的字符 offset。"""
-    off = 0
-    for i, line in enumerate(text.splitlines(keepends=True), start=1):
-        if i == line_no:
-            return off
-        off += len(line)
-    raise AssertionError(f"line {line_no} not in text")
+def _seg(text: str, start_line: int, end_line: int) -> str:
+    """text 中 [start_line, end_line) 行区间(1-based,半开)的原文。"""
+    lines = text.splitlines(keepends=True)
+    return "".join(lines[start_line - 1:end_line - 1])
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -122,45 +119,39 @@ def _line_offset(text: str, line_no: int) -> int:
 
 class TestAnnotateUserLines:
     def test_tags_only_user_headers_with_full_file_line_numbers(self):
-        annotated, linemap = _annotate_user_lines(_TRAJ_MD, first_line_no=1,
-                                                  base_char=0)
+        annotated, user_lines = _annotate_user_lines(_TRAJ_MD, first_line_no=1)
         # 只有 ## User 标题行被打标
-        assert "[L5] ## User" in annotated
-        assert "[L17] ## User" in annotated
+        assert "[line:5] ## User" in annotated
+        assert "[line:17] ## User" in annotated
         # ## Assistant / ## Tool Call / ## System 不打标
         assert "] ## Assistant" not in annotated
         assert "] ## Tool Call" not in annotated
         assert "] ## System" not in annotated
-        # linemap:行号 → 原文 char offset
-        assert set(linemap) == {5, 17}
-        assert linemap[5] == _line_offset(_TRAJ_MD, 5)
-        assert linemap[17] == _line_offset(_TRAJ_MD, 17)
+        # 返回被标记的 ## User 行号,升序
+        assert user_lines == [5, 17]
 
-    def test_offsets_and_line_numbers_shift_with_base(self):
-        """delta 不是从文件头开始时,行号和 char offset 都按 base 平移。"""
-        base = _line_offset(_TRAJ_MD, 9)  # 从第 9 行(## Assistant)起
-        delta = _TRAJ_MD[base:]
-        annotated, linemap = _annotate_user_lines(
-            delta, first_line_no=9, base_char=base)
-        assert set(linemap) == {17}
-        assert linemap[17] == _line_offset(_TRAJ_MD, 17)
-        assert "[L17] ## User" in annotated
+    def test_line_numbers_shift_with_first_line_no(self):
+        """delta 不是从文件头开始时,行号按 first_line_no 平移。"""
+        lines = _TRAJ_MD.splitlines(keepends=True)
+        delta = "".join(lines[8:])  # 从第 9 行(## Assistant)起
+        annotated, user_lines = _annotate_user_lines(delta, first_line_no=9)
+        assert user_lines == [17]
+        assert "[line:17] ## User" in annotated
 
     def test_content_hash_headers_not_mistaken_for_user(self):
         """用户正文里的 markdown 二级标题不能被误判成 ## User。"""
         md = "## User\n\n看这个 ## User 提到的步骤\n## Step 1 做点啥\n"
-        annotated, linemap = _annotate_user_lines(md, first_line_no=1,
-                                                  base_char=0)
-        assert set(linemap) == {1}            # 只有第 1 行真标题
-        assert annotated.count("[L") == 1
+        annotated, user_lines = _annotate_user_lines(md, first_line_no=1)
+        assert user_lines == [1]              # 只有第 1 行真标题
+        assert annotated.count("[line:") == 1
 
 
 # ────────────────────────────────────────────────────────────────────
-# 首轮:两个 atom + 精确行锚定 offset
+# 首轮:两个 atom + 行号坐标
 # ────────────────────────────────────────────────────────────────────
 
 class TestFirstRun:
-    def test_persists_two_atoms_with_line_anchored_offsets(self, tmp_path):
+    def test_persists_two_atoms_with_line_offsets(self, tmp_path):
         traj_dir = tmp_path / "cc-sessions"
         traj_dir.mkdir()
         traj_path = traj_dir / "traj_x.md"
@@ -171,13 +162,12 @@ class TestFirstRun:
             traj_id="traj_x", traj_path=traj_path)
 
         assert len(atoms) == 2
-        l17 = _line_offset(_TRAJ_MD, 17)
-        # 首 atom 从 offset_floor(0)起,终点 = 下一 atom 起点(第 17 行)
-        assert atoms[0].offset_start == 0
-        assert atoms[0].offset_end == l17
-        # 次 atom 起点精确锚定到第 17 行,终点 = 文件末
-        assert atoms[1].offset_start == l17
-        assert atoms[1].offset_end == len(_TRAJ_MD)
+        # offset 是 1-based 行号。首 atom 从 floor 行(1)起,终点 = 下一 atom
+        # 起点(第 17 行);末 atom 终点 = 末行号+1(23+1=24)。
+        assert atoms[0].offset_start == 1
+        assert atoms[0].offset_end == 17
+        assert atoms[1].offset_start == 17
+        assert atoms[1].offset_end == 24
         # 半开衔接:无重叠无缝隙
         assert atoms[0].offset_end == atoms[1].offset_start
         # 链表
@@ -187,9 +177,9 @@ class TestFirstRun:
         # 富化字段仍产出
         assert atoms[1].used_skills == ["frontend-design"]
         assert atoms[1].ux_score == 8
-        # raw_segment 按精确 offset 切回
-        assert atoms[0].raw_segment == _TRAJ_MD[0:l17]
-        assert atoms[1].raw_segment == _TRAJ_MD[l17:]
+        # raw_segment 按行区间切回
+        assert atoms[0].raw_segment == _seg(_TRAJ_MD, 1, 17)
+        assert atoms[1].raw_segment == _seg(_TRAJ_MD, 17, 24)
         # 落盘
         assert (traj_dir / "traj_x" / "tasks" /
                 f"{atoms[0].atom_id}.json").is_file()
@@ -203,8 +193,8 @@ class TestFirstRun:
         stub = _StubLLM([_SPLIT_XML])
         TaskAgent(llm=stub, store=store).run(traj_id="traj_p", traj_path=traj_path)
         # 喂给 LLM 的 prompt 必须带行号标记
-        assert "[L5] ## User" in stub.calls[0]
-        assert "[L17] ## User" in stub.calls[0]
+        assert "[line:5] ## User" in stub.calls[0]
+        assert "[line:17] ## User" in stub.calls[0]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -226,6 +216,7 @@ class TestIncrementalRun:
         full = _TRAJ_MD + appended
         traj_path.write_text(full, encoding="utf-8")
         new_user_line = full[:full.rindex("## User")].count("\n") + 1
+        total_lines = len(full.splitlines(keepends=True))
 
         delta_xml = f"""<atoms>
 <atom>
@@ -242,9 +233,10 @@ class TestIncrementalRun:
             traj_id="traj_y", traj_path=traj_path)
 
         assert len(new_atoms) == 1
-        # 增量 atom 起点 = resume offset(上一轮窗口末),终点到文件末
-        assert new_atoms[0].offset_start == len(_TRAJ_MD)
-        assert new_atoms[0].offset_end == len(full)
+        # 增量 atom 起点 = resume 行(上一轮窗口末行的下一行 = 24),
+        # 终点 = 末行号+1
+        assert new_atoms[0].offset_start == 24
+        assert new_atoms[0].offset_end == total_lines + 1
         # 与上一轮末 atom 链接
         assert new_atoms[0].pre_atom_id is not None
         assert new_atoms[0].pre_atom_id.startswith("atom_traj_y_")
@@ -252,7 +244,7 @@ class TestIncrementalRun:
         assert prior.post_atom_id == new_atoms[0].atom_id
         assert len(store.list_by_traj("traj_y")) == 3
         # 增量 prompt 用的是全文件行号
-        assert f"[L{new_user_line}] ## User" in stub.calls[0]
+        assert f"[line:{new_user_line}] ## User" in stub.calls[0]
 
     def test_no_new_content_returns_empty_no_llm_call(self, tmp_path):
         traj_dir = tmp_path / "cc-sessions"
@@ -369,4 +361,4 @@ class TestSystemPrompt:
         assert "ux_score" in system_msg
         # 新协议关键词
         assert "start_line" in system_msg
-        assert "[L" in system_msg
+        assert "[line:" in system_msg
