@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:  # 避免循环 import
-    from xskill.entities.skill import Skill
-    from xskill.entities.trajectory import Trajectory
+    from xskill.skill.skill import Skill
+    from xskill.pipeline.trajectory import Trajectory
 
 
 # ─── Registry / Watch ─────────────────────────────────────────────

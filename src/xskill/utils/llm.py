@@ -1,11 +1,11 @@
 """
-llm_client.py — LLM 和 Embedding 统一客户端
+utils/llm.py — LLM 和 Embedding 统一客户端
 ═════════════════════════════════════════════
 支持任意 OpenAI 兼容 API (vLLM, Ollama, Together, DeepSeek, 硅基流动, etc.)
 LLM 和 Embedding 分别配置 base_url / model / api_key
 
 用法:
-  from xskill.llm_client import LLMClient, EmbedClient
+  from xskill.utils.llm import LLMClient, EmbedClient
 
   llm = LLMClient.from_config(config["llm"])
   text = llm.chat("分析这条轨迹...")

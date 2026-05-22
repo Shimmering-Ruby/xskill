@@ -1,17 +1,27 @@
 """
-entities/trajectory.py — Trajectory 实体类
-═══════════════════════════════════════════════════
+pipeline/trajectory.py — Trajectory 实体类 + 轨迹 header 解析
+═══════════════════════════════════════════════════════════════
 单条轨迹的视图。纯数据 + 反查接口；不持 LLM。
+
+另含 ``parse_traj_header``：从轨迹 markdown 头部提取
+``<!-- xskill:... -->`` 元数据注释。
+
+约定格式::
+
+    <!-- xskill:skill=fix_django_migration side=staging sha=a1b2c3d4 -->
+
+所有字段均可选，按 key=value 空格分隔。
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from xskill.entities.registry import Registry
+    from xskill.pipeline.registry import Registry
 
 
 class Trajectory:
@@ -92,3 +102,33 @@ class Trajectory:
 
     def __repr__(self) -> str:
         return f"Trajectory({self.path.name})"
+
+
+# =============================================================================
+# 轨迹 header 解析
+# =============================================================================
+
+_T2S_RE = re.compile(
+    r"<!--\s*xskill:"
+    r"((?:\s*\w+=\S+)+)"
+    r"\s*-->"
+)
+
+_KV_RE = re.compile(r"(\w+)=(\S+)")
+
+
+def parse_traj_header(md_text: str) -> dict | None:
+    """解析轨迹中的 ``<!-- xskill:... -->`` 元数据注释。
+
+    只扫描前 500 字符。返回 ``None`` 表示无 xskill 标记。
+    返回示例::
+
+        {"skill": "fix_django", "side": "staging", "sha": "a1b2c3d4"}
+    """
+    m = _T2S_RE.search(md_text[:500])
+    if not m:
+        return None
+    pairs = _KV_RE.findall(m.group(1))
+    if not pairs:
+        return None
+    return dict(pairs)

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from xskill.atom_task import AtomTask, AtomTaskStore
-from xskill.process import process_atom_task
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
+from xskill.pipeline.runner import process_atom_task
 from tests.test_atom_task_store import _FakeEmbed
 
 
@@ -69,7 +69,7 @@ class TestProcessAtomTask:
         # Bug 1 修复：不再返回 edited_skills（edit 独立扫描）
         assert "edited_skills" not in result
         # cluster 写了 candidates（v2.1 简化 schema）
-        from xskill import candidates as C
+        from xskill.skill import candidates as C
         data = C.load_candidates(skill_dir / "auto-skill")
         assert len(data["candidates"]) == 1
         assert data["candidates"][0]["atom_id"] == "atom_x_0001"

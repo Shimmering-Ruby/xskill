@@ -156,7 +156,7 @@ def get_traj_dir() -> Path:
     遇到问题 throw error，不写 fallback）。
     """
     # 函数内 import：registry 反过来依赖 config，模块级 import 会成环。
-    from xskill.registry import list_watch_dirs
+    from xskill.pipeline.registry import list_watch_dirs
     dirs = list_watch_dirs()
     if not dirs:
         raise RuntimeError(

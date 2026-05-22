@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from xskill.llm_client import LLMClient, EmbedClient, _resolve_embed_api_style
+from xskill.utils.llm import LLMClient, EmbedClient, _resolve_embed_api_style
 
 
 class TestLLMClientDefaults:

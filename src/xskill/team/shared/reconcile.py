@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Literal
 
-from xskill.git_lock import run_git, skill_repo_lock
+from xskill.skill.git import run_git, skill_repo_lock
 from xskill.install_history import InstallHistory
 from xskill.agents.user_edit_absorb_agent import has_pending_user_edit
 

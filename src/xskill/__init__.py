@@ -20,12 +20,12 @@ except ImportError:  # 未经 build 的源码树
 
 # 顶级公开面：3 个核心类
 from xskill.core import XSkill
-from xskill.entities.skill import Skill
-from xskill.entities.trajectory import Trajectory
+from xskill.skill.skill import Skill
+from xskill.pipeline.trajectory import Trajectory
 
 # 进阶：子系统类（不必常用）
-from xskill.entities.registry import Registry
-from xskill.entities.skill_repo import SkillRepo
+from xskill.pipeline.registry import Registry
+from xskill.skill.repo import SkillRepo
 
 __all__ = [
     "XSkill", "Skill", "Trajectory",

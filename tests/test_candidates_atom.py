@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from xskill import candidates as C
+from xskill.skill import candidates as C
 
 
 class TestAddAtomContribution:

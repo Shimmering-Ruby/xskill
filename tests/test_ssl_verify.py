@@ -29,7 +29,7 @@ import pytest
     ("anything-else", True),
 ])
 def test_ssl_verify_env(monkeypatch, val, expect_verify):
-    from xskill.llm_client import _ssl_verify
+    from xskill.utils.llm import _ssl_verify
     if val == "":
         monkeypatch.delenv("T2S_SSL_VERIFY", raising=False)
     else:
@@ -121,7 +121,7 @@ def test_inject_verify_on_is_noop(monkeypatch):
 # ── StreamLog 回归：确认它只能 log(msg, tag)，不能 log.step(...) ─────
 def test_streamlog_is_callable_not_has_step():
     """防回归：不要再写 log.step(...)；StreamLog 是 callable 不是 has attr step"""
-    from xskill.log import StreamLog
+    from xskill.utils.logging import StreamLog
     log = StreamLog(verbose=False)
     assert callable(log)
     assert not hasattr(log, "step"), (

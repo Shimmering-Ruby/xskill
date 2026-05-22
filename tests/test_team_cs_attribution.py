@@ -1,8 +1,8 @@
 import subprocess
 from pathlib import Path
 
-from xskill.watcher import DirectoryWatcher
-from xskill.atom_task import AtomTask, AtomTaskStore
+from xskill.pipeline.runner import DirectoryWatcher
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.canary import load_ux_scores
 
 
@@ -45,12 +45,12 @@ def test_server_mode_scores_each_used_skill(tmp_path, monkeypatch):
         scored.append((atom.atom_id, side))
         return {"score": 8, "reasons": "ok"}
 
-    monkeypatch.setattr("xskill.ux_score.score_atom", _fake_score_atom)
+    monkeypatch.setattr("xskill.pipeline.atom.score_atom", _fake_score_atom)
 
     w = DirectoryWatcher(llm=object(), skill_dir=skill_dir, store=store,
                          config={"canary": {"probability": 0.2}}, server_mode=True)
     # 模拟 list_watch_dirs 返回该 client 桶，label=client_id
-    monkeypatch.setattr("xskill.watcher.list_watch_dirs",
+    monkeypatch.setattr("xskill.pipeline.runner.list_watch_dirs",
                         lambda **kw: [{"id": 1, "path": str(sessions), "label": "cid-1"}])
     w._score_atoms_for_traj_server(1, "traj_cc_x_001.md")
 

@@ -284,7 +284,7 @@ class TestWatcherInstallSkillToAllDetected:
     """Watcher._install_skill_to_all_detected — multi-agent + 失败处理。"""
 
     def _make_watcher(self, tmp_path):
-        from xskill.watcher import DirectoryWatcher
+        from xskill.pipeline.runner import DirectoryWatcher
         return DirectoryWatcher(
             llm=None, embed_client=None, config={},
             skill_dir=tmp_path / "skill",

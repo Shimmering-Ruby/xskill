@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from xskill import candidates as C
+from xskill.skill import candidates as C
 from xskill.agents.skill_edit_agent import SkillEditAgent
-from xskill.git_lock import init_skill_repo_on_baby, run_git
+from xskill.skill.git import init_skill_repo_on_baby, run_git
 
 
 def _make_baby_skill(parent: Path, name: str, desc: str = "stub desc") -> Path:
@@ -105,7 +105,7 @@ def _staging_factory(*, instructions, tools):
 def _init_v2_ctx(tmp_path):
     """每个 case 把 _ctx_v2 指到 tmp_path/skill，让 commit_*/write_file 工具可用。"""
     from xskill.agents import skill_tools as ST
-    from xskill.atom_task import AtomTaskStore
+    from xskill.pipeline.atom import AtomTaskStore
     (tmp_path / "skill").mkdir(parents=True, exist_ok=True)
     (tmp_path / "store").mkdir(parents=True, exist_ok=True)
     ST.init_context_v2(
@@ -160,7 +160,7 @@ class TestThresholdGate:
         )
         assert agent.maybe_run() is True
         # baby → main graduate 完成
-        from xskill.git_lock import current_branch
+        from xskill.skill.git import current_branch
         assert current_branch(str(skill_dir)) == "main"
         # candidates 已清空 (v2.1: clear 取代 promoted 标记)
         data2 = C.load_candidates(skill_dir)

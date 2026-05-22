@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from xskill.atom_task import AtomTask, AtomTaskStore
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
 
 
 # ────────────────────────────────────────────────────────────────────

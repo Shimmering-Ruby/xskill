@@ -1287,7 +1287,7 @@ class CCSessionIngester:
         assignments_path: Path | str | None = None,
     ):
         from xskill.install_history import InstallHistory
-        from xskill.session_assignments import SessionAssignments
+        from xskill.canary import SessionAssignments
 
         self.target_traj_dir = Path(target_traj_dir)
         self.home_root = Path(home_root) if home_root else Path.home()
@@ -1471,7 +1471,7 @@ class CCSessionIngester:
 def _read_head_sha(skill_path: Path, *, ref: str) -> str:
     """读 skill 子仓 ``ref`` 分支的 HEAD sha；读不到返回 ""。"""
     try:
-        from xskill.git_lock import run_git
+        from xskill.skill.git import run_git
         code, out, _ = run_git(["rev-parse", ref], cwd=str(skill_path))
         if code == 0 and out:
             return out.strip()

@@ -1,7 +1,7 @@
 """tests/test_traj_meta.py -- trajectory header parsing"""
 
 import pytest
-from xskill.traj_meta import parse_traj_header
+from xskill.pipeline.trajectory import parse_traj_header
 
 
 class TestParseTrajHeader:

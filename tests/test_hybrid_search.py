@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from xskill.atom_task import AtomTask, AtomTaskStore
-from xskill.hybrid_search import HybridSearch
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
+from xskill.utils.search import HybridSearch
 from tests.test_atom_task_store import _FakeEmbed
 
 

@@ -34,7 +34,7 @@ from xskill.ecosystems import (
     ingest_cursor_sessions,
     install_to_cursor,
 )
-from xskill.frontmatter import serialize as fm_serialize
+from xskill.skill.frontmatter import serialize as fm_serialize
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "cursor" / "sample_transcript.jsonl"
@@ -271,7 +271,7 @@ class TestInstallToCursor:
     def test_watcher_installer_dict_includes_cursor(self):
         """watcher._install_skill_to_all_detected 的 installer 字典含 cursor。"""
         import inspect
-        from xskill.watcher import DirectoryWatcher
+        from xskill.pipeline.runner import DirectoryWatcher
         src = inspect.getsource(DirectoryWatcher._install_skill_to_all_detected)
         assert '"cursor": install_to_cursor' in src
 

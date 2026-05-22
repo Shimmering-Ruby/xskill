@@ -46,7 +46,7 @@ from xskill.ecosystems import (
     ingest_codex_sessions,
     install_to_codex,
 )
-from xskill.frontmatter import serialize as fm_serialize
+from xskill.skill.frontmatter import serialize as fm_serialize
 
 
 # ──────────────────────────────────────────────────────────────────

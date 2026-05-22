@@ -14,7 +14,7 @@ from pathlib import Path
 
 import yaml
 
-from xskill import candidates as cand_mod
+from xskill.skill import candidates as cand_mod
 
 
 def _seed_skill(skill_dir: Path, body: str = "# title\n\n## stage\n") -> None:

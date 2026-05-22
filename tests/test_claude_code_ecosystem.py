@@ -17,10 +17,10 @@ import pytest
 from xskill import canary
 from xskill.adapters import adapt_trajectory, submit_trajectory
 from xskill.ecosystems import install_all_to_claude_code, install_to_claude_code
-from xskill.entities.trajectory import Trajectory
-from xskill.frontmatter import parse as fm_parse
-from xskill.frontmatter import serialize as fm_serialize
-from xskill.git_lock import run_git
+from xskill.pipeline.trajectory import Trajectory
+from xskill.skill.frontmatter import parse as fm_parse
+from xskill.skill.frontmatter import serialize as fm_serialize
+from xskill.skill.git import run_git
 
 
 # ──────────────────────────────────────────────────────

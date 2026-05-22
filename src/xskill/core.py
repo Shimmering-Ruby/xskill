@@ -11,10 +11,10 @@ from pathlib import Path
 from typing import Optional
 
 from xskill.config import load_config, get_skill_dir
-from xskill.entities.registry import Registry
-from xskill.entities.skill import Skill
-from xskill.entities.skill_repo import SkillRepo
-from xskill.entities.trajectory import Trajectory
+from xskill.pipeline.registry import Registry
+from xskill.skill.skill import Skill
+from xskill.skill.repo import SkillRepo
+from xskill.pipeline.trajectory import Trajectory
 from xskill.types import SkillHit, TrajectoryHit, UxScoreResult
 
 
@@ -52,14 +52,14 @@ class XSkill:
     @property
     def llm(self):
         if self._llm is None:
-            from xskill.llm_client import create_llm_client
+            from xskill.utils.llm import create_llm_client
             self._llm = create_llm_client(self.config)
         return self._llm
 
     @property
     def embed(self):
         if self._embed is None:
-            from xskill.llm_client import create_embed_client
+            from xskill.utils.llm import create_embed_client
             self._embed = create_embed_client(self.config)
         return self._embed
 
@@ -67,7 +67,7 @@ class XSkill:
     def search_trajectories(self, query: str, top_k: int = 5,
                             min_similarity: float = 0.0) -> list[TrajectoryHit]:
         """跨所有注册目录搜索轨迹。"""
-        from xskill.search import search_all
+        from xskill.utils.search import search_all
         results = search_all(
             query, top_k=top_k,
             min_similarity=min_similarity,
@@ -125,10 +125,10 @@ class XSkill:
 
         watcher 自动跑；本方法用于 watcher 漏打 / 手动重打。
         """
-        from xskill.ux_score import score_and_record_atoms
-        from xskill.atom_task import AtomTaskStore
+        from xskill.pipeline.atom import score_and_record_atoms
+        from xskill.pipeline.atom import AtomTaskStore
         from xskill.canary import CanaryConfig
-        from xskill.traj_meta import parse_traj_header
+        from xskill.pipeline.trajectory import parse_traj_header
 
         md = traj.md_text
         header = parse_traj_header(md)

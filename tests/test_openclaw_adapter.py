@@ -37,7 +37,7 @@ from xskill.ecosystems import (
     ingest_openclaw_sessions,
     install_to_openclaw,
 )
-from xskill.frontmatter import serialize as fm_serialize
+from xskill.skill.frontmatter import serialize as fm_serialize
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "openclaw" / "sample_session.trajectory.jsonl"

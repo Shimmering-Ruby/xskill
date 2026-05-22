@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from xskill.atom_task import AtomTask, AtomTaskStore
-from xskill.frontmatter import parse as fm_parse
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
+from xskill.skill.frontmatter import parse as fm_parse
 
 logger = logging.getLogger("xskill.task_cluster_agent")
 
@@ -46,7 +46,7 @@ def _scan_skill_state(skill_dir: Path) -> list[tuple[str, str, str]]:
     取，确保 cluster agent 看到的 desc 是 cluster 自己当初在 new_skill_folder
     时填的语义边界——和 main/staging 状态 desc 信息密度对等。
     """
-    from xskill.git_lock import run_git
+    from xskill.skill.git import run_git
     out: list[tuple[str, str, str]] = []
     if not skill_dir.is_dir():
         return out

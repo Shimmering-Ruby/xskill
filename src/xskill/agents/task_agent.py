@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from xskill.atom_task import AtomTask, AtomTaskStore
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
 
 logger = logging.getLogger("xskill.task_agent")
 

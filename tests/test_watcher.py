@@ -19,8 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from xskill.registry import register_dir, discover_trajectories, get_unindexed
-from xskill.watcher import DirectoryWatcher
+from xskill.pipeline.registry import register_dir, discover_trajectories, get_unindexed
+from xskill.pipeline.runner import DirectoryWatcher
 
 
 def _drain(watcher: DirectoryWatcher) -> None:
@@ -68,7 +68,7 @@ class TestWatcherDiscovery:
         _drain(watcher)
 
         # File should be discovered (no LLM/embed means no meta extraction).
-        from xskill.registry import get_connection
+        from xskill.pipeline.registry import get_connection
         conn = get_connection(db_path)
         rows = conn.execute("SELECT filename FROM trajectories WHERE watch_dir_id=?", (wid,)).fetchall()
         conn.close()

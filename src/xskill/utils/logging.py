@@ -1,5 +1,10 @@
 """
-log_setup.py — 按 component 把 logging 拆到独立文件
+utils/logging.py — StreamLog 流式日志 + 按 component 拆分文件日志
+=================================================================
+
+StreamLog —— 带前缀的流式日志，方便 grep 和观测。
+
+按 component 把 logging 拆到独立文件
 ======================================================
 
 daemon 跑起来同一个 stdout 里 watcher / canary / ux_score / ecosystems
@@ -28,9 +33,33 @@ stdout-only basicConfig 即可。
 """
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
+from datetime import datetime
 from pathlib import Path
+
+
+class StreamLog:
+    """带前缀的流式日志，方便 grep 和观测"""
+
+    def __init__(self, verbose=True):
+        self.verbose = verbose
+        self.events = []
+
+    def __call__(self, msg: str, tag: str = "info"):
+        entry = {"t": datetime.now().isoformat(), "tag": tag, "msg": msg}
+        self.events.append(entry)
+        if self.verbose:
+            icon = {"step": ">", "tool": "[T]", "decision": "[D]", "git": "[G]",
+                    "eval": "[E]", "error": "[!]", "ok": "[+]"}.get(tag, "  ")
+            print(f"  {icon} [{tag}] {msg}", flush=True)
+
+    def save(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.events, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+
 
 # 每个 namespace 单独一个 file handler；其余 logger 走 root（→ xskill.log）。
 # 写在这里方便统一加/减组件。

@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from xskill.atom_task import AtomTaskStore
-from xskill.registry import (
+from xskill.pipeline.atom import AtomTaskStore
+from xskill.pipeline.registry import (
     register_dir, discover_trajectories, update_traj_status,
     get_trajs_by_status, get_status_counts,
 )
-from xskill.watcher import DirectoryWatcher
+from xskill.pipeline.runner import DirectoryWatcher
 from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _SPLIT_XML, _StubLLM
 
@@ -316,8 +316,8 @@ class TestIndependentSkillEditScan:
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
         (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
 
-        from xskill import candidates as C
-        from xskill.git_lock import init_skill_repo_on_baby
+        from xskill.skill import candidates as C
+        from xskill.skill.git import init_skill_repo_on_baby
         my_skill = skill_dir / "my-skill"
         init_skill_repo_on_baby(str(my_skill), name="my-skill", description="stub")
         data = {"candidates": []}
@@ -379,7 +379,7 @@ class TestIndependentSkillEditScan:
         data2 = C.load_candidates(my_skill)
         assert data2["candidates"] == []
         # baby graduate 到 main
-        from xskill.git_lock import current_branch
+        from xskill.skill.git import current_branch
         assert current_branch(str(my_skill)) == "main"
 
 
@@ -393,7 +393,7 @@ class TestUxScoreAtomLevel:
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
         # 准备 skill 目录（需要存在才会真打分）
         (skill_dir / "test-skill").mkdir()
-        from xskill.git_lock import run_git
+        from xskill.skill.git import run_git
         run_git(["init"], cwd=str(skill_dir / "test-skill"))
         run_git(["checkout", "-b", "main"], cwd=str(skill_dir / "test-skill"))
         run_git(["config", "user.email", "t@t"], cwd=str(skill_dir / "test-skill"))
@@ -424,9 +424,9 @@ class TestUxScoreAtomLevel:
             home_root=tmp_path,
         )
         # mock score_atom 返回固定分数
-        with patch("xskill.watcher.score_atom",
+        with patch("xskill.pipeline.runner.score_atom",
                    return_value={"score": 8, "reasons": "ok"}) if False else \
-             patch("xskill.ux_score.score_atom",
+             patch("xskill.pipeline.atom.score_atom",
                    return_value={"score": 8, "reasons": "ok"}) as mock_score:
             # 多轮推进到 done
             for _ in range(20):
@@ -479,7 +479,7 @@ class TestUxScoreAtomLevel:
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,
         )
-        with patch("xskill.ux_score.score_atom") as mock_score:
+        with patch("xskill.pipeline.atom.score_atom") as mock_score:
             for _ in range(20):
                 watcher._scan_once()
                 for _ in range(30):
@@ -553,8 +553,8 @@ class TestPipelineRun:
         # 后会调 commit_baby_to_main → 分支变 main + candidates 清空
         assert (skill_dir / "auto-skill").is_dir()
         assert (skill_dir / "auto-skill" / ".git").is_dir()
-        from xskill import candidates as C
-        from xskill.git_lock import current_branch
+        from xskill.skill import candidates as C
+        from xskill.skill.git import current_branch
         data = C.load_candidates(skill_dir / "auto-skill")
         # candidates 清空（v2.1 替代 promoted 标记）
         assert data["candidates"] == []
@@ -562,7 +562,7 @@ class TestPipelineRun:
         assert current_branch(str(skill_dir / "auto-skill")) == "main"
 
         # registry 中 last_offset / last_atom_id / tasks_extracted 已写
-        from xskill.registry import get_connection
+        from xskill.pipeline.registry import get_connection
         conn = get_connection(db)
         row = conn.execute(
             "SELECT last_offset, last_atom_id, tasks_extracted FROM trajectories"

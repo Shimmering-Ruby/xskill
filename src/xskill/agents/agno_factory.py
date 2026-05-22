@@ -19,8 +19,8 @@ import logging
 import os
 from typing import Any, Callable
 
-from xskill.log import StreamLog
-from xskill.llm_client import _ssl_verify
+from xskill.utils.logging import StreamLog
+from xskill.utils.llm import _ssl_verify
 
 logger = logging.getLogger("xskill.agno_factory")
 

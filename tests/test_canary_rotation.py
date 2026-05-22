@@ -24,9 +24,9 @@ from unittest.mock import patch
 
 import pytest
 
-from xskill.git_lock import run_git
+from xskill.skill.git import run_git
 from xskill.agents.user_edit_absorb_agent import detect_user_edits, has_pending_user_edit
-from xskill.watcher import DirectoryWatcher
+from xskill.pipeline.runner import DirectoryWatcher
 
 
 # ──────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ class TestHasPendingUserEdit:
 
         ``init_skill_repo_on_baby`` 走 write file → git commit 一气呵成，
         正好复现这个精度差场景。"""
-        from xskill.git_lock import init_skill_repo_on_baby
+        from xskill.skill.git import init_skill_repo_on_baby
 
         skill = tmp_path / "fresh-skill"
         init_skill_repo_on_baby(str(skill), name="fresh-skill", description="stub")
@@ -136,7 +136,7 @@ class TestDetectUserEditsRegression:
 
     def test_fresh_init_not_user_edit(self, tmp_path):
         """精度 bug 回归：刚 init 的 baby skill 不该被识别为 user edit。"""
-        from xskill.git_lock import init_skill_repo_on_baby
+        from xskill.skill.git import init_skill_repo_on_baby
 
         skill = tmp_path / "fresh"
         init_skill_repo_on_baby(str(skill), name="fresh", description="stub")

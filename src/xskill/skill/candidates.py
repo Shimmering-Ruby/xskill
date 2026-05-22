@@ -1,5 +1,5 @@
 """
-candidates.py -- Candidate buffer for the Skill curation pipeline
+skill/candidates.py -- Candidate buffer for the Skill curation pipeline
 ===================================================================
 Manages ``.candidates.yml`` under each skill directory. Candidates are patterns
 (step / warning / decision_branch) proposed by the agent after seeing a
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from xskill.frontmatter import parse as fm_parse, serialize as fm_serialize
+from xskill.skill.frontmatter import parse as fm_parse, serialize as fm_serialize
 
 logger = logging.getLogger("candidates")
 
@@ -518,7 +518,7 @@ def _run_skill_edit_agent(skill_dir: Path, candidates: list[dict],
     # then sees a partial map, which is better than the v1 reverse-derived
     # `skill_dir.parent.parent / "data"` path that silently returned {} once
     # trajectories moved out of the repo root.
-    from xskill.registry import find_traj_file
+    from xskill.pipeline.registry import find_traj_file
     traj_paths = {}
     for c in candidates:
         for tid in c.get("supporting_trajs", []):

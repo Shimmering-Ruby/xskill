@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from xskill.atom_task import AtomTask, AtomTaskStore
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.agents.task_cluster_agent import TaskClusterAgent, build_skill_catalog_block
 
 
 def _make_skill_on_main(skill_dir: Path, name: str, desc: str):
     """模拟一个 main 状态的 skill：git init + main 分支 + SKILL.md。"""
-    from xskill.git_lock import run_git
+    from xskill.skill.git import run_git
     sd = skill_dir / name
     sd.mkdir(parents=True)
     run_git(["init"], cwd=str(sd))
@@ -28,14 +28,14 @@ def _make_skill_on_main(skill_dir: Path, name: str, desc: str):
 
 def _make_skill_on_baby(skill_dir: Path, name: str, desc: str):
     """模拟一个 baby 状态的 skill（cluster 刚创建，还没 SkillEdit graduate）。"""
-    from xskill.git_lock import init_skill_repo_on_baby
+    from xskill.skill.git import init_skill_repo_on_baby
     sd = skill_dir / name
     init_skill_repo_on_baby(str(sd), name=name, description=desc)
 
 
 def _make_skill_on_staging(skill_dir: Path, name: str, main_desc: str, staging_desc: str):
     """模拟 main + staging 双态。"""
-    from xskill.git_lock import run_git
+    from xskill.skill.git import run_git
     _make_skill_on_main(skill_dir, name, main_desc)
     sd = skill_dir / name
     run_git(["checkout", "-b", "staging"], cwd=str(sd))

@@ -1,5 +1,5 @@
 """
-frontmatter.py -- YAML frontmatter parser/serializer for SKILL.md v2
+skill/frontmatter.py -- YAML frontmatter parser/serializer for SKILL.md v2
 ====================================================================
 Small helper module to round-trip `---\\n<yaml>\\n---\\n<body>` markdown files.
 

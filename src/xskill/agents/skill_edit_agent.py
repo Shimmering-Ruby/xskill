@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from xskill import candidates as C
+from xskill.skill import candidates as C
 
 logger = logging.getLogger("xskill.skill_edit_agent")
 
@@ -132,7 +132,7 @@ class SkillEditAgent:
         全过 → 跑 agent → 验证 SKILL.md mtime 推进 + 非空 → 清 candidates。
         agent 没落盘 SKILL.md → 保留 candidates 等下轮重试（Bug 2 修复）。
         """
-        from xskill.git_lock import current_branch, run_git
+        from xskill.skill.git import current_branch, run_git
 
         # 守门 1: 灰度中（有 staging）不触发
         code, _, _ = run_git(["rev-parse", "--verify", "staging"],
@@ -208,7 +208,7 @@ class SkillEditAgent:
 
     def _run(self, ready: list[dict], current_branch_name: str) -> None:
         from xskill.agents import skill_tools as ST
-        from xskill.frontmatter import parse as fm_parse
+        from xskill.skill.frontmatter import parse as fm_parse
 
         # 构造 scenario_block + branch_now 给 prompt 用
         skill_md = self.skill_dir / "SKILL.md"

@@ -28,9 +28,9 @@ from pydantic import BaseModel, Field
 
 from xskill import __version__
 from xskill.config import load_config, get_skill_dir
-from xskill.search import search as search_trajs, search_all as search_trajs_all
-from xskill.skill_manager import (
-    list_skills,
+from xskill.utils.search import search as search_trajs, search_all as search_trajs_all
+from xskill.skill.repo import list_skills, import_skill
+from xskill.skill.skill import (
     show_skill,
     skill_log,
     skill_diff,
@@ -39,11 +39,10 @@ from xskill.skill_manager import (
     unfreeze_skill,
     delete_skill,
     export_skill,
-    import_skill,
 )
 from xskill.agents.skill_tools import init_context, search_skills, rebuild_skill_index
-from xskill.llm_client import create_llm_client, create_embed_client
-from xskill.git_lock import ensure_repo, current_branch
+from xskill.utils.llm import create_llm_client, create_embed_client
+from xskill.skill.git import ensure_repo, current_branch
 
 logger = logging.getLogger("xskill.server")
 
@@ -251,7 +250,7 @@ async def api_trajectory_content(path: str):
     try:
         resolved = p.resolve()
         allowed = False
-        from xskill.registry import list_watch_dirs
+        from xskill.pipeline.registry import list_watch_dirs
         for d in list_watch_dirs():
             if str(resolved).startswith(str(Path(d["path"]).resolve())):
                 allowed = True
@@ -521,7 +520,7 @@ async def api_resolve_skill(req: SkillResolveRequest):
 @router.get("/skills/{name}/candidates")
 async def api_skill_candidates(name: str):
     """返回 .candidates.yml 内容。"""
-    from xskill.candidates import load_candidates
+    from xskill.skill.candidates import load_candidates
     sd = _skill_dir / name
     if not sd.is_dir():
         raise HTTPException(status_code=404, detail=f"skill not found: {name}")
@@ -607,7 +606,7 @@ async def api_canary_overview():
 @router.get("/registry/dirs")
 async def api_list_registry_dirs():
     """List all registered watch directories with trajectory counts."""
-    from xskill.registry import list_watch_dirs
+    from xskill.pipeline.registry import list_watch_dirs
     dirs = list_watch_dirs()
     return {"dirs": dirs, "count": len(dirs)}
 
@@ -615,7 +614,7 @@ async def api_list_registry_dirs():
 @router.post("/registry/dirs")
 async def api_register_dir(req: dict):
     """Register a directory for watching."""
-    from xskill.registry import register_dir
+    from xskill.pipeline.registry import register_dir
     path = req.get("path", "")
     label = req.get("label", "")
     if not path:
@@ -630,7 +629,7 @@ async def api_register_dir(req: dict):
 @router.delete("/registry/dirs")
 async def api_unregister_dir(req: dict):
     """Unregister a directory."""
-    from xskill.registry import unregister_dir
+    from xskill.pipeline.registry import unregister_dir
     path = req.get("path", "")
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
@@ -643,7 +642,7 @@ async def api_unregister_dir(req: dict):
 @router.get("/trajectories/logs")
 async def api_trajectory_logs(filename: str, dir: str = ""):
     """Return stored process logs for a trajectory."""
-    from xskill.registry import list_watch_dirs, get_connection
+    from xskill.pipeline.registry import list_watch_dirs, get_connection
     import json as _json
 
     dirs = list_watch_dirs()
@@ -671,7 +670,7 @@ async def api_trajectory_logs(filename: str, dir: str = ""):
 @router.get("/trajectories/list")
 async def api_list_trajectories():
     """List all trajectories across registered directories with full status."""
-    from xskill.registry import list_watch_dirs, get_connection, get_status_counts
+    from xskill.pipeline.registry import list_watch_dirs, get_connection, get_status_counts
     dirs = list_watch_dirs()
     all_trajs = []
     for d in dirs:
@@ -880,7 +879,7 @@ def create_app(home_root: Path | str | None = None,
                 from xskill.canary import CanaryConfig
                 from xskill.config import XSKILL_HOME
                 from xskill.install_history import InstallHistory
-                from xskill.registry import register_dir
+                from xskill.pipeline.registry import register_dir
 
                 install_history_path = XSKILL_HOME / "install_history.jsonl"
                 install_history = InstallHistory(install_history_path)
@@ -1100,7 +1099,7 @@ def create_app(home_root: Path | str | None = None,
                     get_team_clients_db_path, get_team_server_state_path,
                     get_team_trajectories_dir,
                 )
-                from xskill.registry import register_dir as _register_dir
+                from xskill.pipeline.registry import register_dir as _register_dir
                 from xskill.canary import CanaryConfig
 
                 join_token = ensure_join_token(get_team_server_state_path())
@@ -1131,8 +1130,8 @@ def create_app(home_root: Path | str | None = None,
         # team server 模式即使当前没 client 桶也要起 watcher——_scan_once 每轮
         # 重新 list_watch_dirs()，首个 client upload 后下一轮就被扫到。
         try:
-            from xskill.registry import list_watch_dirs
-            from xskill.watcher import DirectoryWatcher
+            from xskill.pipeline.registry import list_watch_dirs
+            from xskill.pipeline.runner import DirectoryWatcher
             dirs = list_watch_dirs()
             if dirs or team_server:
                 watcher_cfg = _config.get("watcher", {})

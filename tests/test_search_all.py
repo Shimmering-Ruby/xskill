@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from xskill.search import search_all
+from xskill.utils.search import search_all
 
 
 def _hit(atom_id: str, vec_sim: float, dataset_dir: str = ""):
@@ -22,7 +22,7 @@ def _hit(atom_id: str, vec_sim: float, dataset_dir: str = ""):
 
 class TestSearchAll:
     def test_merges_and_sorts_across_datasets(self, tmp_path):
-        from xskill.registry import register_dir
+        from xskill.pipeline.registry import register_dir
         db_path = tmp_path / "test_registry.db"
         d1 = tmp_path / "ds1"; d1.mkdir(); (d1 / "index.pkl").write_bytes(b"fake")
         d2 = tmp_path / "ds2"; d2.mkdir(); (d2 / "index.pkl").write_bytes(b"fake")
@@ -39,8 +39,8 @@ class TestSearchAll:
                         _hit("atom_D", 0.3, str(d2))]
             return []
 
-        with patch("xskill.search.search", side_effect=fake_search), \
-             patch("xskill.registry.all_index_paths",
+        with patch("xskill.utils.search.search", side_effect=fake_search), \
+             patch("xskill.pipeline.registry.all_index_paths",
                    return_value=[d1.resolve(), d2.resolve()]):
             results = search_all("test query", top_k=3)
 
@@ -52,13 +52,13 @@ class TestSearchAll:
         assert results[2]["atom_id"] == "atom_B"
 
     def test_returns_empty_when_no_dirs(self):
-        with patch("xskill.registry.all_index_paths", return_value=[]):
+        with patch("xskill.pipeline.registry.all_index_paths", return_value=[]):
             assert search_all("test query") == []
 
     def test_skips_dirs_with_missing_index(self, tmp_path):
         d1 = tmp_path / "ds1"; d1.mkdir()
-        with patch("xskill.registry.all_index_paths", return_value=[d1]), \
-             patch("xskill.search.search", side_effect=FileNotFoundError("no index")):
+        with patch("xskill.pipeline.registry.all_index_paths", return_value=[d1]), \
+             patch("xskill.utils.search.search", side_effect=FileNotFoundError("no index")):
             results = search_all("test query")
         assert results == []
 
@@ -69,8 +69,8 @@ class TestSearchAll:
                         success_filter="all", config=None):
             return [_hit("atom_X", 0.7)]
 
-        with patch("xskill.registry.all_index_paths", return_value=[d1]), \
-             patch("xskill.search.search", side_effect=fake_search):
+        with patch("xskill.pipeline.registry.all_index_paths", return_value=[d1]), \
+             patch("xskill.utils.search.search", side_effect=fake_search):
             results = search_all("test query")
         assert len(results) == 1
         assert results[0]["dataset_dir"] == str(d1)

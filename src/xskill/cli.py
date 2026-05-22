@@ -225,7 +225,7 @@ def _setup_logging(debug: bool, quiet: bool, *, command: str = "") -> None:
     if command in ("serve", "connect"):
         # serve / connect 都是长跑守护，用 file-split 模式落文件日志
         from xskill.config import get_logs_dir
-        from xskill.log_setup import configure_logging
+        from xskill.utils.logging import configure_logging
         configure_logging(get_logs_dir(), debug=debug, quiet=quiet, stdout=True)
         return
 
@@ -237,7 +237,7 @@ def _setup_logging(debug: bool, quiet: bool, *, command: str = "") -> None:
     else:
         level, fmt = logging.INFO, "%(asctime)s [%(name)s] %(message)s"
     logging.basicConfig(level=level, format=fmt, datefmt="%H:%M:%S")
-    for noisy in ("httpx", "httpcore", "openai", "xskill.llm_client", "agno"):
+    for noisy in ("httpx", "httpcore", "openai", "xskill.utils.llm", "agno"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

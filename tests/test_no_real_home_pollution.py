@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from xskill.atom_task import AtomTaskStore
-from xskill.registry import register_dir, get_status_counts
-from xskill.watcher import DirectoryWatcher
+from xskill.pipeline.atom import AtomTaskStore
+from xskill.pipeline.registry import register_dir, get_status_counts
+from xskill.pipeline.runner import DirectoryWatcher
 from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _SPLIT_XML, _StubLLM
 from tests.test_watcher_atom import _StubAgno

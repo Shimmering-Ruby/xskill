@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from xskill.config import load_config, get_skill_dir, get_traj_dir
-from xskill.llm_client import create_llm_client, create_embed_client
+from xskill.utils.llm import create_llm_client, create_embed_client
 
 logger = logging.getLogger("tasks")
 
@@ -141,7 +141,7 @@ async def api_index(req: IndexRequest):
 
     def run():
         try:
-            from xskill.atom_task import AtomTaskStore
+            from xskill.pipeline.atom import AtomTaskStore
             from xskill.agents.task_agent import TaskAgent
 
             config = load_config()
@@ -229,11 +229,11 @@ async def api_process(req: ProcessRequest):
 
     def run():
         try:
-            from xskill.atom_task import AtomTaskStore
+            from xskill.pipeline.atom import AtomTaskStore
             from xskill.agents.task_agent import TaskAgent
-            from xskill.process import process_atom_task
+            from xskill.pipeline.runner import process_atom_task
             from xskill.agents.agno_factory import make_default_factory
-            from xskill.git_lock import ensure_repo
+            from xskill.skill.git import ensure_repo
 
             config = load_config()
             log_fn = make_sse_log(queue)
@@ -317,11 +317,11 @@ async def api_batch(req: BatchRequest):
 
     def run():
         try:
-            from xskill.atom_task import AtomTaskStore
+            from xskill.pipeline.atom import AtomTaskStore
             from xskill.agents.task_agent import TaskAgent
-            from xskill.process import process_atom_task
+            from xskill.pipeline.runner import process_atom_task
             from xskill.agents.agno_factory import make_default_factory
-            from xskill.git_lock import ensure_repo
+            from xskill.skill.git import ensure_repo
 
             config = load_config()
             log_fn = make_sse_log(queue)

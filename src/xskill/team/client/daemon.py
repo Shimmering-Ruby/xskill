@@ -14,7 +14,7 @@ import shutil
 import threading
 from pathlib import Path
 
-from xskill.git_lock import run_git
+from xskill.skill.git import run_git
 from xskill.install_history import InstallHistory
 from xskill.team.client.state import ClientState
 from xskill.team.client.collector import TeamCollector

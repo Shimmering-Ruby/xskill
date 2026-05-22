@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from xskill import candidates as C
+from xskill.skill import candidates as C
 
 logger = logging.getLogger("xskill.user_edit_absorb_agent")
 
@@ -76,7 +76,7 @@ class UserEditAbsorbAgent:
         返回 True 表示成功 commit（agent 调过 absorb 工具）；False 表示
         diff 为空 / agent 没 commit。
         """
-        from xskill.git_lock import run_git
+        from xskill.skill.git import run_git
 
         # 读 diff 让 agent 看
         code, diff_out, _ = run_git(["diff", "HEAD"], cwd=str(self.skill_dir))
@@ -89,7 +89,7 @@ class UserEditAbsorbAgent:
         skill_name = self.skill_dir.name
 
         # 构造 user_msg：含 skill_name + 当前分支 + 完整 diff + 未追踪文件列表
-        from xskill.git_lock import current_branch
+        from xskill.skill.git import current_branch
         cur_branch = current_branch(str(self.skill_dir))
         user_msg_parts = [
             f"skill_name: {skill_name}",
@@ -169,7 +169,7 @@ def has_pending_user_edit(skill_dir: Path) -> bool:
     时，file mtime = N.XXX 而 commit_ts = N → 浮点差 0.X 秒，会被误判为
     "用户编辑了文件"。要求 mtime 比 commit_ts 严格大 ≥1 秒才算真的编辑。
     """
-    from xskill.git_lock import run_git
+    from xskill.skill.git import run_git
 
     if not (skill_dir / ".git").is_dir():
         return False
@@ -311,7 +311,7 @@ def reverse_sync_openclaw_dest(
     if not has_pending_dest_edit(dest_dir, quiet_seconds=quiet_seconds):
         return False
 
-    from xskill.git_lock import skill_repo_lock
+    from xskill.skill.git import skill_repo_lock
 
     skill_name = source_dir.name
     logger.info("openclaw reverse_sync start: %s (dest=%s → source=%s)",

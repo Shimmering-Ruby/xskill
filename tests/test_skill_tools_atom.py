@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from xskill.atom_task import AtomTask, AtomTaskStore
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.agents import skill_tools as ST
 from tests.test_atom_task_store import _FakeEmbed
 
@@ -106,13 +106,13 @@ class TestNewSkillFolder:
         )
         skill_md = skill_dir / "django-migration-fix" / "SKILL.md"
         assert skill_md.is_file(), "stub SKILL.md 必须由 new_skill_folder 写出"
-        from xskill.frontmatter import parse as fm_parse
+        from xskill.skill.frontmatter import parse as fm_parse
         fm, body = fm_parse(skill_md.read_text(encoding="utf-8"))
         assert fm["name"] == "django-migration-fix"
         assert fm["description"] == "修复 Django manage.py migrate 冲突"
         assert fm["metadata"]["state"] == "baby"
         # git 仓库 + baby 分支
-        from xskill.git_lock import current_branch
+        from xskill.skill.git import current_branch
         assert (skill_dir / "django-migration-fix" / ".git").is_dir()
         assert current_branch(str(skill_dir / "django-migration-fix")) == "baby"
         # .gitignore 含 .candidates.yml
@@ -193,7 +193,7 @@ class TestRenameSkill:
         assert (skill_dir / "new-name").is_dir()
         assert not (skill_dir / "old-name").exists()
         # SKILL.md frontmatter.name 已更新
-        from xskill.frontmatter import parse as fm_parse
+        from xskill.skill.frontmatter import parse as fm_parse
         fm, _ = fm_parse((skill_dir / "new-name" / "SKILL.md").read_text(encoding="utf-8"))
         assert fm["name"] == "new-name"
 
@@ -209,7 +209,7 @@ class TestRenameSkill:
         skill_dir, _ = _setup(tmp_path)
         ST.new_skill_folder("graduated", "stub")
         # graduate 到 main
-        from xskill.git_lock import run_git
+        from xskill.skill.git import run_git
         run_git(["branch", "-m", "baby", "main"], cwd=str(skill_dir / "graduated"))
         result = ST.rename_skill("graduated", "new-name")
         assert result.startswith("error")
@@ -261,7 +261,7 @@ class TestMoveTaskTo:
         result = ST.move_task_to("from-skill", "to-skill", "atom_x")
         assert "moved" in result
         # source 空
-        from xskill import candidates as C
+        from xskill.skill import candidates as C
         from_data = C.load_candidates(skill_dir / "from-skill")
         assert from_data["candidates"] == []
         # target 含 atom_x，weightscore 保留为 8
@@ -278,7 +278,7 @@ class TestMoveTaskTo:
         ST.add_task_to_skill("to", "atom_dup", 9)
         ST.move_task_to("from", "to", "atom_dup")
         # target 的 atom_dup 被覆盖为 from 的 weightscore=3
-        from xskill import candidates as C
+        from xskill.skill import candidates as C
         to_data = C.load_candidates(skill_dir / "to")
         assert to_data["candidates"][0]["weightscore"] == 3
 

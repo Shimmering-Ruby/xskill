@@ -15,7 +15,7 @@ import threading
 import time
 import types
 
-from xskill.git_lock import run_git, skill_repo_lock
+from xskill.skill.git import run_git, skill_repo_lock
 
 
 def test_run_git_serializes_same_repo(tmp_path, monkeypatch):
@@ -32,7 +32,7 @@ def test_run_git_serializes_same_repo(tmp_path, monkeypatch):
             active["count"] -= 1
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("xskill.git_lock.subprocess.run", fake_run)
+    monkeypatch.setattr("xskill.skill.git.subprocess.run", fake_run)
     repo = str(tmp_path / "one-repo")
     threads = [threading.Thread(target=lambda: run_git(["status"], cwd=repo))
                for _ in range(8)]
@@ -58,7 +58,7 @@ def test_run_git_different_repos_run_in_parallel(tmp_path, monkeypatch):
             active["count"] -= 1
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("xskill.git_lock.subprocess.run", fake_run)
+    monkeypatch.setattr("xskill.skill.git.subprocess.run", fake_run)
     threads = [
         threading.Thread(target=lambda i=i: run_git(["status"],
                                                     cwd=str(tmp_path / f"repo-{i}")))
@@ -74,7 +74,7 @@ def test_run_git_different_repos_run_in_parallel(tmp_path, monkeypatch):
 def test_skill_repo_lock_reentrant_and_allows_inner_run_git(tmp_path, monkeypatch):
     """skill_repo_lock 可重入；持锁时内部 run_git 不死锁（同一把 RLock）。"""
     monkeypatch.setattr(
-        "xskill.git_lock.subprocess.run",
+        "xskill.skill.git.subprocess.run",
         lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
     repo = str(tmp_path / "r")

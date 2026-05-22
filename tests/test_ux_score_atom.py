@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from xskill.atom_task import AtomTask
-from xskill.ux_score import score_atom
+from xskill.pipeline.atom import AtomTask
+from xskill.pipeline.atom import score_atom
 
 
 class _StubLLM:

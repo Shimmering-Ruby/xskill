@@ -17,8 +17,8 @@ import time
 from pathlib import Path
 
 from xskill.canary import has_staging, main_sha, pick_side, staging_sha
-from xskill.entities.skill import Skill
-from xskill.entities.skill_repo import SkillRepo
+from xskill.skill.skill import Skill
+from xskill.skill.repo import SkillRepo
 from xskill.team.shared.protocol import SkillSlot, SyncResponse
 
 

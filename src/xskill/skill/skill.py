@@ -1,23 +1,37 @@
 """
-entities/skill.py — Skill 实体类（含内部 CandidateBuffer + CanaryGitOps）
+skill/skill.py — Skill 实体类（含内部 CandidateBuffer + CanaryGitOps）
+                 + 单个 skill 的 git CRUD（原 skill_manager.py 的单-skill 部分）
 ═══════════════════════════════════════════════════════════════════════════
 单个 skill 的视图。包 SKILL.md frontmatter + .candidates.yml + 子仓 git。
+
+模块函数 ``show_skill`` / ``skill_log`` / ``skill_diff`` / ``rollback_skill``
+/ ``freeze_skill`` / ``unfreeze_skill`` / ``delete_skill`` / ``export_skill``
+是对单个 skill（按 name 定位）的 git 版本管理操作，目标均为 SKILL.md +
+YAML frontmatter；legacy（skill.md + .abstract）目录读时惰性合成，写时
+自动迁移到 v2。
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import shutil
 from datetime import datetime, date
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
 from xskill import canary as _canary
-from xskill import candidates as _candidates
-from xskill.frontmatter import parse as _fm_parse
+from xskill.skill import candidates as _candidates
+from xskill.skill.frontmatter import parse as _fm_parse
+from xskill.skill.frontmatter import parse as fm_parse, serialize as fm_serialize
+from xskill.skill.git import run_git, commit_changes
 from xskill.types import Candidate
 
 if TYPE_CHECKING:
-    from xskill.entities.registry import Registry
-    from xskill.entities.trajectory import Trajectory
+    from xskill.pipeline.registry import Registry
+    from xskill.pipeline.trajectory import Trajectory
+
+logger = logging.getLogger("skill_manager")
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -186,13 +200,13 @@ class Skill:
         需要 registry 注入才能反查具体路径；否则返回空列表。"""
         if self._registry is None:
             return []
-        from xskill.entities.trajectory import Trajectory as _Traj
+        from xskill.pipeline.trajectory import Trajectory as _Traj
         out: list[_Traj] = []
         for traj_id in self.source_trajs:
             # 在 registry 中按 filename 反查（traj_id 形如 "traj_0042"）
             paths = self._registry.trajectories_using(self.name)  # 备选反查
             # 直接按 filename 找
-            from xskill import registry as _r
+            from xskill.pipeline import registry as _r
             conn = _r.get_connection(self._registry._db_path)
             try:
                 rows = conn.execute(
@@ -210,3 +224,212 @@ class Skill:
 
     def __repr__(self) -> str:
         return f"Skill({self.name})"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 单个 skill 的 git 版本管理（原 skill_manager.py 单-skill 部分）
+# ═══════════════════════════════════════════════════════════════════
+# Git-based CRUD for one skill. All reads/writes target SKILL.md with YAML
+# frontmatter; legacy (skill.md + .abstract) directories are read lazily,
+# but any mutation auto-migrates the directory to v2.
+
+
+def _skill_md_path(skill_path: Path) -> Path:
+    """Prefer SKILL.md; fall back to legacy skill.md if that's all there is."""
+    upper = skill_path / "SKILL.md"
+    lower = skill_path / "skill.md"
+    if upper.exists():
+        return upper
+    if lower.exists():
+        return lower
+    return upper  # non-existent upper — caller handles
+
+
+def _load_skill(skill_path: Path) -> tuple[dict, str, Path]:
+    """Return (frontmatter, body, path_used). For legacy dirs with only a
+    plain skill.md + .abstract, synthesize a frontmatter dict from the
+    .abstract contents so list_skills/show_skill continue to work without
+    rewriting files on read."""
+    p = _skill_md_path(skill_path)
+    if not p.exists():
+        return {}, "", p
+
+    text = p.read_text(encoding="utf-8")
+    fm, body = fm_parse(text)
+
+    if fm:
+        return fm, body, p
+
+    # Legacy path: body is the whole text; synthesize from .abstract
+    abstract_path = skill_path / ".abstract"
+    synth = {"name": skill_path.name, "metadata": {}}
+    if abstract_path.exists():
+        try:
+            abstract = json.loads(abstract_path.read_text(encoding="utf-8"))
+            synth["description"] = abstract.get("trigger", "") or abstract.get("summary", "")
+            meta = synth["metadata"]
+            meta["version"] = abstract.get("version", 0)
+            meta["tags"] = abstract.get("tags", [])
+            meta["source_trajs"] = abstract.get("source_trajs", [])
+            meta["frozen"] = abstract.get("frozen", False)
+            meta["summary"] = abstract.get("summary", "")
+            if abstract.get("eval_result"):
+                meta["eval"] = abstract["eval_result"]
+        except Exception:
+            pass
+    return synth, text, p
+
+
+def show_skill(skill_dir: Path, name: str) -> dict:
+    """Return skill details.
+
+    Fields:
+        name           — skill dir name
+        description    — from frontmatter.description
+        metadata       — frontmatter.metadata dict
+        skill_md_body  — the markdown body AFTER the frontmatter
+        skill_md_raw   — full raw SKILL.md (including frontmatter) for preview
+        files          — relative file paths inside the skill dir
+    """
+    skill_path = skill_dir / name
+    if not skill_path.is_dir():
+        return {"error": f"skill not found: {name}"}
+
+    fm, body, p = _load_skill(skill_path)
+
+    raw = p.read_text(encoding="utf-8") if p.exists() else ""
+
+    files = [
+        str(f.relative_to(skill_path))
+        for f in sorted(skill_path.rglob("*"))
+        if f.is_file()
+    ]
+
+    return {
+        "name": name,
+        "description": (fm.get("description") or "").strip(),
+        "metadata": fm.get("metadata", {}) or {},
+        "skill_md_body": body,
+        "skill_md_raw": raw,
+        "files": files,
+    }
+
+
+def skill_log(skill_dir: Path, name: str) -> str:
+    """Return git log for a skill directory."""
+    skill_path = skill_dir / name
+    if not skill_path.is_dir():
+        return f"skill not found: {name}"
+
+    code, out, err = run_git(
+        ["log", "--oneline", "--follow", "-20", "--", f"{name}/"],
+        cwd=str(skill_dir),
+    )
+    if code != 0:
+        return f"git log failed: {err}"
+    return out or "(no history)"
+
+
+def skill_diff(skill_dir: Path, name: str, v1: str | None = None, v2: str | None = None) -> str:
+    """Git diff for a skill. Default: HEAD~1 vs HEAD."""
+    skill_path = skill_dir / name
+    if not skill_path.is_dir():
+        return f"skill not found: {name}"
+
+    if v1 and v2:
+        code, out, err = run_git(["diff", v1, v2, "--", f"{name}/"], cwd=str(skill_dir))
+    else:
+        code, out, err = run_git(["diff", "HEAD~1", "HEAD", "--", f"{name}/"], cwd=str(skill_dir))
+
+    if code != 0:
+        return f"git diff failed: {err}"
+    return out or "(no diff)"
+
+
+def rollback_skill(skill_dir: Path, name: str, version: str | None = None) -> bool:
+    """Roll a skill back to a specific commit or HEAD~1."""
+    skill_path = skill_dir / name
+    if not skill_path.is_dir():
+        logger.error(f"skill not found: {name}")
+        return False
+
+    target = version or "HEAD~1"
+    code, _, err = run_git(["checkout", target, "--", f"{name}/"], cwd=str(skill_dir))
+
+    if code != 0:
+        logger.error(f"rollback failed: {err}")
+        return False
+
+    committed = commit_changes(str(skill_dir), f"rollback {name} to {target}")
+    return committed
+
+
+def freeze_skill(skill_dir: Path, name: str) -> bool:
+    """Freeze: set metadata.frozen = true in SKILL.md frontmatter."""
+    return _set_frozen(skill_dir, name, True)
+
+
+def unfreeze_skill(skill_dir: Path, name: str) -> bool:
+    """Unfreeze: set metadata.frozen = false."""
+    return _set_frozen(skill_dir, name, False)
+
+
+def _set_frozen(skill_dir: Path, name: str, frozen: bool) -> bool:
+    """Flip frontmatter.metadata.frozen and persist. Auto-migrates legacy dirs."""
+    skill_path = skill_dir / name
+    if not skill_path.is_dir():
+        logger.error(f"skill not found: {name}")
+        return False
+
+    fm, body, p = _load_skill(skill_path)
+    if not fm:
+        # empty dir — create a minimal stub so freeze/unfreeze isn't a no-op
+        fm = {"name": name, "metadata": {"frozen": frozen}}
+        body = body or f"# {name}\n"
+    else:
+        fm.setdefault("metadata", {})["frozen"] = frozen
+
+    # Always write to SKILL.md (migrate from legacy on the fly)
+    upper = skill_path / "SKILL.md"
+    upper.write_text(fm_serialize(fm, body), encoding="utf-8")
+
+    # remove legacy .abstract and skill.md if we just migrated
+    legacy_abstract = skill_path / ".abstract"
+    if legacy_abstract.exists():
+        legacy_abstract.unlink()
+    legacy_md = skill_path / "skill.md"
+    if legacy_md.exists() and legacy_md != upper:
+        legacy_md.unlink()
+
+    action = "freeze" if frozen else "unfreeze"
+    commit_changes(str(skill_dir), f"{action} {name}")
+    logger.info(f"{action}: {name}")
+    return True
+
+
+def delete_skill(skill_dir: Path, name: str) -> bool:
+    """Delete a skill directory and commit."""
+    skill_path = skill_dir / name
+    if not skill_path.is_dir():
+        logger.error(f"skill not found: {name}")
+        return False
+
+    shutil.rmtree(skill_path)
+    committed = commit_changes(str(skill_dir), f"delete skill: {name}")
+    if committed:
+        logger.info(f"deleted: {name}")
+    return committed
+
+
+def export_skill(skill_dir: Path, name: str, output_path: Path) -> Path:
+    """Copy the skill directory to output_path/<name>."""
+    skill_path = skill_dir / name
+    if not skill_path.is_dir():
+        raise FileNotFoundError(f"skill not found: {name}")
+
+    target = output_path / name if output_path.is_dir() else output_path
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(skill_path, target)
+    logger.info(f"exported: {name} -> {target}")
+    return target

@@ -25,7 +25,7 @@ def _reset_root_logger():
 
 
 def test_creates_log_files_for_each_component(tmp_path):
-    from xskill.log_setup import configure_logging
+    from xskill.utils.logging import configure_logging
     configure_logging(tmp_path, debug=False, quiet=False, stdout=False)
 
     logging.getLogger("xskill.watcher").info("watcher said hi")
@@ -48,7 +48,7 @@ def test_creates_log_files_for_each_component(tmp_path):
 
 def test_xskill_log_aggregates_all_xskill_messages(tmp_path):
     """xskill.* 下游所有子 logger 的消息都应当冒泡进 xskill.log 全合并视图。"""
-    from xskill.log_setup import configure_logging
+    from xskill.utils.logging import configure_logging
     configure_logging(tmp_path, debug=False, quiet=False, stdout=False)
 
     logging.getLogger("xskill.watcher").info("from watcher")
@@ -66,7 +66,7 @@ def test_xskill_log_aggregates_all_xskill_messages(tmp_path):
 
 
 def test_idempotent_no_duplicate_handlers(tmp_path):
-    from xskill.log_setup import configure_logging
+    from xskill.utils.logging import configure_logging
     configure_logging(tmp_path, stdout=False)
     n_first = sum(1 for h in logging.getLogger().handlers
                   if getattr(h, "_xskill_managed", False))
@@ -77,14 +77,14 @@ def test_idempotent_no_duplicate_handlers(tmp_path):
 
 
 def test_quieter_loggers_default_to_warning(tmp_path):
-    from xskill.log_setup import configure_logging
+    from xskill.utils.logging import configure_logging
     configure_logging(tmp_path, stdout=False)
     for noisy in ("httpx", "httpcore", "openai"):
         assert logging.getLogger(noisy).level == logging.WARNING, noisy
 
 
 def test_debug_flag_sets_root_to_debug(tmp_path):
-    from xskill.log_setup import configure_logging
+    from xskill.utils.logging import configure_logging
     configure_logging(tmp_path, debug=True, stdout=False)
     assert logging.getLogger().level == logging.DEBUG
     assert logging.getLogger("xskill.watcher").level == logging.DEBUG

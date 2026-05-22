@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from xskill.atom_task import AtomTaskStore
+from xskill.pipeline.atom import AtomTaskStore
 from xskill.agents.task_agent import TaskAgent
 
 
@@ -172,7 +172,7 @@ class TestIncrementalRun:
         traj_path.write_text("hello", encoding="utf-8")
         store = AtomTaskStore(root=traj_dir)
         # 手动塞一个已覆盖整篇的 atom
-        from xskill.atom_task import AtomTask
+        from xskill.pipeline.atom import AtomTask
         store.save(AtomTask(
             atom_id="atom_traj_z_0001", traj_id="traj_z",
             offset_start=0, offset_end=len("hello"),

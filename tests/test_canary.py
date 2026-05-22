@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from xskill import canary
-from xskill.git_lock import run_git
+from xskill.skill.git import run_git
 
 
 # ──────────────────────────────────────────────────────

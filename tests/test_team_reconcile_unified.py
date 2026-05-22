@@ -8,7 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from xskill.watcher import DirectoryWatcher
+from xskill.pipeline.runner import DirectoryWatcher
 
 
 def _git(args, cwd):

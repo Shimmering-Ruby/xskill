@@ -1,6 +1,6 @@
 """
-watcher.py -- 流水线式目录监听器
-==================================
+pipeline/runner.py -- 流水线式目录监听器 + AtomTask 流水线核心入口
+====================================================================
 
 每条轨迹独立流转，不分批不阻塞：
 
@@ -15,6 +15,10 @@ watcher.py -- 流水线式目录监听器
   6. 解析 xskill header → ux_score
 
 所有耗时操作都在 ThreadPoolExecutor 中异步执行，扫描本身秒完。
+
+本模块还含 AtomTask 流水线核心入口 ``process_atom_task``（原 process.py）：
+v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是单一原子
+操作。``api/sse.py`` 与本模块的 ``DirectoryWatcher`` 都调它。
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 
 from xskill.canary import CanaryConfig
-from xskill.registry import (
+from xskill.pipeline.registry import (
     list_watch_dirs,
     discover_trajectories,
     get_trajs_by_status,
@@ -37,7 +41,7 @@ from xskill.registry import (
     update_traj_status,
     increment_retry,
 )
-from xskill.traj_meta import parse_traj_header
+from xskill.pipeline.trajectory import parse_traj_header
 
 logger = logging.getLogger("xskill.watcher")
 
@@ -467,9 +471,9 @@ class DirectoryWatcher:
         """
         if self.skill_dir is None or not self.skill_dir.is_dir():
             return
-        from xskill.atom_canary import AtomCanary
+        from xskill.canary import AtomCanary
         from xskill.canary import CanaryConfig
-        from xskill.git_lock import run_git
+        from xskill.skill.git import run_git
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
         for d in sorted(self.skill_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("."):
@@ -701,7 +705,7 @@ class DirectoryWatcher:
         测试时显式 inject self.store；生产 watcher 监控多个 dir（registry
         里每个 wd 一份），每个 dir 一个独立 store——按 dir_path 缓存创建。
         """
-        from xskill.atom_task import AtomTaskStore
+        from xskill.pipeline.atom import AtomTaskStore
         if self.store is not None and Path(self.store.root) == Path(dir_path):
             return self.store
         if not hasattr(self, "_store_cache"):
@@ -757,7 +761,7 @@ class DirectoryWatcher:
 
         返回 (fname, [result_dict, ...])。
         """
-        from xskill.process import process_atom_task
+        from xskill.pipeline.runner import process_atom_task
         traj_id = (dir_path / fname).stem
         store = self._store_for(dir_path)
         factory = self._factory()
@@ -787,7 +791,7 @@ class DirectoryWatcher:
     # ───────────────────────────────────────────────────────────
 
     def _on_split_done(self, wd_id, fname, result, **kw):
-        from xskill.registry import update_traj_offset
+        from xskill.pipeline.registry import update_traj_offset
         _fname, n_atoms, last_off, last_id, err = result
         if err is not None:
             update_traj_status(wd_id, fname, "filtered", error_msg=err, **kw)
@@ -871,8 +875,8 @@ class DirectoryWatcher:
         """
         if self.llm is None or self.skill_dir is None:
             return
-        from xskill.ux_score import score_atom
-        from xskill.atom_canary import AtomCanary
+        from xskill.pipeline.atom import score_atom
+        from xskill.canary import AtomCanary
         # 找到该 wd 的 dir_path
         for wd in list_watch_dirs(**kw):
             if wd["id"] == wd_id:
@@ -931,11 +935,11 @@ class DirectoryWatcher:
         """
         if self.llm is None or self.skill_dir is None:
             return
-        from xskill.atom_canary import AtomCanary
+        from xskill.canary import AtomCanary
         from xskill.canary import (
             CanaryConfig, has_staging, main_sha, pick_side, staging_sha,
         )
-        from xskill.ux_score import score_atom
+        from xskill.pipeline.atom import score_atom
 
         # 找到该 wd 的 dir_path + client_id（label）
         client_id = None
@@ -984,3 +988,68 @@ class DirectoryWatcher:
                                      fname, atom.atom_id, skill_name)
         if used_any:
             logger.info("CS attribution done: %s (client=%s)", fname, client_id)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AtomTask 流水线核心入口（原 process.py）
+# ═══════════════════════════════════════════════════════════════════
+# v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是单一原子
+# 操作；不存在"轨迹整篇喂 LLM"概念。api/sse.py / runner 的 DirectoryWatcher
+# 都调本函数，传入已 split + indexed 完毕的 atom_id。
+
+_process_logger = logging.getLogger("xskill.process")
+
+
+def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
+                      store, embed_client, agno_agent_factory) -> dict:
+    """处理一个 AtomTask：只跑 cluster，**不跑 edit**。
+
+    edit 触发由 watcher 每轮独立扫描所有 skill 目录完成（见
+    ``DirectoryWatcher._check_pending_skill_edits``）。把 edit 从 cluster
+    解耦后，即便某次 cluster 抛异常，buffer 已满阈值的 skill 仍能在后续
+    watcher 轮次中被检出 + 触发——不会因为某个 atom cluster 失败错失整批
+    candidates 的 promote 机会。
+
+    Args:
+        atom_id: AtomTask 主键
+        config: xskill 配置（含 llm 段）
+        skill_dir: skill 根目录（其下每个子目录是一个 skill 仓库）
+        store: AtomTaskStore（持有所有 atom + 索引）
+        embed_client: 向量客户端（HybridSearch 用）
+        agno_agent_factory: callable(*, instructions, tools) -> agno-like Agent。
+                            生产环境用 ``agno_factory.make_default_factory(config)``；
+                            单测注入 stub。
+
+    Returns:
+        dict 含 keys: action / atom_id / cluster_log
+    """
+    from xskill.agents.task_cluster_agent import TaskClusterAgent
+    from xskill.agents import skill_tools as ST
+
+    atom = store.load(atom_id)
+    traj_root = store.root
+
+    ST.init_context_v2(
+        skill_dir=skill_dir, store=store,
+        embed_client=embed_client, traj_root=traj_root,
+    )
+
+    cluster = TaskClusterAgent(
+        skill_dir=skill_dir, store=store,
+        agno_agent_factory=agno_agent_factory,
+        llm_cfg=config.get("llm", {}),
+        tools=[
+            ST.atom_task_read, ST.atom_task_search, ST.read_traj,
+            ST.skill_read, ST.read_skill_tasks,
+            ST.new_skill_folder, ST.add_task_to_skill,
+            ST.rename_skill, ST.move_task_to,
+            ST.score_task,
+        ],
+    )
+    cluster_content = cluster.process(atom)
+
+    return {
+        "action": "clustered",
+        "atom_id": atom_id,
+        "cluster_log": (cluster_content or "")[:500],
+    }

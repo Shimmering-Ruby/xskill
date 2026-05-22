@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from xskill.watcher import DirectoryWatcher
+from xskill.pipeline.runner import DirectoryWatcher
 
 
 def test_on_poll_hook_called_at_least_once(tmp_path):

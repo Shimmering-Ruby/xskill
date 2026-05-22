@@ -195,7 +195,7 @@ def test_install_to_claude_code_copy_mode_returns_correct_path(tmp_path, monkeyp
     调用方依赖的契约，不能因为换了 fallback 就破。
     """
     from xskill import ecosystems
-    from xskill.frontmatter import serialize as fm_serialize
+    from xskill.skill.frontmatter import serialize as fm_serialize
 
     skill_src = tmp_path / "srcs" / "list-py"
     skill_src.mkdir(parents=True)

@@ -1,5 +1,5 @@
 """
-git_lock.py — Skill 仓库 git 操作
+skill/git.py — Skill 仓库 git 操作
 ════════════════════════════════════
 封装 git 命令 + skill 仓库的初始化模板。
 

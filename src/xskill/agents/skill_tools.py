@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from xskill.frontmatter import parse as fm_parse, serialize as fm_serialize
+from xskill.skill.frontmatter import parse as fm_parse, serialize as fm_serialize
 
 logger = logging.getLogger("skill_tools")
 
@@ -108,7 +108,7 @@ def search_similar_trajs(query: str, top_k: int = 5, filter: str = "all") -> str
     Returns:
         JSON string: list of {traj_id, similarity, meta (summary), md_path, dataset}
     """
-    from xskill.search import search as do_search
+    from xskill.utils.search import search as do_search
     data_dir = _ctx["data_dir"]
     config = _ctx["config"]
 
@@ -288,7 +288,7 @@ def add_candidate(skill_name: str, pattern: str, pattern_type: str,
     Returns:
         Human-readable status including the current supporter count.
     """
-    from xskill import candidates as C
+    from xskill.skill import candidates as C
 
     skill_dir = _ctx["skill_dir"]
     slug = _slugify(skill_name)
@@ -333,7 +333,7 @@ def list_candidates(skill_name: str) -> str:
     Returns a compact human-readable listing; the agent should read this
     before calling ``add_candidate`` to avoid duplicate proposals.
     """
-    from xskill import candidates as C
+    from xskill.skill import candidates as C
 
     skill_dir = _ctx["skill_dir"]
     slug = _slugify(skill_name)
@@ -563,7 +563,7 @@ def atom_task_search(query: str, top_k: int = 5) -> str:
 
     每条结果含 ``atom_id`` 和 ``sources``（命中通道）；不做 rerank。
     """
-    from xskill.hybrid_search import HybridSearch
+    from xskill.utils.search import HybridSearch
     store = _ctx_v2["store"]
     embed = _ctx_v2["embed_client"]
     if store is None or embed is None:
@@ -620,7 +620,7 @@ def new_skill_folder(skill_name: str, description: str) -> str:
     if target.exists():
         return f"already exists: {target}"
     # 初始化 git + baby 分支 + stub SKILL.md
-    from xskill.git_lock import init_skill_repo_on_baby
+    from xskill.skill.git import init_skill_repo_on_baby
     init_skill_repo_on_baby(str(target), name=slug, description=desc)
     return f"created on baby branch: {target}  desc={desc[:60]!r}"
 
@@ -643,7 +643,7 @@ def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
     同 atom 重复 add 时**覆盖**（不累加，cluster 可改主意）。返回末尾附该
     atom 的 weightscore + buffer 总分 / 10，让 agent 看到"还差多少到阈值"。
     """
-    from xskill import candidates as C
+    from xskill.skill import candidates as C
     skill_dir = _ctx_v2["skill_dir"]
     if skill_dir is None:
         return "error: v2 context not initialized"
@@ -695,7 +695,7 @@ def add_task(
 
     生产路径走 TaskAgent；这个工具是给需要补轨的 agent / 脚本兜底。
     """
-    from xskill.atom_task import AtomTask
+    from xskill.pipeline.atom import AtomTask
     store = _ctx_v2["store"]
     if store is None:
         return "error: v2 context not initialized"
@@ -755,7 +755,7 @@ def commit_baby_to_main(skill_name: str, message: str) -> str:
         成功："graduated baby → main: <skill_name>"
         失败："error: ..."
     """
-    from xskill.git_lock import commit_baby_to_main_branch
+    from xskill.skill.git import commit_baby_to_main_branch
     skill_dir = _ctx_v2["skill_dir"]
     if skill_dir is None:
         return "error: v2 context not initialized"
@@ -790,7 +790,7 @@ def commit_to_staging(skill_name: str, message: str) -> str:
         成功："committed to staging: <skill_name>"
         失败："error: ..."
     """
-    from xskill.git_lock import commit_to_staging_branch
+    from xskill.skill.git import commit_to_staging_branch
     skill_dir = _ctx_v2["skill_dir"]
     if skill_dir is None:
         return "error: v2 context not initialized"
@@ -818,7 +818,7 @@ def absorb_user_edit_to_main(skill_name: str, message: str) -> str:
       - main: 直接 commit
       - 同时存在 staging: 删除 staging (用户手改优先级压过灰度候选)
     """
-    from xskill.git_lock import (
+    from xskill.skill.git import (
         run_git, current_branch, commit_changes,
     )
     skill_dir = _ctx_v2["skill_dir"]
@@ -889,7 +889,7 @@ def rename_skill(old_name: str, new_name: str) -> str:
 
     实现：mv 目录 + 更新 SKILL.md.name + 改 body 标题 + commit on baby。
     """
-    from xskill.git_lock import current_branch, run_git
+    from xskill.skill.git import current_branch, run_git
     skill_dir = _ctx_v2["skill_dir"]
     if skill_dir is None:
         return "error: v2 context not initialized"
@@ -931,7 +931,7 @@ def read_skill_tasks(skill_name: str) -> str:
     cluster agent 用来"看这个 baby skill 在攒什么类型的 atom"——决定该不该
     把当前 atom 也归过去。返回 yaml-like 文本，每条 atom 一行含 weightscore。
     """
-    from xskill import candidates as C
+    from xskill.skill import candidates as C
     skill_dir = _ctx_v2["skill_dir"]
     if skill_dir is None:
         return "error: v2 context not initialized"
@@ -963,7 +963,7 @@ def move_task_to(skill_from: str, skill_to: str, atom_id: str) -> str:
 
     源 buffer 为空时不删空骨架（保留 baby skill，cluster 后续可能再填）。
     """
-    from xskill import candidates as C
+    from xskill.skill import candidates as C
     skill_dir = _ctx_v2["skill_dir"]
     if skill_dir is None:
         return "error: v2 context not initialized"

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from xskill import canary
-from xskill.atom_canary import AtomCanary
-from xskill.git_lock import run_git
+from xskill.canary import AtomCanary
+from xskill.skill.git import run_git
 
 
 def _init_repo(path: Path) -> Path:
