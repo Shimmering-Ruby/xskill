@@ -26,7 +26,7 @@ from xskill.pipeline.atom import AtomTaskStore
 from xskill.pipeline.registry import register_dir, get_status_counts
 from xskill.pipeline.runner import DirectoryWatcher
 from tests.test_atom_task_store import _FakeEmbed
-from tests.test_task_agent import _SPLIT_XML, _StubLLM
+from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM
 from tests.test_watcher_atom import _StubAgno
 
 
@@ -69,12 +69,12 @@ class TestNoRealHomePollution:
         wd.mkdir()
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
-        (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
+        (wd / "traj_x.md").write_text(_TRAJ_MD, encoding="utf-8")
 
         register_dir(wd, db_path=db)
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,

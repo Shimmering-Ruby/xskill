@@ -144,7 +144,7 @@ NewSkillFolder 再 add_task_to_skill）。
 # 可用工具
 - AtomTaskRead(atom_id) — 读 atom 完整 JSON（intent / summary / raw_segment 全字段）
 - AtomTaskSearch(query) — 混合检索其他 atom（语义向量 + BM25 关键字 union）
-- ReadTraj(traj_id, offset_start, offset_end) — 按字符 offset 读 traj.md 原文片段
+- ReadTraj(traj_id, offset_start, offset_end) — 按行号读 traj.md 原文片段（offset 即 1-based 行号）
 - SkillRead(skill_name) — 读 skill 的 SKILL.md（baby 返回 stub，main/staging 返回正版）
 - ReadSkillTasks(skill_name) — **看某 skill 的 candidates buffer 内已有哪些 atom**
   （和 SkillRead 不同——SkillRead 看 SKILL.md，ReadSkillTasks 看正在攒分的 atom
@@ -254,7 +254,7 @@ class TaskClusterAgent:
             f"  tags:      {atom.tags}\n"
             f"  used_skills (agent 自报): {atom.used_skills}\n"
             f"  ux_score:  {atom.ux_score}\n"
-            f"  offset:    [{atom.offset_start}..{atom.offset_end}]\n\n"
+            f"  lines:     [{atom.offset_start}..{atom.offset_end}) (1-based 行号)\n\n"
             f"按系统指令处理这个 atom，做出归类决策。"
         )
 

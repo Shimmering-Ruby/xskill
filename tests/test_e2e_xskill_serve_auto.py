@@ -183,20 +183,25 @@ FAKE_LLM_SCORE_PROFILE = {
 
 
 # ── D. AtomTask 拆分假数据 ────────────────────────────────────────
-# TaskAgent SYSTEM_PROMPT 期望 ``<atoms><atom>...</atom></atoms>`` schema。
-# 单 atom 简单覆盖 offset [50..400]，对 bridged CC traj（通常 ≥500 字符）
-# 都不越界。validate 只看 offset 单调 + 区间正；语义内容不重要。
-FAKE_ATOM_SPLIT_XML = """<atoms>
-<atom>
-  <offset_start>50</offset_start>
-  <offset_end>400</offset_end>
-  <intent>列出当前目录下的 .py 文件</intent>
-  <summary>用户请求列 Python 文件；agent 调 Bash 跑 ls *.py 输出文件列表。</summary>
-  <tags><tag>file_ops</tag><tag>bash</tag></tags>
-  <used_skills><skill>list-py-files</skill></used_skills>
-  <ux_score>7</ux_score>
-</atom>
-</atoms>"""
+# v0.5.0a4 起 TaskAgent 用行号坐标:预处理给 ``## User`` 行打
+# ``[line:<行号>]`` 标记，LLM 只报 atom 起始行号 start_line。fake server 的
+# 拆分应答因此必须动态——扫 prompt 里的 [line:] 标记，按真实行号回应；固定
+# 假数据会因 start_line 不是被标记的 ## User 行而被 TaskAgent 严格校验拒掉。
+# bridged CC 轨迹是单 prompt → 单 user turn，回 1 个覆盖全程的 atom。
+def _atom_split_build(b: dict) -> dict:
+    marks = re.findall(r"\[line:(\d+)\]", _msg_user_text(b))
+    if not marks:
+        raise AssertionError("atom-split responder: prompt 里没有 [line:] 标记")
+    xml = (
+        "<atoms>\n<atom>\n"
+        f"  <start_line>{int(marks[0])}</start_line>\n"
+        "  <intent>列出当前目录下的 .py 文件</intent>\n"
+        "  <summary>用户请求列 Python 文件；agent 调 Bash 输出文件列表。</summary>\n"
+        "  <tags><tag>file_ops</tag><tag>bash</tag></tags>\n"
+        "  <used_skills><skill>list-py-files</skill></used_skills>\n"
+        "  <ux_score>7</ux_score>\n</atom>\n</atoms>"
+    )
+    return make_openai_chat_response(xml, model=b.get("model", "fake"))
 
 # ── E. cluster agent 应答：不调任何工具（empty text reply） ───────
 # v2 下 TaskClusterAgent 调时 fake 回纯文本，不返工具调用 → agent 不调
@@ -456,9 +461,7 @@ def _program_fake_server(fake: FakeLLMServer) -> None:
     fake.add_responder("/chat/completions", Responder(
         name="atom-split",
         match=lambda b: "AtomTask 拆分员" in _msg_system_text(b),
-        build=lambda b: make_openai_chat_response(
-            FAKE_ATOM_SPLIT_XML, model=b.get("model", "fake"),
-        ),
+        build=_atom_split_build,
     ))
 
     # ── OpenAI：TaskClusterAgent noop ─────────────────────────

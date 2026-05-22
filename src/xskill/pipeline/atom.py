@@ -34,12 +34,13 @@ class AtomTask:
     """一段完整用户意图的最小提炼单元。
 
     字段约定：
-    - ``offset_start`` / ``offset_end``: 在 ``<traj_id>.md`` 中的字符 offset
-      （半开区间 ``[start, end)``），便于 ``ReadTraj`` 按需读原文。
+    - ``offset_start`` / ``offset_end``: 在 ``<traj_id>.md`` 中的 **1-based 行号**
+      （半开区间 ``[start, end)``——end 这一行不含；末 atom 的 end = 末行号+1），
+      便于 ``ReadTraj`` 按行号读原文。轨迹入库后不变，行号稳定。
     - ``pre_atom_id`` / ``post_atom_id``: 前后 atom 链表，给 cluster/edit
       agent 沿时间线游走。
-    - ``context_prefix``: ``offset_start`` 之前内容的省略表示（头 200 字 + 占位）。
-    - ``raw_segment``: ``[offset_start, offset_end)`` 内的原文片段。
+    - ``context_prefix``: atom 起始行之前内容的省略表示（头 200 字 + 占位）。
+    - ``raw_segment``: ``[offset_start, offset_end)`` 行区间内的原文片段。
     """
     atom_id: str
     traj_id: str

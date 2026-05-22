@@ -13,7 +13,7 @@ from xskill.pipeline.registry import (
 )
 from xskill.pipeline.runner import DirectoryWatcher
 from tests.test_atom_task_store import _FakeEmbed
-from tests.test_task_agent import _SPLIT_XML, _StubLLM
+from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM
 
 
 class _StubAgno:
@@ -81,7 +81,7 @@ class TestZombieCleanup:
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
-        (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
+        (wd / "traj_x.md").write_text(_TRAJ_MD, encoding="utf-8")
 
         wd_id = register_dir(wd, db_path=db)
         discover_trajectories(wd_id, wd, db_path=db)
@@ -90,7 +90,7 @@ class TestZombieCleanup:
 
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -115,7 +115,7 @@ class TestZombieCleanup:
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
-        (wd / "traj_y.md").write_text("Y" * 250, encoding="utf-8")
+        (wd / "traj_y.md").write_text(_TRAJ_MD, encoding="utf-8")
 
         wd_id = register_dir(wd, db_path=db)
         discover_trajectories(wd_id, wd, db_path=db)
@@ -123,7 +123,7 @@ class TestZombieCleanup:
 
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -152,7 +152,7 @@ class TestColdStartSerial:
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
         # 5 条 traj，2 条 indexed（待 cluster），3 条 split_done（pending pre-index）
         for i in range(5):
-            (wd / f"traj_{i}.md").write_text("x" * 250, encoding="utf-8")
+            (wd / f"traj_{i}.md").write_text(_TRAJ_MD, encoding="utf-8")
 
         wd_id = register_dir(wd, db_path=db)
         discover_trajectories(wd_id, wd, db_path=db)
@@ -172,7 +172,7 @@ class TestColdStartSerial:
 
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -208,7 +208,7 @@ class TestColdStartSerial:
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
         # 2 条 traj indexed，threshold=10 → 远低于阈值，稳态
         for i in range(2):
-            (wd / f"traj_{i}.md").write_text("x" * 250, encoding="utf-8")
+            (wd / f"traj_{i}.md").write_text(_TRAJ_MD, encoding="utf-8")
         wd_id = register_dir(wd, db_path=db)
         discover_trajectories(wd_id, wd, db_path=db)
         for i in range(2):
@@ -224,7 +224,7 @@ class TestColdStartSerial:
 
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -254,7 +254,7 @@ class TestClusterAllFailed:
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
-        (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
+        (wd / "traj_x.md").write_text(_TRAJ_MD, encoding="utf-8")
 
         class _AlwaysFailAgno:
             def __init__(self, *, instructions, tools):
@@ -268,7 +268,7 @@ class TestClusterAllFailed:
         register_dir(wd, db_path=db)
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -314,7 +314,7 @@ class TestIndependentSkillEditScan:
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
-        (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
+        (wd / "traj_x.md").write_text(_TRAJ_MD, encoding="utf-8")
 
         from xskill.skill import candidates as C
         from xskill.skill.git import init_skill_repo_on_baby
@@ -348,7 +348,7 @@ class TestIndependentSkillEditScan:
         register_dir(wd, db_path=db)
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -404,14 +404,14 @@ class TestUxScoreAtomLevel:
 
         traj_text = (
             "<!-- xskill:skill=test-skill side=staging sha=abc123 -->\n"
-            + "X" * 250
+            + _TRAJ_MD
         )
         (wd / "traj_z.md").write_text(traj_text, encoding="utf-8")
 
         register_dir(wd, db_path=db)
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -439,7 +439,7 @@ class TestUxScoreAtomLevel:
                 counts = get_status_counts(db_path=db)
                 if counts.get("done"):
                     break
-            # _SPLIT_XML 有 2 个 atom → score_atom 调 2 次
+            # _TRAJ_MD 有 2 个 ## User → 2 个 atom → score_atom 调 2 次
             assert mock_score.call_count == 2
             # 验证传给 score_atom 的 side 来自 header
             call_kw = mock_score.call_args[1]
@@ -462,12 +462,12 @@ class TestUxScoreAtomLevel:
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
-        (wd / "traj_z.md").write_text("X" * 250, encoding="utf-8")  # no header
+        (wd / "traj_z.md").write_text(_TRAJ_MD, encoding="utf-8")  # no header
 
         register_dir(wd, db_path=db)
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
@@ -498,13 +498,13 @@ class TestPipelineRun:
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
 
-        # 写一条 traj.md 内容长度跟 _SPLIT_XML 的 offset 对得上（200 字符以上）
-        (wd / "traj_x.md").write_text("X" * 250, encoding="utf-8")
+        # 写一条带 ## User 的真实形态 traj.md
+        (wd / "traj_x.md").write_text(_TRAJ_MD, encoding="utf-8")
 
         register_dir(wd, db_path=db)
         store = AtomTaskStore(root=wd)
         watcher = DirectoryWatcher(
-            llm=_StubLLM([_SPLIT_XML]),
+            llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
             config={"llm": {"base_url": "test://", "model": "stub", "api_key": "k"}},
             skill_dir=skill_dir,
@@ -544,7 +544,7 @@ class TestPipelineRun:
 
         # 落盘：atom 文件存在
         atoms = store.list_by_traj("traj_x")
-        assert len(atoms) == 2  # _SPLIT_XML 是两个 atom
+        assert len(atoms) == 2  # _TRAJ_MD 有 2 个 ## User → 2 个 atom
 
         # 索引文件存在
         assert (wd / "index.pkl").is_file()
