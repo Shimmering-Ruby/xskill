@@ -22,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from xskill.ecosystems.adapt import adapt_trajectory
 from xskill.ecosystems import (
+    adapt_trajectory,
     CURSOR_SPEC,
     JsonlIngester,
     _cursor_projects_path,

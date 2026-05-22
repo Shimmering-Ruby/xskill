@@ -31,8 +31,8 @@ from pathlib import Path
 import pytest
 
 from xskill.ecosystems import _fallback as install_fallback
-from xskill.ecosystems.adapt import adapt_trajectory
 from xskill.ecosystems import (
+    adapt_trajectory,
     CC_SPEC,
     CODEX_SPEC,
     EcosystemSpec,

@@ -795,7 +795,7 @@ def create_app(home_root: Path | str | None = None,
     app.include_router(sse_router)
 
     # 轨迹提交接口
-    from xskill.ecosystems.adapt import submit_trajectory
+    from xskill.ecosystems import submit_trajectory
     from pydantic import BaseModel as _BaseModel
 
     class _SubmitRequest(_BaseModel):

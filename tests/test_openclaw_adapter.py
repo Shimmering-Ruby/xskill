@@ -25,8 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from xskill.ecosystems.adapt import adapt_trajectory
 from xskill.ecosystems import (
+    adapt_trajectory,
     OPENCLAW_SPEC,
     JsonlIngester,
     _agents_skills_path,

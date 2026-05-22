@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from xskill import canary
-from xskill.ecosystems.adapt import adapt_trajectory, submit_trajectory
+from xskill.ecosystems import adapt_trajectory, submit_trajectory
 from xskill.ecosystems import install_all_to_claude_code, install_to_claude_code
 from xskill.pipeline.trajectory import Trajectory
 from xskill.skill.frontmatter import parse as fm_parse
