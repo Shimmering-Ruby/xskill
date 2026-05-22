@@ -72,3 +72,42 @@ def test_on_poll_hook_none_is_default(tmp_path):
         assert watcher.is_running
     finally:
         watcher.stop()
+
+
+def test_watcher_thread_has_event_loop(tmp_path):
+    """回归：watcher 是非主线程，_loop 必须给本线程装事件循环。
+
+    线程内会懒加载 agno —— agno 在模块导入期就构造 asyncio.Lock()，Python 3.9
+    上非主线程无事件循环时该构造会 RuntimeError。即便 3.10+，非主线程不显式
+    set_event_loop 时 asyncio.get_event_loop() 也会 raise。用 on_poll_hook
+    （在 _loop 线程里执行）当探针：能取到事件循环即说明 _loop 装好了。
+    """
+    import asyncio
+
+    probe: dict = {}
+
+    def hook():
+        if "result" in probe:
+            return
+        try:
+            asyncio.get_event_loop()
+            probe["result"] = ("ok", None)
+        except RuntimeError as e:
+            probe["result"] = ("fail", str(e))
+
+    db_path = tmp_path / "registry.db"
+    watcher = DirectoryWatcher(
+        llm=None, embed_client=None, config={},
+        skill_dir=tmp_path, poll_interval=0.3, db_path=db_path,
+        home_root=tmp_path, on_poll_hook=hook,
+    )
+    watcher.start()
+    try:
+        time.sleep(3.0)
+    finally:
+        watcher.stop()
+
+    assert probe.get("result", (None,))[0] == "ok", (
+        f"watcher 线程内取不到事件循环（{probe.get('result')}）—— _loop 未装"
+        f"事件循环,3.9 上 agno 懒加载会崩"
+    )

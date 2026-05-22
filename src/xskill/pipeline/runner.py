@@ -23,6 +23,7 @@ v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -52,6 +53,18 @@ _ACTION_STATUS = {
     "skip": "indexed",
     "error": "error",
 }
+
+
+def _install_thread_event_loop() -> None:
+    """给工作线程装一个事件循环（Python 3.9 兼容）。
+
+    Python 3.9 上，在没有事件循环的非主线程里构造 asyncio 对象（如
+    ``asyncio.Lock()``）会 ``raise RuntimeError``。``agno`` 在模块导入期就
+    构造了一个 ``asyncio.Lock()``，而 watcher 线程 / pool 工作线程会懒加载
+    agno —— 不显式给线程装循环,导入即崩。3.10+ 的 ``asyncio.Lock()`` 不在
+    构造期抓 loop,本函数对其无影响。
+    """
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 class DirectoryWatcher:
@@ -116,7 +129,8 @@ class DirectoryWatcher:
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._thread: threading.Thread | None = None
-        self._pool = ThreadPoolExecutor(max_workers=max_concurrent)
+        self._pool = ThreadPoolExecutor(
+            max_workers=max_concurrent, initializer=_install_thread_event_loop)
         self._futures: dict[Future, dict] = {}
         self._last_poll: float | None = None
         # 单机 canary 轮转节流：上次真跑 _reconcile_skill_sides 的时间戳。
@@ -181,6 +195,9 @@ class DirectoryWatcher:
     # ───────────────────────────────────────────────────────────
 
     def _loop(self):
+        # watcher 线程内会懒加载 agno（导入期即构造 asyncio.Lock()）。
+        # Python 3.9 非主线程无事件循环时构造会崩 —— 先给本线程装一个。
+        _install_thread_event_loop()
         while not self._stop.is_set():
             if not self._pause.is_set():
                 if self.on_poll_hook is not None:
