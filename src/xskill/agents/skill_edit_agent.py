@@ -98,6 +98,19 @@ commit message 写明本次基于哪些 atom_id 整理，例如：
 - commit_baby_to_main(skill_name, message) — 仅 baby 分支可用
 - commit_to_staging(skill_name, message) — 仅 main 分支可用
 
+# 隐私守护
+
+source atom / traj 原文来自真实开发轨迹，即便上传时已脱敏，仍可能残留
+**敏感信息**——API key、token、密码、私钥、内网地址、个人邮箱/姓名等。
+整理 skill 时：
+
+- **绝不**把这些原样抄进 SKILL.md / scripts / references 任何产物。skill 要
+  沉淀的是「做法」，不是「某次跑用的具体密钥」。
+- 引用命令/配置/代码时，凡凭证位置一律用占位符——``API_KEY=<your-api-key>``、
+  ``--token <TOKEN>``、``password: <password>``、``ssh user@<host>``。
+- 看到 ``[REDACTED]``（上传脱敏留下的）保持原样，不要试图"还原"或编一个值。
+- 拿不准某串是否敏感 → 一律当敏感处理、占位符化。
+
 # 硬禁止
 - 不要随便引用没在 atom 中出现过的命令/函数；以 AtomTaskRead 为唯一可信来源
 - 不要在描述里发明用户群体或场景

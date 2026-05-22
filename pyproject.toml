@@ -38,6 +38,9 @@ dependencies = [
     "uvicorn",
     "sse-starlette",
     "rank-bm25>=0.2",
+    # team 模式上传前的轨迹脱敏（team/client/redact.py）。脱敏是上传链路的
+    # 强制环节，故列为主依赖而非 optional extra——缺库就该 import 失败。
+    "detect-secrets>=1.5",
     # Python 3.9 上 pydantic 需要它来求值 `X | Y` 联合注解（PEP 604 语法
     # 3.10 才原生支持）；3.10+ 不安装。
     "eval_type_backport; python_version < '3.10'",
