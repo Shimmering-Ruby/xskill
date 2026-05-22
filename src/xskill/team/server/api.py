@@ -137,6 +137,7 @@ async def team_sync(
         probability=_ctx.probability,
         ranked_slots=_ctx.ranked_slots,
         total_slots=_ctx.total_slots,
+        traj_root=_ctx.traj_root,
     )
     return resp.model_dump()
 

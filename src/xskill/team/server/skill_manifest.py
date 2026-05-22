@@ -5,8 +5,9 @@ server 端**不存"账本表"**。manifest = ``pick_side`` 纯函数 + skill git
 
 slot 结构 = 80 ranked + 20 recommended：
 - ranked      —— 按 ux_score（main 侧近 30 天均分）滑窗取高分。
-- recommended —— SP3 = 用户画像质心推荐位。SP1 占位：按 ux 继续往下取 20 个。
-                 slot 结构本身（bucket 字段）SP1 就落地，SP3 只换 recommended 的选法。
+- recommended —— SP3 = 用户画像质心推荐位：基于该 client 用过的 skill 的质心，
+                 从候选里取 cosine 最近邻（``profile_reco.py``）。无画像
+                 （冷启动）或非 team server 调用 → 退回 ux 排序往下取。
 
 灰度归因：某 skill 有 staging 分支 → side = pick_side(client_id, name, p)，
 确定性伪随机，同 client 同 skill 在整轮灰度内 side 钉死。无 staging → main。
@@ -48,6 +49,7 @@ def build_manifest(
     probability: float,
     ranked_slots: int = 80,
     total_slots: int = 100,
+    traj_root: Path | str | None = None,
 ) -> SyncResponse:
     """为 ``client_id`` 现算 manifest。skill 总数不足 total_slots 时全发。
 
@@ -55,13 +57,92 @@ def build_manifest(
     （cluster 建了目录但 SkillEditAgent 还没跑过、没正文）没有 main，本来
     就不该下发给 client——这里直接过滤掉，不是 fallback 而是正确的可分发
     集合判定。
+
+    slot 分两段：
+    - 前 ``ranked_slots`` 个 ``ranked`` —— 按 ux 滑窗均分降序取高分。
+    - 其余 ``recommended`` —— SP3 画像推荐位：基于该 client 用过的 skill 的
+      质心，从「distributable 且不在 ranked、且 client 没用过」的候选里取
+      cosine 最近邻。``traj_root`` 为 None（非 team server 调用）或该 client
+      没有任何带 used_skills 的 atom（冷启动、无画像）时，``recommended``
+      退回 ux 排序往下接着取——这不是 fallback，是画像不存在时的正确定义。
     """
-    repo = SkillRepo(Path(skill_dir))
+    skill_dir = Path(skill_dir)
+    repo = SkillRepo(skill_dir)
     distributable = [s for s in repo if main_sha(s.path)]
     skills = sorted(distributable, key=_rank_key, reverse=True)
-    chosen = skills[:total_slots]
+
+    reco_slots = max(total_slots - ranked_slots, 0)
+    ranked = skills[:ranked_slots]
+    ranked_names = {s.name for s in ranked}
+
+    chosen = ranked + _pick_recommended(
+        client_id=client_id,
+        skill_dir=skill_dir,
+        ranked=ranked,
+        ranked_names=ranked_names,
+        ux_ordered=skills,
+        reco_slots=reco_slots,
+        traj_root=traj_root,
+    )
+
     slots: list[SkillSlot] = []
     for idx, skill in enumerate(chosen):
         bucket = "ranked" if idx < ranked_slots else "recommended"
         slots.append(_resolve_slot(skill, client_id, probability, bucket))
     return SyncResponse(slots=slots, server_time=time.time())
+
+
+def _pick_recommended(
+    *,
+    client_id: str,
+    skill_dir: Path,
+    ranked: list[Skill],
+    ranked_names: set[str],
+    ux_ordered: list[Skill],
+    reco_slots: int,
+    traj_root: Path | str | None,
+) -> list[Skill]:
+    """选 ``recommended`` bucket 的 skill。
+
+    候选 = distributable 里不在 ranked-80 的（``recommend`` 内部再排除该
+    client 已用过的）。有画像 → 按质心 cosine 最近邻；无画像 / 非 team
+    server 调用 → 退回 ux 排序往下接着取。
+    """
+    if reco_slots <= 0:
+        return []
+
+    ux_tail = [s for s in ux_ordered if s.name not in ranked_names]
+    if traj_root is None:
+        return ux_tail[:reco_slots]  # 非 team server：无 traj_root，按 ux 取
+
+    # 延迟 import：profile_reco 依赖 numpy + atom store，非 team 路径不付代价。
+    from xskill.team.server.profile_reco import RECOMMENDER
+
+    skill_index_path = skill_dir / ".skill_index.pkl"
+    if not skill_index_path.is_file():
+        # 没建 skill 向量索引 → 算不出质心。退回 ux 排序。
+        return ux_tail[:reco_slots]
+
+    candidate_names = [s.name for s in ux_tail]
+    reco_names = RECOMMENDER.recommend(
+        client_id=client_id,
+        traj_root=Path(traj_root),
+        skill_index_path=skill_index_path,
+        candidate_names=candidate_names,
+        limit=reco_slots,
+    )
+    if reco_names is None:
+        return ux_tail[:reco_slots]  # 冷启动：无画像，退回 ux 排序
+
+    by_name = {s.name: s for s in ux_tail}
+    picked = [by_name[n] for n in reco_names if n in by_name]
+    if len(picked) < reco_slots:
+        # 画像推荐出的候选不足 reco_slots（候选池本身就小）→ 用 ux 排序补齐。
+        # 不是 error-masking：候选池耗尽是真实情况，补齐保证 slot 数稳定。
+        picked_names = {s.name for s in picked}
+        for s in ux_tail:
+            if len(picked) >= reco_slots:
+                break
+            if s.name not in picked_names:
+                picked.append(s)
+    return picked[:reco_slots]
