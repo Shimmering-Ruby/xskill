@@ -1,6 +1,6 @@
 import inspect
 
-from xskill.server import create_app
+from xskill.api import create_app
 
 
 def test_create_app_accepts_team_server_kwarg():

@@ -1,5 +1,5 @@
 """
-tasks.py -- Background task management with SSE streaming
+api/sse.py -- Background task management with SSE streaming
 ==========================================================
 Provides SSE (Server-Sent Events) endpoints for long-running operations:
   - /api/v1/trajectories/index   -- build/update trajectory index

@@ -115,7 +115,7 @@ def _guard_install_to_claude_code(monkeypatch):
     ``Path.home()`` 或 target_root=None，直接 raise（fail-loud，符合
     CLAUDE.md "no fallback" 原则）。
 
-    生产 daemon 通过 ``xskill.server._home_root()`` 取 root，daemon 不走
+    生产 daemon 通过 ``xskill.api.app._home_root()`` 取 root，daemon 不走
     pytest 入口，所以这层守卫只影响测试。
     """
     import xskill.ecosystems as _eco

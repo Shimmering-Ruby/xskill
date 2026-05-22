@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 
 def test_watcher_starts_even_with_empty_registry(tmp_path):
-    from xskill import server as srv
+    from xskill.api import app as srv
     from starlette.testclient import TestClient
 
     srv._config = {
@@ -24,11 +24,11 @@ def test_watcher_starts_even_with_empty_registry(tmp_path):
     srv._skill_dir.mkdir()
     srv._watcher_ref.clear()
     try:
-        with patch("xskill.server.create_llm_client", return_value=MagicMock()), \
-             patch("xskill.server.create_embed_client", return_value=MagicMock()), \
-             patch("xskill.server.init_context"), \
+        with patch("xskill.api.app.create_llm_client", return_value=MagicMock()), \
+             patch("xskill.api.app.create_embed_client", return_value=MagicMock()), \
+             patch("xskill.api.app.init_context"), \
              patch("xskill.ecosystems.detect_known_ecosystems", return_value=[]):
-            from xskill.server import create_app
+            from xskill.api import create_app
             app = create_app()
             # 进入 context = startup 事件已跑完;退出 = shutdown 停掉 watcher
             with TestClient(app):

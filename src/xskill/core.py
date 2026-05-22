@@ -179,7 +179,7 @@ class XSkill:
                        agent、提供 /api/v1/team/* 同步接口）。
         """
         import uvicorn
-        from xskill.server import create_app
+        from xskill.api import create_app
         app = create_app(home_root=home_root, team_server=server_mode)
         if server_mode:
             from xskill.team.server.state import ensure_join_token

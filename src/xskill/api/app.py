@@ -1,10 +1,10 @@
 """
-server.py -- FastAPI application (SHORT operation endpoints)
+api/app.py -- FastAPI application (SHORT operation endpoints)
 =============================================================
 Non-SSE REST endpoints for trajectory search, skill CRUD, and system operations.
 
 Usage:
-    from xskill.server import create_app
+    from xskill.api.app import create_app
     app = create_app()
 """
 
@@ -49,9 +49,9 @@ logger = logging.getLogger("xskill.server")
 # ---------------------------------------------------------------------------
 # Module-level config -- lazy loaded
 # ---------------------------------------------------------------------------
-# 之前是 import 时就跑 ``_config = load_config()``，会让"导入 xskill.server"
+# 之前是 import 时就跑 ``_config = load_config()``，会让"导入 xskill.api.app"
 # 这件本来无副作用的事情强依赖 ``~/.xskill/config.yaml``。CI runner 上没这个
-# 文件 → 所有间接 import xskill.server 的测试 collection 都炸。
+# 文件 → 所有间接 import xskill.api.app 的测试 collection 都炸。
 #
 # 改成 lazy：占位 None；``_ensure_loaded()`` 在 ``create_app()`` 入口 + 每个
 # server 启动路径首次调用时填充。endpoints 在 startup hook 之后才被 hit，
@@ -791,7 +791,7 @@ def create_app(home_root: Path | str | None = None,
         app.include_router(team_router)
 
     # SSE 长耗时接口
-    from xskill.tasks import sse_router
+    from xskill.api.sse import sse_router
     app.include_router(sse_router)
 
     # 轨迹提交接口

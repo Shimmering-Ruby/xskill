@@ -16,7 +16,7 @@ def _return_none(_, *a, **k):
 
 def test_startup_raises_when_create_llm_client_raises(monkeypatch, tmp_path):
     """create_llm_client 抛 → daemon startup 也应直接抛，不静默降级 llm=None。"""
-    from xskill import server as srv
+    from xskill.api import app as srv
 
     monkeypatch.setattr(srv, "create_llm_client", _raise_bad_config)
     app = srv.create_app(home_root=tmp_path)
@@ -28,7 +28,7 @@ def test_startup_raises_when_create_llm_client_raises(monkeypatch, tmp_path):
 
 def test_startup_raises_when_create_llm_client_returns_none(monkeypatch, tmp_path):
     """create_llm_client 返回 None（内部 except 吞错的路径） → daemon 启动应显式断言失败。"""
-    from xskill import server as srv
+    from xskill.api import app as srv
 
     monkeypatch.setattr(srv, "create_llm_client", _return_none)
     app = srv.create_app(home_root=tmp_path)
@@ -40,7 +40,7 @@ def test_startup_raises_when_create_llm_client_returns_none(monkeypatch, tmp_pat
 
 def test_startup_raises_when_create_embed_client_fails(monkeypatch, tmp_path):
     """create_embed_client 抛 → daemon startup 也应直接抛。"""
-    from xskill import server as srv
+    from xskill.api import app as srv
 
     # LLM 不抛、只让 embed 抛
     monkeypatch.setattr(srv, "create_embed_client", _raise_bad_config)

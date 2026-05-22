@@ -302,7 +302,7 @@ class DirectoryWatcher:
         """target_root 优先级：
 
         1) ``self.home_root``（测试注入的 tmp_path，或 daemon ``--home``）
-        2) ``xskill.server._home_root()``（生产 daemon：默认 Path.home()，
+        2) ``xskill.api.app._home_root()``（生产 daemon：默认 Path.home()，
            server 启动时可被 set 成 ``_home_root_override``）
 
         测试如果不传 ``home_root`` 又没启 server，会 fallback 到真
@@ -312,7 +312,7 @@ class DirectoryWatcher:
         """
         if self.home_root is not None:
             return self.home_root
-        from xskill import server as _srv
+        from xskill.api import app as _srv
         return _srv._home_root() if hasattr(_srv, "_home_root") else None
 
     def _install_skill_to_all_detected(self, skill_path):
