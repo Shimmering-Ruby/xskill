@@ -403,7 +403,7 @@ class DirectoryWatcher:
         写盘本身失败不传播——失败日志的失败只能 logger.warning。
         """
         try:
-            from xskill.install_history import InstallHistory
+            from xskill.ecosystems._history import InstallHistory
             from xskill.config import XSKILL_HOME
             history_path = XSKILL_HOME / "install_history.jsonl"
             InstallHistory(history_path).record_fail(
@@ -496,7 +496,7 @@ class DirectoryWatcher:
                 logger.exception("check_and_decide failed: %s", d.name)
 
     def _install_history(self):
-        from xskill.install_history import InstallHistory
+        from xskill.ecosystems._history import InstallHistory
         return InstallHistory(self.install_history_path)
 
     def _reconcile_skill_sides(self):

@@ -1,6 +1,6 @@
 """
-ecosystems.py -- Install distilled skills into AI-agent ecosystems
-==================================================================
+ecosystems/dispatch.py -- Install distilled skills into AI-agent ecosystems
+============================================================================
 
 xskill produces skills in a self-managed directory (``~/.xskill/skill/<name>/``)
 that is internally a git repo with canary / staging branches. External
@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Literal, Optional
 
-from xskill.adapters import submit_trajectory
-from xskill.install_fallback import InstallMode, install_dir
+from xskill.ecosystems.adapt import submit_trajectory
+from xskill.ecosystems._fallback import InstallMode, install_dir
 
 logger = logging.getLogger("xskill.ecosystems")
 
@@ -1286,7 +1286,7 @@ class CCSessionIngester:
         history_path: Path | str | None = None,
         assignments_path: Path | str | None = None,
     ):
-        from xskill.install_history import InstallHistory
+        from xskill.ecosystems._history import InstallHistory
         from xskill.canary import SessionAssignments
 
         self.target_traj_dir = Path(target_traj_dir)

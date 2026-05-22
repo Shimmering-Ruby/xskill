@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 
 from xskill.team.shared.reconcile import reconcile_skill_side
-from xskill.install_history import InstallHistory
+from xskill.ecosystems._history import InstallHistory
 
 
 def _git(args, cwd):

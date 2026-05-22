@@ -58,6 +58,6 @@ def test_single_machine_reconcile_records_history(tmp_path):
                          config={"canary": {"probability": 1.0, "rotate_interval": 1}},
                          install_history_path=hist_path)
     w._reconcile_skill_sides()
-    from xskill.install_history import InstallHistory
+    from xskill.ecosystems._history import InstallHistory
     hist = InstallHistory(hist_path)
     assert hist.count_by_side(skill="graying")["staging"] >= 1

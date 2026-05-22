@@ -1,6 +1,6 @@
 """
-install_history.py -- daemon 自己装到 ~/.claude/skills/ 的 side 历史
-=====================================================================
+ecosystems/_history.py -- daemon 自己装到 ~/.claude/skills/ 的 side 历史
+========================================================================
 
 灰度链路里 CC 直接读磁盘上的 ``SKILL.md`` 一份文件——CC 既不知道也不关心
 xskill 是不是在做 A/B。要做"半数 CC session 看到 main、半数看到 staging"，

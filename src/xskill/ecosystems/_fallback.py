@@ -1,6 +1,6 @@
 """
-install_fallback.py -- 跨平台目录安装的三阶 fallback
-=====================================================
+ecosystems/_fallback.py -- 跨平台目录安装的三阶 fallback
+========================================================
 
 xskill 把一个 skill 装到外部 agent 的 discovery 目录时，**首选 symlink**：
 

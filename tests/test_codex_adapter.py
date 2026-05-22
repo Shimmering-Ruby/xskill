@@ -30,8 +30,8 @@ from pathlib import Path
 
 import pytest
 
-from xskill import install_fallback
-from xskill.adapters import adapt_trajectory
+from xskill.ecosystems import _fallback as install_fallback
+from xskill.ecosystems.adapt import adapt_trajectory
 from xskill.ecosystems import (
     CC_SPEC,
     CODEX_SPEC,

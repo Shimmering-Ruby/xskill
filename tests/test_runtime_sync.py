@@ -32,7 +32,7 @@ from xskill.ecosystems import (
     JsonlIngester,
     SqliteIngester,
 )
-from xskill.install_history import InstallHistory
+from xskill.ecosystems._history import InstallHistory
 
 
 # ─────────────────────────────────────────────────────────────────

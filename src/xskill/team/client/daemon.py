@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from xskill.skill.git import run_git
-from xskill.install_history import InstallHistory
+from xskill.ecosystems._history import InstallHistory
 from xskill.team.client.state import ClientState
 from xskill.team.client.collector import TeamCollector
 from xskill.team.shared.git_bundle import apply_repo_bundle, make_branch_bundle

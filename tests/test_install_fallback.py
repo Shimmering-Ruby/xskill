@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from xskill import install_fallback
-from xskill.install_fallback import install_dir
+from xskill.ecosystems import _fallback as install_fallback
+from xskill.ecosystems._fallback import install_dir
 
 
 # ──────────────────────────────────────────────────────────────────

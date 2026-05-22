@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from xskill.adapters import adapt_trajectory
+from xskill.ecosystems.adapt import adapt_trajectory
 from xskill.ecosystems import (
     CURSOR_SPEC,
     JsonlIngester,

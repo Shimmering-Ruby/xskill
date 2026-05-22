@@ -1,6 +1,6 @@
 """
-adapters.py -- Trajectory submission and format adaptation layer
-=================================================================
+ecosystems/adapt.py -- Trajectory submission and format adaptation layer
+=========================================================================
 Convert various input formats to the standard xskill format
 (markdown + json metadata) and handle submission to the traj directory.
 """

@@ -795,7 +795,7 @@ def create_app(home_root: Path | str | None = None,
     app.include_router(sse_router)
 
     # 轨迹提交接口
-    from xskill.adapters import submit_trajectory
+    from xskill.ecosystems.adapt import submit_trajectory
     from pydantic import BaseModel as _BaseModel
 
     class _SubmitRequest(_BaseModel):
@@ -878,7 +878,7 @@ def create_app(home_root: Path | str | None = None,
                 )
                 from xskill.canary import CanaryConfig
                 from xskill.config import XSKILL_HOME
-                from xskill.install_history import InstallHistory
+                from xskill.ecosystems._history import InstallHistory
                 from xskill.pipeline.registry import register_dir
 
                 install_history_path = XSKILL_HOME / "install_history.jsonl"

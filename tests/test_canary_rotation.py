@@ -177,7 +177,7 @@ class TestRotateCanarySide:
         # staging 分支名。工作树内容即 staging 内容。
         assert _cur_branch(sd) == "_active"
         assert (sd / "SKILL.md").read_text(encoding="utf-8") == "v2-staging"
-        from xskill.install_history import InstallHistory
+        from xskill.ecosystems._history import InstallHistory
         recs = InstallHistory(tmp_path / "xhome" / "install_history.jsonl").all_records()
         assert len(recs) == 1
         assert recs[0]["skill"] == "alpha"
@@ -208,7 +208,7 @@ class TestRotateCanarySide:
         # 收敛后：checkout 到 _active 分支（指向 main sha）。工作树即 main 内容。
         assert _cur_branch(sd) == "_active"
         assert (sd / "SKILL.md").read_text(encoding="utf-8") == "v1"
-        from xskill.install_history import InstallHistory
+        from xskill.ecosystems._history import InstallHistory
         recs = InstallHistory(tmp_path / "xhome" / "install_history.jsonl").all_records()
         assert len(recs) == 1
         assert recs[0]["side"] == "main"
@@ -234,7 +234,7 @@ class TestRotateCanarySide:
 
         # 没 checkout —— 分支仍在 main（p=1 本来会切 staging）
         assert _cur_branch(sd) == "main"
-        from xskill.install_history import InstallHistory
+        from xskill.ecosystems._history import InstallHistory
         hist_path = tmp_path / "xhome" / "install_history.jsonl"
         recs = InstallHistory(hist_path).all_records()
         assert recs == []
@@ -253,7 +253,7 @@ class TestRotateCanarySide:
         w._reconcile_skill_sides()
 
         assert _cur_branch(sd) == "main"
-        from xskill.install_history import InstallHistory
+        from xskill.ecosystems._history import InstallHistory
         recs = InstallHistory(tmp_path / "xhome" / "install_history.jsonl").all_records()
         assert recs == []
 
@@ -286,6 +286,6 @@ class TestRotateCanarySide:
         assert _cur_branch(sd) == "main", "节流失效：第二次不该真跑 rotate"
 
         # install_history 只有第一次那一条
-        from xskill.install_history import InstallHistory
+        from xskill.ecosystems._history import InstallHistory
         recs = InstallHistory(tmp_path / "xhome" / "install_history.jsonl").all_records()
         assert len(recs) == 1
