@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from xskill.cli import build_parser, cmd_connect
 
 

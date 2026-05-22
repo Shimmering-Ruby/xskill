@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import stat
 
 from xskill.team.server.state import ensure_join_token, load_join_token

@@ -84,6 +84,19 @@ def staging_sha(skill_dir: Path) -> str | None:
     return _rev_parse(skill_dir, STAGING_BRANCH)
 
 
+def _parse_git_iso(iso: str) -> datetime:
+    """解析 git ``%cI`` 时间戳。
+
+    Python 3.9 的 ``datetime.fromisoformat`` 不认 ``Z`` 后缀（3.11+ 才放宽到
+    完整 ISO-8601），先把结尾的 ``Z`` 归一化成 ``+00:00``。归一化后两个版本
+    产出的都是带 UTC tzinfo 的 aware datetime，行为一致。
+    """
+    s = iso.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
 def staging_created_at(skill_dir: Path) -> datetime | None:
     """staging 分支上第一个超出 main 的 commit 的提交时间。"""
     if not has_staging(skill_dir):
@@ -100,12 +113,12 @@ def staging_created_at(skill_dir: Path) -> datetime | None:
         )
         if code != 0 or not iso.strip():
             return None
-        return datetime.fromisoformat(iso.strip())
+        return _parse_git_iso(iso)
     first = out.strip().split("\n")[0]
     code, iso, _ = run_git(["log", "-1", "--format=%cI", first], cwd=str(skill_dir))
     if code != 0 or not iso.strip():
         return None
-    return datetime.fromisoformat(iso.strip())
+    return _parse_git_iso(iso)
 
 
 def route_main_history_to_staging(

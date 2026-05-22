@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from xskill.team.client.redact import redact_text
 
 

@@ -11,6 +11,8 @@
     from xskill import Registry, SkillRepo
 """
 
+from __future__ import annotations
+
 # 版本号唯一真源是 setuptools_scm 生成的 _version.py（git tag 派生）。
 # 安装包里一定有 _version.py；源码 checkout 没 build 过时 fallback。
 try:

@@ -8,6 +8,8 @@ Usage:
     app = create_app()
 """
 
+from __future__ import annotations
+
 # Upgrade sqlite3 to support RETURNING clause (needed by Agno session DB)
 import sys as _sys
 try:

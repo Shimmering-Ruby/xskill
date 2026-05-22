@@ -16,6 +16,8 @@ LLM 和 Embedding 分别配置 base_url / model / api_key
   print(embed.dim)                       # 自动探测的维度
 """
 
+from __future__ import annotations
+
 import os, json, logging, time
 from dataclasses import dataclass, field
 from typing import Literal

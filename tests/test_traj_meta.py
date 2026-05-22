@@ -1,5 +1,7 @@
 """tests/test_traj_meta.py -- trajectory header parsing"""
 
+from __future__ import annotations
+
 import pytest
 from xskill.pipeline.trajectory import parse_traj_header
 

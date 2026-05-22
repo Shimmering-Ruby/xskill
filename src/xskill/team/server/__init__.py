@@ -4,3 +4,5 @@
 给每个 client 现算 skill manifest、发 skill bundle、收手改进隔离分支。
 agent 流水线复用既有 DirectoryWatcher（server_mode=True）。
 """
+
+from __future__ import annotations

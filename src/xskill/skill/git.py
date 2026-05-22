@@ -14,6 +14,8 @@ v2 (AtomTask 流水线) 引入 baby 分支：ClusterAgent 调 new_skill_folder �
 - SkillEditAgent 后续跑 → 调 commit_to_staging(message) → 从 main 切 staging
 """
 
+from __future__ import annotations
+
 import os, subprocess, logging, threading
 from contextlib import contextmanager
 from pathlib import Path

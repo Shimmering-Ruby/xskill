@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import inspect
 
 from xskill.cli import build_parser

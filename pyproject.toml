@@ -7,7 +7,7 @@ name = "xskill"
 dynamic = ["version"]
 description = "Distill reusable Skills from AI Agent execution trajectories"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "SkillNerds", email = "370025263@qq.com" }]
 keywords = ["agent", "skill", "trajectory", "llm", "rag", "self-evolving"]
@@ -20,6 +20,8 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -36,10 +38,13 @@ dependencies = [
     "uvicorn",
     "sse-starlette",
     "rank-bm25>=0.2",
+    # Python 3.9 上 pydantic 需要它来求值 `X | Y` 联合注解（PEP 604 语法
+    # 3.10 才原生支持）；3.10+ 不安装。
+    "eval_type_backport; python_version < '3.10'",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-timeout>=2", "pytest-asyncio>=0.21"]
+dev = ["pytest>=7", "pytest-timeout>=2", "pytest-asyncio>=0.21", "requests>=2"]
 
 [project.urls]
 Homepage = "https://github.com/SkillNerds/xskill"

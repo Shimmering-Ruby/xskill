@@ -17,6 +17,8 @@
 对历史调用方（watcher / server / team / 测试）一致可用。
 """
 
+from __future__ import annotations
+
 from xskill.ecosystems._shared import (
     # specs
     EcosystemSpec,

@@ -18,6 +18,9 @@
    ``target_root`` 解析后等于真 ``Path.home()`` 或 ``None`` 的调用，直接
    raise。生产 daemon 显式调用不走 pytest 入口，不受影响。
 """
+
+from __future__ import annotations
+
 import os
 import sys
 from pathlib import Path

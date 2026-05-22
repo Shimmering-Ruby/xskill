@@ -12,3 +12,5 @@
 消费方按需 ``from xskill.agents.<module> import <symbol>`` 显式取用——
 本 ``__init__`` 不做 eager 再导出，避免引入包级 import 副作用与环依赖。
 """
+
+from __future__ import annotations

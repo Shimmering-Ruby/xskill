@@ -5,6 +5,8 @@ Agno-compatible tool functions. All skill files follow the v2 schema
 (SKILL.md with YAML frontmatter); no more separate .abstract file.
 """
 
+from __future__ import annotations
+
 import json, os, pickle, logging
 from datetime import date, datetime
 from pathlib import Path

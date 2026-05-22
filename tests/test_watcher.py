@@ -14,6 +14,8 @@ v2 AtomTask 流水线特有的测试（splitting/split_done/clustering 状态流
 的等价覆盖。
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

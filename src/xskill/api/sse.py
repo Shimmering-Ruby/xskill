@@ -10,6 +10,8 @@ Each endpoint runs the heavy work in a ThreadPoolExecutor and streams
 progress, log, and result events back to the client via SSE.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

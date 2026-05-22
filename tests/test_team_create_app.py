@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import inspect
 
 from xskill.api import create_app

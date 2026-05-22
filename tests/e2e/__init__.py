@@ -10,3 +10,5 @@ fixture session 丢到 tmp_path 模拟的 agent home → 跑 ingester 桥成 tra
 - 单 e2e ≤ 10s——不起子进程、不起 server，直接 instantiate
   ingester + 调 installer
 """
+
+from __future__ import annotations

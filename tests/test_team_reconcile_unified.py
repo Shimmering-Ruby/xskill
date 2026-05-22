@@ -4,6 +4,9 @@
 步骤 2/3/4 委托 team.reconcile.reconcile_skill_side——checkout 到 _active
 分支（指向 resolved sha），而非直接 checkout main/staging 分支名。
 """
+
+from __future__ import annotations
+
 import os
 import subprocess
 from pathlib import Path

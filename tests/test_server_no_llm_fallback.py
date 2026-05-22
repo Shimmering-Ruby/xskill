@@ -14,7 +14,26 @@ def _return_none(_, *a, **k):
     return None
 
 
-def test_startup_raises_when_create_llm_client_raises(monkeypatch, tmp_path):
+@pytest.fixture
+def _stub_loaded(monkeypatch, tmp_path):
+    """预置 srv._config / _skill_dir，让 create_app 的 _ensure_loaded 短路。
+
+    否则 _ensure_loaded → load_config() 会去读真实 ~/.xskill/config.yaml，
+    测试就依赖机器本地状态——干净环境 / CI 上必挂（本测试此前正是如此）。
+    """
+    from xskill.api import app as srv
+
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    monkeypatch.setattr(srv, "_config", {
+        "llm": {"base_url": "x", "model": "y", "api_key": "z"},
+        "embedding": {},
+        "watcher": {"poll_interval": 30},
+    })
+    monkeypatch.setattr(srv, "_skill_dir", skill_dir)
+
+
+def test_startup_raises_when_create_llm_client_raises(monkeypatch, tmp_path, _stub_loaded):
     """create_llm_client 抛 → daemon startup 也应直接抛，不静默降级 llm=None。"""
     from xskill.api import app as srv
 
@@ -26,7 +45,7 @@ def test_startup_raises_when_create_llm_client_raises(monkeypatch, tmp_path):
             pass  # 触发 startup event
 
 
-def test_startup_raises_when_create_llm_client_returns_none(monkeypatch, tmp_path):
+def test_startup_raises_when_create_llm_client_returns_none(monkeypatch, tmp_path, _stub_loaded):
     """create_llm_client 返回 None（内部 except 吞错的路径） → daemon 启动应显式断言失败。"""
     from xskill.api import app as srv
 
@@ -38,7 +57,7 @@ def test_startup_raises_when_create_llm_client_returns_none(monkeypatch, tmp_pat
             pass
 
 
-def test_startup_raises_when_create_embed_client_fails(monkeypatch, tmp_path):
+def test_startup_raises_when_create_embed_client_fails(monkeypatch, tmp_path, _stub_loaded):
     """create_embed_client 抛 → daemon startup 也应直接抛。"""
     from xskill.api import app as srv
 

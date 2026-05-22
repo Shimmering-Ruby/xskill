@@ -1,5 +1,7 @@
 """tests/test_registry.py -- registry CRUD + trajectory tracking"""
 
+from __future__ import annotations
+
 import os
 import pickle
 from pathlib import Path

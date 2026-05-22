@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 
 from xskill.team.client.state import ClientState, save_client_state, load_client_state
