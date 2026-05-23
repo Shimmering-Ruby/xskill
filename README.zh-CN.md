@@ -2,7 +2,7 @@
 
 # xskill
 
-**AI agent 做过的事，别让它每次从头再来。xskill 把过往会话里跑通的解法蒸馏成可复用 Skill。**
+**xskill 让你的 codeAgent 自己进化。**
 
 [![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
 [![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
@@ -24,7 +24,7 @@
 
 - **2026-05** — 发布 `v0.5.0`：团队模式（client-server）落地、行号锚定的 atom 切分、`detect-secrets` 自动脱敏、Python 3.9 起跑、运行时不再需要系统 `git`。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。
 - **2026-05** — MIT 协议开源，PyPI 已上架：`pip install xskill`。
-- **2026-05** — Claude Code、Codex、OpenCode 三个生态端到端验证通过；OpenClaw、Cursor 已对接但尚未跑全套 e2e。
+- **2026-05** — Claude Code、Codex、OpenCode 三个生态端到端验证通过；OpenClaw、Cursor 已对接但 not well tested。
 
 ## 解决什么问题
 
@@ -92,8 +92,8 @@ xskill connect <host:port> --token <token>
 | **Claude Code** | ✅ 已验证 | 扫 `~/.claude/projects/` | symlink → `~/.claude/skills/<name>/` |
 | **Codex CLI** | ✅ 已验证 | 扫 `~/.codex/sessions/` | symlink → `~/.agents/skills/<name>/` |
 | **OpenCode** | ✅ 已验证 | 读 SQLite `~/.local/share/opencode/opencode.db` | symlink → `~/.agents/skills/<name>/` |
-| **OpenClaw** | 🟡 已对接，未跑完 e2e | 扫 `~/.openclaw/agents/` | 拷贝 → `~/.agents/skills/<name>/` |
-| **Cursor** | 🟡 已对接，未跑完 e2e | 扫 `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
+| **OpenClaw** | 🟡 已对接，not well tested | 扫 `~/.openclaw/agents/` | 拷贝 → `~/.agents/skills/<name>/` |
+| **Cursor** | 🟡 已对接，not well tested | 扫 `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
 | **其他 agent** | 手动 | SDK：`xskill.adapters.submit_trajectory` | 自己拷贝 / symlink `SKILL.md` 目录 |
 
 产物遵循 Anthropic 的 `SKILL.md` schema，所以整个库是可移植的——换 agent 也带得走。Trae 在 [roadmap](#roadmap) 上。
