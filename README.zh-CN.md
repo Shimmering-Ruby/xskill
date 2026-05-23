@@ -22,20 +22,20 @@
 
 ## 动态
 
-- **2026-05** — 发布 `v0.5.0`：团队模式（client-server）落地、行号锚定的 atom 切分、`detect-secrets` 自动脱敏、Python 3.9 起跑、运行时不再需要系统 `git`。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。
-- **2026-05** — MIT 协议开源，PyPI 已上架：`pip install xskill`。
-- **2026-05** — Claude Code、Codex、OpenCode 三个生态端到端验证通过；OpenClaw、Cursor 已对接但 not well tested。
+- **2026-05-23** — 正式开源，发布 `v0.5.0`：团队模式（client-server）、隐私脱敏、Python 3.9 支持、无需 `git`依赖。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。
+- **2026-05-20** — MIT 开源，PyPI 上架：`pip install xskill`。
+- **2026-05-12** — Claude Code、Codex、OpenCode 支持；OpenClaw、Cursor对接。
 
 ## 解决什么问题
 
-agent 每次撞上熟面孔问题，都会把同一套解法重推一遍。你要么再讲一遍，要么自己维护一份 prompt 库——而这份库没人看的时候就慢慢腐烂。
+agent 每次撞上同一个问题，都会把同一套解法重推一遍。你要么再讲一遍，要么自己维护一份 prompt 库——而这份库没人看的时候就慢慢腐烂。
 
 xskill 跑起来之后，这件事不用你管了：
 
 - 跑通过的解题套路自动沉淀成 Skill 文件，agent 自己加载。
 - 你照常用 agent 干活，Skill 库自己长出来——没有审核队列，没人需要去"挑选最佳实践"。
-- 你手改某个 Skill，xskill 不会回滚——人写的版本被视为 ground truth。
-- 新版本只有真的把用户服务得更好，才会顶掉老版本（数据说话，不是 LLM 自己说好）。
+- 你手改某个 Skill，xskill 会立即借鉴重点学习。
+- 新版本只有真的把用户服务得更好，才会顶掉老版本（用户体验驱动进行进化，而非简单 LLM 开环评价）。
 
 ## 上手
 
@@ -61,13 +61,13 @@ embedding:
   dim:      0
 ```
 
-OpenAI 兼容的 endpoint 都能用。再跑一次 `xskill serve`，它会自动扫机器上装好的所有 agent（Claude Code、Codex、OpenCode、OpenClaw、Cursor）开始监听。如果还有一份历史轨迹归档想一起吃进来：
+再跑一次 `xskill serve`，它会自动扫机器上装好的所有 agent（Claude Code、Codex、OpenCode、OpenClaw、Cursor）开始监听。如果还有一份历史轨迹归档想一起吃进来：
 
 ```bash
 xskill registry add /path/to/trajectories
 ```
 
-## 团队模式：一份共用的 Skill 库
+## 团队模式：真正的杀手场景
 
 xskill 真正想在组织里铺开的形态是团队模式：一台机器当 server，其他人作为瘦客户端接入，共用 server 上长出来的同一份 Skill 库。
 
@@ -76,10 +76,11 @@ xskill serve --server                        # 启动后打印 join token
 xskill connect <host:port> --token <token>
 ```
 
-- **库是共享的。** 一个人在自己工作里跑通的解法，可以让全团队复用。
-- **轨迹不出 client。** client 上传前先脱敏；只有 server 跑流水线、留完整历史。
-- **灰度按人分桶。** Canary 按 `client_id` 分配版本，一个 Skill 改动会先在每个人身上分别衡量，赢了再扩散。
-- **手改隔离。** Client 的本地修改进 `user-staging/<client_id>` 分支，永远不会污染 server 上的 `main`。
+- **无感蒸馏大佬员工** 一个人在自己工作里跑通的解法，自动可以让全团队复用，不需要任何人做任何事。（能力民主化）
+- **兼容各种 coding 方式** 用 codex、clade 还是 cursor IDE？ 都能加入，多端同步。
+- **轨迹隐私** 轨迹上传前先脱敏，agent 隐私功能。
+- **灰度测试驱动的进化** 一个 Skill 的改动会先在每个人身上分别衡量，赢了再扩散，人越多进化越准越快。
+- **专家知道的手动进化** 专家本地直接修改 skill，会被学习进服务器远程 `user-staging/<client_id>` 分支，作为下一步进化参考。
 
 ## 工作原理
 
@@ -96,8 +97,6 @@ xskill connect <host:port> --token <token>
 | **Cursor** | 🟡 已对接，not well tested | 扫 `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
 | **其他 agent** | 手动 | SDK：`xskill.adapters.submit_trajectory` | 自己拷贝 / symlink `SKILL.md` 目录 |
 
-产物遵循 Anthropic 的 `SKILL.md` schema，所以整个库是可移植的——换 agent 也带得走。Trae 在 [roadmap](#roadmap) 上。
-
 ## 几个名词
 
 | 术语 | 含义 |
@@ -111,9 +110,9 @@ xskill connect <host:port> --token <token>
 ## Roadmap
 
 - 更多 agent adapter：Trae、Goose、OpenHands、Aider
+- 更为成熟的用户画像和推荐算法
 - 原生 MCP server 接口（把 Skill 暴露成 tool）
 - Web UI：浏览 Skill 库、看灰度数据
-- 按使用情况自动淘汰
 - Skill marketplace：导入 / 导出可移植 bundle
 - 多租户 Skill 库（每个团队独立 `skill_dir`）
 
