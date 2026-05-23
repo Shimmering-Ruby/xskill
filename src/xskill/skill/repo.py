@@ -74,14 +74,17 @@ class SkillRepo:
 
     # ─── 索引 ──────────────────────────────────────────────────
     def rebuild_index(self) -> None:
-        """重建 .skill_index.pkl（向量检索用）。"""
-        from xskill.agents import skill_tools
+        """重建 .skill_index.pkl（向量检索用）。
+
+        显式给 ``rebuild_skill_index`` 传参，**不**走 ``init_context``——后者
+        会要求 ``data_dir`` / ``llm_client`` 等本路径用不到的字段（早先版本
+        传 ``None`` 进去会触发 ``Path(None)`` TypeError，rebuild 直接挂）。
+        """
+        from xskill.agents.skill_tools import rebuild_skill_index
         from xskill.config import get_config
         from xskill.utils.llm import create_embed_client
-        cfg = get_config()
-        embed = create_embed_client(cfg)
-        skill_tools.init_context(self.root, None, None, embed, cfg)
-        skill_tools.rebuild_skill_index()
+        embed = create_embed_client(get_config())
+        rebuild_skill_index(skill_dir=self.root, embed_client=embed)
 
     def __repr__(self) -> str:
         return f"SkillRepo({self.root}, n={len(self)})"

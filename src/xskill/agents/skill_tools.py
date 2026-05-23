@@ -498,10 +498,22 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
 # Skill index rebuild
 # ═══════════════════════════════════════════════════════════════════
 
-def rebuild_skill_index():
-    """Rebuild ./skill/.skill_index.pkl from frontmatter description+summary+tags."""
-    skill_dir = _ctx["skill_dir"]
-    embed_client = _ctx["embed_client"]
+def rebuild_skill_index(*, skill_dir: Path | None = None, embed_client=None):
+    """Rebuild ./skill/.skill_index.pkl from frontmatter description+summary+tags.
+
+    显式 kwarg 优先；不传则从模块级 ``_ctx`` 读（供 daemon 起来后的
+    ``api_reindex`` 路径用——daemon 启动时已调过 ``init_context``）。两路都
+    没填 → fail-loud RuntimeError，不要拿着 ``None`` 接着跑出 AttributeError。
+    """
+    if skill_dir is None:
+        skill_dir = _ctx["skill_dir"]
+    if embed_client is None:
+        embed_client = _ctx["embed_client"]
+    if skill_dir is None or embed_client is None:
+        raise RuntimeError(
+            "rebuild_skill_index: 需要 skill_dir 和 embed_client —— 显式传入"
+            "或先调 init_context 把 _ctx 填好"
+        )
 
     entries = []
     for d in sorted(skill_dir.iterdir()):
