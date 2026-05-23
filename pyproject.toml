@@ -41,6 +41,10 @@ dependencies = [
     # team 模式上传前的轨迹脱敏（team/client/redact.py）。脱敏是上传链路的
     # 强制环节，故列为主依赖而非 optional extra——缺库就该 import 失败。
     "detect-secrets>=1.5",
+    # 纯 Python git 实现，替代系统 ``git`` 二进制——容器/受限环境（如
+    # ``python:3.9-slim``）默认没装 git，SkillEditAgent 等链路又要跑 git
+    # init/commit/branch；走 dulwich 后零依赖系统 git。
+    "dulwich>=0.21",
     # Python 3.9 上 pydantic 需要它来求值 `X | Y` 联合注解（PEP 604 语法
     # 3.10 才原生支持）；3.10+ 不安装。
     "eval_type_backport; python_version < '3.10'",
