@@ -82,6 +82,13 @@ xskill connect <host:port> --token <token>
 - **A/B-driven evolution.** A Skill change is measured per person before it spreads — the more people in the team, the faster and sharper the evolution.
 - **Experts can teach manually.** When an expert edits a Skill locally, the change is pulled into the server as `user-staging/<client_id>` and feeds the next round of evolution.
 
+## Architecture
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="900"
+       alt="xskill architecture: agent ecosystems → trajectory watcher → atom splitter → skill router → skill edit agent → canary A/B → skill repository ↔ team mode">
+</p>
+
 ## How it works
 
 A few narrow LLM agents do the work. One splits a trajectory into single-intent Atoms; one routes each Atom to a Skill; one rewrites the `SKILL.md` once a Skill has enough material; one A/B-tests new versions on live traffic and keeps the winner. Every Skill is its own git repository, so every change is versioned and reversible. Details: [`docs/agent.md`](docs/agent.md).
