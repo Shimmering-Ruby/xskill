@@ -22,7 +22,8 @@
 
 ## News
 
-- **2026-05** — xskill is open-source under the MIT license, and on PyPI: `pip install xskill` (0.4.2).
+- **2026-05** — `v0.5.0` released: Team mode (client-server) lands, line-anchored atom splitting, `detect-secrets` redaction, Python 3.9 supported, runtime no longer needs the system `git` binary. See the [release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0).
+- **2026-05** — xskill is open-source under the MIT license, and on PyPI: `pip install xskill`.
 - **2026-05** — Claude Code and OpenClaw are verified end to end; Codex and Cursor support is implemented.
 
 ## What changes for you
@@ -45,7 +46,7 @@ You keep working as before. The Skill library is a byproduct.
 ## Get started
 
 ```bash
-pip install xskill          # Python 3.11+
+pip install xskill          # Python 3.9+
 xskill serve                # writes ~/.xskill/config.yaml, then exits
 ```
 

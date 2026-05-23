@@ -22,7 +22,8 @@
 
 ## 动态
 
-- **2026-05** — xskill 以 MIT 协议开源,并发布到 PyPI:`pip install xskill`(0.4.2)。
+- **2026-05** — 发布 `v0.5.0`:团队模式(client-server)落地、行号锚定的 atom 切分、`detect-secrets` 脱敏、支持 Python 3.9、运行时不再需要系统 `git`。详见[发布说明](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。
+- **2026-05** — xskill 以 MIT 协议开源,并发布到 PyPI:`pip install xskill`。
 - **2026-05** — Claude Code 与 OpenClaw 已端到端验证;Codex、Cursor 支持已实现。
 
 ## 用了之后有什么不同
@@ -42,7 +43,7 @@ xskill 跑起来之后,这部分维护就没了:
 ## 快速开始
 
 ```bash
-pip install xskill          # 需要 Python 3.11+
+pip install xskill          # 需要 Python 3.9+
 xskill serve                # 写出 ~/.xskill/config.yaml,然后退出
 ```
 
