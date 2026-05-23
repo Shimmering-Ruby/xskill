@@ -2,7 +2,7 @@
 
 # xskill
 
-**别再反复教你的 AI agent。xskill 把它已经做过的工作,变成它能复用的 Skill。**
+**AI agent 做过的事，别让它每次从头再来。xskill 把过往会话里跑通的解法蒸馏成可复用 Skill。**
 
 [![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
 [![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
@@ -22,32 +22,29 @@
 
 ## 动态
 
-- **2026-05** — 发布 `v0.5.0`:团队模式(client-server)落地、行号锚定的 atom 切分、`detect-secrets` 脱敏、支持 Python 3.9、运行时不再需要系统 `git`。详见[发布说明](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。
-- **2026-05** — xskill 以 MIT 协议开源,并发布到 PyPI:`pip install xskill`。
-- **2026-05** — Claude Code 与 OpenClaw 已端到端验证;Codex、Cursor 支持已实现。
+- **2026-05** — 发布 `v0.5.0`：团队模式（client-server）落地、行号锚定的 atom 切分、`detect-secrets` 自动脱敏、Python 3.9 起跑、运行时不再需要系统 `git`。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。
+- **2026-05** — MIT 协议开源，PyPI 已上架：`pip install xskill`。
+- **2026-05** — Claude Code、Codex、OpenCode 三个生态端到端验证通过；OpenClaw、Cursor 已对接但尚未跑全套 e2e。
 
-## 用了之后有什么不同
+## 解决什么问题
 
-没有 xskill 时,coding agent 每次遇到一个似曾相识的问题,都会把同一套解法重新推一遍;
-而你要么再讲一遍,要么手维护一份 prompt 库,看着它慢慢过时。
+agent 每次撞上熟面孔问题，都会把同一套解法重推一遍。你要么再讲一遍，要么自己维护一份 prompt 库——而这份库没人看的时候就慢慢腐烂。
 
-xskill 跑起来之后,这部分维护就没了:
+xskill 跑起来之后，这件事不用你管了：
 
-- 起作用的解题模式会变成 Skill 文件,agent 自动加载。
-- 你照常干活,Skill 库自己更新——没有审核队列,不用手工挑选。
-- 你手动改了某个 Skill,xskill 会保留这次改动,并把它当成 ground truth。
-- 新版本只有在确实把用户服务得更好时,才会替换掉旧版本。
+- 跑通过的解题套路自动沉淀成 Skill 文件，agent 自己加载。
+- 你照常用 agent 干活，Skill 库自己长出来——没有审核队列，没人需要去"挑选最佳实践"。
+- 你手改某个 Skill，xskill 不会回滚——人写的版本被视为 ground truth。
+- 新版本只有真的把用户服务得更好，才会顶掉老版本（数据说话，不是 LLM 自己说好）。
 
-你照常工作,Skill 库是顺带长出来的副产品。
-
-## 快速开始
+## 上手
 
 ```bash
 pip install xskill          # 需要 Python 3.9+
-xskill serve                # 写出 ~/.xskill/config.yaml,然后退出
+xskill serve                # 生成 ~/.xskill/config.yaml 模板后退出
 ```
 
-在 `~/.xskill/config.yaml` 里填两个模型 endpoint:
+打开 `~/.xskill/config.yaml`，填好两个模型 endpoint：
 
 ```yaml
 skill_dir: ~/.xskill/skill
@@ -64,76 +61,66 @@ embedding:
   dim:      0
 ```
 
-任何 OpenAI 兼容 endpoint 都行。再跑一次 `xskill serve`——它会自动发现并监听你机器上
-所有受支持的 agent(Claude Code、Codex、OpenClaw、Cursor)。如果还想把一份旧轨迹存档
-也纳入索引,把那个目录注册进来:
+OpenAI 兼容的 endpoint 都能用。再跑一次 `xskill serve`，它会自动扫机器上装好的所有 agent（Claude Code、Codex、OpenCode、OpenClaw、Cursor）开始监听。如果还有一份历史轨迹归档想一起吃进来：
 
 ```bash
 xskill registry add /path/to/trajectories
 ```
 
-## 团队:一个共享的 Skill 库
+## 团队模式：一份共用的 Skill 库
 
-团队模式是把 xskill 铺到整个组织的理由。一台机器当 server,其他人作为瘦客户端加入。
+xskill 真正想在组织里铺开的形态是团队模式：一台机器当 server，其他人作为瘦客户端接入，共用 server 上长出来的同一份 Skill 库。
 
 ```bash
-xskill serve --server                        # 打印一个 join token
+xskill serve --server                        # 启动后打印 join token
 xskill connect <host:port> --token <token>
 ```
 
-- **共享库。** 每个 client 都能用上从全团队工作里蒸馏出的 Skill,而不只是自己那份。
-- **轨迹隐私。** client 上传前先脱敏;只有 server 跑流水线、持有完整历史。
-- **按人做 A/B。** 灰度按 `client_id` 分桶,一个 Skill 改动会先在每个人身上分别衡量,
-  再扩散开。
-- **本地改动安全。** client 的手改进入隔离的 `user-staging/<client_id>` 分支,
-  绝不直接落到共享的 `main`。
+- **库是共享的。** 一个人在自己工作里跑通的解法，可以让全团队复用。
+- **轨迹不出 client。** client 上传前先脱敏；只有 server 跑流水线、留完整历史。
+- **灰度按人分桶。** Canary 按 `client_id` 分配版本，一个 Skill 改动会先在每个人身上分别衡量，赢了再扩散。
+- **手改隔离。** Client 的本地修改进 `user-staging/<client_id>` 分支，永远不会污染 server 上的 `main`。
 
 ## 工作原理
 
-几个职责很窄的 LLM agent 在做事:一个把轨迹切成单一意图的 Atom;一个把每个 Atom
-归到某个 Skill;一个在 Skill 攒够素材后重写它的 `SKILL.md`;一个在真实流量上
-A/B 测试新版本、留下赢家。每个 Skill 是独立的 git 仓库,所以改动有版本、可回退。
-细节见 [`docs/agent.md`](docs/agent.md)。
+几个职责单一的 LLM agent 各管一摊：一个把轨迹切成单一意图的 Atom；一个把每个 Atom 路由到对应 Skill；一个等某个 Skill 攒够素材了就重写它的 `SKILL.md`；一个在真实流量上 A/B 测试新版本，留下赢家。每个 Skill 本身就是一个独立 git 仓库，改了什么、谁改的、能不能回退都有据可查。细节见 [`docs/agent.md`](docs/agent.md)。
 
 ## 支持哪些 agent
 
 | Agent | 状态 | 轨迹采集 | Skill 安装 |
 | ----- | ---- | -------- | ---------- |
-| **Claude Code** | ✅ 已验证 | 自动发现 `~/.claude/projects/` | symlink → `~/.claude/skills/<name>/` |
-| **OpenClaw** | ✅ 已验证 | 自动发现 `~/.openclaw/agents/` | 拷贝 → `~/.agents/skills/<name>/` |
-| **Codex CLI** | 🟡 已实现 | 自动发现 `~/.codex/sessions/` | symlink → `~/.agents/skills/<name>/` |
-| **Cursor** | 🟡 已实现 | 自动发现 `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
-| **其他任意 agent** | 手动 | SDK:`xskill.adapters.submit_trajectory` | 拷贝或 symlink 那个 `SKILL.md` 目录 |
+| **Claude Code** | ✅ 已验证 | 扫 `~/.claude/projects/` | symlink → `~/.claude/skills/<name>/` |
+| **Codex CLI** | ✅ 已验证 | 扫 `~/.codex/sessions/` | symlink → `~/.agents/skills/<name>/` |
+| **OpenCode** | ✅ 已验证 | 读 SQLite `~/.local/share/opencode/opencode.db` | symlink → `~/.agents/skills/<name>/` |
+| **OpenClaw** | 🟡 已对接，未跑完 e2e | 扫 `~/.openclaw/agents/` | 拷贝 → `~/.agents/skills/<name>/` |
+| **Cursor** | 🟡 已对接，未跑完 e2e | 扫 `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
+| **其他 agent** | 手动 | SDK：`xskill.adapters.submit_trajectory` | 自己拷贝 / symlink `SKILL.md` 目录 |
 
-产物遵循 Anthropic 的 `SKILL.md` schema,所以整个库是可移植的。OpenCode 和 Trae
-在 [roadmap](#roadmap) 上。
+产物遵循 Anthropic 的 `SKILL.md` schema，所以整个库是可移植的——换 agent 也带得走。Trae 在 [roadmap](#roadmap) 上。
 
-## 概念
+## 几个名词
 
 | 术语 | 含义 |
 | ---- | ---- |
-| **Trajectory(轨迹)** | 一次 agent 执行——一个 session 的完整记录,以 `traj_*.md` 存盘。 |
-| **Atom** | 轨迹中单一意图的最小片段。归类判断发生在这一粒度。 |
-| **Skill** | 一个 `SKILL.md` 加可选脚本,各自在一个带版本的 git 目录里。 |
-| **Canary(灰度)** | 在真实流量上,把现有 Skill 与新候选做 A/B 比较。 |
-| **UX score** | 某个 Skill 在某个 Atom 上把用户服务得有多好,按这次交互本身打 1–10 分。灰度保留分高的那个版本。 |
+| **Trajectory（轨迹）** | 一次 agent 执行——一段 session 的完整记录，存成 `traj_*.md`。 |
+| **Atom** | 轨迹里单一意图的最小片段。路由判断发生在这一级。 |
+| **Skill** | 一个 `SKILL.md` 加可选脚本，住在自己的 git 仓库里，带版本。 |
+| **Canary（灰度）** | 现有 Skill 与候选版本在真实流量上做 A/B。 |
+| **UX score** | 某个 Skill 在某个 Atom 上服务用户的好坏，从交互本身打 1–10 分。灰度按这个分数选赢家。 |
 
-## 为什么不直接维护一个 prompt 文件夹
+## 为什么不直接搞个 prompt 文件夹
 
-手维护的 prompt 库没有反馈回路——没有任何东西告诉你哪些条目还有用、哪些已经过时。
-xskill 把这个回路接上:每个 Skill 版本都在真实流量上做 A/B,按它产生的用户体验打分,
-再据此结果留下或淘汰。与 10 个已有 trajectory-to-skill 系统的对比见
-[`docs/research/related-work-survey.md`](docs/research/related-work-survey.md)。
+手维护的 prompt 库没有反馈回路——没东西告诉你哪些条目还能用、哪些早就过时。xskill 把这条回路补上：每个 Skill 版本都在真实流量上跑 A/B，按它产生的用户体验打分，按分数决定留还是淘。我们对比了 10 个已有的 trajectory-to-skill 系统，结论写在 [`docs/research/related-work-survey.md`](docs/research/related-work-survey.md)。
 
 ## Roadmap
 
-- 更多 agent adapter——OpenCode、Trae、Goose、OpenHands、Aider
-- 原生 MCP server 接口(Skill 暴露为 tool)
-- Web UI:浏览 Skill 库、查看灰度数据
-- 基于使用情况的自动淘汰
-- Skill marketplace:导入 / 导出可移植的 Skill bundle
-- 多租户 Skill 库(每个团队一个 `skill_dir`)
+- 更多 agent adapter：Trae、Goose、OpenHands、Aider
+- 原生 MCP server 接口（把 Skill 暴露成 tool）
+- Web UI：浏览 Skill 库、看灰度数据
+- 按使用情况自动淘汰
+- Skill marketplace：导入 / 导出可移植 bundle
+- 多租户 Skill 库（每个团队独立 `skill_dir`）
 
 ## License
 
-MIT © [370025263](https://github.com/370025263),详见 [LICENSE](LICENSE)。
+MIT © [370025263](https://github.com/370025263)，详见 [LICENSE](LICENSE)。

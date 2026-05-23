@@ -24,7 +24,7 @@
 
 - **2026-05** — `v0.5.0` released: Team mode (client-server) lands, line-anchored atom splitting, `detect-secrets` redaction, Python 3.9 supported, runtime no longer needs the system `git` binary. See the [release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0).
 - **2026-05** — xskill is open-source under the MIT license, and on PyPI: `pip install xskill`.
-- **2026-05** — Claude Code and OpenClaw are verified end to end; Codex and Cursor support is implemented.
+- **2026-05** — Claude Code, Codex, and OpenCode are verified end to end; OpenClaw and Cursor are implemented but not yet end-to-end tested.
 
 ## What changes for you
 
@@ -107,13 +107,14 @@ reversible. Details: [`docs/agent.md`](docs/agent.md).
 | Agent | Status | Trajectory ingest | Skill install |
 | ----- | ------ | ----------------- | ------------- |
 | **Claude Code** | ✅ verified | auto-detects `~/.claude/projects/` | symlink → `~/.claude/skills/<name>/` |
-| **OpenClaw** | ✅ verified | auto-detects `~/.openclaw/agents/` | copy → `~/.agents/skills/<name>/` |
-| **Codex CLI** | 🟡 implemented | auto-detects `~/.codex/sessions/` | symlink → `~/.agents/skills/<name>/` |
-| **Cursor** | 🟡 implemented | auto-detects `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
+| **Codex CLI** | ✅ verified | auto-detects `~/.codex/sessions/` | symlink → `~/.agents/skills/<name>/` |
+| **OpenCode** | ✅ verified | SQLite `~/.local/share/opencode/opencode.db` | symlink → `~/.agents/skills/<name>/` |
+| **OpenClaw** | 🟡 implemented, not yet end-to-end tested | auto-detects `~/.openclaw/agents/` | copy → `~/.agents/skills/<name>/` |
+| **Cursor** | 🟡 implemented, not yet end-to-end tested | auto-detects `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
 | **Any other agent** | manual | SDK: `xskill.adapters.submit_trajectory` | copy or symlink the `SKILL.md` directory |
 
 Output follows the Anthropic `SKILL.md` schema, so the library is portable.
-OpenCode and Trae are on the [roadmap](#roadmap).
+Trae is on the [roadmap](#roadmap).
 
 ## Concepts
 
@@ -136,7 +137,7 @@ trajectory-to-skill systems is in
 
 ## Roadmap
 
-- More agent adapters — OpenCode, Trae, Goose, OpenHands, Aider
+- More agent adapters — Trae, Goose, OpenHands, Aider
 - Native MCP server interface (Skills exposed as tools)
 - Web UI for browsing the library and viewing canary stats
 - Usage-driven auto-prune
