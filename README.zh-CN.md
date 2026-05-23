@@ -80,7 +80,7 @@ xskill connect <host:port> --token <token>
 - **兼容各种 coding 方式** 用 codex、clade 还是 cursor IDE？ 都能加入，多端同步。
 - **轨迹隐私** 轨迹上传前先脱敏，agent 隐私功能。
 - **灰度测试驱动的进化** 一个 Skill 的改动会先在每个人身上分别衡量，赢了再扩散，人越多进化越准越快。
-- **专家知道的手动进化** 专家本地直接修改 skill，会被学习进服务器远程 `user-staging/<client_id>` 分支，作为下一步进化参考。
+- **专家指导的手动进化** 专家本地直接修改 skill，会被学习进服务器远程 `user-staging/<client_id>` 分支，作为下一步进化参考。
 
 ## 工作原理
 
