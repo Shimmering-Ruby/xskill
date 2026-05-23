@@ -4,6 +4,10 @@ data_bak/
 
 # 生成的 skill 仓库（有自己的 git）
 skill/
+# src/xskill/skill/ 是包目录,重构后引入的,不在"生成 skill 仓库"语义里——
+# 否则给它加新文件 git add 会被静默拒掉、得 -f 强加
+!src/xskill/skill/
+!src/xskill/skill/**
 
 # 运行日志
 output/
