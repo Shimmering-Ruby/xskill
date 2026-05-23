@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" width="900" height="620" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <!-- Background -->
+  <rect width="900" height="620" fill="#0d1117" rx="12"/>
+
+  <!-- Title -->
+  <text x="450" y="38" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="700" letter-spacing="0.5">xskill — Architecture Overview</text>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       ZONE 1 — Agent Ecosystems (top)
+  ═══════════════════════════════════════════════════════════ -->
+  <rect x="30" y="58" width="840" height="88" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="450" y="76" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600" letter-spacing="1.2">AGENT ECOSYSTEMS</text>
+
+  <!-- Agent boxes -->
+  <!-- Claude Code -->
+  <rect x="52"  y="85" width="130" height="48" rx="6" fill="#1a2332" stroke="#2f6bc9" stroke-width="1.5"/>
+  <text x="117" y="106" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="600">Claude Code</text>
+  <text x="117" y="123" text-anchor="middle" fill="#8b949e" font-size="10">~/.claude/projects/</text>
+
+  <!-- Codex -->
+  <rect x="202" y="85" width="130" height="48" rx="6" fill="#1a2332" stroke="#2f6bc9" stroke-width="1.5"/>
+  <text x="267" y="106" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="600">Codex CLI</text>
+  <text x="267" y="123" text-anchor="middle" fill="#8b949e" font-size="10">~/.codex/sessions/</text>
+
+  <!-- OpenCode -->
+  <rect x="352" y="85" width="130" height="48" rx="6" fill="#1a2332" stroke="#2f6bc9" stroke-width="1.5"/>
+  <text x="417" y="106" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="600">OpenCode</text>
+  <text x="417" y="123" text-anchor="middle" fill="#8b949e" font-size="10">SQLite opencode.db</text>
+
+  <!-- OpenClaw -->
+  <rect x="502" y="85" width="130" height="48" rx="6" fill="#1a2332" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="567" y="106" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="600">OpenClaw</text>
+  <text x="567" y="123" text-anchor="middle" fill="#6e7681" font-size="10">~/.openclaw/agents/</text>
+
+  <!-- Cursor -->
+  <rect x="652" y="85" width="130" height="48" rx="6" fill="#1a2332" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="717" y="106" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="600">Cursor</text>
+  <text x="717" y="123" text-anchor="middle" fill="#6e7681" font-size="10">agent-transcripts/</text>
+
+  <!-- Arrows from agents to pipeline -->
+  <line x1="117" y1="133" x2="117" y2="165" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="267" y1="133" x2="267" y2="165" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="417" y1="133" x2="417" y2="165" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="567" y1="133" x2="567" y2="165" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-dim)"/>
+  <line x1="717" y1="133" x2="717" y2="165" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-dim)"/>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       ZONE 2 — Core Pipeline (middle)
+  ═══════════════════════════════════════════════════════════ -->
+  <rect x="30" y="165" width="840" height="200" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="450" y="183" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600" letter-spacing="1.2">CORE PIPELINE</text>
+
+  <!-- Step 1: Trajectory Watcher -->
+  <rect x="55"  y="192" width="150" height="62" rx="6" fill="#0d2d10" stroke="#238636" stroke-width="1.5"/>
+  <text x="130" y="215" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Trajectory</text>
+  <text x="130" y="231" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Watcher</text>
+  <text x="130" y="247" text-anchor="middle" fill="#8b949e" font-size="10">traj_*.md / SQLite</text>
+
+  <!-- Arrow -->
+  <line x1="205" y1="223" x2="235" y2="223" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Step 2: Atom Splitter -->
+  <rect x="235" y="192" width="150" height="62" rx="6" fill="#0d2d10" stroke="#238636" stroke-width="1.5"/>
+  <text x="310" y="215" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Atom</text>
+  <text x="310" y="231" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Splitter</text>
+  <text x="310" y="247" text-anchor="middle" fill="#8b949e" font-size="10">single-intent slices</text>
+
+  <!-- Arrow -->
+  <line x1="385" y1="223" x2="415" y2="223" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Step 3: Skill Router -->
+  <rect x="415" y="192" width="150" height="62" rx="6" fill="#0d2d10" stroke="#238636" stroke-width="1.5"/>
+  <text x="490" y="215" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Skill</text>
+  <text x="490" y="231" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Router</text>
+  <text x="490" y="247" text-anchor="middle" fill="#8b949e" font-size="10">BM25 + embedding</text>
+
+  <!-- Arrow -->
+  <line x1="565" y1="223" x2="595" y2="223" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Step 4: Skill Edit Agent -->
+  <rect x="595" y="192" width="150" height="62" rx="6" fill="#0d2d10" stroke="#238636" stroke-width="1.5"/>
+  <text x="670" y="215" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Skill Edit</text>
+  <text x="670" y="231" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">Agent</text>
+  <text x="670" y="247" text-anchor="middle" fill="#8b949e" font-size="10">rewrites SKILL.md</text>
+
+  <!-- Arrow Step 4 → Canary -->
+  <line x1="670" y1="254" x2="670" y2="284" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+
+  <!-- Step 5: Canary A/B -->
+  <rect x="415" y="284" width="420" height="62" rx="6" fill="#1a1a2e" stroke="#8957e5" stroke-width="1.5"/>
+  <text x="625" y="307" text-anchor="middle" fill="#d2a8ff" font-size="12" font-weight="700">Canary A/B Test</text>
+  <text x="625" y="325" text-anchor="middle" fill="#8b949e" font-size="10">live traffic · UX score 1–10 · winner replaces current version</text>
+  <text x="625" y="339" text-anchor="middle" fill="#8b949e" font-size="10">UserEditAbsorbAgent absorbs manual edits automatically</text>
+
+  <!-- Arrow from Canary → Skill Repo -->
+  <line x1="625" y1="346" x2="625" y2="376" stroke="#8957e5" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+  <!-- Arrow from Step 3 → Skill Repo (query) -->
+  <line x1="490" y1="254" x2="490" y2="400" stroke="#388bfd" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arrow-blue)"/>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       ZONE 3 — Skill Repo + Team (bottom left + right)
+  ═══════════════════════════════════════════════════════════ -->
+
+  <!-- Skill Repository -->
+  <rect x="30" y="376" width="380" height="88" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="220" y="394" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600" letter-spacing="1.2">SKILL REPOSITORY</text>
+
+  <rect x="52"  y="403" width="160" height="48" rx="6" fill="#1a2332" stroke="#388bfd" stroke-width="1.5"/>
+  <text x="132" y="424" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="600">Skill Store</text>
+  <text x="132" y="441" text-anchor="middle" fill="#8b949e" font-size="10">SKILL.md · dulwich git</text>
+
+  <rect x="232" y="403" width="160" height="48" rx="6" fill="#1a2332" stroke="#388bfd" stroke-width="1.5"/>
+  <text x="312" y="424" text-anchor="middle" fill="#79c0ff" font-size="12" font-weight="600">Search Index</text>
+  <text x="312" y="441" text-anchor="middle" fill="#8b949e" font-size="10">BM25 + vector hybrid</text>
+
+  <!-- Arrow Skill Store → Agents (install) -->
+  <line x1="132" y1="403" x2="132" y2="165" stroke="#388bfd" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-blue)"/>
+
+  <!-- Team Mode -->
+  <rect x="430" y="376" width="440" height="88" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="650" y="394" text-anchor="middle" fill="#8b949e" font-size="11" font-weight="600" letter-spacing="1.2">TEAM MODE</text>
+
+  <rect x="452" y="403" width="180" height="48" rx="6" fill="#1f1a2e" stroke="#8957e5" stroke-width="1.5"/>
+  <text x="542" y="422" text-anchor="middle" fill="#d2a8ff" font-size="12" font-weight="600">Team Server</text>
+  <text x="542" y="439" text-anchor="middle" fill="#8b949e" font-size="10">FastAPI · SSE · token auth</text>
+
+  <rect x="652" y="403" width="200" height="48" rx="6" fill="#1f1a2e" stroke="#8957e5" stroke-width="1.5"/>
+  <text x="752" y="422" text-anchor="middle" fill="#d2a8ff" font-size="12" font-weight="600">Team Clients</text>
+  <text x="752" y="439" text-anchor="middle" fill="#8b949e" font-size="10">redact → upload · sync Skills</text>
+
+  <!-- Arrows Team -->
+  <line x1="632" y1="427" x2="652" y2="427" stroke="#8957e5" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+  <line x1="652" y1="420" x2="632" y2="420" stroke="#8957e5" stroke-width="1.5" marker-end="url(#arrow-purple)"/>
+
+  <!-- Arrow Skill Repo ↔ Team Server -->
+  <line x1="410" y1="427" x2="452" y2="427" stroke="#30363d" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Arrow from Canary to Skill Repo -->
+  <line x1="415" y1="315" x2="220" y2="315" stroke="#8957e5" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="220" y1="315" x2="220" y2="376" stroke="#8957e5" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow-purple)"/>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       ZONE 4 — User / CLI (bottom)
+  ═══════════════════════════════════════════════════════════ -->
+  <rect x="30" y="480" width="840" height="56" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+
+  <rect x="52"  y="492" width="155" height="32" rx="5" fill="#1a2332" stroke="#388bfd" stroke-width="1.2"/>
+  <text x="129" y="512" text-anchor="middle" fill="#79c0ff" font-size="11" font-weight="600">xskill CLI</text>
+
+  <rect x="222" y="492" width="155" height="32" rx="5" fill="#1a2332" stroke="#388bfd" stroke-width="1.2"/>
+  <text x="299" y="512" text-anchor="middle" fill="#79c0ff" font-size="11" font-weight="600">xskill serve / watch</text>
+
+  <rect x="392" y="492" width="155" height="32" rx="5" fill="#1a2332" stroke="#388bfd" stroke-width="1.2"/>
+  <text x="469" y="512" text-anchor="middle" fill="#79c0ff" font-size="11" font-weight="600">registry add / search</text>
+
+  <rect x="562" y="492" width="155" height="32" rx="5" fill="#1a2332" stroke="#388bfd" stroke-width="1.2"/>
+  <text x="639" y="512" text-anchor="middle" fill="#79c0ff" font-size="11" font-weight="600">xskill connect</text>
+
+  <rect x="732" y="492" width="120" height="32" rx="5" fill="#1a2332" stroke="#388bfd" stroke-width="1.2"/>
+  <text x="792" y="512" text-anchor="middle" fill="#79c0ff" font-size="11" font-weight="600">Python SDK</text>
+
+  <!-- Legend -->
+  <text x="450" y="558" text-anchor="middle" fill="#6e7681" font-size="10">
+    ── verified   - - - planned / partially tested   ─ ─ query/install flow
+  </text>
+  <line x1="138" y1="554" x2="170" y2="554" stroke="#238636" stroke-width="1.5"/>
+  <line x1="258" y1="554" x2="304" y2="554" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <line x1="397" y1="554" x2="443" y2="554" stroke="#388bfd" stroke-width="1" stroke-dasharray="5,3"/>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       Arrow Markers
+  ═══════════════════════════════════════════════════════════ -->
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#30363d"/>
+    </marker>
+    <marker id="arrow-dim" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#30363d" opacity="0.5"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#3fb950"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#8957e5"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#388bfd"/>
+    </marker>
+  </defs>
+</svg>
