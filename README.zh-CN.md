@@ -82,6 +82,13 @@ xskill connect <host:port> --token <token>
 - **灰度测试驱动的进化** 一个 Skill 的改动会先在每个人身上分别衡量，赢了再扩散，人越多进化越准越快。
 - **专家指导的手动进化** 专家本地直接修改 skill，会被学习进服务器远程 `user-staging/<client_id>` 分支，作为下一步进化参考。
 
+## 架构图
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="900"
+       alt="xskill 架构：agent 生态 → 轨迹监听 → Atom 切分 → Skill 路由 → Skill 编辑 Agent → Canary A/B → Skill 仓库 ↔ 团队模式">
+</p>
+
 ## 工作原理
 
 几个职责单一的 LLM agent 各管一摊：一个把轨迹切成单一意图的 Atom；一个把每个 Atom 路由到对应 Skill；一个等某个 Skill 攒够素材了就重写它的 `SKILL.md`；一个在真实流量上 A/B 测试新版本，留下赢家。每个 Skill 本身就是一个独立 git 仓库，改了什么、谁改的、能不能回退都有据可查。细节见 [`docs/agent.md`](docs/agent.md)。
