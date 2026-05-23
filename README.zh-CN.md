@@ -108,10 +108,6 @@ xskill connect <host:port> --token <token>
 | **Canary（灰度）** | 现有 Skill 与候选版本在真实流量上做 A/B。 |
 | **UX score** | 某个 Skill 在某个 Atom 上服务用户的好坏，从交互本身打 1–10 分。灰度按这个分数选赢家。 |
 
-## 为什么不直接搞个 prompt 文件夹
-
-手维护的 prompt 库没有反馈回路——没东西告诉你哪些条目还能用、哪些早就过时。xskill 把这条回路补上：每个 Skill 版本都在真实流量上跑 A/B，按它产生的用户体验打分，按分数决定留还是淘。我们对比了 10 个已有的 trajectory-to-skill 系统，结论写在 [`docs/research/related-work-survey.md`](docs/research/related-work-survey.md)。
-
 ## Roadmap
 
 - 更多 agent adapter：Trae、Goose、OpenHands、Aider
