@@ -221,8 +221,12 @@ NewSkillFolder 再 add_task_to_skill）。
 - **门槛**：单 atom weightscore < 7 不要新建（防污染 skill 列表）
 - description 必填，2-3 句中文写清服务于什么类型的 atom
 
-## Step 5: 不值得收录
-- weightscore 在 2-3 边缘相关：什么都不调，直接说明理由结束
+## Step 5: 边缘 atom 兜底（**绝不允许直接 return 不调工具**）
+- weightscore 2-3：仍要 add_task_to_skill 把 atom 灌进 desc 最贴近的 skill；
+  ws=2/3 不会单独触发 SkillEdit（buffer 阈值 10），但 atom→skill 归属必须留底
+- weightscore 1：跟路由表所有 skill 都没明显交叉时，挑 desc 最不远的那个 add，
+  weightscore=1；**不要**为 ws=1 atom 新开 skill（守住"≥7 才新建"门槛）
+- 任何分数都不允许"什么都不调，直接说明理由结束"——atom 不能静默蒸发
 
 # 渐进收敛策略
 
