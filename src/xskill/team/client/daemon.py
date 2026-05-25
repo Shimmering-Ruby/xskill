@@ -144,13 +144,14 @@ class TeamClient:
         """
         from xskill.ecosystems import (
             detect_known_ecosystems, install_to_claude_code,
-            install_to_codex, install_to_opencode, install_to_openclaw,
-            install_to_cursor,
+            install_to_codex, install_to_opencode, install_to_ngagent,
+            install_to_openclaw, install_to_cursor,
         )
         installer = {
             "claude_code": install_to_claude_code,
             "codex": install_to_codex,
             "opencode": install_to_opencode,
+            "ngagent": install_to_ngagent,
             "openclaw": install_to_openclaw,
             "cursor": install_to_cursor,
         }

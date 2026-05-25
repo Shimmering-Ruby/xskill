@@ -79,7 +79,7 @@ class TeamCollector:
         """探测本机生态，对每个起一个纯镜像 ingester 写进标准 bridge 目录。"""
         from xskill.ecosystems import (
             detect_known_ecosystems, JsonlIngester, SqliteIngester,
-            CC_SPEC, CODEX_SPEC, OPENCODE_SPEC,
+            CC_SPEC, CODEX_SPEC, OPENCODE_SPEC, NGAGENT_SPEC,
         )
         for det in detect_known_ecosystems(home_root=self.home_root):
             eco = det["ecosystem"]
@@ -97,6 +97,12 @@ class TeamCollector:
                 ing = SqliteIngester(target_traj_dir=bridge,
                                      home_root=self.home_root,
                                      spec=OPENCODE_SPEC,
+                                     poll_interval=self.poll_interval)
+            elif eco == "ngagent":
+                # ngagent = opencode 企业分支，复用 SqliteIngester，只换 spec
+                ing = SqliteIngester(target_traj_dir=bridge,
+                                     home_root=self.home_root,
+                                     spec=NGAGENT_SPEC,
                                      poll_interval=self.poll_interval)
             else:
                 continue

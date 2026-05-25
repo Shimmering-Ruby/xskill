@@ -359,6 +359,7 @@ class DirectoryWatcher:
             install_to_claude_code,
             install_to_codex,
             install_to_opencode,
+            install_to_ngagent,
             install_to_openclaw,
             install_to_cursor,
         )
@@ -374,6 +375,7 @@ class DirectoryWatcher:
             "claude_code": install_to_claude_code,
             "codex": install_to_codex,
             "opencode": install_to_opencode,
+            "ngagent": install_to_ngagent,  # opencode 企业分支，独立 skill 目录
             "openclaw": install_to_openclaw,  # copy 模式，详见 install_to_openclaw docstring
             "cursor": install_to_cursor,
         }
