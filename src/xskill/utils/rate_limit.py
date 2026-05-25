@@ -186,6 +186,9 @@ class RateLimitedLLM:
         self.inner_call = inner_call
 
     def call(self, *, prompt: str, timeout: float = 30.0, **kwargs) -> Any:
+        """执行受限流的 LLM 调用。流程: acquire_rpm → estimate → acquire_tpm
+        → inner_call(**kw) → reconcile_tpm by response.usage(缺失则保留估算)。
+        """
         # 1) RPM acquire
         wait = self.bucket.acquire_rpm(timeout=timeout)
         if wait > 0:
@@ -233,3 +236,6 @@ def reset_buckets_for_testing() -> None:
     """测试用 —— 清空注册表,各测试间隔离。"""
     with _BUCKETS_LOCK:
         _BUCKETS.clear()
+
+
+# pylint: disable=R0902  # 10 instance attrs 是 RPM+TPM 双桶 + 时钟 + 锁的自然结果
