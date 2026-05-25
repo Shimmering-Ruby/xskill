@@ -27,10 +27,22 @@ from xskill.team.shared.protocol import (
 logger = logging.getLogger("xskill.team.client")
 
 
-def register_with_server(http, *, token: str, label: str, hostname: str) -> str:
-    """跟 server 握手注册，返回 server 分配的 client_id。"""
+def register_with_server(
+    http, *,
+    token: str, label: str, hostname: str,
+    existing_client_id: str | None = None,
+) -> str:
+    """跟 server 握手注册，返回 server 分配（或续用）的 client_id。
+
+    ``existing_client_id`` 用于重连保持身份：调用方（CLI）若发现本地 state
+    里已有 client_id，传过来；server 按 (claimed_client_id, fingerprint,
+    new uuid) 三级优先级判定（详见 ClientRegistry.register）。
+    """
     resp = http.post("/api/v1/team/register", json={
-        "token": token, "client_label": label, "hostname": hostname,
+        "token": token,
+        "client_label": label,
+        "hostname": hostname,
+        "claimed_client_id": existing_client_id,
     })
     if resp.status_code != 200:
         raise RuntimeError(
