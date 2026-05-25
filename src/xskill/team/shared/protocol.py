@@ -26,6 +26,10 @@ class RegisterRequest(BaseModel):
     token: str
     client_label: str = ""
     hostname: str = ""
+    # client 自报本地 state 里已有的 client_id，希望 server 续用——
+    # server 按优先级判定（详见 client_registry.register）；None = 客户端
+    # 没有历史身份（首次连接或 state 丢失），server 自行新发或按指纹回查。
+    claimed_client_id: str | None = None
 
 
 class RegisterResponse(BaseModel):

@@ -86,7 +86,9 @@ async def team_register(req: RegisterRequest) -> RegisterResponse:
     if req.token != _ctx.join_token:
         raise HTTPException(status_code=401, detail="invalid join token")
     client_id = _ctx.client_registry.register(
-        label=req.client_label, hostname=req.hostname,
+        label=req.client_label,
+        hostname=req.hostname,
+        claimed_client_id=req.claimed_client_id,
     )
     logger.info("team client registered: %s (label=%s)", client_id, req.client_label)
     return RegisterResponse(client_id=client_id)

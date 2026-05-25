@@ -93,6 +93,18 @@ def cmd_connect(args) -> int:
         server_url = args.address
         if not server_url.startswith("http"):
             server_url = f"http://{server_url}"
+        # 带参 connect 也尽量保身份不漂移：本地 state 文件若存在就读出
+        # 已有 client_id，作为 ``claimed_client_id`` 一起发给 server——
+        # server 按 (claimed/fingerprint/new) 三级判定续用。state 不在 →
+        # existing_client_id=None，让 server 按指纹回查或新发。
+        existing_client_id: str | None = None
+        if state_path.is_file():
+            try:
+                existing_client_id = load_client_state(state_path).client_id
+            except Exception:
+                # state 文件损坏不阻断重连——按"无本地身份"处理，让 server
+                # 走指纹回查或新发。损坏的 state 接下来会被新的 save 覆盖。
+                existing_client_id = None
         import httpx
         http = httpx.Client(base_url=server_url, timeout=30.0)
         try:
@@ -100,6 +112,7 @@ def cmd_connect(args) -> int:
                 http, token=args.token,
                 label=args.label or _socket.gethostname(),
                 hostname=_socket.gethostname(),
+                existing_client_id=existing_client_id,
             )
         except Exception as e:
             print(f"error: 注册失败: {e}", file=sys.stderr)
