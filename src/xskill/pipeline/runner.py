@@ -1067,8 +1067,18 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
     )
     cluster_content = cluster.process(atom)
 
+    # cluster 跑完后回查 .candidates.yml 看 atom 实际落到了哪个 skill。
+    # 新 prompt 要求"任何分数都必须 add_task_to_skill"，正常情况下应该总能
+    # 找到；找不到 (skill_name=None) 即为 silent drop，被上层 logger 升 WARN。
+    from xskill.skill.candidates import find_atom_entry_in_any_skill
+    hit = find_atom_entry_in_any_skill(skill_dir, atom_id)
+    skill_name = hit[0] if hit else None
+    weightscore = hit[1] if hit else None
+
     return {
         "action": "clustered",
         "atom_id": atom_id,
+        "skill_name": skill_name,
+        "weightscore": weightscore,
         "cluster_log": (cluster_content or "")[:500],
     }
