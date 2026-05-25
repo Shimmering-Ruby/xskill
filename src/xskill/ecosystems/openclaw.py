@@ -378,7 +378,14 @@ def _adapt_openclaw_trajectory_jsonl(content: str, metadata: dict) -> tuple[str,
                     continue
                 ptype = part.get("type")
                 if ptype == "text":
-                    text = (part.get("text") or "").strip()
+                    text_part = part.get("text")
+                    if text_part is None:
+                        text = ""
+                    elif not isinstance(text_part, str):
+                        # text 可能是 dict（thinking/自定义块），跳过以修复 .strip() 调用
+                        continue
+                    else:
+                        text = text_part.strip()
                     if not text:
                         continue
                     if role == "user" and not first_user_query:
