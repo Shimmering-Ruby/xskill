@@ -50,8 +50,36 @@ class ClientRegistry:
         finally:
             conn.close()
 
-    def register(self, *, label: str = "", hostname: str = "") -> str:
-        """注册一个新 client，返回新生成的 client_id。"""
+    def register(
+        self, *,
+        label: str = "",
+        hostname: str = "",
+        claimed_client_id: str | None = None,
+    ) -> str:
+        """注册或续用 client_id。
+
+        三级优先级（显式判定，非 fallback）：
+          ① client 自报 ``claimed_client_id`` 且 server DB 里还认得 → 续用，
+             touch last_seen。覆盖 ``xskill connect <addr> --token`` 带参重连
+             场景：本地 ``team_client.json`` 已存 client_id，不该换。
+          ② client 没自报 / 自报的 server 不认得，但 (hostname, label) 指纹
+             能查到唯一历史身份 → 续用。覆盖 state 文件丢失（重装、清家目录）
+             但 server DB 还在的场景，让灰度/归属链路自愈。
+          ③ 以上都不行 → 发新 uuid 入库。
+
+        指纹查找仅在 hostname 或 label 至少一个非空时启用，防止匿名 client
+        互相误匹配。
+        """
+        # 优先级 ① — claimed_client_id 命中
+        if claimed_client_id and self.exists(claimed_client_id):
+            self.touch(claimed_client_id)
+            return claimed_client_id
+        # 优先级 ② — (hostname, label) 指纹回查
+        existing = self._find_by_fingerprint(hostname=hostname, label=label)
+        if existing:
+            self.touch(existing)
+            return existing
+        # 优先级 ③ — 发新 uuid
         client_id = uuid.uuid4().hex
         now = _now()
         conn = self._conn()
@@ -65,6 +93,31 @@ class ClientRegistry:
         finally:
             conn.close()
         return client_id
+
+    def _find_by_fingerprint(
+        self, *, hostname: str, label: str,
+    ) -> str | None:
+        """按 (hostname, label) 查唯一历史身份。
+
+        - hostname 和 label **同时为空** → 直接返回 None（不让匿名 client
+          误匹配上历史空记录）。
+        - 命中多条 → 返回 last_seen 最新的那条（最贴近"同一台机器最近的
+          身份"语义）。
+        - 没命中 → None。
+        """
+        if not hostname and not label:
+            return None
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT client_id FROM clients"
+                " WHERE hostname=? AND label=?"
+                " ORDER BY last_seen DESC LIMIT 1",
+                (hostname, label),
+            ).fetchone()
+            return row["client_id"] if row else None
+        finally:
+            conn.close()
 
     def exists(self, client_id: str) -> bool:
         conn = self._conn()
