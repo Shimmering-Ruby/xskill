@@ -250,13 +250,20 @@ def _reset_dest(dest: Path) -> None:
 def install_dir(
     src_dir: Path, dest: Path, *,
     force_mode: InstallMode | None = None,
+    auto_reset: bool = False,
 ) -> InstallMode:
     """把 ``src_dir`` 整目录安装到 ``dest``，按 symlink→junction→copy 顺序尝试。
 
     调用者负责：
     * 保证 ``src_dir`` 存在且是目录（本函数不校验，假设上层已校验）
-    * 保证 ``dest`` 当前**不存在**（旧条目必须先删；本函数不会动旧文件）
     * 保证 ``dest.parent`` 已存在（``mkdir -p``）
+    * 若 ``auto_reset=False``（默认，向后兼容）：保证 ``dest`` 当前
+      **不存在**（旧条目必须先删；本函数不会动旧文件）。
+    * 若 ``auto_reset=True``：本函数会先调 ``_maybe_reverse_sync_before_overwrite``
+      读 install-meta 判断要不要回流，再 ``_reset_dest`` 清掉旧 link/dir/file，
+      再装新的——一站式完成 reverse_sync + reset + install。新代码推荐用
+      ``auto_reset=True``，旧调用方（``_install_skill_into``、``install_to_openclaw``）
+      迁移完之后这个开关将变成默认 True。
 
     返回值是实际走的模式：``"symlink"`` / ``"junction"`` / ``"copy"``。
     上层（``ecosystems.install_to_claude_code``）可以据此决定要不要打
@@ -273,7 +280,13 @@ def install_dir(
             ``"copy"`` 用于 ngagent / openclaw 等已知 link/junction 不工作
             的生态（issue #34）；``"symlink"`` / ``"junction"`` 也支持
             但目前没人用。强制模式失败会把底层异常抛上去。
+        auto_reset: 是否自动处理"覆盖旧 dest"。打开后函数会先 reverse_sync
+            （若上轮是 copy 且有 pending edit）再 reset_dest，安全覆盖。
     """
+    if auto_reset:
+        _maybe_reverse_sync_before_overwrite(dest, src_dir)
+        _reset_dest(dest)
+
     if force_mode == "copy":
         _do_copy(src_dir, dest)
         _write_install_meta(dest, src_dir, "copy")
