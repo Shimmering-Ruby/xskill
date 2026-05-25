@@ -18,7 +18,7 @@ import io
 from pathlib import Path
 
 from dulwich import porcelain
-from dulwich.bundle import Bundle, create_bundle_from_repo, read_bundle, write_bundle
+from dulwich.bundle import create_bundle_from_repo, read_bundle, write_bundle
 from dulwich.repo import Repo
 
 from xskill.skill.git import _write_repo_identity  # 复用身份初始化
@@ -34,10 +34,7 @@ def make_repo_bundle(repo_dir: Path | str) -> bytes:
         head_refs = [r for r in repo.refs.keys() if r.startswith(b"refs/heads/")]
         bundle = create_bundle_from_repo(repo, refs=head_refs)
         buf = io.BytesIO()
-        try:
-            write_bundle(buf, bundle)
-        finally:
-            bundle.close()
+        write_bundle(buf, bundle)
         return buf.getvalue()
 
 
@@ -65,15 +62,12 @@ def apply_repo_bundle(bundle_bytes: bytes, dest_dir: Path | str) -> None:
     with Repo(str(dest_dir)) as repo:
         with io.BytesIO(bundle_bytes) as buf:
             bundle = read_bundle(buf)
-            try:
-                # 存所有对象
-                bundle.store_objects(repo.object_store)
-                # 把 bundle.references 强制写入本地 refs
-                for ref, sha in bundle.references.items():
-                    if ref.startswith(b"refs/heads/"):
-                        repo.refs[ref] = sha
-            finally:
-                bundle.close()
+            # 存所有对象
+            bundle.store_objects(repo.object_store)
+            # 把 bundle.references 强制写入本地 refs
+            for ref, sha in bundle.references.items():
+                if ref.startswith(b"refs/heads/"):
+                    repo.refs[ref] = sha
 
 
 def make_branch_bundle(repo_dir: Path | str, branch: str) -> bytes:
@@ -87,10 +81,7 @@ def make_branch_bundle(repo_dir: Path | str, branch: str) -> bytes:
             raise RuntimeError(f"branch not found: {branch}")
         bundle = create_bundle_from_repo(repo, refs=[ref])
         buf = io.BytesIO()
-        try:
-            write_bundle(buf, bundle)
-        finally:
-            bundle.close()
+        write_bundle(buf, bundle)
         return buf.getvalue()
 
 
@@ -111,15 +102,12 @@ def fetch_branch_from_bundle(
     with Repo(str(dest_repo)) as repo:
         with io.BytesIO(bundle_bytes) as buf:
             bundle = read_bundle(buf)
-            try:
-                bundle.store_objects(repo.object_store)
-                if src_ref not in bundle.references:
-                    raise RuntimeError(
-                        f"bundle missing branch {src_branch}: "
-                        f"have {list(bundle.references.keys())}",
-                    )
-                sha = bundle.references[src_ref]
-                repo.refs[dest_ref_b] = sha
-                return sha.decode("ascii")
-            finally:
-                bundle.close()
+            bundle.store_objects(repo.object_store)
+            if src_ref not in bundle.references:
+                raise RuntimeError(
+                    f"bundle missing branch {src_branch}: "
+                    f"have {list(bundle.references.keys())}",
+                )
+            sha = bundle.references[src_ref]
+            repo.refs[dest_ref_b] = sha
+            return sha.decode("ascii")

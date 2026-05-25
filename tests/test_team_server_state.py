@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import stat
+import sys
+
+import pytest
 
 from xskill.team.server.state import ensure_join_token, load_join_token
 
@@ -14,6 +17,10 @@ def test_ensure_generates_and_persists(tmp_path):
     assert ensure_join_token(p) == tok
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX mode bits not enforceable on Windows",
+)
 def test_token_file_is_0600(tmp_path):
     p = tmp_path / "team_server.json"
     ensure_join_token(p)
