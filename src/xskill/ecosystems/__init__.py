@@ -10,6 +10,7 @@
   cursor.py     — Cursor：适配 + install/ingest
   openclaw.py   — OpenClaw：适配 + install/ingest + canary flip hook
   opencode.py   — OpenCode：SqliteIngester + install/ingest
+  ngagent.py    — ngagent（opencode 企业分支）：复用 SqliteIngester + 独立 install 路径
   _fallback.py  — 跨平台目录安装的三阶 fallback
   _history.py   — daemon 自己装到 ~/.claude/skills/ 的 side 历史
 
@@ -82,17 +83,25 @@ from xskill.ecosystems.opencode import (
     install_all_to_opencode,
     _opencode_db_path,
 )
+from xskill.ecosystems.ngagent import (
+    NGAGENT_SPEC,
+    install_to_ngagent,
+    install_all_to_ngagent,
+    _ngagent_db_path,
+    _ngagent_skills_path,
+)
 
 __all__ = [
     "EcosystemSpec", "SqliteEcosystemSpec",
     "CC_SPEC", "CODEX_SPEC", "OPENCLAW_SPEC", "CURSOR_SPEC", "OPENCODE_SPEC",
+    "NGAGENT_SPEC",
     "JsonlIngester", "SqliteIngester", "CCSessionIngester",
     "detect_known_ecosystems",
     "install_to_claude_code", "install_to_codex", "install_to_cursor",
-    "install_to_openclaw", "install_to_opencode",
+    "install_to_openclaw", "install_to_opencode", "install_to_ngagent",
     "install_all_to_claude_code", "install_all_to_codex",
     "install_all_to_cursor", "install_all_to_openclaw",
-    "install_all_to_opencode",
+    "install_all_to_opencode", "install_all_to_ngagent",
     "ingest_claude_code_sessions", "ingest_codex_sessions",
     "ingest_cursor_sessions", "ingest_openclaw_sessions",
     "make_openclaw_canary_flip_hook",

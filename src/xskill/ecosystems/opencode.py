@@ -75,6 +75,7 @@ OPENCODE_SPEC = SqliteEcosystemSpec(
     path_resolver=_opencode_db_path,
     cursor_strategy="sqlite_time_updated",
     label="opencode",
+    traj_id_prefix="traj_oc_",
 )
 
 
@@ -352,8 +353,9 @@ class SqliteIngester:
                     msg["_parts"] = parts_by_msg.get(mid, [])
                     messages.append(msg)
 
-                # 生成 traj_id：含 project basename + sid8（同 CC 命名风格）
-                traj_id = self._opencode_traj_id(sid, directory)
+                # 生成 traj_id：含 project basename + sid8（同 CC 命名风格）；
+                # 前缀按 spec.traj_id_prefix 派生，避免对 ecosystem 硬编码 if 分支。
+                traj_id = self._sqlite_traj_id(sid, directory)
                 # 拼 markdown 内容
                 md_content = self._render_session_md(
                     sid=sid, directory=directory, messages=messages,
@@ -435,18 +437,20 @@ class SqliteIngester:
                 out.append("")
         return "\n".join(out)
 
-    @staticmethod
-    def _opencode_traj_id(sid: str, directory: str) -> str:
-        """traj_oc_<projectname>_<sid8> 命名，与 CC bridged 同风格。
+    def _sqlite_traj_id(self, sid: str, directory: str) -> str:
+        """``<spec.traj_id_prefix><projectname>_<sid8>`` 命名，与 CC bridged
+        同风格。
 
-        OpenCode session id 是 `ses_xxxx` 形式（带前缀），sid8 取前 8 字符
-        即可，碰撞概率忽略。
+        OpenCode / ngagent session id 是 ``ses_xxxx`` 形式（带前缀），
+        sid8 取前 8 字符即可，碰撞概率忽略。前缀由 ``spec.traj_id_prefix``
+        决定（``traj_oc_`` for opencode、``traj_ng_`` for ngagent），
+        非硬编码。
         """
         project = _sanitize_for_filename(
             Path(directory).name if directory else "", maxlen=32,
         ) or "unknown"
         sid_short = _sanitize_for_filename(sid, maxlen=8) or "nosid"
-        return f"traj_oc_{project}_{sid_short}"
+        return f"{self.spec.traj_id_prefix}{project}_{sid_short}"
 
 
 # ─────────────────────────────────────────────────────────────────

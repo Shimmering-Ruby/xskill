@@ -111,13 +111,19 @@ class SqliteEcosystemSpec:
     EcosystemSpec 是 JSONL ingester 专用 spec（含 sessions_glob 等 JSONL-only
     字段），不适合 SQLite。SqliteIngester 用本类，字段集中在 SQLite 视角：
     path_resolver 解析到 .db 文件、cursor_strategy 用 time_updated。
+
+    ``traj_id_prefix`` —— 桥过来的 ``traj_*.md`` 文件名 ID 前缀（``traj_oc_`` /
+    ``traj_ng_`` 等）。由 ingester 按 spec 派生 traj_id 而非硬编码——新增同形
+    SQLite 生态（如 ngagent，opencode 的企业分支）时只换 spec 即可，避免
+    ingester 里出现 ``if spec.name == "ngagent"`` 这种熵增分支。
     """
 
-    name: str                                       # "opencode" | "codex" | "claude_code"
+    name: str                                       # "opencode" | "ngagent" | ...
     source_kind: Literal["jsonl", "sqlite"]
     path_resolver: Callable[[Path], Path]           # (home) -> db file / dir
     cursor_strategy: Literal["mtime_offset", "sqlite_time_updated"]
     label: str                                      # adapter / metadata 标签
+    traj_id_prefix: str = "traj_"                   # bridged traj_*.md filename prefix
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -148,6 +154,15 @@ _KNOWN_ECOSYSTEMS: list[dict] = [
         # 文件，不是目录。detect 用 ``source_kind="file"`` 判存在。
         "source_subpath": ".local/share/opencode/opencode.db",
         "bridge_subpath": ".xskill/opencode_sessions",
+        "source_kind": "file",
+    },
+    {
+        "id": "ngagent",
+        # ngagent: opencode 的企业分支，schema 与 opencode 一致，
+        # 但 DB 在 ``~/.local/share/opencode/db/ngagent.db``（子目录里的
+        # 独立 DB 文件，不是 opencode.db），可与 opencode 并存。
+        "source_subpath": ".local/share/opencode/db/ngagent.db",
+        "bridge_subpath": ".xskill/ngagent_sessions",
         "source_kind": "file",
     },
     {

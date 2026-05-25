@@ -870,10 +870,12 @@ def create_app(home_root: Path | str | None = None,
                 from xskill.ecosystems import (
                     detect_known_ecosystems,
                     CCSessionIngester, JsonlIngester, SqliteIngester,
-                    CODEX_SPEC, OPENCODE_SPEC, OPENCLAW_SPEC, CURSOR_SPEC,
+                    CODEX_SPEC, OPENCODE_SPEC, NGAGENT_SPEC,
+                    OPENCLAW_SPEC, CURSOR_SPEC,
                     install_all_to_claude_code,
                     install_all_to_codex,
                     install_all_to_opencode,
+                    install_all_to_ngagent,
                     install_all_to_openclaw,
                     install_all_to_cursor,
                     make_openclaw_canary_flip_hook,
@@ -996,6 +998,36 @@ def create_app(home_root: Path | str | None = None,
                             target_traj_dir=bridge,
                             home_root=_home_root(),
                             spec=OPENCODE_SPEC,
+                            poll_interval=poll_interval,
+                        )
+                        ingester.start()
+                        _watcher_ref[ingester_key] = ingester
+
+                    elif eco == "ngagent":
+                        # ngagent = opencode 企业分支：复用 SqliteIngester
+                        # （schema 一致），只在 spec / skill install 路径上
+                        # 与 opencode 区分。skill 装到 ~/.config/opencode/skills/
+                        # （不和 opencode 共享 ~/.agents/skills/）。
+                        try:
+                            installed = install_all_to_ngagent(
+                                _skill_dir, target_root=_home_root(),
+                            )
+                            logger.info(
+                                "startup install_all_to_ngagent: %d skills installed to ~/.config/opencode/skills/",
+                                len(installed),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "startup install_all_to_ngagent failed", exc_info=True,
+                            )
+                            install_history.record_fail(
+                                skill="<startup_all>", agent="ngagent",
+                                reason=str(e)[:200],
+                            )
+                        ingester = SqliteIngester(
+                            target_traj_dir=bridge,
+                            home_root=_home_root(),
+                            spec=NGAGENT_SPEC,
                             poll_interval=poll_interval,
                         )
                         ingester.start()
