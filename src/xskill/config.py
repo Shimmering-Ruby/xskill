@@ -55,6 +55,11 @@ llm:
                          # reasoning_tokens + content, or meta extraction
                          # returns empty/truncated and falls back to rules.
   # temperature: 0.0     # optional; default 0 (deterministic)
+  # rate_limit:          # optional; absent = unlimited (good for self-hosted)
+  #   rpm: 60            # requests per minute; match your provider plan
+  #   tpm: 100000        # tokens per minute (optional within rate_limit)
+  #   burst: 10          # optional; default = ceil(rate/6)
+  # See docs/adr/0001-rate-limit-diy-not-litellm.md for the design rationale.
 
 # ===== Embedding (vector retrieval) =====
 # Any OpenAI-compatible embeddings endpoint. dim: 0 auto-probes on first call.
@@ -77,7 +82,11 @@ canary:
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:
   poll_interval:  30            # seconds between scans of every watch_dir
-  max_concurrent: 30            # ThreadPoolExecutor size for meta extraction
+  max_concurrent: 4             # parallel LLM calls per scan. Conservative
+                                # placeholder that pairs with llm.rate_limit
+                                # above. Raise to 20-30 for self-hosted vLLM
+                                # or accounts with no concurrency cap. See
+                                # docs/adr/0001-rate-limit-diy-not-litellm.md
   cold_start_threshold: 3       # defer process while >= N trajectories un-indexed
 
 # ===== Team C/S mode (only read by `xskill serve --server`) =====

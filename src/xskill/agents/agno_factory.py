@@ -61,6 +61,51 @@ def _inject_verify_off_if_requested(model_cls, model_kwargs: dict,
                 f"kwarg，改用 SSL_CERT_FILE=/path/to/ca.pem", "error")
 
 
+def _wrap_with_rate_limit(model, llm_cfg: dict):
+    """如果 llm_cfg['rate_limit'] 配置存在,monkey-patch model.invoke
+    在调用 LLM 前先 acquire 共享桶。
+
+    设计取舍:
+    - 不子类化 agno model(agno 版本升级会接口变更,subclass 易腐)
+    - monkey-patch 方法绑定 to instance,只影响这一个 model 实例
+    - reasoning_content / tool_use 等 agno 内部逻辑完全保留
+    """
+    rl_cfg = llm_cfg.get("rate_limit")
+    if not rl_cfg:
+        return model
+    from xskill.utils.rate_limit import (
+        get_or_create_bucket, estimate_tokens, _extract_total_tokens,
+    )
+    bucket = get_or_create_bucket(
+        llm_cfg.get("base_url", ""),
+        rpm=rl_cfg.get("rpm"),
+        tpm=rl_cfg.get("tpm"),
+        burst=rl_cfg.get("burst"),
+    )
+    original_invoke = model.invoke
+
+    def rate_limited_invoke(messages, **kwargs):
+        # agno 把 messages 列表传进来,估算用拼起来的总字符
+        prompt_text = "\n".join(
+            getattr(m, "content", str(m)) or "" for m in (messages or [])
+        )
+        wait = bucket.acquire_rpm(timeout=60)
+        if wait > 0:
+            raise RuntimeError(f"RPM exhausted, wait {wait:.1f}s")
+        estimated = estimate_tokens(prompt_text)
+        wait = bucket.acquire_tpm(estimated, timeout=60)
+        if wait > 0:
+            raise RuntimeError(f"TPM exhausted, wait {wait:.1f}s")
+        resp = original_invoke(messages, **kwargs)
+        actual = _extract_total_tokens(resp)
+        if actual is not None:
+            bucket.reconcile_tpm(estimated=estimated, actual=actual)
+        return resp
+
+    model.invoke = rate_limited_invoke
+    return model
+
+
 def build_chat_model(llm_cfg: dict, log: StreamLog | None = None):
     """根据 ``llm_cfg.base_url`` 路由到合适的 agno model 类。
 
@@ -98,11 +143,13 @@ def build_chat_model(llm_cfg: dict, log: StreamLog | None = None):
         _inject_verify_off_if_requested(DeepSeek, common_kwargs, log)
         if log:
             log(f"使用 agno DeepSeek model class (base_url=api.deepseek.com)", "step")
-        return DeepSeek(**common_kwargs)
+        model = DeepSeek(**common_kwargs)
+        return _wrap_with_rate_limit(model, llm_cfg)
 
     from agno.models.openai import OpenAIChat
     _inject_verify_off_if_requested(OpenAIChat, common_kwargs, log)
-    return OpenAIChat(**common_kwargs)
+    model = OpenAIChat(**common_kwargs)
+    return _wrap_with_rate_limit(model, llm_cfg)
 
 
 def make_default_factory(config: dict) -> Callable[..., Any]:
