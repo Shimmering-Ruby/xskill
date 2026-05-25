@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os, json, logging, time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -55,6 +55,9 @@ class LLMClient:
     # 里可覆盖；缩小可省 token 费但要承担更高 fallback 率。
     max_tokens: int = 10000
     temperature: float = 0.0
+    # 限流配置；None = 不限流(快路径)。结构: {rpm, tpm, burst} 任一可缺。
+    # 详见 src/xskill/utils/rate_limit.py 与 docs/adr/0001。
+    rate_limit_cfg: "Optional[dict]" = field(default=None)
     _client: object = field(default=None, repr=False)
 
     @classmethod
@@ -76,6 +79,8 @@ class LLMClient:
             kwargs["max_tokens"] = int(cfg["max_tokens"])
         if "temperature" in cfg:
             kwargs["temperature"] = float(cfg["temperature"])
+        if "rate_limit" in cfg:
+            kwargs["rate_limit_cfg"] = cfg["rate_limit"]
         return cls(**kwargs)
 
     def _get_client(self):
@@ -91,20 +96,36 @@ class LLMClient:
 
     def chat(self, prompt: str, system: str = "") -> str:
         """单轮对话，返回文本"""
+        if self.rate_limit_cfg:
+            # 走限流 wrapper —— 共享按 base_url 注册的桶
+            from xskill.utils.rate_limit import (
+                RateLimitedLLM, get_or_create_bucket,
+            )
+            bucket = get_or_create_bucket(
+                self.base_url,
+                rpm=self.rate_limit_cfg.get("rpm"),
+                tpm=self.rate_limit_cfg.get("tpm"),
+                burst=self.rate_limit_cfg.get("burst"),
+            )
+            wrapper = RateLimitedLLM(bucket=bucket, inner_call=self._raw_chat)
+            resp = wrapper.call(prompt=prompt, system=system, timeout=60.0)
+            return resp.choices[0].message.content
+        return self._raw_chat(prompt=prompt, system=system).choices[0].message.content
+
+    def _raw_chat(self, *, prompt: str, system: str = ""):
+        """原始 LLM 调用,返回完整 response 对象(供 wrapper reconcile usage)。"""
         client = self._get_client()
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-
         try:
-            resp = client.chat.completions.create(
+            return client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
             )
-            return resp.choices[0].message.content
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             raise

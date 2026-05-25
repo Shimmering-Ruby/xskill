@@ -67,6 +67,29 @@ Run `xskill serve` again — it auto-detects every supported agent on your machi
 xskill registry add /path/to/trajectories
 ```
 
+### Rate limiting (cloud-plan users)
+
+Default `watcher.max_concurrent: 4` is conservative and OK for accounts without
+a hard concurrency cap. If your provider has RPM/TPM quotas (OpenAI Tier-1,
+Azure 60 RPM, OneAPI, etc.) add `rate_limit` under `llm`:
+
+```yaml
+llm:
+  base_url: https://api.deepseek.com
+  model:    deepseek-v4-flash
+  api_key:  YOUR_KEY
+  rate_limit:
+    rpm: 60          # match your provider plan
+    tpm: 100000      # optional within rate_limit
+    burst: 10        # optional; default = ceil(rate/6)
+```
+
+Buckets are shared per `base_url` across `utils/llm` and `agno_factory`
+paths, so the same key is never double-debited. Self-hosted vLLM / high-tier
+accounts should leave `rate_limit` out and raise `max_concurrent` to 20-30.
+
+Design rationale: `docs/adr/0001-rate-limit-diy-not-litellm.md`.
+
 ## Team mode: the killer use case
 
 The way xskill really wants to be deployed in an organization is team mode: one machine is the server, everyone else joins as a thin client, and the whole team works against the same evolving Skill library.
