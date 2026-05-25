@@ -30,7 +30,7 @@ from typing import Any, Callable
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -45,11 +45,63 @@ class Responder:
     ``build(body)`` returns the JSON response dict. Both receive the parsed
     request body. If a responder is single-use, set ``one_shot=True`` and
     the server will pop it after the first hit.
+
+    Special markers in build() return dict:
+    - ``__status``: int — override HTTP status (default 200)
+    - ``__headers``: dict — extra response headers
+    - ``__stream``: True + ``__sse_body``: str — return SSE stream instead of JSON
     """
     name: str
     match: Callable[[dict], bool]
     build: Callable[[dict], dict]
     one_shot: bool = False
+
+
+@dataclass
+class RateLimitResponder:
+    """包装 inner Responder,自带 token bucket 模拟 provider 限流。
+
+    超额时按 over_limit_mode 返回不同形态:
+    - 'http_429'   → 标准 OpenAI 429 + Retry-After header
+    - 'http_503'   → vLLM OOM 形态(500/503)
+    - 'body_error' → OneAPI 风格 200 + body 含 error 字段
+    """
+    name: str
+    inner: Responder
+    rpm: int
+    over_limit_mode: str = "http_429"  # "http_429" | "http_503" | "body_error"
+    one_shot: bool = False
+
+    def __post_init__(self):
+        self._requests_in_window: list = []
+        self._lock = threading.Lock()
+
+    @property
+    def match(self):
+        return self.inner.match
+
+    def build(self, body: dict) -> dict:
+        """返回 inner.build(body) 或 over-limit payload。"""
+        now = time.time()
+        with self._lock:
+            self._requests_in_window = [
+                t for t in self._requests_in_window if now - t < 60
+            ]
+            if len(self._requests_in_window) >= self.rpm:
+                return self._over_limit_payload()
+            self._requests_in_window.append(now)
+        return self.inner.build(body)
+
+    def _over_limit_payload(self) -> dict:
+        if self.over_limit_mode == "http_429":
+            return {
+                "__status": 429,
+                "__headers": {"Retry-After": "2"},
+                "error": {"message": "rate limit exceeded", "type": "rate_limit"},
+            }
+        if self.over_limit_mode == "http_503":
+            return {"__status": 503, "error": {"message": "service unavailable"}}
+        return {"error": {"message": "rate limit", "code": "RATE_LIMIT"}}
 
 
 def _free_port() -> int:
@@ -185,7 +237,7 @@ class FakeLLMServer:
                     if resp.one_shot:
                         self.responders[path].remove(resp)
                     rec["matched_by"] = resp.name
-                    return JSONResponse(payload)
+                    return self._render_payload(payload)
             except Exception as e:  # pragma: no cover -- surface in tests
                 rec["matched_by"] = f"ERROR in {resp.name}: {e}"
                 return JSONResponse(
@@ -193,6 +245,21 @@ class FakeLLMServer:
                 )
         rec["matched_by"] = "(default)"
         return JSONResponse(default_builder(body))
+
+    @staticmethod
+    def _render_payload(payload):
+        """把 Responder.build 返回 dict 转 FastAPI Response,
+        识别 __status / __headers / __stream / __sse_body 特殊标记。"""
+        if not isinstance(payload, dict):
+            return JSONResponse(payload)
+        # Streaming branch
+        if payload.get("__stream"):
+            sse_body = payload.get("__sse_body", "")
+            return StreamingResponse(iter([sse_body]), media_type="text/event-stream")
+        # JSON branch with optional status/headers
+        status = payload.pop("__status", 200)
+        headers = payload.pop("__headers", None)
+        return JSONResponse(payload, status_code=status, headers=headers)
 
     # ── default response builders ────────────────────────────────
 
