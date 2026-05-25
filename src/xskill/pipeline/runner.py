@@ -43,6 +43,7 @@ from xskill.pipeline.registry import (
     increment_retry,
 )
 from xskill.pipeline.trajectory import parse_traj_header
+from xskill.pipeline.trajectory import validate_trajectory_source
 
 logger = logging.getLogger("xskill.watcher")
 
@@ -648,6 +649,18 @@ class DirectoryWatcher:
             ):
                 if self._too_many_in_flight():
                     break
+                validation = validate_trajectory_source(dir_path / fname)
+                if not validation.valid:
+                    update_traj_status(
+                        wd_id, fname, "filtered",
+                        error_msg=validation.reason or "invalid_trajectory",
+                        **kw,
+                    )
+                    logger.info(
+                        "%s filtered before split: %s",
+                        fname, validation.reason,
+                    )
+                    continue
                 update_traj_status(wd_id, fname, "splitting", **kw)
                 fut = self._pool.submit(self._do_split, dir_path, fname)
                 self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "split"}
@@ -753,8 +766,12 @@ class DirectoryWatcher:
         """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id, err)。"""
         from xskill.agents.task_agent import TaskAgent
         md_path = dir_path / fname
-        if not md_path.is_file():
-            return (fname, 0, 0, None, "file not found")
+        validation = validate_trajectory_source(md_path)
+        if not validation.valid:
+            return (
+                fname, 0, 0, None,
+                validation.reason or "invalid_trajectory",
+            )
         traj_id = md_path.stem
         store = self._store_for(dir_path)
         atoms = TaskAgent(llm=self.llm, store=store).run(
