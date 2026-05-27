@@ -14,7 +14,7 @@
 <br>
 
 <p align="center">
-  <img src="docs/assets/demo.gif" width="764"
+  <img src="docs/assets/demo.gif" width="700"
        alt="A coding agent listing the Skills xskill distilled from past sessions">
 </p>
 

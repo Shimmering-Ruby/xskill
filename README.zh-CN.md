@@ -14,7 +14,7 @@
 ---
 
 <p align="center">
-  <img src="docs/assets/demo.gif" width="764"
+  <img src="docs/assets/demo.gif" width="700"
        alt="一个 coding agent 列出 xskill 从过往会话里蒸馏出的 Skill">
 </p>
 
