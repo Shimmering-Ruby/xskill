@@ -37,6 +37,7 @@ src/xskill/_version.py
 .playwright-mcp/
 *-snapshot.yml
 *.png
+!docs/assets/header.png
 
 # pip editable install
 src/*.egg-info/

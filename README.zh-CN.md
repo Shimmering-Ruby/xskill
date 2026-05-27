@@ -1,8 +1,6 @@
 <div align="center">
 
-# xskill
-
-**xskill 让你的 codeAgent 自己进化。**
+<img src="docs/assets/header.png" width="800" alt="xskill — your coding agent, self-evolving.">
 
 [![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
 [![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
