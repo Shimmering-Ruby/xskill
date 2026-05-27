@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -102,6 +103,124 @@ class Trajectory:
 
     def __repr__(self) -> str:
         return f"Trajectory({self.path.name})"
+
+
+# =============================================================================
+# 轨迹入口有效性校验
+# =============================================================================
+
+_USER_HEADER_RE = re.compile(r"^##\s+User\b", re.IGNORECASE)
+_SECTION_HEADER_RE = re.compile(r"^##\s+\S+")
+
+
+@dataclass(frozen=True)
+class TrajectoryValidation:
+    """标准 ``traj_*.md`` 文件进入 AtomTask 流水线前的校验结果。"""
+
+    valid: bool
+    reason: str | None = None
+    detail: str = ""
+    user_intent_count: int = 0
+
+
+def _read_trajectory_text(path: Path) -> tuple[str | None, str | None]:
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        return None, f"{type(e).__name__}: {e}"
+    if raw == b"":
+        return "", None
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _extract_user_sections(md_text: str) -> tuple[list[str], bool]:
+    """从标准化 trajectory markdown 中提取 ``## User`` 段落正文。
+
+    返回 ``(sections, has_malformed_user_header)``。TaskAgent 只认可
+    ``## User`` 标题作为切分信号，因此这里使用同一类信号做入口判定。
+    """
+    sections: list[str] = []
+    current: list[str] | None = None
+    malformed_user_header = False
+
+    for line in md_text.splitlines(keepends=True):
+        stripped = line.strip()
+        if _SECTION_HEADER_RE.match(stripped):
+            if current is not None:
+                sections.append("".join(current))
+                current = None
+            if _USER_HEADER_RE.match(stripped):
+                current = []
+            elif stripped.lower().startswith("## user"):
+                malformed_user_header = True
+            continue
+        if current is not None:
+            current.append(line)
+
+    if current is not None:
+        sections.append("".join(current))
+    return sections, malformed_user_header
+
+
+def validate_trajectory_source(path: str | Path) -> TrajectoryValidation:
+    """校验 trajectory 是否可进入 Atom 拆分/索引/候选池流程。
+
+    该函数只检查已经标准化落盘的 ``traj_*.md``。不同 agent 的原生格式
+    先由各 adapter 转成统一 markdown，再走这里，从而避免每个来源各写一套
+    空轨迹判断。
+    """
+    p = Path(path)
+    if not p.is_file():
+        return TrajectoryValidation(
+            valid=False,
+            reason="unreadable_source",
+            detail=f"trajectory file not found: {p}",
+        )
+
+    text, read_error = _read_trajectory_text(p)
+    if read_error is not None:
+        return TrajectoryValidation(
+            valid=False,
+            reason="unreadable_source",
+            detail=read_error,
+        )
+    assert text is not None
+    if text == "":
+        return TrajectoryValidation(
+            valid=False,
+            reason="empty_content",
+            detail="trajectory file is empty",
+        )
+    if not text.strip():
+        return TrajectoryValidation(
+            valid=False,
+            reason="whitespace_only",
+            detail="trajectory file contains only whitespace",
+        )
+
+    sections, malformed_user_header = _extract_user_sections(text)
+    if malformed_user_header:
+        return TrajectoryValidation(
+            valid=False,
+            reason="malformed_trajectory",
+            detail="malformed user section header",
+        )
+
+    non_empty_user_sections = [s for s in sections if s.strip()]
+    if not non_empty_user_sections:
+        return TrajectoryValidation(
+            valid=False,
+            reason="no_user_intent",
+            detail="no non-empty ## User section found",
+        )
+
+    return TrajectoryValidation(
+        valid=True,
+        user_intent_count=len(non_empty_user_sections),
+    )
 
 
 # =============================================================================

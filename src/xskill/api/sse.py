@@ -145,6 +145,7 @@ async def api_index(req: IndexRequest):
         try:
             from xskill.pipeline.atom import AtomTaskStore
             from xskill.agents.task_agent import TaskAgent
+            from xskill.pipeline.trajectory import validate_trajectory_source
 
             config = load_config()
             log_fn = make_sse_log(queue)
@@ -181,6 +182,18 @@ async def api_index(req: IndexRequest):
 
             agent = TaskAgent(llm=llm, store=store)
             for idx, md in enumerate(md_files, 1):
+                validation = validate_trajectory_source(md)
+                if not validation.valid:
+                    log_fn(
+                        f"[{idx}/{total}] {md.name} filtered: {validation.reason}",
+                        "step",
+                    )
+                    _push(queue, "progress", {
+                        "step": "拆分 AtomTask",
+                        "current": idx,
+                        "total": total,
+                    })
+                    continue
                 try:
                     atoms = agent.run(traj_id=md.stem, traj_path=md)
                     log_fn(f"[{idx}/{total}] {md.name} -> {len(atoms)} atoms", "step")
@@ -234,6 +247,7 @@ async def api_process(req: ProcessRequest):
             from xskill.pipeline.atom import AtomTaskStore
             from xskill.agents.task_agent import TaskAgent
             from xskill.pipeline.runner import process_atom_task
+            from xskill.pipeline.trajectory import validate_trajectory_source
             from xskill.agents.agno_factory import make_default_factory
             from xskill.skill.git import ensure_repo
 
@@ -243,6 +257,14 @@ async def api_process(req: ProcessRequest):
             traj_path = Path(req.traj_path)
             if not traj_path.is_file():
                 _fail(queue, f"traj file not found: {traj_path}")
+                return
+            validation = validate_trajectory_source(traj_path)
+            if not validation.valid:
+                _finish(queue, {
+                    "status": "filtered",
+                    "traj": traj_path.name,
+                    "reason": validation.reason,
+                })
                 return
 
             _push(queue, "progress", {
@@ -322,6 +344,7 @@ async def api_batch(req: BatchRequest):
             from xskill.pipeline.atom import AtomTaskStore
             from xskill.agents.task_agent import TaskAgent
             from xskill.pipeline.runner import process_atom_task
+            from xskill.pipeline.trajectory import validate_trajectory_source
             from xskill.agents.agno_factory import make_default_factory
             from xskill.skill.git import ensure_repo
 
@@ -359,6 +382,13 @@ async def api_batch(req: BatchRequest):
 
             # Phase 1: 整批拆 atom + 重建索引
             for idx, md in enumerate(md_files, 1):
+                validation = validate_trajectory_source(md)
+                if not validation.valid:
+                    log_fn(
+                        f"[{idx}/{total}] filtered: {md.name}: {validation.reason}",
+                        "step",
+                    )
+                    continue
                 try:
                     atoms = TaskAgent(llm=llm, store=store).run(
                         traj_id=md.stem, traj_path=md,
