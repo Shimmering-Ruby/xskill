@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/header.png" width="800" alt="xskill — your coding agent, self-evolving.">
+<img src="docs/assets/header.png" width="800" alt="xskill — One solves it. Everyone gets it.">
 
 [![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
 [![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
