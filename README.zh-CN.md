@@ -2,10 +2,10 @@
 
 <img src="docs/assets/header.png" width="800" alt="xskill — One solves it. Everyone gets it.">
 
-[![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
-[![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![GitHub](https://img.shields.io/badge/github-SkillNerds%2Fxskill-181717?logo=github)](https://github.com/SkillNerds/xskill)
+[![PyPI](https://img.shields.io/pypi/v/xskill.svg?style=flat-square&color=E07A5F&label=PyPI)](https://pypi.org/project/xskill/)
+[![Python](https://img.shields.io/pypi/pyversions/xskill.svg?style=flat-square&color=4A90B8)](https://pypi.org/project/xskill/)
+[![License](https://img.shields.io/badge/license-MIT-5B8C5A?style=flat-square)](LICENSE)
+[![GitHub](https://img.shields.io/badge/github-SkillNerds%2Fxskill-D4A574?style=flat-square&logo=github&logoColor=white)](https://github.com/SkillNerds/xskill)
 
 [English](./README.md) · **简体中文**
 

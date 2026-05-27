@@ -2,27 +2,23 @@
 
 <img src="docs/assets/header.png" width="800" alt="xskill — One solves it. Everyone gets it.">
 
-[![PyPI version](https://img.shields.io/pypi/v/xskill.svg?color=blue)](https://pypi.org/project/xskill/)
-[![Python](https://img.shields.io/pypi/pyversions/xskill.svg)](https://pypi.org/project/xskill/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![GitHub](https://img.shields.io/badge/github-SkillNerds%2Fxskill-181717?logo=github)](https://github.com/SkillNerds/xskill)
+[![PyPI](https://img.shields.io/pypi/v/xskill.svg?style=flat-square&color=E07A5F&label=PyPI)](https://pypi.org/project/xskill/)
+[![Python](https://img.shields.io/pypi/pyversions/xskill.svg?style=flat-square&color=4A90B8)](https://pypi.org/project/xskill/)
+[![License](https://img.shields.io/badge/license-MIT-5B8C5A?style=flat-square)](LICENSE)
+[![GitHub](https://img.shields.io/badge/github-SkillNerds%2Fxskill-D4A574?style=flat-square&logo=github&logoColor=white)](https://github.com/SkillNerds/xskill)
 
 **English** · [简体中文](./README.zh-CN.md)
 
 </div>
 
----
+<br>
 
 <p align="center">
   <img src="docs/assets/demo.gif" width="764"
        alt="A coding agent listing the Skills xskill distilled from past sessions">
 </p>
 
-## News
-
-- **2026-05-23** — Officially open-source, `v0.5.0` released: team mode (client-server), trajectory redaction, Python 3.9 support, no `git` binary needed at runtime. See the [release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0).
-- **2026-05-20** — MIT-licensed open source; on PyPI: `pip install xskill`.
-- **2026-05-12** — Claude Code, Codex, OpenCode supported; OpenClaw and Cursor connected.
+<br>
 
 ## What problem it solves
 
@@ -88,7 +84,7 @@ accounts should leave `rate_limit` out and raise `max_concurrent` to 20-30.
 
 Design rationale: `docs/adr/0001-rate-limit-diy-not-litellm.md`.
 
-## Team mode: the killer use case
+## Team mode — the killer use case
 
 The way xskill really wants to be deployed in an organization is team mode: one machine is the server, everyone else joins as a thin client, and the whole team works against the same evolving Skill library.
 
@@ -143,6 +139,12 @@ A few narrow LLM agents do the work. One splits a trajectory into single-intent 
 - Web UI for browsing the library and viewing canary stats
 - Skill marketplace — import / export portable bundles
 - Multi-tenant libraries (per-team `skill_dir`)
+
+## News
+
+- **2026-05-23** — Officially open-source, `v0.5.0` released: team mode (client-server), trajectory redaction, Python 3.9 support, no `git` binary needed at runtime. See the [release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0).
+- **2026-05-20** — MIT-licensed open source; on PyPI: `pip install xskill`.
+- **2026-05-12** — Claude Code, Codex, OpenCode supported; OpenClaw and Cursor connected.
 
 ## License
 
