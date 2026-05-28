@@ -49,8 +49,12 @@ llm:
   api_key:  YOUR_KEY
 
 embedding:
-  base_url: https://api.deepseek.com
-  model:    deepseek-embedding
+  # DeepSeek does NOT provide embeddings. Alternatives:
+  # Alibaba DashScope:  base_url=https://dashscope.aliyuncs.com/compatible-mode/v1  model=text-embedding-v4
+  # OpenAI:             base_url=https://api.openai.com/v1                          model=text-embedding-3-small
+  # Ollama (local):     base_url=http://localhost:11434/v1                          model=nomic-embed-text
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model:    text-embedding-v4
   api_key:  YOUR_KEY
   dim:      0
 ```

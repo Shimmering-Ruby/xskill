@@ -63,9 +63,15 @@ llm:
 
 # ===== Embedding (vector retrieval) =====
 # Any OpenAI-compatible embeddings endpoint. dim: 0 auto-probes on first call.
+#
+# DeepSeek does NOT provide an embeddings API. Choose one of these:
+#   • Alibaba DashScope:  base_url=https://dashscope.aliyuncs.com/compatible-mode/v1  model=text-embedding-v4
+#   • OpenAI:             base_url=https://api.openai.com/v1                          model=text-embedding-3-small
+#   • Ollama (local):     base_url=http://localhost:11434/v1                          model=nomic-embed-text
+#   • Jina AI:            base_url=https://api.jina.ai/v1                             model=jina-embeddings-v3
 embedding:
-  base_url: https://api.deepseek.com
-  model:    deepseek-embedding
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model:    text-embedding-v4
   api_key:  PUT_YOUR_EMBEDDING_API_KEY_HERE
   dim:      0
   # api: openai | multimodal   # optional; default openai. "multimodal" for
