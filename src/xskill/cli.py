@@ -62,6 +62,8 @@ def cmd_registry(args, xskill) -> int:
         # ecosystem 是来源标签：``manual`` = 用户手动注册；其他如
         # ``claude_code`` = daemon 启动时自动 detect 出来的生态目录。
         # 同时用 codex / opencode 等其他工具时一眼能区分来源。
+        # 表头与数据行都用 \t 分隔；解析方只取含 ecosystem 名的数据行即可。
+        print("ID\tECOSYSTEM\tTRAJ\tINDEXED\tLABEL\tPATH")
         for w in dirs:
             print(
                 f"{w.id}\t{w.ecosystem}\t{w.traj_count}\t{w.indexed_count}\t"
@@ -69,6 +71,73 @@ def cmd_registry(args, xskill) -> int:
             )
         return 0
     return 1
+
+
+def _standalone_watch_dir_count() -> int:
+    """轻量读 registry.db 里 watch_dirs 行数（不建表、不走 facade/config）。
+
+    用于判断本机是否有 standalone/server 数据。库文件或表不存在都视作 0
+    ——这是"尚未初始化"的正常状态，不是错误，故显式查表而非吞异常。
+    """
+    import sqlite3
+    from xskill.config import get_registry_db_path
+    db = get_registry_db_path()
+    if not db.is_file():
+        return 0
+    conn = sqlite3.connect(str(db))
+    try:
+        has_table = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='watch_dirs'"
+        ).fetchone()
+        if not has_table:
+            return 0
+        return int(conn.execute("SELECT COUNT(*) FROM watch_dirs").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def cmd_registry_list_client() -> int:
+    """team 客户端模式的 ``registry list``。
+
+    瘦客户端不写 ``watch_dirs`` / ``trajectories`` 表（那是 standalone/server
+    的存储），它靠实时 ``detect_known_ecosystems`` 采集 + ``team_client_cursor``
+    记上传进度。所以这里**现算**视图：每个探测到的生态显示
+
+        ECOSYSTEM  COLLECTED  UPLOADED  SOURCE
+
+    - COLLECTED = 该生态 bridge 目录下 ``traj_*.json`` 数（已镜像采集的轨迹）
+    - UPLOADED  = 上述轨迹里已记入 cursor（已上传 server）的数
+    - SOURCE    = 用户真实的原生目录（如 ~/.claude/projects），非内部 bridge
+
+    不依赖 config.yaml / XSkill 门面——纯客户端机器也能直接看。
+    """
+    import json
+    from pathlib import Path
+    from xskill.config import XSKILL_HOME
+    from xskill.ecosystems import detect_known_ecosystems
+
+    home = XSKILL_HOME.parent  # 与 XSKILL_HOME 同源,避免 home 解析漂移
+    cursor_path = XSKILL_HOME / "team_client_cursor.json"
+    uploaded_ids: set[str] = set()
+    if cursor_path.is_file():
+        uploaded_ids = set(json.loads(cursor_path.read_text(encoding="utf-8")))
+
+    dets = detect_known_ecosystems(home_root=home)
+    if not dets:
+        print("(no agent ecosystems detected)")
+        return 0
+    print("ECOSYSTEM\tCOLLECTED\tUPLOADED\tSOURCE")
+    for det in dets:
+        bridge = Path(det["bridge"])
+        bridge_ids = (
+            {p.stem for p in bridge.glob("traj_*.json")}
+            if bridge.is_dir() else set()
+        )
+        collected = len(bridge_ids)
+        uploaded = len(bridge_ids & uploaded_ids)
+        print(f"{det['ecosystem']}\t{collected}\t{uploaded}\t{det['source']}")
+    return 0
 
 
 def cmd_connect(args) -> int:
@@ -295,6 +364,16 @@ def main() -> int:
     # connect 是瘦客户端：不读 config.yaml / 不需要 llm.api_key / 不构造 XSkill 门面
     if args.command == "connect":
         return cmd_connect(args)
+
+    # team 客户端的 `registry list`：本机是 client（有 team_client.json）且没有
+    # standalone 数据（watch_dirs 为空）时，改走现算视图。放在 config/facade
+    # 之前——纯客户端没 config.yaml 也能直接看。standalone/server 机（watch_dirs
+    # 非空）走原路，不受影响（哪怕本机也存了 team_client.json）。
+    if args.command == "registry" and args.registry_action == "list":
+        from xskill.config import get_team_client_state_path
+        if (get_team_client_state_path().is_file()
+                and _standalone_watch_dir_count() == 0):
+            return cmd_registry_list_client()
 
     # 首次运行 auto-init：serve / registry / search 都需要 config.yaml。
     # 不存在就写一份模板并要求用户填 key 后重跑——比直接抛 traceback 友好。
