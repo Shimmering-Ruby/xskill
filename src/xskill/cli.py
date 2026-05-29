@@ -107,7 +107,11 @@ def cmd_connect(args) -> int:
                 # 走指纹回查或新发。损坏的 state 接下来会被新的 save 覆盖。
                 existing_client_id = None
         import httpx
-        http = httpx.Client(base_url=server_url, timeout=30.0)
+        # 默认 trust_env=False：team server 是已知、可直连的内网主机，绕开公司
+        # 代理（SWG）才是正确语义——经代理常因代理出口连不上 server 而 504。
+        # --use-proxy 时恢复读取系统/环境代理（含 Windows 注册表代理）。
+        http = httpx.Client(base_url=server_url, timeout=30.0,
+                            trust_env=args.use_proxy)
         try:
             client_id = register_with_server(
                 http, token=args.token,
@@ -129,7 +133,9 @@ def cmd_connect(args) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         import httpx
-        http = httpx.Client(base_url=state.server_url, timeout=30.0)
+        # 同上：复用连接的后台同步也走直连，否则"注册过了同步全 504"。
+        http = httpx.Client(base_url=state.server_url, timeout=30.0,
+                            trust_env=args.use_proxy)
         print(f"reconnecting: client_id={state.client_id}  server={state.server_url}")
 
     # skill working copies 复用标准 skill_dir（~/.xskill/skill/）——瘦客户端
@@ -231,6 +237,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="join token（server 启动 `xskill serve --server` 时打印）")
     p_conn.add_argument("--label", default="",
                         help="本 client 的可读标签（默认主机名）")
+    p_conn.add_argument(
+        "--use-proxy", action="store_true",
+        help="经系统/环境代理连 server（默认直连，绕开公司 SWG 代理）。"
+             "仅当本机唯一出网路径是代理、且代理能到 server 时才需要。",
+    )
 
     return p
 
