@@ -828,6 +828,18 @@ def create_app(home_root: Path | str | None = None,
             return _watcher_ref["instance"].stats
         return {"running": False, "message": "watcher not started"}
 
+    # -- Usage / cost stats (Issue #43) --
+    @app.get("/api/v1/stats")
+    async def api_stats():
+        from xskill.pipeline.registry import usage_summary
+        watcher = (_watcher_ref["instance"].stats
+                   if _watcher_ref.get("instance") else None)
+        return {
+            "role": "server" if _config.get("team", {}).get("server") else "client",
+            "cost": usage_summary(),
+            "pipeline": watcher,
+        }
+
     # ------------------------------------------------------------------
     @app.on_event("startup")
     async def _startup():

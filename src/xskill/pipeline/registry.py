@@ -60,6 +60,19 @@ CREATE TABLE IF NOT EXISTS trajectories (
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(watch_dir_id, filename)
 );
+
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT DEFAULT (datetime('now')),
+    step         TEXT,
+    model        TEXT,
+    prompt       INTEGER DEFAULT 0,
+    completion   INTEGER DEFAULT 0,
+    total        INTEGER DEFAULT 0,
+    cost_usd     REAL DEFAULT 0,
+    price_source TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(ts);
 """
 
 
@@ -120,6 +133,58 @@ def _migrate(conn: sqlite3.Connection) -> None:
         " WHERE has_meta=1 AND has_embedding=0 AND (status IS NULL OR status='discovered')"
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# LLM usage / cost accounting  (Issue #43)  —— 唯一"无家可归"数据的持久化
+# ---------------------------------------------------------------------------
+
+def record_usage(*, step: str, model: str, prompt: int, completion: int,
+                 total: int, cost_usd: float, price_source: str,
+                 db_path: Optional[Path] = None) -> None:
+    """追加一条 LLM/embedding 调用的 token+成本记录。旁路 telemetry。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO llm_usage(step,model,prompt,completion,total,cost_usd,price_source)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (step, model, int(prompt), int(completion), int(total),
+             float(cost_usd), price_source),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def usage_summary(db_path: Optional[Path] = None) -> dict:
+    """跨重启的持久汇总:累计 token/$、今日 $、按 step / model 分解。"""
+    conn = get_connection(db_path)
+    try:
+        tot = conn.execute(
+            "SELECT COALESCE(SUM(total),0) t, COALESCE(SUM(cost_usd),0) c, COUNT(*) n"
+            " FROM llm_usage"
+        ).fetchone()
+        today = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd),0) FROM llm_usage WHERE ts >= date('now')"
+        ).fetchone()[0]
+        estimated = conn.execute(
+            "SELECT COUNT(*) FROM llm_usage WHERE price_source != 'config'"
+        ).fetchone()[0] > 0
+        by_step = [dict(r) for r in conn.execute(
+            "SELECT step, SUM(total) tokens, SUM(cost_usd) cost, COUNT(*) calls"
+            " FROM llm_usage GROUP BY step ORDER BY cost DESC"
+        ).fetchall()]
+        by_model = [dict(r) for r in conn.execute(
+            "SELECT model, SUM(total) tokens, SUM(cost_usd) cost, COUNT(*) calls"
+            " FROM llm_usage GROUP BY model ORDER BY cost DESC"
+        ).fetchall()]
+        return {
+            "total_tokens": tot["t"], "total_usd": round(tot["c"], 6),
+            "total_calls": tot["n"], "today_usd": round(today, 6),
+            "estimated": estimated, "by_step": by_step, "by_model": by_model,
+        }
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

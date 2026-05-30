@@ -77,6 +77,15 @@ embedding:
   # api: openai | multimodal   # optional; default openai. "multimodal" for
                                # vision-style embedding endpoints.
 
+# ===== Pricing (optional; for `xskill stats` cost estimation) =====
+# Cost is ESTIMATED from response.usage tokens × price (USD per 1M tokens).
+# Resolution order: this `pricing:` map  >  the vendored price table
+# (src/xskill/data/model_prices.json, refreshed at build time)  >  `default`.
+# Leave this out entirely to rely on the vendored table + default below.
+# pricing:
+#   default: { input_per_1m: 1.0, output_per_1m: 3.0, embed_per_1m: 0.05 }
+#   deepseek-v4-flash: { input_per_1m: 0.14, output_per_1m: 0.28, cache_hit_per_1m: 0.014 }
+
 # ===== Canary (gradual rollout) =====
 canary:
   enabled:       true

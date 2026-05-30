@@ -219,6 +219,32 @@ def cmd_connect(args) -> int:
     return 0
 
 
+def cmd_stats(args) -> int:
+    """token/成本统计。直接读 registry(~/.xskill/registry.db),不需要 config/facade。"""
+    import json as _json
+    import time
+    from xskill.pipeline.registry import usage_summary
+    from xskill.usage import render_stats
+
+    def _emit() -> None:
+        s = usage_summary()
+        if args.json:
+            print(_json.dumps({"cost": s}, ensure_ascii=False, indent=2))
+        else:
+            print(render_stats(s, role="client"))
+
+    if args.watch and not args.json:
+        try:
+            while True:
+                print("\033[2J\033[H", end="")  # 清屏 + 光标归位
+                _emit()
+                time.sleep(2)
+        except KeyboardInterrupt:
+            return 0
+    _emit()
+    return 0
+
+
 def cmd_search(args, xskill) -> int:
     target = args.search_target
     if target == "traj":
@@ -312,6 +338,13 @@ def build_parser() -> argparse.ArgumentParser:
              "仅当本机唯一出网路径是代理、且代理能到 server 时才需要。",
     )
 
+    p_stats = sub.add_parser(
+        "stats", help="Show token usage & estimated cost (Issue #43)",
+    )
+    p_stats.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_stats.add_argument("--watch", action="store_true",
+                         help="htop 式整屏刷新（每 2s）")
+
     return p
 
 
@@ -364,6 +397,10 @@ def main() -> int:
     # connect 是瘦客户端：不读 config.yaml / 不需要 llm.api_key / 不构造 XSkill 门面
     if args.command == "connect":
         return cmd_connect(args)
+
+    # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
+    if args.command == "stats":
+        return cmd_stats(args)
 
     # team 客户端的 `registry list`：本机是 client（有 team_client.json）且没有
     # standalone 数据（watch_dirs 为空）时，改走现算视图。放在 config/facade

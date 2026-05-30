@@ -63,6 +63,9 @@ xskill = "xskill.cli:main"
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.package-data]
+xskill = ["data/*.json"]   # vendored 价格表(Issue #43),随 wheel 发布
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
