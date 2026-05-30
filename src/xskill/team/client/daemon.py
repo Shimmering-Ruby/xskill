@@ -97,7 +97,8 @@ class TeamClient:
         if not pending:
             return 0
         req = UploadRequest(trajectories=[
-            UploadTrajectory(traj_id=p.traj_id, content=p.content, sha256=p.sha256)
+            UploadTrajectory(traj_id=p.traj_id, content=p.content, sha256=p.sha256,
+                             model=p.model)
             for p in pending
         ])
         resp = self.http.post("/api/v1/team/upload", headers=self._hdr(),

@@ -54,6 +54,35 @@ def test_mark_uploaded_excludes_next_time(tmp_path):
     assert len(col.pending()) == 1
 
 
+def test_pending_carries_sidecar_model(tmp_path):
+    home = tmp_path / "home"
+    bridge = _bridge(home)
+    md = bridge / "traj_cc_x_001.md"
+    md.write_text("# body", encoding="utf-8")
+    # 同名 .json sidecar 带 model
+    (bridge / "traj_cc_x_001.json").write_text(
+        '{"model": "claude-opus-4-7", "cwd": "/secret"}', encoding="utf-8")
+    old = time.time() - 600
+    os.utime(md, (old, old))
+    col = TeamCollector(cursor_path=tmp_path / "cursor.json",
+                        quiet_seconds=180, home_root=home)
+    p = col.pending()[0]
+    assert p.model == "claude-opus-4-7"
+
+
+def test_pending_no_sidecar_model_empty(tmp_path):
+    home = tmp_path / "home"
+    bridge = _bridge(home)
+    md = bridge / "traj_cc_x_001.md"
+    md.write_text("# body", encoding="utf-8")          # 没有 .json sidecar
+    old = time.time() - 600
+    os.utime(md, (old, old))
+    col = TeamCollector(cursor_path=tmp_path / "cursor.json",
+                        quiet_seconds=180, home_root=home)
+    p = col.pending()[0]
+    assert p.model == ""                                # 不报错，空串
+
+
 def test_redaction_applied_to_content(tmp_path):
     home = tmp_path / "home"
     bridge = _bridge(home)

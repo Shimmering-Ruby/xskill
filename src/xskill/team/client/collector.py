@@ -32,6 +32,19 @@ class PendingTrajectory:
     traj_id: str
     content: str       # 已脱敏
     sha256: str        # 脱敏后 content 的 sha256
+    model: str = ""    # 用户 agent 模型，取自同名 .json sidecar 的 "model"
+
+
+def _sidecar_model(md_path: Path) -> str:
+    """读 ``<traj>.md`` 同目录同名 ``.json`` sidecar 里的 ``model``；
+    无 sidecar / 无该键 / 解析失败 → 空串（保持 unknown，不抛错不影响上传）。"""
+    jp = md_path.with_suffix(".json")
+    if not jp.is_file():
+        return ""
+    try:
+        return str(json.loads(jp.read_text(encoding="utf-8")).get("model") or "")
+    except (OSError, json.JSONDecodeError):
+        return ""
 
 
 class TeamCollector:
@@ -142,5 +155,6 @@ class TeamCollector:
             traj_id = md.stem
             if self._cursor.get(traj_id) == sha:
                 continue   # 这个版本已上传过
-            out.append(PendingTrajectory(traj_id=traj_id, content=content, sha256=sha))
+            out.append(PendingTrajectory(traj_id=traj_id, content=content, sha256=sha,
+                                         model=_sidecar_model(md)))
         return out
