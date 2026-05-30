@@ -243,11 +243,26 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def render_stats(summary: dict, *, role: str = "client", watcher: Optional[dict] = None) -> str:
-    """把 usage_summary(+可选 watcher) 渲成一屏人类可读文本仪表盘。"""
+def render_stats(summary: dict, *, status: Optional[dict] = None) -> str:
+    """把 status(进程/角色/处理模型) + usage_summary 渲成一屏文本仪表盘。"""
+    status = status or {}
+    role = status.get("role", "?")
+    bar_line = " " + "─" * 56
+    lines = [f"  xskill stats · {role}", bar_line]
+
+    # ── 进程 + 处理模型 ──
+    if status.get("running"):
+        lines.append(f"  ● serve 运行中   pid {status.get('pid')} · :{status.get('port')}")
+    else:
+        lines.append("  ○ serve 未运行")
+    if status.get("llm_model"):
+        prov = (status.get("llm_base_url") or "").split("://")[-1].split("/")[0]
+        em = f"  · embed {status.get('embed_model')}" if status.get("embed_model") else ""
+        lines.append(f"  处理模型  {status['llm_model']} @ {prov}{em}")
+    lines.append(bar_line)
+
+    # ── 成本/用量 ──
     est = " · 估算" if summary.get("estimated") else ""
-    lines = [f"  xskill stats · {role}"]
-    lines.append(" " + "─" * 56)
     lines.append(f"  💰 成本{est}      今日 ${summary.get('today_usd', 0):.4f}"
                  f"  ·  累计 ${summary.get('total_usd', 0):.4f}")
     lines.append(f"     {_fmt_tokens(summary.get('total_tokens', 0))} tokens"
@@ -259,12 +274,7 @@ def render_stats(summary: dict, *, role: str = "client", watcher: Optional[dict]
             bar = "█" * int(round((s["cost"] or 0) / mx * 14))
             lines.append(f"       {s['step']:<13}{bar:<14}  "
                          f"{_fmt_tokens(s['tokens'] or 0):>7}  ${s['cost'] or 0:.4f}")
-    if watcher:
-        lines.append("")
-        lines.append("  🔄 流水线  " + " · ".join(
-            f"{k} {v}" for k, v in watcher.items()
-            if isinstance(v, int) and k not in ("polls",)))
-    lines.append(" " + "─" * 56)
+    lines.append(bar_line)
     return "\n".join(lines)
 
 

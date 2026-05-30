@@ -109,3 +109,37 @@ def test_load_vendored_price_table():
     t = load_price_table(None)
     p, src = t.resolve("deepseek-v4-flash")
     assert src == "static" and p.input_per_1m > 0
+
+
+# ── batch1: render header + runtime ──────────────────────────────
+from xskill.usage import render_stats
+
+
+def test_render_stats_running_with_models():
+    out = render_stats(
+        {"today_usd": 0.5, "total_usd": 1.0, "total_tokens": 1200, "total_calls": 3,
+         "estimated": True,
+         "by_step": [{"step": "atom_split", "tokens": 1000, "cost": 0.4, "calls": 2}]},
+        status={"running": True, "pid": 42, "port": 8000, "role": "standalone",
+                "llm_model": "deepseek-v4-flash",
+                "llm_base_url": "https://api.deepseek.com",
+                "embed_model": "text-embedding-v4"})
+    assert "serve 运行中" in out and "pid 42" in out and "standalone" in out
+    assert "deepseek-v4-flash @ api.deepseek.com" in out
+    assert "atom_split" in out and "今日 $0.5000" in out
+
+
+def test_render_stats_not_running():
+    out = render_stats(
+        {"today_usd": 0, "total_usd": 0, "total_tokens": 0, "total_calls": 0,
+         "estimated": False, "by_step": []},
+        status={"running": False, "role": "client"})
+    assert "serve 未运行" in out and "· client" in out
+
+
+def test_runtime_alive():
+    import os
+    from xskill.runtime import _alive
+    assert _alive(os.getpid()) is True
+    assert _alive(2_000_000_000) is False
+    assert _alive(None) is False

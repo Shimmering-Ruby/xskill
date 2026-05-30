@@ -38,6 +38,8 @@ def cmd_serve(args, xskill) -> int:
         if not home_root.is_dir():
             print(f"error: --home 目录不存在: {home_root}", file=sys.stderr)
             return 2
+    from xskill.runtime import write_running
+    write_running(port=args.port, mode="server" if args.server else "standalone")
     xskill.serve(host=args.host, port=args.port, home_root=home_root,
                  server_mode=args.server)
     return 0
@@ -224,14 +226,16 @@ def cmd_stats(args) -> int:
     import json as _json
     import time
     from xskill.pipeline.registry import usage_summary
+    from xskill.runtime import read_status
     from xskill.usage import render_stats
 
     def _emit() -> None:
         s = usage_summary()
+        st = read_status()
         if args.json:
-            print(_json.dumps({"cost": s}, ensure_ascii=False, indent=2))
+            print(_json.dumps({"status": st, "cost": s}, ensure_ascii=False, indent=2))
         else:
-            print(render_stats(s, role="client"))
+            print(render_stats(s, status=st))
 
     if args.watch and not args.json:
         try:
