@@ -143,3 +143,39 @@ def test_runtime_alive():
     assert _alive(os.getpid()) is True
     assert _alive(2_000_000_000) is False
     assert _alive(None) is False
+
+
+# ── batch2: source_model / model_share / 模型占比渲染 ────────────
+def test_sidecar_model(tmp_path):
+    import json as _j
+    from xskill.pipeline.registry import _sidecar_model
+    md = tmp_path / "traj_x.md"; md.write_text("x", encoding="utf-8")
+    (tmp_path / "traj_x.json").write_text(_j.dumps({"model": "qwen-max"}), encoding="utf-8")
+    assert _sidecar_model(md) == "qwen-max"
+    md2 = tmp_path / "traj_y.md"; md2.write_text("y", encoding="utf-8")
+    assert _sidecar_model(md2) is None
+
+
+def test_model_share(tmp_path):
+    from xskill.pipeline import registry as R
+    db = tmp_path / "r.db"
+    conn = R.get_connection(db)
+    conn.execute("INSERT INTO watch_dirs(path) VALUES('/x')")
+    wid = conn.execute("SELECT id FROM watch_dirs").fetchone()[0]
+    for fn, m in [("a.md", "qwen"), ("b.md", "qwen"), ("c.md", "deepseek"), ("d.md", None)]:
+        conn.execute("INSERT INTO trajectories(watch_dir_id,filename,source_model)"
+                     " VALUES(?,?,?)", (wid, fn, m))
+    conn.commit(); conn.close()
+    d = {x["model"]: x for x in R.model_share(db)}
+    assert d["qwen"]["trajs"] == 2 and d["qwen"]["pct"] == 50.0
+    assert d["unknown"]["trajs"] == 1
+
+
+def test_render_stats_model_share():
+    out = render_stats(
+        {"today_usd": 0, "total_usd": 0, "total_tokens": 0, "total_calls": 0,
+         "estimated": False, "by_step": []},
+        status={"running": False, "role": "server"},
+        models=[{"model": "qwen", "trajs": 50, "pct": 50.0},
+                {"model": "unknown", "trajs": 50, "pct": 50.0}])
+    assert "用户模型" in out and "qwen" in out and "50.0%" in out

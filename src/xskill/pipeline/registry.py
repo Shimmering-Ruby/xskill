@@ -15,6 +15,7 @@ watch_dir + trajectory 反查走这个类。
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS trajectories (
     skill_generated TEXT,
     skill_used    TEXT,
     canary_side   TEXT,
+    source_model  TEXT,
     ux_score      REAL,
     error_msg     TEXT,
     retry_count   INTEGER DEFAULT 0,
@@ -109,6 +111,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("tasks_extracted", "INTEGER DEFAULT 0"),
         ("last_offset", "INTEGER DEFAULT 0"),
         ("last_atom_id", "TEXT"),
+        # 用户 agent 模型(批2,Issue #43 关联):discover 时从 .json sidecar 写入
+        ("source_model", "TEXT"),
     ]
     for col, typedef in migrations:
         if col not in cols:
@@ -183,6 +187,32 @@ def usage_summary(db_path: Optional[Path] = None) -> dict:
             "total_calls": tot["n"], "today_usd": round(today, 6),
             "estimated": estimated, "by_step": by_step, "by_model": by_model,
         }
+    finally:
+        conn.close()
+
+
+def _sidecar_model(md_path: Path) -> Optional[str]:
+    """从 traj_*.md 的同名 .json sidecar 读用户 agent 模型(meta['model'])。"""
+    try:
+        meta = json.loads(md_path.with_suffix(".json").read_text(encoding="utf-8"))
+        m = meta.get("model")
+        return str(m) if m else None
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def model_share(db_path: Optional[Path] = None) -> list[dict]:
+    """用户 agent 模型分布(按轨迹数),供 server stats 显示占比。None → 'unknown'。"""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT COALESCE(source_model,'unknown') AS model, COUNT(*) AS trajs"
+            " FROM trajectories GROUP BY COALESCE(source_model,'unknown')"
+            " ORDER BY trajs DESC"
+        ).fetchall()
+        total = sum(r["trajs"] for r in rows) or 1
+        return [{"model": r["model"], "trajs": r["trajs"],
+                 "pct": round(100 * r["trajs"] / total, 1)} for r in rows]
     finally:
         conn.close()
 
@@ -292,9 +322,10 @@ def discover_trajectories(
             mtime = md.stat().st_mtime
             if md.name not in existing:
                 conn.execute(
-                    "INSERT INTO trajectories (watch_dir_id, filename, file_mtime)"
-                    " VALUES (?, ?, ?)",
-                    (watch_dir_id, md.name, mtime),
+                    "INSERT INTO trajectories"
+                    " (watch_dir_id, filename, file_mtime, source_model)"
+                    " VALUES (?, ?, ?, ?)",
+                    (watch_dir_id, md.name, mtime, _sidecar_model(md)),
                 )
                 new_files.append(md.name)
             else:

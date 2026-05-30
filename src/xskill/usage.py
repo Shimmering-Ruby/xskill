@@ -243,8 +243,9 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def render_stats(summary: dict, *, status: Optional[dict] = None) -> str:
-    """把 status(进程/角色/处理模型) + usage_summary 渲成一屏文本仪表盘。"""
+def render_stats(summary: dict, *, status: Optional[dict] = None,
+                 models: Optional[list] = None) -> str:
+    """把 status(进程/角色/处理模型) + usage_summary + 用户模型占比 渲成文本仪表盘。"""
     status = status or {}
     role = status.get("role", "?")
     bar_line = " " + "─" * 56
@@ -275,6 +276,16 @@ def render_stats(summary: dict, *, status: Optional[dict] = None) -> str:
             lines.append(f"       {s['step']:<13}{bar:<14}  "
                          f"{_fmt_tokens(s['tokens'] or 0):>7}  ${s['cost'] or 0:.4f}")
     lines.append(bar_line)
+
+    # ── 用户 agent 模型占比(轨迹来源)──
+    models = models or []
+    if models:
+        lines.append("  🧩 用户模型 (轨迹占比)")
+        for m in models[:8]:
+            bar = "█" * int(round((m.get("pct") or 0) / 100 * 14))
+            lines.append(f"     {m['model']:<22}{bar:<14} {m.get('pct', 0):>5.1f}%"
+                         f"  ({m.get('trajs', 0)})")
+        lines.append(bar_line)
     return "\n".join(lines)
 
 

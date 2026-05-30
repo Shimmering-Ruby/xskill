@@ -831,12 +831,13 @@ def create_app(home_root: Path | str | None = None,
     # -- Usage / cost stats (Issue #43) --
     @app.get("/api/v1/stats")
     async def api_stats():
-        from xskill.pipeline.registry import usage_summary
+        from xskill.pipeline.registry import model_share, usage_summary
         watcher = (_watcher_ref["instance"].stats
                    if _watcher_ref.get("instance") else None)
         return {
             "role": "server" if _config.get("team", {}).get("server") else "client",
             "cost": usage_summary(),
+            "models": model_share(),
             "pipeline": watcher,
         }
 

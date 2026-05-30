@@ -225,17 +225,19 @@ def cmd_stats(args) -> int:
     """token/成本统计。直接读 registry(~/.xskill/registry.db),不需要 config/facade。"""
     import json as _json
     import time
-    from xskill.pipeline.registry import usage_summary
+    from xskill.pipeline.registry import model_share, usage_summary
     from xskill.runtime import read_status
     from xskill.usage import render_stats
 
     def _emit() -> None:
         s = usage_summary()
         st = read_status()
+        ms = model_share()
         if args.json:
-            print(_json.dumps({"status": st, "cost": s}, ensure_ascii=False, indent=2))
+            print(_json.dumps({"status": st, "cost": s, "models": ms},
+                              ensure_ascii=False, indent=2))
         else:
-            print(render_stats(s, status=st))
+            print(render_stats(s, status=st, models=ms))
 
     if args.watch and not args.json:
         try:
