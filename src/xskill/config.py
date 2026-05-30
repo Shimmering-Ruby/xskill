@@ -91,8 +91,14 @@ canary:
   enabled:       true
   probability:   0.2            # on a retrieval hit, route to staging with prob p
   min_samples:   5              # need >= N UX scores on each side to decide
+                                # (single-bucket / un-scoped path)
   max_days_hold: 14             # max staging lifetime; discarded on timeout
   rotate_interval: 300          # standalone canary time-window rotation (seconds)
+  scope_top_n:   2              # model-scoped canary: only the top-N user models
+                                # by usage take part (routing + scoring); unknown
+                                # and non-top-N traffic stays on main
+  total_samples: 20             # model-scoped path: total UX scores needed on
+                                # each side before a weighted decision
 
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:

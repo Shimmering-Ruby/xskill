@@ -32,6 +32,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -40,6 +41,17 @@ from pathlib import Path
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 
 logger = logging.getLogger("xskill.task_agent")
+
+
+def _sidecar_model(traj_path: Path) -> str:
+    """读 ``<traj>.md`` 同名 ``.json`` sidecar 的 ``model``；无则空串。"""
+    jp = traj_path.with_suffix(".json")
+    if not jp.is_file():
+        return ""
+    try:
+        return str(json.loads(jp.read_text(encoding="utf-8")).get("model") or "")
+    except (OSError, json.JSONDecodeError):
+        return ""
 
 
 SYSTEM_PROMPT = """你是 AtomTask 拆分员。给你一段 agent 与用户的对话轨迹（markdown），
@@ -178,6 +190,7 @@ class TaskAgent:
         text = traj_path.read_text(encoding="utf-8")
         lines = text.splitlines(keepends=True)
         total_lines = len(lines)
+        source_model = _sidecar_model(traj_path)   # 轨迹的用户模型，继承给每个 atom
 
         # resume：start_line 是 1-based 行号。store 空时 last_offset 返回 0。
         start_line = self.store.last_offset(traj_id) or 1
@@ -229,6 +242,7 @@ class TaskAgent:
                 post_atom_id=None,
                 context_prefix=self._context_prefix(text, lines, os_line),
                 raw_segment="".join(lines[os_line - 1:oe_line - 1]),
+                source_model=source_model,
             ))
 
         # 本批内部相邻 atom 互填 pre/post

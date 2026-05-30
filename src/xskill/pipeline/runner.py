@@ -500,10 +500,15 @@ class DirectoryWatcher:
         """
         if self.skill_dir is None or not self.skill_dir.is_dir():
             return
-        from xskill.canary import AtomCanary
-        from xskill.canary import CanaryConfig
+        from xskill.canary import AtomCanary, CanaryConfig, eligible_models
+        from xskill.pipeline.registry import model_share
         from xskill.skill.git import run_git
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
+        # 模型分桶权重:使用量 top-N 模型的人口占比(unknown 等已被排除)。
+        # 有合格模型 → 按模型加权裁决;一个都没有(全 unknown)→ None = 单桶均分,
+        # 不让纯 unknown 部署的灰度永远卡住。
+        weights = eligible_models(model_share(**self._db_kw()),
+                                  canary_cfg.scope_top_n) or None
         for d in sorted(self.skill_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("."):
                 continue
@@ -513,7 +518,8 @@ class DirectoryWatcher:
             if code != 0:
                 continue  # 无 staging，跳过
             try:
-                decision = AtomCanary(skill_dir=d).check_and_decide(config=canary_cfg)
+                decision = AtomCanary(skill_dir=d).check_and_decide(
+                    config=canary_cfg, weights=weights)
                 action = decision.get("action", "")
                 if action in ("promoted", "rejected", "timeout_discarded"):
                     logger.info("canary decision %s: %s — %s",
@@ -1018,6 +1024,7 @@ class DirectoryWatcher:
                     atom_id=atom.atom_id, skill_name=skill_name,
                     side=header["side"], commit_sha=header.get("sha", ""),
                     score=result["score"], reasons=result["reasons"],
+                    user_model=atom.source_model,
                 )
                 self._stats["scores"] += 1
             except Exception:
@@ -1042,9 +1049,11 @@ class DirectoryWatcher:
             return
         from xskill.canary import AtomCanary
         from xskill.canary import (
-            CanaryConfig, has_staging, main_sha, pick_side, staging_sha,
+            CanaryConfig, eligible_models, has_staging, main_sha,
+            pick_side_scoped, staging_sha,
         )
         from xskill.pipeline.atom import score_atom
+        from xskill.pipeline.registry import model_share
 
         # 找到该 wd 的 dir_path + client_id（label）
         client_id = None
@@ -1065,6 +1074,8 @@ class DirectoryWatcher:
         if not atoms:
             return
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
+        # 模型分桶路由:top-N 模型才可能进 staging,unknown/非 top-N 一律 main。
+        eligible = eligible_models(model_share(**kw), canary_cfg.scope_top_n) or None
         used_any = False
         for atom in atoms:
             for skill_name in (atom.used_skills or []):
@@ -1072,7 +1083,9 @@ class DirectoryWatcher:
                 if not (skill_sub / ".git").is_dir():
                     continue
                 if has_staging(skill_sub):
-                    side = pick_side(client_id, skill_name, canary_cfg.probability)
+                    side = pick_side_scoped(
+                        client_id, skill_name, canary_cfg.probability,
+                        user_model=atom.source_model, eligible=eligible)
                     sha = staging_sha(skill_sub) if side == "staging" else main_sha(skill_sub)
                 else:
                     side = "main"
@@ -1085,6 +1098,7 @@ class DirectoryWatcher:
                         atom_id=atom.atom_id, skill_name=skill_name,
                         side=side, commit_sha=sha or "",
                         score=result["score"], reasons=result["reasons"],
+                        user_model=atom.source_model,
                     )
                     self._stats["scores"] += 1
                     used_any = True
