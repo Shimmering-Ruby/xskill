@@ -137,6 +137,24 @@ def test_render_stats_not_running():
     assert "serve 未运行" in out and "· client" in out
 
 
+def _empty_summary():
+    return {"today_usd": 0, "total_usd": 0, "total_tokens": 0, "total_calls": 0,
+            "estimated": False, "by_step": []}
+
+
+def test_render_price_warn_shown_when_failing():
+    out = render_stats(_empty_summary(), status={"running": False, "role": "x"},
+                       price_health={"ok": False, "kind": "schema_changed",
+                                     "stale_days": 12.0, "error": "..."})
+    assert "价格表" in out and "上游格式变更" in out and "12d" in out
+
+
+def test_render_price_warn_hidden_when_healthy():
+    out = render_stats(_empty_summary(), status={"running": False, "role": "x"},
+                       price_health={"ok": True, "kind": None, "stale_days": 0.1})
+    assert "价格表" not in out
+
+
 def test_runtime_alive():
     import os
     from xskill.runtime import _alive

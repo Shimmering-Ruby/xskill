@@ -6,9 +6,11 @@ Issue #43。设计要点(详见会话定稿):
   内容(技能事件/流水线/贡献)都是对已有状态单元的只读视图,不在这里存。
 - **成本 = 估算**:token × 单价。没有余额、没有第二套真值来源。
 - **定价不引任何包**(litellm/tokencost/tiktoken 全 ban,见 ADR-0001):
-  build 时 vendor 一份 ``data/model_prices.json``(USD / 1M token),运行时
-  零网络。解析优先级 ``config.pricing[model]`` > vendored 表 > ``pricing.default``
-  可配兜底单价 —— ``cost`` 永不为 None,只标 ``price_source``。
+  build 时 vendor 一份 ``data/model_prices.json``(USD / 1M token)做离线 seed;
+  运行时 ``prices.maybe_refresh`` 后台 best-effort 刷新用户缓存(无网/报错绝不
+  阻塞、绝不抛错)。解析优先级 ``config.pricing[model]`` > 用户缓存 > vendored
+  seed > ``pricing.default`` 可配兜底单价 —— ``cost`` 永不为 None,只标
+  ``price_source``。
 - **旁路 best-effort**:``record_*`` 永不抛错、永不阻断流水线。
 - token 数沿用 rate_limit 的字符粗估 + ``response.usage`` 自校准。
 
@@ -214,14 +216,31 @@ def _vendored_path() -> Path:
 
 
 def load_price_table(config_pricing: Optional[dict] = None,
-                     vendored_path: Optional[Path] = None) -> PriceTable:
+                     vendored_path: Optional[Path] = None,
+                     cache_path: Optional[Path] = None) -> PriceTable:
+    """vendored seed 打底,运行时刷新得来的用户缓存**覆盖**其上(较新)。
+
+    用合并而非替换:缓存里有的(上游 litellm)取新价,seed 独有的(自维护的
+    deepseek-v4-flash 等 litellm 缺失条目)保留,不会因刷新而退化成 default。
+    """
+    from xskill import prices
     p = vendored_path or _vendored_path()
+    table = _read_prices(p) or {}
+    cp = cache_path if cache_path is not None else prices.user_cache_path()
+    if cp and cp.exists():
+        cache = _read_prices(cp)
+        if cache:
+            table = {**table, **cache}
+    if not table:
+        logger.warning("price table unreadable (cache=%s vendored=%s); default-only", cp, p)
+    return PriceTable(table, config_pricing)
+
+
+def _read_prices(path: Path) -> Optional[dict]:
     try:
-        vendored = json.loads(p.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        logger.warning("vendored price table unreadable at %s; default-only", p)
-        vendored = {}
-    return PriceTable(vendored, config_pricing)
+        return None
 
 
 def _persist(step: str, model: str, usage: Usage, usd: float, source: str) -> None:
@@ -243,13 +262,37 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
+_PRICE_WARN_REASON = {
+    "schema_changed": "上游格式变更", "source_moved": "上游地址失效",
+    "unreachable": "上游不可达", "unknown": "刷新异常",
+}
+
+
+def _price_warn_line(health: Optional[dict]) -> Optional[str]:
+    """价格表刷新失效时的看板告警行;健康/无记录 → None(不显示)。"""
+    if not health or health.get("ok"):
+        return None
+    reason = _PRICE_WARN_REASON.get(health.get("kind"), "刷新异常")
+    sd = health.get("stale_days")
+    aged = f"{sd:g}d 未刷新" if sd is not None else "从未成功刷新"
+    return f"  ⚠ 价格表 {aged} · {reason},沿用旧价"
+
+
 def render_stats(summary: dict, *, status: Optional[dict] = None,
-                 models: Optional[list] = None) -> str:
+                 models: Optional[list] = None,
+                 price_health: Optional[dict] = None) -> str:
     """把 status(进程/角色/处理模型) + usage_summary + 用户模型占比 渲成文本仪表盘。"""
     status = status or {}
     role = status.get("role", "?")
     bar_line = " " + "─" * 56
     lines = [f"  xskill stats · {role}", bar_line]
+    if price_health is None:
+        try:
+            from xskill import prices
+            price_health = prices.refresh_health()
+        except Exception:  # pylint: disable=broad-exception-caught
+            price_health = None
+    warn = _price_warn_line(price_health)
 
     # ── 进程 + 处理模型 ──
     if status.get("running"):
@@ -268,6 +311,8 @@ def render_stats(summary: dict, *, status: Optional[dict] = None,
                  f"  ·  累计 ${summary.get('total_usd', 0):.4f}")
     lines.append(f"     {_fmt_tokens(summary.get('total_tokens', 0))} tokens"
                  f"  ·  {summary.get('total_calls', 0)} calls")
+    if warn:
+        lines.append(warn)
     steps = summary.get("by_step") or []
     if steps:
         mx = max((s["cost"] or 0) for s in steps) or 1e-9
@@ -299,6 +344,12 @@ def get_ledger() -> UsageLedger:
     if _LEDGER is None:
         with _LEDGER_LOCK:
             if _LEDGER is None:
+                # 后台 best-effort 刷新价格缓存:无网/报错都不阻塞、不抛错。
+                try:
+                    from xskill import prices
+                    prices.maybe_refresh()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    logger.debug("price refresh trigger skipped", exc_info=True)
                 pricing = None
                 try:
                     from xskill.config import get_config
