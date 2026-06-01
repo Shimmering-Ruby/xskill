@@ -1,2 +1,84 @@
-<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>xskill 控制台</title></head>
-<body><h1>xskill 控制台</h1><p>placeholder — Task 6 替换</p></body></html>
+<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>xskill 控制台</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/css/tabler.min.css">
+<style>
+  /* 原 B 配色：海洋青 + 暖沙 */
+  :root{--tblr-primary:#1C7A8C;--tblr-primary-rgb:28,122,140;}
+  body{background:radial-gradient(900px 300px at 90% -120px,#FFE79A55,transparent 60%),#F6F1E7;color:#3a2d20}
+  .navbar-vertical{background:linear-gradient(180deg,#1C7A8C,#155f6e)!important}
+  .card{border:1px solid #E6D3AC;background:#FFFDF7;border-radius:14px}
+  .card-sm .h1,.kpi{color:#1C7A8C}
+  .subheader{color:#9a7c4e}.page-pretitle{color:#9a7c4e!important}
+  .nav-link.active{background:rgba(255,255,255,.14)!important;border-radius:8px}
+  header.navbar{background:#FFFDF7!important;border-bottom:1px solid #E6D3AC}
+  header .form-control{background:#FFF8EA;border-color:#E6D3AC}
+  .hero-accent{height:5px;border-radius:14px 14px 0 0;background:linear-gradient(90deg,#2A9DB0,#FFCB3D,#E2725B)}
+  .mini{font-size:12px;color:#9a7c4e}.sec-page{display:none}.sec-page.on{display:block}
+</style></head>
+<body>
+<div class="page">
+  <aside class="navbar navbar-vertical navbar-expand-lg" data-bs-theme="dark"><div class="container-fluid">
+    <div class="navbar-brand px-0 fs-2 fw-bold text-white">🐚 xskill <span class="badge bg-yellow text-dark ms-1" style="font-size:10px">控制台</span></div>
+    <div class="collapse navbar-collapse"><ul class="navbar-nav pt-2" id="nav">
+      <li class="nav-item"><a class="nav-link text-white" data-pg="overview" href="#">📊 总览</a></li>
+      <li class="nav-item"><a class="nav-link text-white-50" data-pg="cost" href="#">💰 成本 & 用量</a></li>
+      <li class="nav-item"><a class="nav-link text-white-50" data-pg="profile" href="#">🏄 用户 & 画像</a></li>
+      <li class="nav-item"><a class="nav-link text-white-50" data-pg="eco" href="#">🏝 生态目录</a></li>
+    </ul></div>
+  </div></aside>
+
+  <div class="page-wrapper">
+    <header class="navbar navbar-expand-md d-print-none"><div class="container-xl">
+      <div class="col"><div class="input-icon"><span class="input-icon-addon">🔍</span>
+        <input type="text" class="form-control" placeholder="搜索技能 / 轨迹 / 用户…"></div></div>
+      <div class="navbar-nav flex-row ms-3"><span class="badge bg-teal-lt me-2 my-auto" data-m="status.role">—</span>
+        <span class="text-secondary small my-auto" id="snap">🕒 实时</span></div>
+    </div></header>
+
+    <div class="page-header"><div class="container-xl"><div class="row align-items-center">
+      <div class="col"><div class="page-pretitle">xskill 控制台 🏖</div><h2 class="page-title" id="pgname">总览</h2></div>
+    </div></div></div>
+
+    <div class="page-body"><div class="container-xl">
+    <!-- 总览 -->
+    <div class="sec-page on" id="pg-overview">
+      <div class="row row-deck row-cards">
+        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">轨迹总数 🌊</div><div class="h1 mb-0" data-m="overview.trajs">—</div></div></div></div>
+        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">原子总数 ⚛</div><div class="h1 mb-0" data-m="overview.atoms">—</div></div></div></div>
+        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">今日成本 💰</div><div class="h1 mb-0" data-m="status.today_usd">—</div></div></div></div>
+        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">平均 ux 🏄</div><div class="h1 mb-0" data-m="overview.avg_ux">—</div></div></div></div>
+      </div>
+
+      <div class="row row-cards mt-1"><div class="col-12"><div class="card"><div class="card-header"><h3 class="card-title">📐 关键指标</h3></div>
+        <div class="card-body"><div class="row g-3 text-center">
+          <div class="col-6 col-md"><div class="kpi h2 mb-0" data-m="overview.avg_atoms_per_traj">—</div><div class="mini">单轨迹均原子</div></div>
+          <div class="col-6 col-md"><div class="kpi h2 mb-0" data-m="overview.skill_yield">—</div><div class="mini">技能产出率</div></div>
+          <div class="col-6 col-md"><div class="kpi h2 mb-0" data-m="overview.success_rate">—</div><div class="mini">处理成功率</div></div>
+          <div class="col-6 col-md"><div class="kpi h2 mb-0" data-m="overview.retry_rate">—</div><div class="mini">重试率</div></div>
+          <div class="col-6 col-md"><div class="h2 mb-0" style="color:#c79a3a">—<sup>*</sup></div><div class="mini" title="需「推荐→使用」埋点">推荐触发率 ⓘ</div></div>
+          <div class="col-6 col-md"><div class="h2 mb-0" style="color:#c79a3a">—<sup>*</sup></div><div class="mini" title="需原子级采纳埋点">原子采纳率 ⓘ</div></div>
+        </div><div class="mini mt-2"><sup>*</sup> 需新增埋点才能算准，见设计文档 §5 backlog。</div></div></div></div></div>
+
+      <div class="row row-cards mt-1">
+        <div class="col-lg-6"><div class="card"><div class="card-header"><h3 class="card-title">🔬 按生态对比</h3></div>
+          <div class="table-responsive"><table class="table card-table table-vcenter">
+            <thead><tr><th>生态</th><th class="text-end">轨迹</th><th class="text-end">均原子</th><th class="text-end">产 skill</th><th class="text-end">平均 ux</th></tr></thead>
+            <tbody id="eco-body"><tr><td colspan="5" class="text-secondary">加载中…</td></tr></tbody></table></div></div></div>
+        <div class="col-lg-6"><div class="card"><div class="card-header"><h3 class="card-title">🔬 按用户模型对比</h3></div>
+          <div class="table-responsive"><table class="table card-table table-vcenter">
+            <thead><tr><th>模型</th><th class="text-end">轨迹</th><th class="text-end">均原子</th><th class="text-end">产 skill</th><th class="text-end">平均 ux</th></tr></thead>
+            <tbody id="model-body"><tr><td colspan="5" class="text-secondary">加载中…</td></tr></tbody></table></div></div></div>
+      </div>
+    </div>
+
+    <!-- 其余分区 v0 占位（后续接 /api/v1/stats、画像、生态详情） -->
+    <div class="sec-page" id="pg-cost"><div class="card"><div class="card-body text-secondary">成本 & 用量详情接 <code>/api/v1/stats</code>（后续）。</div></div></div>
+    <div class="sec-page" id="pg-profile"><div class="card"><div class="card-body text-secondary">用户 & 画像详情（后续）。</div></div></div>
+    <div class="sec-page" id="pg-eco"><div class="card"><div class="card-body text-secondary">生态目录详情接 <code>/api/v1/registry/dirs</code>（后续）。</div></div></div>
+    </div></div>
+  </div>
+</div>
+<script src="app.js" defer></script>
+</body></html>
