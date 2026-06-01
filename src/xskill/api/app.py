@@ -1244,4 +1244,8 @@ def create_app(home_root: Path | str | None = None,
                 except Exception:
                     logger.warning("failed to stop %s", k, exc_info=True)
 
+    # 看板:仅当 config.dashboard.enabled 时挂载(默认不挂)
+    from xskill.dashboard.mount import mount_dashboard
+    mount_dashboard(app, _config)
+
     return app
