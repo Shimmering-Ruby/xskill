@@ -677,12 +677,6 @@ def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
     data = C.load_candidates(target)
     data, was_new = C.add_atom_contribution(data, atom_id, ws)
     C.save_candidates(target, data)
-    # 埋点：原子被采纳进 skill（best-effort，失败不阻断聚类）
-    try:
-        from xskill.pipeline.registry import record_atom_adoption
-        record_atom_adoption(atom_id=atom_id, skill=slug, weightscore=ws, was_new=was_new)
-    except Exception:  # pylint: disable=broad-exception-caught
-        logger.debug("atom adoption telemetry skipped", exc_info=True)
     buffer_total = sum(int(c.get("weightscore", 0)) for c in data["candidates"])
     verb = "new" if was_new else "overwrite"
     return (f"{verb}: skill={slug} atom={atom_id} weightscore={ws} "

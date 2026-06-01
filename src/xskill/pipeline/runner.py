@@ -1175,6 +1175,10 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
     skill_name = hit[0] if hit else None
     weightscore = hit[1] if hit else None
 
+    # 注：原子采纳埋点不放这里——process_atom_task 是 watcher 并发处理每个 atom
+    # 的热路径，逐 atom 同步写 registry 会与 candidates 晋升抢时序(实测显著恶化
+    # 时序敏感测试)。原子采纳率改由 follow-up(批量/从 skill 状态派生)实现。
+
     return {
         "action": "clustered",
         "atom_id": atom_id,
