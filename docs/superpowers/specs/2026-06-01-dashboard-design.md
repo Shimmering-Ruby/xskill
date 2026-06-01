@@ -1,9 +1,21 @@
 # Design Doc — xskill 控制台 Dashboard（serve 内置 Web 面板）
 
 - 日期：2026-06-01
-- 状态：草案，待评审
+- 状态：v0 已落地（`feat/dashboard`）；埋点 backlog 待后续
+- 实现计划：`docs/superpowers/plans/2026-06-01-dashboard.md`
 - 关联：Issue #43（成本统计）、`docs/deployment-mode.md`、`docs/adr/0001-rate-limit-diy-not-litellm.md`
 - 设计原型（沙滩品牌版 B · 内容丰富版）：`xskill.wiki/dashboarddemo/m-brand-rich.html`
+
+## 0. v0 落地状态（2026-06-01）
+
+已实现（`src/xskill/dashboard/` 子包 + `tests/test_dashboard_*.py`）：
+- `config.dashboard` 段（enabled/public/password）
+- `DashboardMetrics`：overview 衍生率 + 按生态/按模型分域对比（纯读 registry）
+- `DashboardAccessMiddleware`：默认仅本机 + 可选 HTTP Basic 密码
+- `router` 端点 `/api/v1/dashboard/overview`、`/by-domain` + 静态壳 `/` + `/app.js`
+- `create_app` 按 config 挂载；前端 B 版式运行时取数
+
+未落地（埋点 backlog，见 §5.1）：推荐触发率、原子采纳率精确值、canary 晋升率 —— 前端已占位 + ⓘ tooltip；成本/画像/生态详情分区前端为占位，后续接既有 `/api/v1/stats` 等。
 
 ## 1. 目标与范围
 
