@@ -116,6 +116,12 @@ team:
     traj_root:    ~/.xskill/team_trajectories
     skill_slots:  100
     ranked_slots: 80
+
+# ===== Dashboard (the built-in web console served by `xskill serve`) =====
+dashboard:
+  enabled:  false      # 设 true 才挂载控制台到 serve 的 /
+  public:   false      # 默认仅本机可达；true 才放行公网（仅看板路由）
+  password: ""         # 可选；非空时看板要求 HTTP Basic 登录（API 不受影响）
 """
 
 
@@ -161,6 +167,16 @@ def get_config() -> dict:
     if not _config:
         load_config()
     return _config
+
+
+def dashboard_config(cfg: dict) -> dict:
+    """从已加载 config 取 dashboard 段，缺字段用显式默认（非 fallback 兼容）。"""
+    d = cfg.get("dashboard") or {}
+    return {
+        "enabled": bool(d.get("enabled", False)),
+        "public": bool(d.get("public", False)),
+        "password": str(d.get("password", "") or ""),
+    }
 
 
 def get_skill_dir() -> Path:
