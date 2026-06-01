@@ -134,7 +134,7 @@ class DashboardMetrics:
             if u > 0:
                 adopted_skills += 1
             by_skill.append({"skill": skill, "recommended": rec, "used": u,
-                             "rate": round(min(u / rec * 100, 100), 1) if rec else 0.0})
+                             "rate": round(min(u / rec * 100, 100.0), 1) if rec else 0.0})
         return {"overall": _pct(adopted_skills, len(recs)), "by_skill": by_skill}
 
     @staticmethod
