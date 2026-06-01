@@ -83,9 +83,9 @@ async function loadModels() {
 
 async function loadUsers() {
   const d = await j('api/v1/dashboard/users');
-  put('users.summary', `共 ${d.total} 个用户`);
+  put('users.summary', `共 ${d.total} 个用户 · 悬浮/点击行高亮其标签`);
   rows('users-body', (d.users || []).map(u =>
-    `<tr><td><code>${esc(u.client_id)}</code></td><td class="text-end">${u.trajs}</td>`
+    `<tr data-uid="${esc(u.client_id)}"><td><code>${esc(u.client_id)}</code></td><td class="text-end">${u.trajs}</td>`
     + `<td class="text-end">${u.atoms}</td><td class="text-secondary">${esc(u.last_active) || '—'}</td></tr>`).join('')
     || '<tr><td colspan="4" class="text-secondary">暂无团队用户（非 team server 或尚无 client 上传）</td></tr>');
 }
@@ -99,9 +99,37 @@ async function loadTags() {
   const max = Math.max(...tags.map(t => t.count)), min = Math.min(...tags.map(t => t.count));
   el.innerHTML = tags.map(t => {
     const sz = (12 + (max > min ? (t.count - min) / (max - min) * 18 : 6)).toFixed(0);
-    return `<span class="badge bg-teal-lt me-2" title="${esc(t.count)} 次" style="font-size:${sz}px">${esc(t.tag)}</span>`;
+    const users = (t.users || []).map(esc).join(' ');
+    return `<span class="badge bg-teal-lt me-2 tagchip" data-users="${users}" title="${esc(t.count)} 次" style="font-size:${sz}px">${esc(t.tag)}</span>`;
   }).join(' ');
 }
+
+// 用户 ⇄ 标签联动：悬浮(或点击 pin)某用户行 → 高亮其贡献的标签、淡化其余。
+let _pinnedUid = null;
+function highlightUser(uid) {
+  document.querySelectorAll('#tagcloud .tagchip').forEach(ch => {
+    const us = (ch.dataset.users || '').split(' ').filter(Boolean);
+    const on = uid && us.includes(uid);
+    ch.classList.toggle('hot', !!on);
+    ch.classList.toggle('dim', !!uid && !on);
+  });
+  document.querySelectorAll('#users-body tr[data-uid]').forEach(tr =>
+    tr.classList.toggle('table-active', !!uid && tr.dataset.uid === uid));
+}
+document.addEventListener('mouseover', e => {
+  const tr = e.target.closest('#users-body tr[data-uid]');
+  if (tr && !_pinnedUid) highlightUser(tr.dataset.uid);
+});
+document.addEventListener('mouseout', e => {
+  const tr = e.target.closest('#users-body tr[data-uid]');
+  if (tr && !_pinnedUid) highlightUser(null);
+});
+document.addEventListener('click', e => {
+  const tr = e.target.closest('#users-body tr[data-uid]');
+  if (!tr) return;
+  _pinnedUid = (_pinnedUid === tr.dataset.uid) ? null : tr.dataset.uid;
+  highlightUser(_pinnedUid);
+});
 
 async function loadCanary() {
   const c = await j('api/v1/dashboard/canary');

@@ -219,21 +219,28 @@ class DashboardMetrics:
         原子文件散在各 watch_dir 的 ``<traj_id>/tasks/atom_*.json``。watch_dir 路径
         可能是别的 XSKILL_HOME（容器 ``/root/.xskill``）——只读镜像跑在宿主时按
         ``.xskill`` 段重映射到本地 registry.db 同级目录,使读盘对独立实例与 serve
-        内置挂载都成立。返回按出现次数降序的 ``[{tag, count}]`` 前 top_n。
+        内置挂载都成立。
+
+        每个标签附带 ``users``：贡献过该标签的 team 用户(client_id)列表——前端据此
+        实现"悬浮用户 → 高亮其标签"。team_client watch_dir 的 label 即 client_id；
+        本机(非 team)目录的原子计入 count 但不归属任何用户。
+        返回按出现次数降序的 ``[{tag, count, users}]`` 前 top_n。
         """
-        from collections import Counter
+        from collections import Counter, defaultdict
         from xskill.pipeline.atom import AtomTaskStore
         from xskill.config import get_registry_db_path
         db_dir = Path(self._db).parent if self._db else get_registry_db_path().parent
         counter: Counter = Counter()
+        tag_users: dict[str, set] = defaultdict(set)
         conn = get_connection(self._db)
         try:
-            paths = [r["path"] for r in conn.execute(
-                "SELECT DISTINCT path FROM watch_dirs").fetchall()]
+            wds = [(r["path"], r["label"], r["ecosystem"]) for r in conn.execute(
+                "SELECT path, label, ecosystem FROM watch_dirs").fetchall()]
         finally:
             conn.close()
-        for wp in paths:
+        for wp, label, eco in wds:
             root = _resolve_local_root(wp, db_dir)
+            client = label if (eco == "team_client" and label) else None
             try:
                 if not root.is_dir():
                     continue
@@ -242,9 +249,12 @@ class DashboardMetrics:
                         t = str(tag).strip().lower()
                         if t:
                             counter[t] += 1
+                            if client:
+                                tag_users[t].add(client)
             except OSError:
                 continue  # 某个目录不可读/路径异常,跳过不阻断整体聚合
-        return [{"tag": t, "count": n} for t, n in counter.most_common(top_n)]
+        return [{"tag": t, "count": n, "users": sorted(tag_users.get(t, ()))}
+                for t, n in counter.most_common(top_n)]
 
     def canary_sides(self) -> list[dict]:
         """灰度分桶分布:轨迹按 canary_side(staging/main) 计数 + 平均 ux(纯 registry)。"""
