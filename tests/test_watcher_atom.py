@@ -31,6 +31,11 @@ class _StubAgno:
         head = (self.instructions[0] if self.instructions else "")[:60]
         if "TaskClusterAgent" in head:
             import re
+            import time as _t
+            # 真聚类要等大模型(按秒)；stub 模拟一点耗时,让"逐 atom 写 registry"
+            # 这类毫秒级旁路开销相对可忽略,贴近生产时序(否则瞬时 stub 会放大
+            # 旁路写入、扰动 candidates 晋升竞态)。
+            _t.sleep(0.03)
             m = re.search(r"atom_id:\s*(\S+)", user_msg)
             atom_id = m.group(1) if m else None
             if "new_skill_folder" in self.tools:

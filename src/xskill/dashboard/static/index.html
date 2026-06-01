@@ -60,11 +60,11 @@
           <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="overview.success_rate">—</div><div class="mini">处理成功率</div></div>
           <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="overview.retry_rate">—</div><div class="mini">重试率</div></div>
           <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="rates.trigger">—</div><div class="mini" title="被推荐的 skill 被采用占比(skill 粗粒度近似)">推荐触发率 ⓘ</div></div>
-          <div class="col-6 col-md-3"><div class="h2 mb-0" style="color:#c79a3a" data-m="rates.adoption">—</div><div class="mini" title="拆出的原子中沉淀成技能的比例；待 follow-up 埋点">原子采纳率 *</div></div>
+          <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="rates.adoption">—</div><div class="mini" title="拆出的原子中沉淀成技能的比例">原子采纳率 ⓘ</div></div>
           <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="rates.promotion">—</div><div class="mini">canary 晋升率</div></div>
           <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="overview.atoms2">—</div><div class="mini">累计原子</div></div>
         </div>
-        <div class="mini mt-2">推荐触发率 / canary 晋升率 来自埋点(instrumentation)事件，需累积一段时间才有稳定数字（当前为 0 = 事件尚未产生）。原子采纳率(*) 暂缺——逐 atom 写库会扰动并发热路径时序，留作 follow-up（批量/从 skill 状态派生）。</div>
+        <div class="mini mt-2">推荐触发率 / 原子采纳率 / canary 晋升率 来自埋点(instrumentation，在代码里插记录点)事件，需累积一段时间才有稳定数字（当前为 0 = 对应事件尚未产生）。</div>
         </div></div></div></div>
 
       <div class="row row-cards mt-1">

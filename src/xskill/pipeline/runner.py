@@ -1175,9 +1175,16 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
     skill_name = hit[0] if hit else None
     weightscore = hit[1] if hit else None
 
-    # 注：原子采纳埋点不放这里——process_atom_task 是 watcher 并发处理每个 atom
-    # 的热路径，逐 atom 同步写 registry 会与 candidates 晋升抢时序(实测显著恶化
-    # 时序敏感测试)。原子采纳率改由 follow-up(批量/从 skill 状态派生)实现。
+    # 埋点：atom 实际落到某 skill = 一次采纳(best-effort，失败不阻断)。
+    # 在 cluster(大模型调用,按秒)之后,这条数据库写入(毫秒级)可忽略——和
+    # record_usage 同样的代价位置,生产无影响。
+    if skill_name:
+        try:
+            from xskill.pipeline.registry import record_atom_adoption
+            record_atom_adoption(atom_id=atom_id, skill=skill_name,
+                                 weightscore=weightscore or 0, was_new=True)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("atom adoption telemetry skipped", exc_info=True)
 
     return {
         "action": "clustered",

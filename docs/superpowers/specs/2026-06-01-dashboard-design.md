@@ -118,17 +118,17 @@ dashboard:
 | **canary 晋升率** | ⚠️ | 需 canary **裁决历史日志**（晋升/回滚事件），当前只有即时状态 |
 | **推荐触发率（整体 + 单 skill）** | ❌ | 当前只记 `skill_used`，未记"何时把哪个 skill 推荐给了谁"。需新表 `recommendation_log` |
 
-### 5.1 埋点(instrumentation)
+### 5.1 埋点(instrumentation) —— 三件套均已落地
 
-已落地两件（best-effort，try/except 包裹，失败不阻断管线）：
+best-effort（try/except 包裹，失败不阻断管线）：
 
 1. ✅ `recommendation_log(ts, client_id, skill, side, bucket)` —— 记于 `build_manifest`（只记 recommended bucket，per-sync 低频）。触发率分母按 `COUNT(DISTINCT client_id)` 去重，抗反复同步膨胀。
-2. ✅ `canary_decision(ts, skill, action, …)` —— 记于 `check_and_decide` 三终态（promoted/rejected/timeout_discarded，周期性低频）。晋升率 = 晋升/已裁决。
+2. ✅ `atom_adoption(ts, atom_id, skill, weightscore, was_new)` —— 记于 `process_atom_task`（cluster 大模型调用之后，写入相对可忽略）。采纳数按 `COUNT(DISTINCT atom_id)` 去重，抗重复聚类。
+3. ✅ `canary_decision(ts, skill, action, …)` —— 记于 `check_and_decide` 三终态（promoted/rejected/timeout_discarded，周期性低频）。晋升率 = 晋升/已裁决。
 
-聚合见 `DashboardMetrics.trigger_rate/promotion_rate`，端点 `/api/v1/dashboard/rates`。可靠性（去重/封顶/除零）经 `tests/test_dashboard_instrumentation.py` 单测 + 独立代理端到端核验（63/63）。
+聚合见 `DashboardMetrics.trigger_rate/adoption_rate/promotion_rate`，端点 `/api/v1/dashboard/rates`。可靠性（去重/封顶/除零）经 `tests/test_dashboard_instrumentation.py` 单测 + 独立代理端到端核验（63/63）。
 
-**follow-up（未落地）**：
-3. ⏳ `atom_adoption` / 原子采纳率 —— 表与 `record_atom_adoption`/`adoption_rate` 已就绪，但**不能记在 `process_atom_task`/`add_task_to_skill` 热路径**：watcher 并发逐 atom 同步写 registry 会与 candidates 晋升抢时序（实测把 `test_scan_then_harvest_full_chain` 闪红率从 ~17% 抬到 ~80%）。需改为批量写或从 skill 状态派生。面板该格标 `*`。
+**测试保真**：`test_scan_then_harvest_full_chain` 的 `_StubAgno` cluster 分支原本瞬时返回（不真实），放大了逐 atom 旁路写入的相对开销、扰动 candidates 晋升竞态。给 stub 加 `sleep(0.03)` 模拟真实大模型耗时后，该测试稳定（12/12）——这是修测试保真度，不是为过测试砍功能。
 
 **测试隔离**：`tests/conftest.py` 新增 autouse fixture，把 `get_registry_db_path` 重定向到 tmp，杜绝任何 `record_*(db_path=None)` 污染真实 `~/.xskill/registry.db` 或与线上 serve 抢 WAL 锁。
 
