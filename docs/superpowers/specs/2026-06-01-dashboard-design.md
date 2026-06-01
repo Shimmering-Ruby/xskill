@@ -1,7 +1,7 @@
 # Design Doc — xskill 控制台 Dashboard（serve 内置 Web 面板）
 
 - 日期：2026-06-01
-- 状态：v0 已落地（`feat/dashboard`）；埋点 backlog 待后续
+- 状态：v0 + 埋点(instrumentation)三件套均已落地并入 main；端到端核验通过
 - 实现计划：`docs/superpowers/plans/2026-06-01-dashboard.md`
 - 关联：Issue #43（成本统计）、`docs/deployment-mode.md`、`docs/adr/0001-rate-limit-diy-not-litellm.md`
 - 设计原型（沙滩品牌版 B · 内容丰富版）：`xskill.wiki/dashboarddemo/m-brand-rich.html`
@@ -118,13 +118,16 @@ dashboard:
 | **canary 晋升率** | ⚠️ | 需 canary **裁决历史日志**（晋升/回滚事件），当前只有即时状态 |
 | **推荐触发率（整体 + 单 skill）** | ❌ | 当前只记 `skill_used`，未记"何时把哪个 skill 推荐给了谁"。需新表 `recommendation_log` |
 
-### 5.1 埋点 backlog（分期）
+### 5.1 埋点(instrumentation)三件套 —— 已落地
 
-1. `recommendation_log(ts, client_id, skill, context)` + 与后续 `skill_used` 关联 → 推荐触发率（整体/单 skill）。
-2. 原子级采纳计数（atom 聚进 skill 时 +1）→ 原子采纳率精确化。
-3. canary 裁决事件日志 → 晋升率、回滚率。
+1. ✅ `recommendation_log(ts, client_id, skill, side, bucket)` —— 记于 `build_manifest`（只记 recommended bucket）。触发率分母按 `COUNT(DISTINCT client_id)` 去重，抗反复同步膨胀。
+2. ✅ `atom_adoption(ts, atom_id, skill, weightscore, was_new)` —— 记于 `add_task_to_skill`。采纳数按 `COUNT(DISTINCT atom_id)` 去重，抗重复聚类。
+3. ✅ `canary_decision(ts, skill, action, …)` —— 记于 `check_and_decide` 三终态（promoted/rejected/timeout_discarded）。晋升率 = 晋升/已裁决。
 
-v0 面板：可算的真实上线；未埋点的占位 + 标 `*` + tooltip 注明"需埋点"。
+三处记录均 best-effort（try/except 包裹，失败不阻断管线）。聚合见 `DashboardMetrics.trigger_rate/adoption_rate/promotion_rate`，端点 `/api/v1/dashboard/rates`。
+可靠性：去重/封顶/除零经 `tests/test_dashboard_instrumentation.py` 单测 + 独立代理端到端核验（63/63）。
+
+**已知近似**：`trajectories` 无 `client_id`，推荐触发率为 skill 粗粒度（被推荐 skill 是否被任意用户采用），非按人精确归因；面板 tooltip 已注明。
 
 ## 6. 测试
 
