@@ -75,6 +75,39 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     price_source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(ts);
+
+-- 埋点(instrumentation,在代码里插记录点):三类事件,供看板算衍生率 --
+CREATE TABLE IF NOT EXISTS recommendation_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        TEXT DEFAULT (datetime('now')),
+    client_id TEXT,
+    skill     TEXT,
+    side      TEXT,          -- main / staging
+    bucket    TEXT           -- ranked / recommended
+);
+CREATE INDEX IF NOT EXISTS idx_reco_skill ON recommendation_log(skill);
+
+CREATE TABLE IF NOT EXISTS atom_adoption (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT DEFAULT (datetime('now')),
+    atom_id     TEXT,
+    skill       TEXT,
+    weightscore INTEGER,
+    was_new     INTEGER       -- 1=首次加入 0=覆盖
+);
+CREATE INDEX IF NOT EXISTS idx_atom_adopt ON atom_adoption(atom_id);
+
+CREATE TABLE IF NOT EXISTS canary_decision (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT DEFAULT (datetime('now')),
+    skill           TEXT,
+    action          TEXT,     -- promoted / rejected / timeout_discarded
+    main_avg        REAL,
+    staging_avg     REAL,
+    main_samples    INTEGER,
+    staging_samples INTEGER,
+    age_days        REAL
+);
 """
 
 
@@ -154,6 +187,57 @@ def record_usage(*, step: str, model: str, prompt: int, completion: int,
             " VALUES(?,?,?,?,?,?,?)",
             (step, model, int(prompt), int(completion), int(total),
              float(cost_usd), price_source),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 埋点(instrumentation)：三类事件的记录 + 聚合，供看板算衍生率
+# 记录函数走旁路 telemetry——调用点用 try/except 包，记录失败绝不阻断管线。
+# ---------------------------------------------------------------------------
+
+def record_recommendation(*, client_id: str, skill: str, side: str, bucket: str,
+                          db_path: Optional[Path] = None) -> None:
+    """记一次"把 skill 推荐给某用户"。供算推荐触发率(被推荐→被采用)。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO recommendation_log(client_id,skill,side,bucket) VALUES(?,?,?,?)",
+            (client_id, skill, side, bucket),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def record_atom_adoption(*, atom_id: str, skill: str, weightscore: int,
+                         was_new: bool, db_path: Optional[Path] = None) -> None:
+    """记一次"某 atom 被聚进某 skill"。供算原子采纳率(采纳原子/总原子)。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO atom_adoption(atom_id,skill,weightscore,was_new) VALUES(?,?,?,?)",
+            (atom_id, skill, int(weightscore), 1 if was_new else 0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def record_canary_decision(*, skill: str, action: str, main_avg: float,
+                           staging_avg: float, main_samples: int,
+                           staging_samples: int, age_days: float,
+                           db_path: Optional[Path] = None) -> None:
+    """记一次灰度裁决(promoted/rejected/timeout_discarded)。供算晋升率。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO canary_decision(skill,action,main_avg,staging_avg,"
+            "main_samples,staging_samples,age_days) VALUES(?,?,?,?,?,?,?)",
+            (skill, action, main_avg, staging_avg, int(main_samples),
+             int(staging_samples), float(age_days)),
         )
         conn.commit()
     finally:
