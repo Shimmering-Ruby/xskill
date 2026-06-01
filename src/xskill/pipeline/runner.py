@@ -656,29 +656,34 @@ class DirectoryWatcher:
             self._stats["new_trajs"] += len(new)
             logger.info("[%s] discovered %d new", dir_path.name, len(new))
 
-        # ── 提交 split 任务（discovered → splitting）──
-        # 需要 llm；缺则 traj 留在 discovered 等条件齐备
+        # ── 提交 split 任务（discovered / updated → splitting）──
+        # 需要 llm；缺则 traj 留在 discovered 等条件齐备。
+        # ``updated``（续写重传后 discover 翻的状态）与 ``discovered`` 同等处理：
+        # 同样跑 _do_split，TaskAgent 用 last_offset 续接点只拆新增内容。
         if self.llm is not None:
-            for fname in get_trajs_by_status(
-                wd_id, "discovered", limit=self.max_concurrent * 2, **kw,
-            ):
-                if self._too_many_in_flight():
-                    break
-                validation = validate_trajectory_source(dir_path / fname)
-                if not validation.valid:
-                    update_traj_status(
-                        wd_id, fname, "filtered",
-                        error_msg=validation.reason or "invalid_trajectory",
-                        **kw,
-                    )
-                    logger.info(
-                        "%s filtered before split: %s",
-                        fname, validation.reason,
-                    )
-                    continue
-                update_traj_status(wd_id, fname, "splitting", **kw)
-                fut = self._pool.submit(self._do_split, dir_path, fname)
-                self._futures[fut] = {"wd_id": wd_id, "fname": fname, "stage": "split"}
+            for status in ("discovered", "updated"):
+                for fname in get_trajs_by_status(
+                    wd_id, status, limit=self.max_concurrent * 2, **kw,
+                ):
+                    if self._too_many_in_flight():
+                        break
+                    validation = validate_trajectory_source(dir_path / fname)
+                    if not validation.valid:
+                        update_traj_status(
+                            wd_id, fname, "filtered",
+                            error_msg=validation.reason or "invalid_trajectory",
+                            **kw,
+                        )
+                        logger.info(
+                            "%s filtered before split: %s",
+                            fname, validation.reason,
+                        )
+                        continue
+                    update_traj_status(wd_id, fname, "splitting", **kw)
+                    fut = self._pool.submit(self._do_split, dir_path, fname)
+                    self._futures[fut] = {
+                        "wd_id": wd_id, "fname": fname, "stage": "split",
+                    }
 
         # ── 提交 embed 任务（split_done → indexed，整批一个任务） ──
         if self.embed_client is not None:
@@ -701,6 +706,7 @@ class DirectoryWatcher:
         if self.skill_dir:
             pending_pre_index = (
                 len(get_trajs_by_status(wd_id, "discovered", **kw))
+                + len(get_trajs_by_status(wd_id, "updated", **kw))
                 + len(get_trajs_by_status(wd_id, "splitting", **kw))
                 + len(get_trajs_by_status(wd_id, "split_done", **kw))
             )
@@ -778,7 +784,13 @@ class DirectoryWatcher:
     # v2 流水线任务：split / atom_index / cluster
 
     def _do_split(self, dir_path, fname):
-        """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id, err)。"""
+        """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id, err)。
+
+        v2.3: TaskAgent 走 agentic 工具调用（submit_atom/readfile/grep），用
+        和 cluster/edit 同一个 agno 工厂。``updated`` 状态的续写轨迹和首次
+        ``discovered`` 走同一条路径——TaskAgent 内部用 last_offset 续接点只拆
+        新增内容。
+        """
         from xskill.agents.task_agent import TaskAgent
         md_path = dir_path / fname
         validation = validate_trajectory_source(md_path)
@@ -789,9 +801,12 @@ class DirectoryWatcher:
             )
         traj_id = md_path.stem
         store = self._store_for(dir_path)
-        atoms = TaskAgent(llm=self.llm, store=store).run(
-            traj_id=traj_id, traj_path=md_path,
-        )
+        atoms = TaskAgent(
+            agno_agent_factory=self._factory(),
+            store=store,
+            traj_root=dir_path,
+            skill_dir=self.skill_dir,
+        ).run(traj_id=traj_id, traj_path=md_path)
         last_off = store.last_offset(traj_id)
         last_id = store.last_atom_id(traj_id)
         return (fname, len(atoms), last_off, last_id, None)

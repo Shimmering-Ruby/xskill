@@ -15,6 +15,113 @@ def _pct(num: float, den: float) -> float:
     return round(num / den * 100, 1) if den else 0.0
 
 
+def _resolve_local_root(path: str, db_dir: Path) -> Path:
+    """把 watch_dir 路径解析成本机可读路径。
+
+    原路径存在就直接用（serve 内置挂载：路径即本机原生）。否则按 ``.xskill``
+    段重映射到 ``db_dir`` 下（独立只读镜像：registry.db 来自别的 XSKILL_HOME，
+    如容器 ``/root/.xskill`` bind 到宿主 ``<db_dir>``）。两条都不命中则原样返回，
+    由调用方 ``is_dir()`` 兜底跳过。
+    """
+    def _exists(pp: Path) -> bool:
+        # /root/.xskill 这类容器路径对宿主 admin 不可读,os.stat 抛 EACCES 而非
+        # 返回 False——吞掉权限/IO 异常当作"不存在",继续走重映射。
+        try:
+            return pp.exists()
+        except OSError:
+            return False
+
+    p = Path(path)
+    if _exists(p):
+        return p
+    parts = p.parts
+    if ".xskill" in parts:
+        cand = db_dir.joinpath(*parts[parts.index(".xskill") + 1:])
+        if _exists(cand):
+            return cand
+    return p
+
+
+def _branches(skill_path: Path) -> set[str]:
+    """读 skill git 仓的分支名(loose refs + packed-refs),不调子进程。
+
+    94 个 skill 目录若每个都 run_git 会很慢;这里直接读 ``.git/refs/heads/`` 散
+    引用 + ``.git/packed-refs`` 里的 ``refs/heads/*``,纯文件读,够判 baby/main/staging。
+    """
+    git = skill_path / ".git"
+    out: set[str] = set()
+    heads = git / "refs" / "heads"
+    if heads.is_dir():
+        for p in heads.iterdir():
+            if p.is_file():
+                out.add(p.name)
+    packed = git / "packed-refs"
+    if packed.is_file():
+        try:
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if " refs/heads/" in line:
+                    out.add(line.split("refs/heads/", 1)[1])
+        except OSError:
+            pass
+    return out
+
+
+def skills_catalog(skill_dir: Path) -> list[dict]:
+    """列出 skill 库里的所有 skill —— 纯分析式(读目录 + SKILL.md + .candidates.yml)。
+
+    不依赖任何埋点事件,永远有内容(只要库里有 skill 目录)。每条含:
+    name / state(baby|main|staging) / description / version / use_count / candidates。
+    供"技能库"页直接展示库存,不再只靠空的触发率表。
+    """
+    from xskill.skill.frontmatter import parse as fm_parse
+    skill_dir = Path(skill_dir)
+    if not skill_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for d in sorted(skill_dir.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        branches = _branches(d)
+        if "staging" in branches:
+            state = "staging"
+        elif "main" in branches:
+            state = "main"
+        elif "baby" in branches:
+            state = "baby"
+        else:
+            state = "unknown"
+        desc, version, use_count = "", 0, 0
+        smd = d / "SKILL.md"
+        if smd.is_file():
+            try:
+                fm, _ = fm_parse(smd.read_text(encoding="utf-8"))
+                desc = (fm.get("description") or "").strip().replace("\n", " ")
+                meta = fm.get("metadata", {}) or {}
+                version = meta.get("version", 0)
+                use_count = meta.get("use_count", 0)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+        n_cand = 0
+        cand = d / ".candidates.yml"
+        if cand.is_file():
+            try:
+                import yaml
+                data = yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
+                n_cand = len(data.get("candidates", []) or [])
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+        out.append({
+            "name": d.name, "state": state,
+            "description": desc[:300], "version": version,
+            "use_count": use_count, "candidates": n_cand,
+        })
+    # main/staging（已正式产出）排前,其次 baby,再按名字
+    order = {"main": 0, "staging": 0, "baby": 1, "unknown": 2}
+    out.sort(key=lambda s: (order.get(s["state"], 3), s["name"]))
+    return out
+
+
 class DashboardMetrics:
     def __init__(self, db_path: Optional[Path] = None):
         self._db = db_path
@@ -43,15 +150,29 @@ class DashboardMetrics:
         }
 
     def by_ecosystem(self) -> list[dict]:
+        """按生态分组。team server 上 watch_dir.ecosystem 一律是 ``team_client``
+        （每个 client 一个目录）——对用户毫无信息量。这里把 team_client 的轨迹
+        改按其真实 coding agent（``source_harness``）分组,让"生态"显示用户实际
+        用的是 claude_code / codex / … 而非内部的 team_client 标签；harness 缺失
+        才退回 team_client。
+        """
+        # team_client（每 client 一个目录的内部标签）对用户无意义：改按该轨迹
+        # 真实 coding agent（source_harness）分组,harness 缺失才退回 'unknown'
+        # ——不再把内部的 team_client 当作一个"生态"暴露给用户。
+        eco_expr = (
+            "CASE WHEN wd.ecosystem='team_client'"
+            " THEN COALESCE(NULLIF(t.source_harness,''),'unknown')"
+            " ELSE wd.ecosystem END"
+        )
         conn = get_connection(self._db)
         try:
             rows = conn.execute(
-                "SELECT wd.ecosystem ecosystem, COUNT(t.id) trajs,"
+                f"SELECT {eco_expr} ecosystem, COUNT(t.id) trajs,"
                 " COALESCE(SUM(t.tasks_extracted),0) atoms,"
                 " SUM(CASE WHEN t.skill_generated IS NOT NULL AND t.skill_generated!='' THEN 1 ELSE 0 END) skills,"
                 " AVG(t.ux_score) avg_ux"
                 " FROM watch_dirs wd LEFT JOIN trajectories t ON t.watch_dir_id=wd.id"
-                " GROUP BY wd.ecosystem ORDER BY trajs DESC"
+                f" GROUP BY {eco_expr} ORDER BY trajs DESC"
             ).fetchall()
         finally:
             conn.close()
@@ -70,6 +191,60 @@ class DashboardMetrics:
         finally:
             conn.close()
         return [self._row(r, "model") for r in rows]
+
+    def users(self) -> list[dict]:
+        """团队用户(client)列表 —— 纯 registry。team server 上每个 client 注册成
+        一个 ecosystem='team_client' 的 watch_dir(label=client_id)。按 client 聚合
+        其轨迹数 / 原子数 / 最近活跃时间。非 team 部署无此类目录 → 返回 []。
+        """
+        conn = get_connection(self._db)
+        try:
+            rows = conn.execute(
+                "SELECT wd.label client_id, COUNT(t.id) trajs,"
+                " COALESCE(SUM(t.tasks_extracted),0) atoms,"
+                " MAX(t.updated_at) last_active"
+                " FROM watch_dirs wd LEFT JOIN trajectories t ON t.watch_dir_id=wd.id"
+                " WHERE wd.ecosystem='team_client' AND wd.label IS NOT NULL"
+                " AND wd.label!='' GROUP BY wd.label ORDER BY trajs DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [{"client_id": r["client_id"], "trajs": r["trajs"] or 0,
+                 "atoms": r["atoms"] or 0, "last_active": r["last_active"] or ""}
+                for r in rows]
+
+    def tag_cloud(self, top_n: int = 40) -> list[dict]:
+        """标签云/关键词 —— 分析式：扫所有 watch_dir 下已拆原子的 ``tags`` 聚合。
+
+        原子文件散在各 watch_dir 的 ``<traj_id>/tasks/atom_*.json``。watch_dir 路径
+        可能是别的 XSKILL_HOME（容器 ``/root/.xskill``）——只读镜像跑在宿主时按
+        ``.xskill`` 段重映射到本地 registry.db 同级目录,使读盘对独立实例与 serve
+        内置挂载都成立。返回按出现次数降序的 ``[{tag, count}]`` 前 top_n。
+        """
+        from collections import Counter
+        from xskill.pipeline.atom import AtomTaskStore
+        from xskill.config import get_registry_db_path
+        db_dir = Path(self._db).parent if self._db else get_registry_db_path().parent
+        counter: Counter = Counter()
+        conn = get_connection(self._db)
+        try:
+            paths = [r["path"] for r in conn.execute(
+                "SELECT DISTINCT path FROM watch_dirs").fetchall()]
+        finally:
+            conn.close()
+        for wp in paths:
+            root = _resolve_local_root(wp, db_dir)
+            try:
+                if not root.is_dir():
+                    continue
+                for atom in AtomTaskStore(root=root).all_atoms():
+                    for tag in (atom.tags or []):
+                        t = str(tag).strip().lower()
+                        if t:
+                            counter[t] += 1
+            except OSError:
+                continue  # 某个目录不可读/路径异常,跳过不阻断整体聚合
+        return [{"tag": t, "count": n} for t, n in counter.most_common(top_n)]
 
     def canary_sides(self) -> list[dict]:
         """灰度分桶分布:轨迹按 canary_side(staging/main) 计数 + 平均 ux(纯 registry)。"""

@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS trajectories (
     skill_used    TEXT,
     canary_side   TEXT,
     source_model  TEXT,
+    source_harness TEXT,
     ux_score      REAL,
     error_msg     TEXT,
     retry_count   INTEGER DEFAULT 0,
@@ -146,6 +147,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("last_atom_id", "TEXT"),
         # 用户 agent 模型(批2,Issue #43 关联):discover 时从 .json sidecar 写入
         ("source_model", "TEXT"),
+        # 用户 coding agent(harness):discover 时从 .json sidecar 的 harness 写入。
+        # team server 据此按真实 coding agent 分组,替代把所有上传一律标 team_client。
+        ("source_harness", "TEXT"),
     ]
     for col, typedef in migrations:
         if col not in cols:
@@ -275,14 +279,48 @@ def usage_summary(db_path: Optional[Path] = None) -> dict:
         conn.close()
 
 
-def _sidecar_model(md_path: Path) -> Optional[str]:
-    """从 traj_*.md 的同名 .json sidecar 读用户 agent 模型(meta['model'])。"""
+def _sidecar_field(md_path: Path, key: str) -> Optional[str]:
+    """从 traj_*.md 的同名 .json sidecar 读某字段（model / harness 等）。"""
     try:
         meta = json.loads(md_path.with_suffix(".json").read_text(encoding="utf-8"))
-        m = meta.get("model")
-        return str(m) if m else None
+        v = meta.get(key)
+        return str(v) if v else None
     except (OSError, json.JSONDecodeError, AttributeError):
         return None
+
+
+def _sidecar_model(md_path: Path) -> Optional[str]:
+    """从 traj_*.md 的同名 .json sidecar 读用户 agent 模型(meta['model'])。"""
+    return _sidecar_field(md_path, "model")
+
+
+# 每条轨迹的 coding agent(harness)推断：
+#   1) 优先 client 上报的 source_harness（team 上传带）；
+#   2) 缺失时,非 team_client 目录的 ecosystem 本身就是 harness
+#      （本机 claude_code / codex / opencode sessions 目录）；
+#   3) 都没有（团队上传但旧 client 没带 harness）→ unknown。
+# 这样既替代了"全是 team_client"的无信息分组,也不需要为本机轨迹回填。
+_HARNESS_EXPR = (
+    "COALESCE(NULLIF(t.source_harness,''),"
+    " CASE WHEN wd.ecosystem NOT IN ('team_client','manual')"
+    " THEN wd.ecosystem END, 'unknown')"
+)
+
+
+def harness_share(db_path: Optional[Path] = None) -> list[dict]:
+    """用户 coding agent(harness)分布(按轨迹数),供看板按 coding agent 显示占比。"""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            f"SELECT {_HARNESS_EXPR} AS harness, COUNT(*) AS trajs"
+            " FROM trajectories t JOIN watch_dirs wd ON t.watch_dir_id=wd.id"
+            f" GROUP BY {_HARNESS_EXPR} ORDER BY trajs DESC"
+        ).fetchall()
+        total = sum(r["trajs"] for r in rows) or 1
+        return [{"harness": r["harness"], "trajs": r["trajs"],
+                 "pct": round(100 * r["trajs"] / total, 1)} for r in rows]
+    finally:
+        conn.close()
 
 
 def model_share(db_path: Optional[Path] = None) -> list[dict]:
@@ -381,21 +419,34 @@ def get_watch_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> di
 # Trajectory tracking
 # ---------------------------------------------------------------------------
 
+# mtime 变更检测时**不触碰**的中间态：split / cluster 正在 in-flight 跑，
+# 此刻翻 updated 会和在飞 future 的状态回写打架。留着旧 mtime,等它落定下一轮
+# scan 再检出变更（续写重拆最终收敛,不丢更新）。
+_ACTIVE_STATUSES = ("splitting", "clustering")
+
+
 def discover_trajectories(
     watch_dir_id: int,
     dir_path: Path,
     *,
     db_path: Optional[Path] = None,
 ) -> list[str]:
-    """扫描目录中的 traj_*.md，upsert 到 DB。返回新发现的文件名列表。"""
+    """扫描目录中的 traj_*.md，upsert 到 DB。返回新发现的文件名列表。
+
+    续写重拆触发：已存在的文件若 mtime 增大（客户端追加内容后重传覆盖写,
+    mtime 变更），把它从"已落定"状态翻回 ``updated``——watcher 下一轮会像
+    ``discovered`` 一样重新提交 split，TaskAgent 用 ``last_offset`` 续接点
+    只拆新增内容。``updated`` 不计入返回的 new_files（只统计真·新文件）。
+    """
     dir_path = Path(dir_path)
     conn = get_connection(db_path)
     new_files: list[str] = []
     try:
         existing = {
-            row["filename"]
+            row["filename"]: row
             for row in conn.execute(
-                "SELECT filename FROM trajectories WHERE watch_dir_id=?",
+                "SELECT filename, status, file_mtime FROM trajectories"
+                " WHERE watch_dir_id=?",
                 (watch_dir_id,),
             ).fetchall()
         }
@@ -404,20 +455,43 @@ def discover_trajectories(
             if md.name.endswith(".meta"):
                 continue
             mtime = md.stat().st_mtime
-            if md.name not in existing:
+            row = existing.get(md.name)
+            if row is None:
                 conn.execute(
                     "INSERT INTO trajectories"
-                    " (watch_dir_id, filename, file_mtime, source_model)"
-                    " VALUES (?, ?, ?, ?)",
-                    (watch_dir_id, md.name, mtime, _sidecar_model(md)),
+                    " (watch_dir_id, filename, file_mtime, source_model,"
+                    "  source_harness)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (watch_dir_id, md.name, mtime, _sidecar_model(md),
+                     _sidecar_field(md, "harness")),
                 )
                 new_files.append(md.name)
-            else:
-                # 更新 mtime（用于变更检测）
+                continue
+
+            stored_mtime = row["file_mtime"] or 0
+            if mtime <= stored_mtime:
+                continue  # 没变化
+            status = row["status"]
+            if status in _ACTIVE_STATUSES:
+                # 正在 split/cluster——别打架,留旧 mtime,落定后下一轮再检出。
+                continue
+            if status == "discovered":
+                # 还没开拆,后续 split 会读到最新内容（last_offset=0 全量拆）。
+                # 只更 mtime,不必翻 updated。
                 conn.execute(
-                    "UPDATE trajectories SET file_mtime=? WHERE watch_dir_id=? AND filename=?",
+                    "UPDATE trajectories SET file_mtime=?"
+                    " WHERE watch_dir_id=? AND filename=?",
                     (mtime, watch_dir_id, md.name),
                 )
+                continue
+            # 已落定（done/indexed/split_done/error/filtered/updated）+ 内容变更
+            # → 翻 updated,等下一轮重新 split（续接点续拆）。
+            conn.execute(
+                "UPDATE trajectories SET status='updated', file_mtime=?,"
+                " updated_at=datetime('now')"
+                " WHERE watch_dir_id=? AND filename=?",
+                (mtime, watch_dir_id, md.name),
+            )
 
         conn.commit()
         return new_files

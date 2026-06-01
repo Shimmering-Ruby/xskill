@@ -121,12 +121,17 @@ async def team_upload(
         if t.sha256 and actual != t.sha256:
             rejected.append(UploadRejection(traj_id=t.traj_id, reason="sha256 mismatch"))
             continue
-        # model 非空时先落 .json sidecar，再落 .md：watcher 只 glob traj_*.md，
-        # 必须保证它发现新 .md 时同名 sidecar 已就位，否则 discover 会 INSERT
-        # source_model=NULL 且永不回读（已存在的行只更 mtime）。
+        # model / harness 非空时先落 .json sidecar，再落 .md：watcher 只 glob
+        # traj_*.md，必须保证它发现新 .md 时同名 sidecar 已就位，否则 discover 会
+        # INSERT source_model/source_harness=NULL 且永不回读（已存在的行只更 mtime）。
+        sidecar = {}
         if t.model:
+            sidecar["model"] = t.model
+        if t.harness:
+            sidecar["harness"] = t.harness
+        if sidecar:
             (sessions_dir / f"{t.traj_id}.json").write_text(
-                json.dumps({"model": t.model}, ensure_ascii=False), encoding="utf-8")
+                json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
         (sessions_dir / f"{t.traj_id}.md").write_text(t.content, encoding="utf-8")
         accepted.append(t.traj_id)
     logger.info("team upload from %s: %d accepted, %d rejected",

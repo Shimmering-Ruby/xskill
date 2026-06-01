@@ -65,6 +65,7 @@ class TeamClient:
         home_root: Path | None = None,
         poll_interval: float = 30.0,
         quiet_seconds: int = 180,
+        min_change_interval: int = 600,
     ):
         self.state = state
         self.http = http
@@ -79,6 +80,7 @@ class TeamClient:
         self.collector = TeamCollector(
             cursor_path=Path(cursor_path),
             quiet_seconds=quiet_seconds, home_root=self.home_root,
+            min_change_interval=min_change_interval,
         )
         self._stop = threading.Event()
 
@@ -98,7 +100,7 @@ class TeamClient:
             return 0
         req = UploadRequest(trajectories=[
             UploadTrajectory(traj_id=p.traj_id, content=p.content, sha256=p.sha256,
-                             model=p.model)
+                             model=p.model, harness=p.harness)
             for p in pending
         ])
         resp = self.http.post("/api/v1/team/upload", headers=self._hdr(),

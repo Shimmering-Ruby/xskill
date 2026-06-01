@@ -1,8 +1,45 @@
 """test_dashboard_metrics.py —— DashboardMetrics 衍生指标"""
 from __future__ import annotations
 
-from xskill.pipeline.registry import get_connection
-from xskill.dashboard.metrics import DashboardMetrics
+from xskill.pipeline.registry import get_connection, harness_share
+from xskill.dashboard.metrics import DashboardMetrics, skills_catalog
+
+
+def _seed_team(db):
+    """一个 team server：自有 claude_code 本机目录 + 一个 team_client 上传目录。
+    team 上传的轨迹有的带 source_harness（新 client），有的没带（旧 client）。"""
+    conn = get_connection(db)
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(1,'/cc','cc','claude_code')")
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(2,'/tc','client-a','team_client')")
+    rows = [  # (wd, source_harness)
+        (1, None),          # 本机 cc 目录 → harness 从 ecosystem 推断 claude_code
+        (2, 'codex'),       # team 上传，新 client 带了 harness
+        (2, None),          # team 上传，旧 client 没带 → unknown
+    ]
+    for i, (wd, hn) in enumerate(rows):
+        conn.execute("INSERT INTO trajectories(watch_dir_id,filename,status,source_harness)"
+                     " VALUES(?,?,?,?)", (wd, f"traj_{i}.md", "done", hn))
+    conn.commit()
+    conn.close()
+
+
+def test_harness_share_derives_from_ecosystem(tmp_path):
+    db = tmp_path / "h.db"
+    _seed_team(db)
+    share = {h["harness"]: h["trajs"] for h in harness_share(db)}
+    assert share == {"claude_code": 1, "codex": 1, "unknown": 1}
+    # 内部标签 team_client 绝不暴露给用户
+    assert "team_client" not in share
+
+
+def test_by_ecosystem_replaces_team_client_with_harness(tmp_path):
+    db = tmp_path / "h.db"
+    _seed_team(db)
+    ecos = {r["ecosystem"]: r["trajs"] for r in DashboardMetrics(db_path=db).by_ecosystem()}
+    assert "team_client" not in ecos          # 不再把内部标签当生态
+    assert ecos.get("claude_code") == 1
+    assert ecos.get("codex") == 1             # team 上传带 harness → 归 codex
+    assert ecos.get("unknown") == 1           # team 上传无 harness → unknown
 
 
 def _seed(db):
@@ -50,6 +87,66 @@ def test_by_ecosystem(tmp_path):
     assert rows["claude_code"]["trajs"] == 3 and rows["claude_code"]["atoms"] == 12
     assert rows["claude_code"]["skills"] == 1
     assert rows["opencode"]["trajs"] == 1
+
+
+def test_skills_catalog_lists_skills(tmp_path):
+    """技能库清单：分析式读 skill 目录,不依赖埋点 → 永远有内容。"""
+    from xskill.skill.git import init_skill_repo_on_baby, commit_baby_to_main_branch
+    sd = tmp_path / "skill"
+    sd.mkdir()
+    # 一个 baby、一个已 graduate 到 main
+    init_skill_repo_on_baby(str(sd / "wip-skill"), name="wip-skill", description="草稿描述")
+    init_skill_repo_on_baby(str(sd / "ready-skill"), name="ready-skill", description="正式描述")
+    commit_baby_to_main_branch(str(sd / "ready-skill"), "graduate")
+    (sd / ".hidden").mkdir()  # 隐藏目录应被跳过
+
+    cat = skills_catalog(sd)
+    names = {s["name"]: s for s in cat}
+    assert set(names) == {"wip-skill", "ready-skill"}
+    assert names["wip-skill"]["state"] == "baby"
+    assert names["ready-skill"]["state"] == "main"
+    assert "正式描述" in names["ready-skill"]["description"]
+    # main 排在 baby 前
+    assert cat[0]["name"] == "ready-skill"
+
+
+def test_skills_catalog_empty_dir(tmp_path):
+    assert skills_catalog(tmp_path / "nope") == []
+
+
+def test_users_lists_team_clients(tmp_path):
+    db = tmp_path / "u.db"
+    conn = get_connection(db)
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(1,'/a','alice','team_client')")
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(2,'/b','bob','team_client')")
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(3,'/cc','local','claude_code')")
+    conn.execute("INSERT INTO trajectories(watch_dir_id,filename,tasks_extracted) VALUES(1,'t1.md',3)")
+    conn.execute("INSERT INTO trajectories(watch_dir_id,filename,tasks_extracted) VALUES(1,'t2.md',2)")
+    conn.execute("INSERT INTO trajectories(watch_dir_id,filename,tasks_extracted) VALUES(2,'t3.md',1)")
+    conn.commit(); conn.close()
+    users = {u["client_id"]: u for u in DashboardMetrics(db_path=db).users()}
+    assert set(users) == {"alice", "bob"}      # 本机 claude_code 不算"团队用户"
+    assert users["alice"]["trajs"] == 2 and users["alice"]["atoms"] == 5
+    assert users["bob"]["trajs"] == 1
+
+
+def test_tag_cloud_aggregates_atom_tags(tmp_path):
+    from xskill.pipeline.atom import AtomTask, AtomTaskStore
+    wd = tmp_path / "wd"; wd.mkdir()
+    store = AtomTaskStore(root=wd)
+    for i, tags in enumerate([["django", "migrate"], ["django", "orm"], ["nginx"]]):
+        store.save(AtomTask(
+            atom_id=f"atom_t_{i:04d}", traj_id="t", offset_start=1, offset_end=2,
+            intent="i", summary="s", tags=tags, used_skills=[], ux_score=7,
+            pre_atom_id=None, post_atom_id=None, context_prefix="", raw_segment=""))
+    db = tmp_path / "tg.db"
+    conn = get_connection(db)
+    conn.execute("INSERT INTO watch_dirs(path,label,ecosystem) VALUES(?,?,?)",
+                 (str(wd), "w", "claude_code"))
+    conn.commit(); conn.close()
+    cloud = {t["tag"]: t["count"] for t in DashboardMetrics(db_path=db).tag_cloud()}
+    assert cloud["django"] == 2
+    assert cloud["migrate"] == 1 and cloud["nginx"] == 1
 
 
 def test_by_model(tmp_path):
