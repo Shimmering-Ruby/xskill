@@ -30,9 +30,21 @@ def _skill_dir_for(db_path: Optional[Path]) -> Path:
     return get_skill_dir()
 
 
-def build_dashboard_router(db_path: Optional[Path] = None) -> APIRouter:
+def build_dashboard_router(db_path: Optional[Path] = None, *,
+                           default_harness: Optional[str] = None,
+                           default_model: Optional[str] = None) -> APIRouter:
+    # 看板归类口径：缺 source_harness/source_model 的历史轨迹归到哪个桶。
+    # 显式传入优先（serve 挂载从 dashboard_config 传）；否则直接读 config.yaml 的
+    # dashboard 段（独立只读实例走这条，不需要 api_key）。留空均退 'unknown'。
+    if default_harness is None or default_model is None:
+        from xskill.config import dashboard_attribution_defaults
+        attr = dashboard_attribution_defaults()
+        default_harness = default_harness or attr["harness"]
+        default_model = default_model or attr["model"]
+
     router = APIRouter()
-    metrics = DashboardMetrics(db_path=db_path)
+    metrics = DashboardMetrics(db_path=db_path, unknown_harness=default_harness,
+                               unknown_model=default_model)
     skill_dir = _skill_dir_for(db_path)
 
     @router.get("/", response_class=HTMLResponse)
@@ -65,8 +77,8 @@ def build_dashboard_router(db_path: Optional[Path] = None) -> APIRouter:
 
     @router.get("/api/v1/dashboard/models")
     def models() -> dict:
-        return {"models": model_share(db_path),
-                "harnesses": harness_share(db_path)}
+        return {"models": model_share(db_path, unknown_label=default_model),
+                "harnesses": harness_share(db_path, unknown_label=default_harness)}
 
     @router.get("/api/v1/dashboard/dirs")
     def dirs() -> dict:

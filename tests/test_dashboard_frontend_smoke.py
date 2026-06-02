@@ -15,5 +15,7 @@ def test_index_references_appjs_and_tabler():
 
 def test_appjs_fetches_overview_endpoint():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "/api/v1/dashboard/overview" in js
-    assert "/api/v1/dashboard/by-domain" in js
+    # 前端 fetch 用相对路径(去前导 /)以支持经 nginx 子路径反代；断言不带前导
+    # 斜杠，对相对/绝对两种写法都成立。
+    assert "api/v1/dashboard/overview" in js
+    assert "api/v1/dashboard/by-domain" in js

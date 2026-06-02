@@ -123,8 +123,14 @@ def skills_catalog(skill_dir: Path) -> list[dict]:
 
 
 class DashboardMetrics:
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, *,
+                 unknown_harness: str = "unknown",
+                 unknown_model: str = "unknown"):
         self._db = db_path
+        # 历史轨迹缺 source_harness / source_model 时的归类桶（看板展示口径）。
+        # 默认 'unknown'；看板路由按 config.dashboard.default_harness/_model 传入覆盖。
+        self._unknown_harness = unknown_harness
+        self._unknown_model = unknown_model
 
     def overview(self) -> dict:
         conn = get_connection(self._db)
@@ -159,9 +165,10 @@ class DashboardMetrics:
         # team_client（每 client 一个目录的内部标签）对用户无意义：改按该轨迹
         # 真实 coding agent（source_harness）分组,harness 缺失才退回 'unknown'
         # ——不再把内部的 team_client 当作一个"生态"暴露给用户。
+        # 兜底标签经命名参数 :hlabel 注入（自由字符串，防 SQL 注入/引号问题）。
         eco_expr = (
             "CASE WHEN wd.ecosystem='team_client'"
-            " THEN COALESCE(NULLIF(t.source_harness,''),'unknown')"
+            " THEN COALESCE(NULLIF(t.source_harness,''),:hlabel)"
             " ELSE wd.ecosystem END"
         )
         conn = get_connection(self._db)
@@ -172,7 +179,8 @@ class DashboardMetrics:
                 " SUM(CASE WHEN t.skill_generated IS NOT NULL AND t.skill_generated!='' THEN 1 ELSE 0 END) skills,"
                 " AVG(t.ux_score) avg_ux"
                 " FROM watch_dirs wd LEFT JOIN trajectories t ON t.watch_dir_id=wd.id"
-                f" GROUP BY {eco_expr} ORDER BY trajs DESC"
+                f" GROUP BY {eco_expr} ORDER BY trajs DESC",
+                {"hlabel": self._unknown_harness},
             ).fetchall()
         finally:
             conn.close()
@@ -182,11 +190,12 @@ class DashboardMetrics:
         conn = get_connection(self._db)
         try:
             rows = conn.execute(
-                "SELECT COALESCE(source_model,'unknown') model, COUNT(*) trajs,"
+                "SELECT COALESCE(source_model,:mlabel) model, COUNT(*) trajs,"
                 " COALESCE(SUM(tasks_extracted),0) atoms,"
                 " SUM(CASE WHEN skill_generated IS NOT NULL AND skill_generated!='' THEN 1 ELSE 0 END) skills,"
                 " AVG(ux_score) avg_ux FROM trajectories"
-                " GROUP BY COALESCE(source_model,'unknown') ORDER BY trajs DESC"
+                " GROUP BY COALESCE(source_model,:mlabel) ORDER BY trajs DESC",
+                {"mlabel": self._unknown_model},
             ).fetchall()
         finally:
             conn.close()

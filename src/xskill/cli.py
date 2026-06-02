@@ -116,14 +116,22 @@ def cmd_registry_list_client() -> int:
     """
     import json
     from pathlib import Path
-    from xskill.config import XSKILL_HOME
+    from xskill.config import (
+        XSKILL_HOME, get_team_client_state_path, get_team_client_cursor_path,
+    )
     from xskill.ecosystems import detect_known_ecosystems
+    from xskill.team.client.state import load_client_state
 
     home = XSKILL_HOME.parent  # 与 XSKILL_HOME 同源,避免 home 解析漂移
-    cursor_path = XSKILL_HOME / "team_client_cursor.json"
+    # 游标按 server 分目录（方案 A）——先读连接状态拿 server_url 才能定位。
+    # 没连过 server（无 state）则没有任何上传游标，uploaded 全 0。
     uploaded_ids: set[str] = set()
-    if cursor_path.is_file():
-        uploaded_ids = set(json.loads(cursor_path.read_text(encoding="utf-8")))
+    state_path = get_team_client_state_path()
+    if state_path.is_file():
+        cursor_path = get_team_client_cursor_path(
+            load_client_state(state_path).server_url)
+        if cursor_path.is_file():
+            uploaded_ids = set(json.loads(cursor_path.read_text(encoding="utf-8")))
 
     dets = detect_known_ecosystems(home_root=home)
     if not dets:
@@ -149,7 +157,10 @@ def cmd_connect(args) -> int:
     ``xskill connect``                          复用已存连接
     """
     import socket as _socket
-    from xskill.config import get_team_client_state_path, XSKILL_HOME
+    from xskill.config import (
+        get_team_client_state_path, XSKILL_HOME,
+        get_team_client_cursor_path, get_team_client_history_path,
+    )
     from xskill.team.client.state import (
         ClientState, load_client_state, save_client_state,
     )
@@ -211,11 +222,14 @@ def cmd_connect(args) -> int:
 
     # skill working copies 复用标准 skill_dir（~/.xskill/skill/）——瘦客户端
     # 没有 config.yaml，直接用默认路径，不走 get_skill_dir()（那会 load_config）。
+    # 游标 / 去抖 / 安装历史按 server 分目录（方案 A）——换 server 不再被上一个
+    # server 的"已上传"游标静默压制对新 server 的上传。skill 工作副本仍复用共享
+    # 的 skill_dir（cleanup 已按 manifest 摘除旧 server 的残留 skill）。
     client = TeamClient(
         state=state, http=http,
         skill_dir=XSKILL_HOME / "skill",
-        cursor_path=XSKILL_HOME / "team_client_cursor.json",
-        history_path=XSKILL_HOME / "install_history.jsonl",
+        cursor_path=get_team_client_cursor_path(state.server_url),
+        history_path=get_team_client_history_path(state.server_url),
     )
     client.run_forever()   # 阻塞
     return 0

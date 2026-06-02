@@ -298,23 +298,32 @@ def _sidecar_model(md_path: Path) -> Optional[str]:
 #   1) 优先 client 上报的 source_harness（team 上传带）；
 #   2) 缺失时,非 team_client 目录的 ecosystem 本身就是 harness
 #      （本机 claude_code / codex / opencode sessions 目录）；
-#   3) 都没有（团队上传但旧 client 没带 harness）→ unknown。
+#   3) 都没有（团队上传但旧 client 没带 harness）→ 兜底标签（默认 'unknown'，
+#      看板可经 config 的 dashboard.default_harness 改成别的已知 harness）。
 # 这样既替代了"全是 team_client"的无信息分组,也不需要为本机轨迹回填。
+# 兜底标签经 SQL 命名绑定参数 ``:hlabel`` 注入（自由字符串，防注入/引号问题）。
 _HARNESS_EXPR = (
     "COALESCE(NULLIF(t.source_harness,''),"
     " CASE WHEN wd.ecosystem NOT IN ('team_client','manual')"
-    " THEN wd.ecosystem END, 'unknown')"
+    " THEN wd.ecosystem END, :hlabel)"
 )
 
 
-def harness_share(db_path: Optional[Path] = None) -> list[dict]:
-    """用户 coding agent(harness)分布(按轨迹数),供看板按 coding agent 显示占比。"""
+def harness_share(db_path: Optional[Path] = None, *,
+                  unknown_label: str = "unknown") -> list[dict]:
+    """用户 coding agent(harness)分布(按轨迹数),供看板按 coding agent 显示占比。
+
+    ``unknown_label``：harness 完全缺失时的归类桶，默认 'unknown'。看板层据
+    config 传入 dashboard.default_harness 覆盖；canary/stats 等调用不传，保持
+    'unknown' 语义不变。
+    """
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
             f"SELECT {_HARNESS_EXPR} AS harness, COUNT(*) AS trajs"
             " FROM trajectories t JOIN watch_dirs wd ON t.watch_dir_id=wd.id"
-            f" GROUP BY {_HARNESS_EXPR} ORDER BY trajs DESC"
+            f" GROUP BY {_HARNESS_EXPR} ORDER BY trajs DESC",
+            {"hlabel": unknown_label},
         ).fetchall()
         total = sum(r["trajs"] for r in rows) or 1
         return [{"harness": r["harness"], "trajs": r["trajs"],
@@ -323,14 +332,21 @@ def harness_share(db_path: Optional[Path] = None) -> list[dict]:
         conn.close()
 
 
-def model_share(db_path: Optional[Path] = None) -> list[dict]:
-    """用户 agent 模型分布(按轨迹数),供 server stats 显示占比。None → 'unknown'。"""
+def model_share(db_path: Optional[Path] = None, *,
+                unknown_label: str = "unknown") -> list[dict]:
+    """用户 agent 模型分布(按轨迹数),供 server stats 显示占比。source_model 缺失
+    → ``unknown_label``（默认 'unknown'，经命名参数 ``:mlabel`` 注入）。
+
+    注意：canary 的 ``eligible_models`` 把 'unknown' 当“未归属、留在 main”的哨兵，
+    所以那条路径必须用默认 'unknown'——只有看板展示层才传入 config 的覆盖值。
+    """
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
-            "SELECT COALESCE(source_model,'unknown') AS model, COUNT(*) AS trajs"
-            " FROM trajectories GROUP BY COALESCE(source_model,'unknown')"
-            " ORDER BY trajs DESC"
+            "SELECT COALESCE(source_model,:mlabel) AS model, COUNT(*) AS trajs"
+            " FROM trajectories GROUP BY COALESCE(source_model,:mlabel)"
+            " ORDER BY trajs DESC",
+            {"mlabel": unknown_label},
         ).fetchall()
         total = sum(r["trajs"] for r in rows) or 1
         return [{"model": r["model"], "trajs": r["trajs"],

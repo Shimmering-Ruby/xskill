@@ -4,6 +4,7 @@ import argparse
 import json
 
 import xskill.cli as cli
+from xskill import config as xconfig
 
 
 # ── 客户端模式：registry list 现算视图（不读 watch_dirs/trajectories 表）──
@@ -21,8 +22,15 @@ def test_cmd_registry_list_client(tmp_path, monkeypatch, capsys):
         (bridge / tid).write_text("x", encoding="utf-8")        # 必须被忽略
     (bridge / "index.pkl").write_text("x", encoding="utf-8")     # 必须被忽略
 
+    # 客户端连接状态 + 按 server 分目录的游标（方案 A）：cmd_registry_list_client
+    # 先读 team_client.json 拿 server_url，再定位该 server 的 cursor.json。
+    server_url = "http://7.220.144.233:9961"
+    (xskill_home / "team_client.json").write_text(
+        json.dumps({"server_url": server_url, "client_id": "cid", "join_token": "t"}),
+        encoding="utf-8",
+    )
     # cursor：3 条里 2 条已上传，外加一条不在 bridge 里的（不应计入）
-    (xskill_home / "team_client_cursor.json").write_text(
+    xconfig.get_team_client_cursor_path(server_url).write_text(
         json.dumps({"traj_cc_a": "s1", "traj_cc_b": "s2", "traj_other": "sX"}),
         encoding="utf-8",
     )

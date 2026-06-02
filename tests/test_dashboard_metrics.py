@@ -1,7 +1,7 @@
 """test_dashboard_metrics.py —— DashboardMetrics 衍生指标"""
 from __future__ import annotations
 
-from xskill.pipeline.registry import get_connection, harness_share
+from xskill.pipeline.registry import get_connection, harness_share, model_share
 from xskill.dashboard.metrics import DashboardMetrics, skills_catalog
 
 
@@ -40,6 +40,60 @@ def test_by_ecosystem_replaces_team_client_with_harness(tmp_path):
     assert ecos.get("claude_code") == 1
     assert ecos.get("codex") == 1             # team 上传带 harness → 归 codex
     assert ecos.get("unknown") == 1           # team 上传无 harness → unknown
+
+
+def test_harness_share_custom_unknown_label(tmp_path):
+    # config.dashboard.default_harness 覆盖：缺 harness 的轨迹归到指定桶，不再叫 unknown
+    db = tmp_path / "h.db"
+    _seed_team(db)
+    share = {h["harness"]: h["trajs"] for h in harness_share(db, unknown_label="claude_code")}
+    # 那条无 harness 的 team 上传并入 claude_code（本机 1 + 兜底 1）
+    assert share == {"claude_code": 2, "codex": 1}
+    assert "unknown" not in share
+
+
+def test_by_ecosystem_custom_unknown_label(tmp_path):
+    db = tmp_path / "h.db"
+    _seed_team(db)
+    m = DashboardMetrics(db_path=db, unknown_harness="codex")
+    ecos = {r["ecosystem"]: r["trajs"] for r in m.by_ecosystem()}
+    assert ecos.get("codex") == 2             # 自带 codex 1 + 兜底并入 1
+    assert "unknown" not in ecos
+
+
+def test_by_model_custom_unknown_label(tmp_path):
+    db = tmp_path / "h.db"
+    conn = get_connection(db)
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(1,'/cc','cc','claude_code')")
+    conn.execute("INSERT INTO trajectories(watch_dir_id,filename,status,source_model)"
+                 " VALUES(1,'a.md','done','deepseek-v4-pro')")
+    conn.execute("INSERT INTO trajectories(watch_dir_id,filename,status,source_model)"
+                 " VALUES(1,'b.md','done',NULL)")
+    conn.commit(); conn.close()
+    models = {r["model"]: r["trajs"] for r in
+              DashboardMetrics(db_path=db, unknown_model="deepseek-v4-flash").by_model()}
+    assert models == {"deepseek-v4-pro": 1, "deepseek-v4-flash": 1}
+
+
+def test_unknown_label_is_sql_injection_safe(tmp_path):
+    # 自由字符串经命名绑定参数注入：带引号/分号的标签原样出现，不破坏 SQL
+    db = tmp_path / "h.db"
+    _seed_team(db)
+    weird = "o'brien; DROP TABLE trajectories;--"
+    share = {h["harness"]: h["trajs"] for h in harness_share(db, unknown_label=weird)}
+    assert share.get(weird) == 1              # 兜底标签原样作为分组键
+    # 表没被删：再查一次仍有数据
+    assert sum(h["trajs"] for h in harness_share(db)) == 3
+
+
+def test_model_share_default_label_unchanged(tmp_path):
+    # 不传 unknown_label → 仍是 'unknown'（保护 canary/stats 的哨兵语义）
+    db = tmp_path / "h.db"
+    conn = get_connection(db)
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(1,'/cc','cc','claude_code')")
+    conn.execute("INSERT INTO trajectories(watch_dir_id,filename,status,source_model) VALUES(1,'a.md','done',NULL)")
+    conn.commit(); conn.close()
+    assert model_share(db)[0]["model"] == "unknown"
 
 
 def _seed(db):
