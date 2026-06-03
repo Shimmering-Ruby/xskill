@@ -236,17 +236,28 @@ def cmd_connect(args) -> int:
 
 
 def cmd_stats(args) -> int:
-    """token/成本统计。直接读 registry(~/.xskill/registry.db),不需要 config/facade。"""
+    """token/成本统计。直接读 registry(~/.xskill/registry.db)。
+
+    模型分布的 unknown 兜底标签复用 config 的 ``dashboard.default_model``——与看板
+    口径一致，让"没记到模型名"的存量轨迹在 stats 里也归到指定模型而非 unknown。
+    经 ``dashboard_attribution_defaults`` 读取：只看 dashboard 段、不校验
+    llm/embedding key，config.yaml 缺失则退 'unknown'，瘦客户端无 config 也能用。
+    纯展示——不改库里真实值、不影响 canary（灰度走 runner 里另一条默认 unknown 的
+    路径，与此互不串）。
+    """
     import json as _json
     import time
+    from xskill.config import dashboard_attribution_defaults
     from xskill.pipeline.registry import model_share, usage_summary
     from xskill.runtime import read_status
     from xskill.usage import render_stats
 
+    unknown_model = dashboard_attribution_defaults()["model"]
+
     def _emit() -> None:
         s = usage_summary()
         st = read_status()
-        ms = model_share()
+        ms = model_share(unknown_label=unknown_model)
         if args.json:
             print(_json.dumps({"status": st, "cost": s, "models": ms},
                               ensure_ascii=False, indent=2))
