@@ -61,6 +61,23 @@ def _inject_verify_off_if_requested(model_cls, model_kwargs: dict,
                 f"kwarg，改用 SSL_CERT_FILE=/path/to/ca.pem", "error")
 
 
+def _wrap_with_context_mgmt(model, llm_cfg: dict):
+    """把弃窗单趟的上下文自管理（spec §4.5）套到 model.invoke 外层。
+
+    - max_context 配置优先,缺省 200K + warning（``resolve_max_context``）。
+    - 发请求前到 85% 主动剪裁旧 look/readfile 工具返回（纯截断,不调模型）。
+    - 唯一底层兜底：抓后端"上下文超长"报错 → 再剪 → 重发一次。
+    - 记后端真实 prompt_tokens 供 ``context_budget()`` 工具读。
+
+    套在 rate_limit 包装之外（最外层）：剪裁/重发后才进限流记账,语义正确。
+    """
+    from xskill.agents.context_budget import ContextManager, resolve_max_context
+    max_ctx = resolve_max_context(llm_cfg)
+    cm = ContextManager(max_ctx)
+    model.invoke = cm.wrap(model.invoke)
+    return model
+
+
 def _wrap_with_rate_limit(model, llm_cfg: dict):
     """如果 llm_cfg['rate_limit'] 配置存在,monkey-patch model.invoke
     在调用 LLM 前先 acquire 共享桶。
@@ -156,12 +173,14 @@ def build_chat_model(llm_cfg: dict, log: StreamLog | None = None):
         if log:
             log(f"使用 agno DeepSeek model class (base_url=api.deepseek.com)", "step")
         model = DeepSeek(**common_kwargs)
-        return _wrap_with_rate_limit(model, llm_cfg)
+        return _wrap_with_context_mgmt(
+            _wrap_with_rate_limit(model, llm_cfg), llm_cfg)
 
     from agno.models.openai import OpenAIChat
     _inject_verify_off_if_requested(OpenAIChat, common_kwargs, log)
     model = OpenAIChat(**common_kwargs)
-    return _wrap_with_rate_limit(model, llm_cfg)
+    return _wrap_with_context_mgmt(
+        _wrap_with_rate_limit(model, llm_cfg), llm_cfg)
 
 
 def make_default_factory(config: dict) -> Callable[..., Any]:
@@ -182,6 +201,12 @@ def make_default_factory(config: dict) -> Callable[..., Any]:
 
     def factory(*, instructions, tools, **kwargs):
         model = build_chat_model(llm_cfg)
+        # 弃窗单趟拆分必须开重试 + 指数退避：agno 默认 retries=0,限流时工具调用
+        # 会静默返回空 submitted（被 TaskAgent 的 0 提交抛错兜住,但白白丢一趟）。
+        # 调用方显式传 retries 时尊重其值,否则给安全缺省。
+        kwargs.setdefault("retries", 3)
+        kwargs.setdefault("exponential_backoff", True)
+        kwargs.setdefault("delay_between_retries", 2)
         return Agent(
             model=model,
             instructions=instructions,

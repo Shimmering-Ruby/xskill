@@ -54,6 +54,14 @@ llm:
   max_tokens: 10000      # optional; a "thinking" model needs enough budget for
                          # reasoning_tokens + content, or meta extraction
                          # returns empty/truncated and falls back to rules.
+  # max_context: 200000  # optional; the model's CONTEXT-WINDOW size in tokens.
+                         # The windowless single-pass splitter (TaskAgent) uses
+                         # this as the denominator for context self-management:
+                         # it proactively trims old `look` tool results at 85%
+                         # of this budget. Leave commented to use the 200K
+                         # default (a warning is logged). Uncomment and set it
+                         # to YOUR model's real context limit (e.g. 128000 for
+                         # gpt-4o, 64000 for deepseek-chat).
   # temperature: 0.0     # optional; default 0 (deterministic)
   # rate_limit:          # optional; absent = unlimited (good for self-hosted)
   #   rpm: 60            # requests per minute; match your provider plan

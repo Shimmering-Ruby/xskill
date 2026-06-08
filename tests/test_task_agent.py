@@ -1,12 +1,13 @@
-"""TaskAgent —— agentic 行号坐标切分（submit_atom 工具 + 增量续拆）
+"""TaskAgent —— 弃窗单趟 agentic 拆分（submit_atom/look/context_budget/my_atoms）
 
-v2.3 起 TaskAgent 改为 agentic：不再解析 XML，而是给 agno agent 三个工具
-``readfile`` / ``grep`` / ``submit_atom``。``submit_atom`` 提交即校验（带
-[line:] 标记的 ## User 行、≥ 续接点、严格递增），不合法返 error 让 agent 自改；
-整段无新意图时可一个都不提交（0 个 atom 合法）。
+v3 起 TaskAgent 弃窗：抽全轨迹 User 地图喂一次,agent 一趟出全部 atom。
+- 首 atom offset_start=1（并前言）、末 atom offset_end=total+1（盖到 EOF）。
+- 有 User 轮却 0 提交 → raise（不静默产空）。
+- 容噪过滤（F0）：纯机器签名的 ## User 块不进地图、不当边界。
+- 增量续拆：resume_line=last_offset,只切 ≥ resume 的新意图。
 
-这里用 stub agno 工厂驱动：测试控制 agent 在 run() 里调用哪些工具、传什么参数,
-从而确定性地覆盖首轮 / 增量 / 校验 / 提示词内容。
+测试用 stub agno 工厂注入假 submit 序列,确定性覆盖：单趟覆盖 / 前言并入 /
+增量只加 / 0 提交 raise / 撤销不切（非法行被拒）/ 容噪过滤 / run_response error。
 """
 from __future__ import annotations
 
@@ -17,24 +18,26 @@ import pytest
 
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.agents.task_agent import (
-    TaskAgent, _annotate_user_lines, _extract_user_queries,
+    TaskAgent, _extract_user_queries, _is_machine_noise_block,
 )
 
 
 # ════════════════════════════════════════════════════════════════════
-# 共享 stub：agno 工厂 + autosplit 助手（watcher 等下游测试 import 复用）
+# 共享 stub：agno 工厂（watcher 等下游测试 import 复用）
 # ════════════════════════════════════════════════════════════════════
 
 class _RunResult:
-    """模拟 agno agent.run() 的返回（只需 .content 字段）。"""
+    """模拟 agno agent.run() 的返回（.content + 可选 .status）。"""
     content = ""
+    status = None
 
 
 def autosplit_submit(user_msg: str, tools: dict) -> None:
-    """扫 user_msg 里的 ``[line:N]`` 标记，每个 ## User 行调一次 submit_atom。
+    """扫 user_msg 里的 ``[line:N]`` 标记,每个 ## User 行调一次 submit_atom。
 
-    供 split-agent 的 stub 工厂复用——与轨迹具体行号解耦，任何含 ``## User``
-    的轨迹都能直接用，不必手算行号。``tools`` 是 ``{name: callable}`` 映射。
+    弃窗后 user_msg 是"用户提问地图",每个真实回合带 ``[line:N]`` 标记。这个
+    helper 对每个标记行 submit 一次——与轨迹具体行号解耦,任何含 ## User 的
+    轨迹都能直接用。``tools`` 是 ``{name: callable}`` 映射。
     """
     submit = tools.get("submit_atom")
     if submit is None:
@@ -45,7 +48,7 @@ def autosplit_submit(user_msg: str, tools: dict) -> None:
 
 
 class _AutoSplitAgno:
-    """split-agent stub：扫 [line:N] 标记逐个 submit_atom。
+    """split-agent stub：扫地图里的 [line:N] 标记逐个 submit_atom。
 
     构造签名与生产 agno 工厂一致 ``(*, instructions, tools)``。watcher /
     pipeline 等下游测试把它（或派生）当 ``agno_agent_factory`` 注入。
@@ -60,22 +63,27 @@ class _AutoSplitAgno:
         return _RunResult()
 
 
-def _scripted_factory(submit_calls):
-    """返回一个 stub 工厂：agent.run() 时按 submit_calls 逐条调 submit_atom，
-    把每次返回值记到 ``factory.results``，sysprompt / user_msg 记到 captured。
+def _scripted_factory(submit_calls, *, status=None):
+    """返回一个 stub 工厂：agent.run() 时按 submit_calls 逐条调 submit_atom,
+    把每次返回值记到 ``factory.captured['results']``,sysprompt/user_msg/tool
+    名也记到 captured。``status`` 注入 run_response.status（测 error 兜底）。
     """
-    captured: dict = {"results": [], "instructions": None, "user_msg": None}
+    captured: dict = {"results": [], "instructions": None, "user_msg": None,
+                      "tool_names": None}
 
     def factory(*, instructions, tools):
         toolmap = {getattr(t, "__name__", ""): t for t in tools}
         captured["instructions"] = instructions
+        captured["tool_names"] = sorted(toolmap)
 
         class _A:
             def run(self, user_msg, **kw):
                 captured["user_msg"] = user_msg
                 for c in submit_calls:
                     captured["results"].append(toolmap["submit_atom"](**c))
-                return _RunResult()
+                r = _RunResult()
+                r.status = status
+                return r
 
         return _A()
 
@@ -110,11 +118,13 @@ Editing CSS...
 """
 
 
-# ── 向后兼容：旧 XML 时代的 _AutoSplitLLM 仍被若干 watcher 测试当作 ``llm=``
-# 占位（watcher 的 split 现在走 agno 工厂，``llm`` 只用于 score_atom 闸门）。
-# 保留它的 .chat 行为不变,避免下游 import 断裂。
 class _AutoSplitLLM:
-    """旧 XML split stub。现仅作 watcher 的 ``llm=`` 占位（不再驱动 split）。"""
+    """``.chat`` 形态的 LLM 占位（watcher 的 ``llm=`` 参数用）。
+
+    弃窗后 split 走 agno 工厂,``llm`` 只用于 ``score_atom`` 闸门。watcher 等
+    下游测试把它注入当 ``llm=`` 占位——保留 ``.chat`` 行为,返回一个合法的
+    ux_score JSON,避免 score_atom 解析失败。
+    """
     model = "stub-autosplit"
 
     def __init__(self):
@@ -124,19 +134,7 @@ class _AutoSplitLLM:
     def chat(self, prompt: str, system: str = "") -> str:
         self.calls.append(prompt)
         self.systems.append(system)
-        marks = [int(n) for n in re.findall(r"\[line:(\d+)\]", prompt)]
-        if not marks:
-            raise RuntimeError("_AutoSplitLLM: prompt 里没有 [line:] 标记")
-        atoms = "\n".join(
-            f"<atom><start_line>{ln}</start_line>"
-            f"<intent>stub intent</intent>"
-            f"<summary>stub summary</summary>"
-            f"<tags><tag>stub</tag></tags>"
-            f"<used_skills></used_skills>"
-            f"<ux_score>7</ux_score></atom>"
-            for ln in marks
-        )
-        return f"<atoms>\n{atoms}\n</atoms>"
+        return '{"score": 7, "reasons": "stub"}'
 
 
 def _seg(text: str, start_line: int, end_line: int) -> str:
@@ -146,47 +144,59 @@ def _seg(text: str, start_line: int, end_line: int) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────
-# _annotate_user_lines / _extract_user_queries 单元测试
+# _extract_user_queries / 容噪过滤（F0）
 # ────────────────────────────────────────────────────────────────────
 
-class TestAnnotateUserLines:
-    def test_tags_only_user_headers_with_full_file_line_numbers(self):
-        annotated, user_lines = _annotate_user_lines(_TRAJ_MD, first_line_no=1)
-        assert "[line:5] ## User" in annotated
-        assert "[line:17] ## User" in annotated
-        assert "] ## Assistant" not in annotated
-        assert "] ## Tool Call" not in annotated
-        assert "] ## System" not in annotated
-        assert user_lines == [5, 17]
-
-    def test_line_numbers_shift_with_first_line_no(self):
-        """delta 不是从文件头开始时,行号按 first_line_no 平移。"""
-        lines = _TRAJ_MD.splitlines(keepends=True)
-        delta = "".join(lines[8:])  # 从第 9 行(## Assistant)起
-        annotated, user_lines = _annotate_user_lines(delta, first_line_no=9)
-        assert user_lines == [17]
-        assert "[line:17] ## User" in annotated
-
-    def test_content_hash_headers_not_mistaken_for_user(self):
-        """用户正文里的 markdown 二级标题不能被误判成 ## User。"""
-        md = "## User\n\n看这个 ## User 提到的步骤\n## Step 1 做点啥\n"
-        annotated, user_lines = _annotate_user_lines(md, first_line_no=1)
-        assert user_lines == [1]
-        assert annotated.count("[line:") == 1
-
-    def test_extract_user_queries_line_and_snippet(self):
+class TestUserQueryMap:
+    def test_extract_line_and_snippet(self):
         lines = _TRAJ_MD.splitlines(keepends=True)
         queries = _extract_user_queries(lines)
         assert [ln for ln, _ in queries] == [5, 17]
         assert queries[0][1] == "Deploy xquiz to 1717."
         assert queries[1][1] == "Now redesign the frontend."
 
+    def test_content_hash_header_not_user_turn(self):
+        """正文里的 markdown 二级标题不能被误判成 ## User。"""
+        md = "## User\n\n看这个 ## Step 提到的步骤\n## Step 1 做点啥\n"
+        queries = _extract_user_queries(md.splitlines(keepends=True))
+        assert [ln for ln, _ in queries] == [1]
+
+    def test_machine_noise_sha_block_filtered(self):
+        """整块是 40-hex SHA 的 ## User 块不当作意图边界（容噪 F0）。"""
+        block = ["a" * 40 + "\n"]
+        assert _is_machine_noise_block(block) is True
+
+    def test_machine_noise_log_block_filtered(self):
+        block = ["12:30:01 [info] started\n", "12:30:02 [warn] retry\n"]
+        assert _is_machine_noise_block(block) is True
+
+    def test_machine_noise_json_block_filtered(self):
+        block = ['{"event": "ping", "ts": 1717}\n']
+        assert _is_machine_noise_block(block) is True
+
+    def test_instruction_block_not_noise(self):
+        """带用户指令特征的块即便混了 hash 也不算噪声。"""
+        block = ["帮我把 " + "a" * 40 + " 这个 commit 回滚\n"]
+        assert _is_machine_noise_block(block) is False
+
+    def test_noise_user_turn_excluded_from_map(self):
+        """纯机器签名的 ## User 回合不进地图,真实意图回合保留。"""
+        md = ("## User\n\n" + "f" * 40 + "\n\n"
+              "## Assistant\n\nok\n\n"
+              "## User\n\n请帮我部署服务\n\n## Assistant\n\ndone\n")
+        lines = md.splitlines(keepends=True)
+        queries = _extract_user_queries(lines)
+        # 第一个 ## User（纯 SHA）被过滤,只剩真实意图回合。
+        snippets = [snip for _, snip in queries]
+        assert any("部署" in s for s in snippets)
+        assert not any(set(s) == {"f"} for s in snippets)
+
 
 # ────────────────────────────────────────────────────────────────────
-# 首轮:两个 atom + 行号坐标
+# 首轮单趟：两个 atom + 行号坐标 + EOF 覆盖
 # ────────────────────────────────────────────────────────────────────
 
-class TestFirstRun:
+class TestFirstRunSinglePass:
     def test_persists_two_atoms_with_line_offsets(self, tmp_path):
         traj_dir = tmp_path / "cc-sessions"
         traj_dir.mkdir()
@@ -198,19 +208,18 @@ class TestFirstRun:
         ).run(traj_id="traj_x", traj_path=traj_path)
 
         assert len(atoms) == 2
-        # offset 是 1-based 行号。首 atom 从 floor 行(1)起,终点 = 下一 atom
-        # 起点(第 17 行);末 atom 终点 = 末行号+1(23+1=24)。
+        # 首 atom 从 floor(1) 起（并前言）；终点 = 下一 atom 起点（17）。
         assert atoms[0].offset_start == 1
         assert atoms[0].offset_end == 17
+        # 末 atom 终点 = 末行号+1（23+1=24）—— EOF 硬覆盖。
         assert atoms[1].offset_start == 17
         assert atoms[1].offset_end == 24
-        # 半开衔接:无重叠无缝隙
+        # 半开衔接无重叠无缝隙
         assert atoms[0].offset_end == atoms[1].offset_start
         # 链表
         assert atoms[0].pre_atom_id is None
         assert atoms[0].post_atom_id == atoms[1].atom_id
         assert atoms[1].pre_atom_id == atoms[0].atom_id
-        # ux_score 富化字段
         assert atoms[1].ux_score == 7
         # raw_segment 按行区间切回
         assert atoms[0].raw_segment == _seg(_TRAJ_MD, 1, 17)
@@ -219,7 +228,25 @@ class TestFirstRun:
         assert (traj_dir / "traj_x" / "tasks" /
                 f"{atoms[0].atom_id}.json").is_file()
 
-    def test_user_msg_and_sysprompt_carry_markers(self, tmp_path):
+    def test_preamble_folded_into_first_atom(self, tmp_path):
+        """首个 ## User 前有大段前言时,前言并入首 atom（offset_start=1）。"""
+        traj_dir = tmp_path / "cc-sessions"
+        traj_dir.mkdir()
+        traj_path = traj_dir / "traj_pre.md"
+        preamble = "## System\n\n" + "\n".join(f"note {i}" for i in range(50))
+        full = preamble + "\n\n## User\n\n请部署服务\n\n## Assistant\n\ndone\n"
+        traj_path.write_text(full, encoding="utf-8")
+        total = len(full.splitlines(keepends=True))
+        store = AtomTaskStore(root=traj_dir)
+        atoms = TaskAgent(
+            agno_agent_factory=_AutoSplitAgno, store=store,
+        ).run(traj_id="traj_pre", traj_path=traj_path)
+        assert len(atoms) == 1
+        assert atoms[0].offset_start == 1            # 前言并入
+        assert atoms[0].offset_end == total + 1      # 盖到 EOF
+
+    def test_user_msg_is_query_map_without_assistant_body(self, tmp_path):
+        """context-0 只放 User 地图,不含 assistant 正文。"""
         traj_dir = tmp_path / "cc-sessions"
         traj_dir.mkdir()
         traj_path = traj_dir / "traj_p.md"
@@ -235,20 +262,70 @@ class TestFirstRun:
             traj_id="traj_p", traj_path=traj_path)
         assert len(atoms) == 2
         assert atoms[1].used_skills == ["frontend-design"]
-        # 喂给 agent 的 user_msg 带行号标记 + 元信息
         user_msg = factory.captured["user_msg"]
+        # 地图带行号标记 + 元信息
         assert "[line:5] ## User" in user_msg
         assert "[line:17] ## User" in user_msg
         assert "trajid: traj_p" in user_msg
         assert "续接点）: 第 1 行" in user_msg
+        assert "total_lines: 23" in user_msg
+        # assistant 正文不进 context-0
+        assert "Cloning..." not in user_msg
+        assert "Editing CSS" not in user_msg
         # 首次拆分无 prior 衔接块
         assert "首次拆分" in user_msg
-        # 提交都成功
         assert all(r.startswith("ok:") for r in factory.captured["results"])
+
+    def test_four_agentic_tools_exposed(self, tmp_path):
+        """agent 拿到 4 个工具：submit_atom / look / context_budget / my_atoms。"""
+        traj_dir = tmp_path / "cc-sessions"
+        traj_dir.mkdir()
+        traj_path = traj_dir / "traj_t.md"
+        traj_path.write_text(_TRAJ_MD, encoding="utf-8")
+        store = AtomTaskStore(root=traj_dir)
+        factory = _scripted_factory([
+            dict(start_line=5, intent="i", summary="s"),
+        ])
+        TaskAgent(agno_agent_factory=factory, store=store).run(
+            traj_id="traj_t", traj_path=traj_path)
+        assert factory.captured["tool_names"] == [
+            "context_budget", "look", "my_atoms", "submit_atom"]
 
 
 # ────────────────────────────────────────────────────────────────────
-# 增量轮:append 新 user turn → 续切
+# 单趟覆盖多回合（曾经窗机制只拆第一窗 → 漏拆）
+# ────────────────────────────────────────────────────────────────────
+
+class TestSinglePassCoversAll:
+    def test_many_turns_all_split_in_one_run(self, tmp_path):
+        """6 个 user turn 一趟全拆 + 覆盖到 EOF（弃窗后无字符上限,不漏拆）。"""
+        traj_dir = tmp_path / "cc-sessions"
+        traj_dir.mkdir()
+        traj_path = traj_dir / "traj_big.md"
+        segs = [f"## User\n\nTask {i}\n\n## Assistant\n\ndone\n" for i in range(6)]
+        full = "".join(segs)
+        traj_path.write_text(full, encoding="utf-8")
+        total_lines = len(full.splitlines(keepends=True))
+        store = AtomTaskStore(root=traj_dir)
+
+        atoms = TaskAgent(
+            agno_agent_factory=_AutoSplitAgno, store=store,
+        ).run(traj_id="traj_big", traj_path=traj_path)
+
+        assert len(atoms) == 6
+        assert len(store.list_by_traj("traj_big")) == 6
+        # 续接点覆盖到文件末尾（半开：末行号+1）
+        assert store.last_offset("traj_big") == total_lines + 1
+        ordered = sorted(store.list_by_traj("traj_big"),
+                         key=lambda a: a.offset_start)
+        for prev, cur in zip(ordered, ordered[1:]):
+            assert prev.offset_end == cur.offset_start
+            assert cur.pre_atom_id == prev.atom_id
+            assert prev.post_atom_id == cur.atom_id
+
+
+# ────────────────────────────────────────────────────────────────────
+# 增量续拆：append 新 user turn → 只切新增
 # ────────────────────────────────────────────────────────────────────
 
 class TestIncrementalRun:
@@ -261,7 +338,6 @@ class TestIncrementalRun:
         TaskAgent(agno_agent_factory=_AutoSplitAgno, store=store).run(
             traj_id="traj_y", traj_path=traj_path)
 
-        # append 第三个 user turn
         appended = "\n## User\n\nAdd tests.\n\n## Assistant\n\nWriting pytest...\n"
         full = _TRAJ_MD + appended
         traj_path.write_text(full, encoding="utf-8")
@@ -277,22 +353,21 @@ class TestIncrementalRun:
             traj_id="traj_y", traj_path=traj_path)
 
         assert len(new_atoms) == 1
-        # 增量 atom 起点 = resume 行(上一轮窗口末行的下一行 = 24),
+        # 增量 atom 起点 = resume 行（上一轮末 atom 的 offset_end = 24）,
         # 终点 = 末行号+1
         assert new_atoms[0].offset_start == 24
         assert new_atoms[0].offset_end == total_lines + 1
-        # 与上一轮末 atom 链接
         assert new_atoms[0].pre_atom_id is not None
         assert new_atoms[0].pre_atom_id.startswith("atom_traj_y_")
         prior = store.load(new_atoms[0].pre_atom_id)
         assert prior.post_atom_id == new_atoms[0].atom_id
         assert len(store.list_by_traj("traj_y")) == 3
-        # 增量 user_msg：续接点=24 + 列出已拆 atom 衔接块（行号范围 + 路径）
+        # 增量 user_msg：续接点=24 + 列出已拆 atom 衔接块
         user_msg = factory.captured["user_msg"]
         assert f"[line:{new_user_line}] ## User" in user_msg
         assert "续接点）: 第 24 行" in user_msg
         assert "atom-line: 1-17" in user_msg or "atom-line: 17-24" in user_msg
-        assert str(traj_path) in user_msg  # atom-path 是宿主机路径
+        assert str(traj_path) in user_msg
 
     def test_no_new_content_returns_empty_no_agent_call(self, tmp_path):
         traj_dir = tmp_path / "cc-sessions"
@@ -303,7 +378,6 @@ class TestIncrementalRun:
         TaskAgent(agno_agent_factory=_AutoSplitAgno, store=store).run(
             traj_id="traj_z", traj_path=traj_path)
 
-        # 文件没变,再跑一次 → 空,且不构造/调 agent
         calls = {"n": 0}
 
         def _spy_factory(*, instructions, tools):
@@ -315,8 +389,8 @@ class TestIncrementalRun:
         assert result == []
         assert calls["n"] == 0
 
-    def test_window_without_user_header_returns_empty_no_agent_call(self, tmp_path):
-        """窗口内没有 ## User → 没有可切分的新 atom,直接返回,不构造 agent。"""
+    def test_no_user_header_returns_empty_no_agent_call(self, tmp_path):
+        """全文无 ## User → 无可切边界,直接返回,不构造 agent,不 raise。"""
         traj_dir = tmp_path / "cc-sessions"
         traj_dir.mkdir()
         traj_path = traj_dir / "traj_n.md"
@@ -336,48 +410,45 @@ class TestIncrementalRun:
 
 
 # ────────────────────────────────────────────────────────────────────
-# 多窗：一条超过单窗的轨迹应在一次 run 内被逐窗拆完（回归：曾只拆第一窗）
+# 0 提交抛错（有 User 轮却 0 提交 → 不静默产空）
 # ────────────────────────────────────────────────────────────────────
 
-class TestMultiWindow:
-    def test_large_traj_splits_all_windows_in_one_run(self, tmp_path):
-        """轨迹跨多个窗时，一次 run() 必须拆完全部窗、覆盖到 EOF。
-
-        回归此前缺陷：run() 只拆第一窗就返回，剩余窗永不调度 →
-        大轨迹静默漏拆，coverage 卡在第一窗占比。
-        """
+class TestZeroSubmitRaises:
+    def test_user_turns_but_zero_submit_raises(self, tmp_path):
         traj_dir = tmp_path / "cc-sessions"
         traj_dir.mkdir()
-        traj_path = traj_dir / "traj_big.md"
-        # 6 个短 user turn（每段 ~36 字符，都含 ## User）。配小 max_context_chars
-        # 使一窗只能容 2~3 段 → 需多窗才能覆盖全文；段够短保证不出现无 ## User 窗。
-        segs = [f"## User\n\nTask {i}\n\n## Assistant\n\ndone\n" for i in range(6)]
-        full = "".join(segs)
-        traj_path.write_text(full, encoding="utf-8")
-        total_lines = len(full.splitlines(keepends=True))
+        traj_path = traj_dir / "traj_e.md"
+        traj_path.write_text(_TRAJ_MD, encoding="utf-8")
+        store = AtomTaskStore(root=traj_dir)
+        factory = _scripted_factory([])  # 不调 submit_atom
+
+        with pytest.raises(RuntimeError, match="0 提交"):
+            TaskAgent(agno_agent_factory=factory, store=store).run(
+                traj_id="traj_e", traj_path=traj_path)
+        # 抛错后不落盘
+        assert store.list_by_traj("traj_e") == []
+
+    def test_run_status_error_raises(self, tmp_path):
+        """agno run_response.status=ERROR → raise（不把静默失败当成功）。"""
+        traj_dir = tmp_path / "cc-sessions"
+        traj_dir.mkdir()
+        traj_path = traj_dir / "traj_s.md"
+        traj_path.write_text(_TRAJ_MD, encoding="utf-8")
         store = AtomTaskStore(root=traj_dir)
 
-        atoms = TaskAgent(
-            agno_agent_factory=_AutoSplitAgno, store=store,
-            max_context_chars=100,
-        ).run(traj_id="traj_big", traj_path=traj_path)
+        class _Status:
+            value = "ERROR"
 
-        # 6 个 user turn 全部拆出（修复前只会拿到第一窗的 2~3 个）
-        assert len(atoms) == 6
-        assert len(store.list_by_traj("traj_big")) == 6
-        # 续接点覆盖到文件末尾（半开：末行号 + 1）
-        assert store.last_offset("traj_big") == total_lines + 1
-        # 链表跨窗连续：相邻 atom 半开衔接、pre/post 不断裂
-        ordered = sorted(store.list_by_traj("traj_big"),
-                         key=lambda a: a.offset_start)
-        for prev, cur in zip(ordered, ordered[1:]):
-            assert prev.offset_end == cur.offset_start
-            assert cur.pre_atom_id == prev.atom_id
-            assert prev.post_atom_id == cur.atom_id
+        factory = _scripted_factory([
+            dict(start_line=5, intent="i", summary="s"),
+        ], status=_Status())
+        with pytest.raises(RuntimeError, match="ERROR"):
+            TaskAgent(agno_agent_factory=factory, store=store).run(
+                traj_id="traj_s", traj_path=traj_path)
 
 
 # ────────────────────────────────────────────────────────────────────
-# submit_atom 提交即校验：非法 → error 返回 + 不落盘
+# submit_atom 提交即校验：非法 → error 返回 + 不落盘（含撤销不切）
 # ────────────────────────────────────────────────────────────────────
 
 class TestSubmitValidation:
@@ -391,58 +462,121 @@ class TestSubmitValidation:
 
     def test_start_line_not_a_user_header_rejected(self, tmp_path):
         traj_path, store = self._setup(tmp_path)
-        # 第 9 行是 ## Assistant,不是被标记的 ## User 行
+        # 第 9 行是 ## Assistant,不是 ## User 回合
         factory = _scripted_factory([
             dict(start_line=9, intent="i", summary="s"),
+            dict(start_line=5, intent="i2", summary="s2"),  # 补一个合法的
         ])
         atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_e", traj_path=traj_path)
-        assert atoms == []  # 非法提交不落盘
         assert factory.captured["results"][0].startswith("error:")
         assert "## User" in factory.captured["results"][0]
+        # 合法那条仍落盘 → 单 atom 覆盖到 EOF
+        assert len(atoms) == 1
+        assert atoms[0].offset_start == 1
 
-    def test_non_monotonic_start_line_rejected(self, tmp_path):
+    def test_undo_revert_backward_line_rejected(self, tmp_path):
+        """撤销/反悔不切：倒退的 start_line（回到上一意图）被拒,不另起 atom。"""
         traj_path, store = self._setup(tmp_path)
         factory = _scripted_factory([
             dict(start_line=17, intent="i1", summary="s1"),
-            dict(start_line=5, intent="i2", summary="s2"),  # 倒退 → reject
+            dict(start_line=5, intent="撤销回上一个", summary="s2"),  # 倒退 → reject
         ])
         atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_e", traj_path=traj_path)
-        # 第一条合法 → 落 1 个 atom；第二条被拒
         assert len(atoms) == 1
-        assert atoms[0].offset_start == 1  # 首 atom 从 floor 起
+        # 唯一 atom 从 floor(1) 起,盖到 EOF
+        assert atoms[0].offset_start == 1
+        assert atoms[0].offset_end == 24
         assert factory.captured["results"][0].startswith("ok:")
         assert factory.captured["results"][1].startswith("error:")
         assert "严格大于" in factory.captured["results"][1]
 
-    def test_missing_required_field_rejected(self, tmp_path):
+    def test_missing_required_field_then_valid(self, tmp_path):
         traj_path, store = self._setup(tmp_path)
         factory = _scripted_factory([
-            dict(start_line=5, intent="i", summary=""),  # 缺 summary
+            dict(start_line=5, intent="i", summary=""),   # 缺 summary → reject
+            dict(start_line=5, intent="i", summary="s"),  # 改对重提
         ])
         atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_e", traj_path=traj_path)
-        assert atoms == []
         assert factory.captured["results"][0].startswith("error:")
         assert "必填" in factory.captured["results"][0]
-
-    def test_zero_atoms_is_legal_no_raise(self, tmp_path):
-        """整段无新意图 → agent 一个都不提交 → 返回 []，不报错（设计第 4 点）。"""
-        traj_path, store = self._setup(tmp_path)
-        factory = _scripted_factory([])  # 不调 submit_atom
-        atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
-            traj_id="traj_e", traj_path=traj_path)
-        assert atoms == []
-        assert store.list_by_traj("traj_e") == []
+        assert len(atoms) == 1
 
 
 # ────────────────────────────────────────────────────────────────────
-# SYSTEM_PROMPT 共享一份：含严格分档表 + submit_atom 协议
+# look 工具：读某行附近原文（含向前看）
+# ────────────────────────────────────────────────────────────────────
+
+class TestLookTool:
+    def test_look_returns_numbered_neighborhood(self, tmp_path):
+        traj_dir = tmp_path / "cc-sessions"
+        traj_dir.mkdir()
+        traj_path = traj_dir / "traj_l.md"
+        traj_path.write_text(_TRAJ_MD, encoding="utf-8")
+        store = AtomTaskStore(root=traj_dir)
+        captured_look: dict = {}
+
+        def factory(*, instructions, tools):
+            toolmap = {getattr(t, "__name__", ""): t for t in tools}
+
+            class _A:
+                def run(self, user_msg, **kw):
+                    # 用 look 读第 5 行（## User）附近,验证向前看包含 assistant
+                    captured_look["out"] = toolmap["look"](
+                        line=11, before=3, after=2)
+                    toolmap["submit_atom"](
+                        start_line=5, intent="i", summary="s")
+                    return _RunResult()
+
+            return _A()
+
+        TaskAgent(agno_agent_factory=factory, store=store).run(
+            traj_id="traj_l", traj_path=traj_path)
+        out = captured_look["out"]
+        # 含行号前缀 + 读到 assistant 正文（弃窗后唯一进上下文的途径）
+        assert "11: Cloning..." in out
+        assert re.search(r"^\d+: ", out, re.MULTILINE)
+
+    def test_my_atoms_reports_submitted_spans(self, tmp_path):
+        traj_dir = tmp_path / "cc-sessions"
+        traj_dir.mkdir()
+        traj_path = traj_dir / "traj_m.md"
+        traj_path.write_text(_TRAJ_MD, encoding="utf-8")
+        store = AtomTaskStore(root=traj_dir)
+        captured_my: dict = {}
+
+        def factory(*, instructions, tools):
+            toolmap = {getattr(t, "__name__", ""): t for t in tools}
+
+            class _A:
+                def run(self, user_msg, **kw):
+                    toolmap["submit_atom"](start_line=5, intent="i", summary="s")
+                    toolmap["submit_atom"](
+                        start_line=17, intent="i2", summary="s2")
+                    captured_my["out"] = toolmap["my_atoms"]()
+                    captured_my["budget"] = toolmap["context_budget"]()
+                    return _RunResult()
+
+            return _A()
+
+        TaskAgent(agno_agent_factory=factory, store=store).run(
+            traj_id="traj_m", traj_path=traj_path)
+        # 两个区间：[5,17) [17,24)
+        assert "[5,17)" in captured_my["out"]
+        assert "[17,24)" in captured_my["out"]
+        # context_budget 返回 JSON 含 used/max/remaining
+        assert '"max_tokens"' in captured_my["budget"]
+        assert '"used_tokens"' in captured_my["budget"]
+
+
+# ────────────────────────────────────────────────────────────────────
+# SYSTEM_PROMPT 共享一份：含严格分档表 + 4 工具协议 + 弃窗/撤销原则
 # ────────────────────────────────────────────────────────────────────
 
 class TestSystemPrompt:
-    def test_prompt_contains_strict_rubric_and_submit_protocol(self, tmp_path):
+    def test_prompt_contains_rubric_tools_and_principles(self, tmp_path):
         traj_dir = tmp_path / "cc-sessions"
         traj_dir.mkdir()
         traj_path = traj_dir / "traj_p.md"
@@ -458,19 +592,23 @@ class TestSystemPrompt:
         assert "10 一次到位" in system_msg
         assert "用户意图切换" in system_msg
         assert "ux_score" in system_msg
-        # 新协议关键词：submit_atom + 行号标记 + readfile
+        # 4 工具协议
         assert "submit_atom" in system_msg
+        assert "look" in system_msg
+        assert "context_budget" in system_msg
+        assert "my_atoms" in system_msg
         assert "start_line" in system_msg
-        assert "[line:" in system_msg
-        assert "readfile" in system_msg
+        # 弃窗 + 撤销原则
+        assert "弃窗单趟" in system_msg
+        assert "撤销" in system_msg
 
-    def test_literal_braces_in_content_are_safe(self, tmp_path):
-        """轨迹正文含 ``{annotated}`` / ``{start_line}`` 字面量时,注入不二次解析。"""
+    def test_literal_braces_in_query_snippet_are_safe(self, tmp_path):
+        """User 提问含 ``{}`` 字面量时,模板注入不二次解析。"""
         traj_dir = tmp_path / "cc-sessions"
         traj_dir.mkdir()
         traj_path = traj_dir / "traj_b.md"
         traj_path.write_text(
-            "## User\n\n聊到 {annotated} 和 {start_line} 这两个占位\n",
+            "## User\n\n聊到 {start_line} 这个占位\n\n## Assistant\n\nok\n",
             encoding="utf-8",
         )
         store = AtomTaskStore(root=traj_dir)
@@ -481,6 +619,99 @@ class TestSystemPrompt:
             traj_id="traj_b", traj_path=traj_path)
         assert len(atoms) == 1
         user_msg = factory.captured["user_msg"]
-        # 占位字面量原样保留在 user_msg 里,没被当模板变量替掉
-        assert "{annotated}" in user_msg
         assert "{start_line}" in user_msg
+
+
+# ────────────────────────────────────────────────────────────────────
+# 上下文自管理（context_budget 模块）：剪裁 + 超长兜底 + max_context 解析
+# ────────────────────────────────────────────────────────────────────
+
+class TestContextManager:
+    def test_resolve_max_context_config_first(self):
+        from xskill.agents.context_budget import resolve_max_context
+        assert resolve_max_context({"max_context": 128000}) == 128000
+
+    def test_resolve_max_context_default_with_warning(self, caplog):
+        from xskill.agents.context_budget import (
+            resolve_max_context, DEFAULT_MAX_CONTEXT)
+        import logging
+        with caplog.at_level(logging.WARNING):
+            assert resolve_max_context({}) == DEFAULT_MAX_CONTEXT
+        assert any("max_context" in r.message for r in caplog.records)
+
+    def test_proactive_trim_of_old_look_results(self):
+        """到 85% 上限时,旧 look 工具返回被纯截断（不调模型）。"""
+        from xskill.agents.context_budget import ContextManager, _TRIM_MARK
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        # max_context 小,凑一条超大的 look 返回触发剪裁。
+        cm = ContextManager(max_context=1000)
+        big = "x" * 8000  # ~2000 token,远超 85%*1000=850
+        messages = [
+            _Msg("user", "map"),
+            _Msg("tool", big, tool_name="look"),
+        ]
+        sent = {}
+
+        def fake_invoke(msgs, **kw):
+            sent["look_content"] = msgs[1].content
+            return {"usage": {"prompt_tokens": 123}}
+
+        managed = cm.wrap(fake_invoke)
+        managed(messages)
+        # 旧 look 返回被剪成标记
+        assert sent["look_content"] == _TRIM_MARK
+
+    def test_overlong_error_triggers_retrim_and_resend(self):
+        from xskill.agents.context_budget import ContextManager, _TRIM_MARK
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        cm = ContextManager(max_context=100000)
+        messages = [
+            _Msg("user", "map"),
+            _Msg("tool", "y" * 4000, tool_name="look"),
+        ]
+        calls = {"n": 0}
+
+        def flaky_invoke(msgs, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("maximum context length exceeded")
+            return {"usage": {"prompt_tokens": 50}}
+
+        managed = cm.wrap(flaky_invoke)
+        resp = managed(messages)
+        assert calls["n"] == 2                 # 兜底重发了一次
+        assert messages[1].content == _TRIM_MARK
+        assert resp["usage"]["prompt_tokens"] == 50
+
+    def test_non_overlong_error_propagates(self):
+        from xskill.agents.context_budget import ContextManager
+        cm = ContextManager(max_context=100000)
+
+        def boom(msgs, **kw):
+            raise ValueError("totally unrelated failure")
+
+        with pytest.raises(ValueError, match="unrelated"):
+            cm.wrap(boom)([])
+
+    def test_records_real_prompt_tokens(self):
+        from xskill.agents.context_budget import (
+            ContextManager, get_used_tokens)
+        cm = ContextManager(max_context=100000)
+
+        def ok_invoke(msgs, **kw):
+            return {"usage": {"prompt_tokens": 777}}
+
+        cm.wrap(ok_invoke)([])
+        assert get_used_tokens() == 777
