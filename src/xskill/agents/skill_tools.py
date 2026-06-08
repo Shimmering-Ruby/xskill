@@ -13,7 +13,12 @@ from pathlib import Path
 
 import numpy as np
 
-from xskill.skill.frontmatter import parse as fm_parse, serialize as fm_serialize
+from xskill.skill.frontmatter import (
+    parse as fm_parse,
+    parse_strict as fm_parse_strict,
+    serialize as fm_serialize,
+    FrontmatterError,
+)
 
 logger = logging.getLogger("skill_tools")
 
@@ -387,15 +392,24 @@ def write_file(path: str, content: str) -> str:
     if ".git" in resolved.parts:
         return f"error: writes into .git/ are forbidden (tried: {path})"
 
-    p.parent.mkdir(parents=True, exist_ok=True)
-    # 写 SKILL.md：消毒 frontmatter 日期（防止 LLM 写未来日期 / 不合法 ISO）
+    # 写 SKILL.md：先做 frontmatter 写后校验（漏拦=静默放行坏 skill），
+    # 非法**不写盘**，把富误差返回给 agent 让它当场改重写；合法再消毒日期 +
+    # 重序列化写入。校验逻辑见 frontmatter.parse_strict（必填 name/description、
+    # description 必须非空字符串、body 非空）。
     if p.name == "SKILL.md":
         try:
-            fm, body = fm_parse(content)
-            _sanitize_frontmatter_dates(fm)
-            content = fm_serialize(fm, body)
-        except Exception as e:
-            logger.warning(f"SKILL.md frontmatter 日期消毒失败，原样写入: {e}")
+            fm, body = fm_parse_strict(content)
+        except FrontmatterError as e:
+            logger.warning(f"SKILL.md frontmatter 非法，拒写: {e}")
+            return (
+                f"error: SKILL.md frontmatter 非法，未写盘 —— {e}\n"
+                "请修正 frontmatter 后重新调用 write_file。常见原因：多行 "
+                "description 没用块标量 `|` 或引号、缺 name/description、正文为空。"
+            )
+        _sanitize_frontmatter_dates(fm)
+        content = fm_serialize(fm, body)
+
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
     logger.info(f"✏️  wrote: {p} ({len(content)} bytes)")
     return f"wrote: {p} ({len(content)} chars)"

@@ -200,6 +200,22 @@ class SkillEditAgent:
             )
             return False
 
+        # 发布门兜底：write_file 已挡住非法 frontmatter，但 agent 可能绕开
+        # write_file（或别的路径）落了坏 SKILL.md。commit 前再跑一次 parse_strict，
+        # 非法 → 不清 buffer、标重试，绝不把坏 skill 静默发布出去。
+        from xskill.skill.frontmatter import (
+            parse_strict as fm_parse_strict,
+            FrontmatterError,
+        )
+        try:
+            fm_parse_strict(skill_md.read_text(encoding="utf-8"))
+        except FrontmatterError as e:
+            logger.warning(
+                "SkillEditAgent 落了非法 SKILL.md: %s — %s；保留 candidates 重试",
+                self.skill_dir.name, e,
+            )
+            return False
+
         # commit 工具的成功效应（baby→main 或 main→staging）通过当前分支变化
         # 自然反映，不需要在这里做额外检查
         C.clear_candidates(self.skill_dir)
