@@ -79,23 +79,27 @@ def test_reset_eco_filter_skips_other_ecosystems(tmp_path, db_path):
     assert "traj_cc_y.md" not in get_trajs_by_status(wid2, "discovered", db_path=db_path)
 
 
-def test_force_wipe_atoms_deletes_atom_files(tmp_path, db_path):
+def test_reset_always_deletes_atom_files(tmp_path, db_path):
+    """splitter 续接点取自 atom 文件——必须删 atom 才能真正触发重拆（0.6.1a1 洞）。"""
     d, _wid = _seed_done_traj(tmp_path, db_path, with_atoms=True)
     tasks = d / "traj_ng_x" / "tasks"
     assert list(tasks.glob("atom_*.json"))
 
-    reset_trajectories(eco="ngagent", wipe_atoms=True, db_path=db_path)
+    reset_trajectories(eco="ngagent", db_path=db_path)
 
-    assert not list(tasks.glob("atom_*.json")), "wipe_atoms 应删光原子文件"
+    assert not list(tasks.glob("atom_*.json")), "reset 应删光原子文件"
 
 
-def test_reset_without_wipe_keeps_atoms(tmp_path, db_path):
+def test_reset_deletes_stale_index_pkl(tmp_path, db_path):
+    """删 atom 同时删该目录的 index.pkl——否则陈旧 embedding 指向已删 atom。"""
     d, _wid = _seed_done_traj(tmp_path, db_path, with_atoms=True)
-    tasks = d / "traj_ng_x" / "tasks"
+    idx = d / "index.pkl"
+    idx.write_bytes(b"stale-index")
+    assert idx.is_file()
 
-    reset_trajectories(eco="ngagent", wipe_atoms=False, db_path=db_path)
+    reset_trajectories(eco="ngagent", db_path=db_path)
 
-    assert list(tasks.glob("atom_*.json")), "不带 force 不应删原子"
+    assert not idx.exists(), "reset 应删陈旧 index.pkl"
 
 
 def test_wipe_all_skills_removes_skill_dirs_keeps_references(tmp_path):

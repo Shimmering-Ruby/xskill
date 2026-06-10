@@ -344,8 +344,9 @@ def cmd_read(args, xskill) -> int:
 def cmd_rebuild(args, xskill) -> int:
     """`xskill rebuild [--force]` —— 用现有原始轨迹重跑蒸馏。
 
-    默认：重置目标轨迹状态/offset，让运行中的 watcher 从头重拆重聚。
-    ``--force``：额外清空 skill 仓 + 已拆原子（删除重建）。
+    默认：删除已拆 atom + index.pkl、轨迹状态翻回 discovered，让运行中的 watcher
+    从头重拆重聚（删 atom 是真正触发重拆的动作——splitter 续接点取自 atom 文件，
+    不读 DB offset）。``--force``：额外先清空 skill 仓（删除重建）。
 
     换模型护栏：rebuild 的重跑是交给**正在运行的 daemon**，而 daemon 的模型是
     启动时缓存的（改 config 不重启不生效）。若 daemon 在跑且其模型 ≠ 当前 config
@@ -381,10 +382,8 @@ def cmd_rebuild(args, xskill) -> int:
         n_skills = SkillRepo(get_skill_dir()).wipe_all_skills()
         print(f"--force: 清空 skill 仓（删 {n_skills} 个 skill）")
 
-    n = reset_trajectories(
-        eco=args.eco, traj_id=args.traj, wipe_atoms=args.force,
-    )
-    print(f"rebuild: 重置 {n} 条轨迹（{'含清原子' if args.force else '保留原子'}）")
+    n = reset_trajectories(eco=args.eco, traj_id=args.traj)
+    print(f"rebuild: 重置 {n} 条轨迹（已删 atom + index.pkl，将从头重拆）")
 
     if read_status().get("running"):
         print("watcher 运行中 —— 30s 内将自动重跑这些轨迹。")

@@ -836,19 +836,24 @@ def reset_trajectories(
     *,
     eco: Optional[str] = None,
     traj_id: Optional[str] = None,
-    wipe_atoms: bool = False,
     db_path: Optional[Path] = None,
 ) -> int:
-    """把轨迹重置回 ``discovered`` 让 watcher 从头重拆（``xskill rebuild`` 用）。
+    """删除已拆 atom + 重置状态，让 watcher 从头重拆（``xskill rebuild`` 用）。
 
-    重置内容：``status='discovered'``、``last_offset=0``、``last_atom_id=NULL``、
-    ``tasks_extracted=0``——下一轮 watcher scan 会像新轨迹一样全量重拆重聚。
+    **关键正确性点**：TaskAgent 的续接点取自 atom **文件**
+    （``AtomTaskStore.last_offset`` = 各 ``<traj_id>/tasks/atom_*.json`` 的
+    ``max(offset_end)``），**不读 DB 的 ``last_offset`` 列**。所以只翻 DB 状态
+    而不删 atom 文件 → ``last_offset ≥ EOF`` → TaskAgent 直接返回空 → 重拆失效
+    （0.6.1a1 的洞）。因此本函数**必删 atom 文件**，这才是真正触发重拆的动作。
+
+    同时删该目录的 ``index.pkl``（atom 的向量索引）——否则 atom 已删而索引仍留
+    陈旧 embedding，cluster 阶段向量检索会命中已不存在的 atom。
+
+    DB ``status`` 翻回 ``discovered`` 让 watcher 下轮重新排 split。
 
     Args:
         eco: 只重置该生态（``watch_dirs.ecosystem``）的轨迹；None=全部。
         traj_id: 只重置该轨迹（按文件名 stem 匹配）；None=不按轨迹过滤。
-        wipe_atoms: True 时额外删除每条轨迹已拆的 ``<traj_id>/tasks/atom_*.json``，
-            强制 TaskAgent 用新模型重拆（``--force`` 走这条）。
 
     Returns:
         被重置的轨迹行数。
@@ -868,6 +873,7 @@ def reset_trajectories(
             params += [traj_id, f"{traj_id}.md"]
         rows = conn.execute(sql, params).fetchall()
 
+        dirs_seen: set[str] = set()
         for r in rows:
             conn.execute(
                 "UPDATE trajectories SET status='discovered', last_offset=0, "
@@ -875,14 +881,19 @@ def reset_trajectories(
                 "updated_at=datetime('now') WHERE id=?",
                 (r["id"],),
             )
-            if wipe_atoms:
-                stem = (r["filename"][:-3] if r["filename"].endswith(".md")
-                        else r["filename"])
-                tasks_dir = Path(r["path"]) / stem / "tasks"
-                if tasks_dir.is_dir():
-                    for af in tasks_dir.glob("atom_*.json"):
-                        af.unlink()
+            stem = (r["filename"][:-3] if r["filename"].endswith(".md")
+                    else r["filename"])
+            tasks_dir = Path(r["path"]) / stem / "tasks"
+            if tasks_dir.is_dir():
+                for af in tasks_dir.glob("atom_*.json"):
+                    af.unlink()
+            dirs_seen.add(r["path"])
         conn.commit()
+        # 清各目录的陈旧向量索引（AtomTaskStore.INDEX_FILE = "index.pkl"）。
+        for d in dirs_seen:
+            idx = Path(d) / "index.pkl"
+            if idx.is_file():
+                idx.unlink()
         return len(rows)
     finally:
         conn.close()
