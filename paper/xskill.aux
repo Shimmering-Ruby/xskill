@@ -1,0 +1,112 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{anthropic2025claude}
+\citation{openai2025codex}
+\citation{sst2025opencode}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
+\citation{hku2025openspace}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {xskill system overview.} Developers use their preferred coding agents (Claude Code, Codex, OpenCode, etc.). The xskill client daemon watches trajectory directories and uploads sanitized deltas to the central server. The server's three-agent pipeline decomposes trajectories into atomic tasks, clusters them into skill candidates, and produces versioned SKILL.md artifacts via git commits. Evolved skills are synced back to each developer's agent runtime.}}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:overview}{{1}{2}{\textbf {xskill system overview.} Developers use their preferred coding agents (Claude Code, Codex, OpenCode, etc.). The xskill client daemon watches trajectory directories and uploads sanitized deltas to the central server. The server's three-agent pipeline decomposes trajectories into atomic tasks, clusters them into skill candidates, and produces versioned SKILL.md artifacts via git commits. Evolved skills are synced back to each developer's agent runtime}{figure.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\newlabel{sec:related}{{2}{2}{Related Work}{section.2}{}}
+\citation{sentient2025evoskill}
+\citation{ecnu2025autoskill}
+\citation{memskill2025}
+\citation{evoagentx2025}
+\citation{seagent2025}
+\citation{skillrl2025}
+\citation{agentevolver2025}
+\citation{alibaba2025trace2skill}
+\citation{gepa2025}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces \textbf  {Landscape of trajectory-to-skill systems.} Columns indicate whether the system produces SKILL.md files, supports online (per-turn) triggering, implements deduplication, performs canary/A-B evaluation, and targets production coding-agent deployment.}}{3}{table.1}\protected@file@percent }
+\newlabel{tab:landscape}{{1}{3}{\textbf {Landscape of trajectory-to-skill systems.} Columns indicate whether the system produces SKILL.md files, supports online (per-turn) triggering, implements deduplication, performs canary/A-B evaluation, and targets production coding-agent deployment}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Skill-as-SKILL.md Systems}{3}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Non-SKILL.md Systems}{3}{subsection.2.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces \textbf  {Feature coverage of trajectory-to-skill systems} on five dimensions critical for team deployment. Only xskill covers all five: asynchronous per-turn triggering, multi-ecosystem support, deduplication, canary-based A/B testing, and user-experience scoring. None of the 10 surveyed systems implement canary or UX evaluation.}}{4}{figure.2}\protected@file@percent }
+\newlabel{fig:features}{{2}{4}{\textbf {Feature coverage of trajectory-to-skill systems} on five dimensions critical for team deployment. Only xskill covers all five: asynchronous per-turn triggering, multi-ecosystem support, deduplication, canary-based A/B testing, and user-experience scoring. None of the 10 surveyed systems implement canary or UX evaluation}{figure.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \textbf  {Cross-agent trajectory collection.} Each coding agent writes trajectories in its native format and path. The xskill client runs per-agent adapters that normalize events into a unified schema. Four of five agents use appendable JSONL files, enabling efficient \texttt  {inotify}/\texttt  {tail} collection; OpenCode's SQLite database requires polling.}}{4}{figure.3}\protected@file@percent }
+\newlabel{fig:collection}{{3}{4}{\textbf {Cross-agent trajectory collection.} Each coding agent writes trajectories in its native format and path. The xskill client runs per-agent adapters that normalize events into a unified schema. Four of five agents use appendable JSONL files, enabling efficient \texttt {inotify}/\texttt {tail} collection; OpenCode's SQLite database requires polling}{figure.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Key Gap: No System Does A/B Evaluation}{4}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}System Architecture}{4}{section.3}\protected@file@percent }
+\newlabel{sec:architecture}{{3}{4}{System Architecture}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Cross-Agent Trajectory Collection}{4}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:collection}{{3.1}{4}{Cross-Agent Trajectory Collection}{subsection.3.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \textbf  {Three-agent pipeline.} \emph  {TaskAgent} decomposes trajectory deltas into AtomTask segments. \emph  {TaskClusterAgent} routes each atom to an existing or new skill, appending weighted evidence. \emph  {SkillEditAgent} fires when cumulative evidence exceeds a threshold (default: weight$\geq $10), producing or updating SKILL.md via git commit.}}{5}{figure.4}\protected@file@percent }
+\newlabel{fig:pipeline}{{4}{5}{\textbf {Three-agent pipeline.} \emph {TaskAgent} decomposes trajectory deltas into AtomTask segments. \emph {TaskClusterAgent} routes each atom to an existing or new skill, appending weighted evidence. \emph {SkillEditAgent} fires when cumulative evidence exceeds a threshold (default: weight$\geq $10), producing or updating SKILL.md via git commit}{figure.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Sanitization.}{5}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Three-Agent Pipeline}{5}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:pipeline}{{3.2}{5}{Three-Agent Pipeline}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.1}TaskAgent: Trajectory Decomposition}{5}{subsubsection.3.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.2}TaskClusterAgent: Skill Routing}{6}{subsubsection.3.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.3}SkillEditAgent: Skill Production}{6}{subsubsection.3.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Canary Evaluation Protocol}{6}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:canary}{{3.3}{6}{Canary Evaluation Protocol}{subsection.3.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces \textbf  {Canary evaluation protocol.} When the SkillEditAgent produces an updated skill, it commits to a staging branch. The xskill server routes a subset of users ($u_4, u_5$) to the staging version while the majority ($u_1, u_2, u_3$) continue on main. UX scores from AtomTasks using each branch are aggregated; the staging branch is promoted to main only if its mean score exceeds main's.}}{7}{figure.5}\protected@file@percent }
+\newlabel{fig:canary}{{5}{7}{\textbf {Canary evaluation protocol.} When the SkillEditAgent produces an updated skill, it commits to a staging branch. The xskill server routes a subset of users ($u_4, u_5$) to the staging version while the majority ($u_1, u_2, u_3$) continue on main. UX scores from AtomTasks using each branch are aggregated; the staging branch is promoted to main only if its mean score exceeds main's}{figure.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces \textbf  {Skill output paths for 5 agent ecosystems.} The SKILL.md format with YAML frontmatter (\texttt  {name} + \texttt  {description}) is the cross-agent interoperability unit. Two filesystem paths---\texttt  {\~{}/.claude/skills/} and \texttt  {\~{}/.agents/skills/}---cover 4 of 5 ecosystems; only Hermes requires a dedicated path.}}{7}{table.2}\protected@file@percent }
+\newlabel{tab:distribution}{{2}{7}{\textbf {Skill output paths for 5 agent ecosystems.} The SKILL.md format with YAML frontmatter (\texttt {name} + \texttt {description}) is the cross-agent interoperability unit. Two filesystem paths---\texttt {\~{}/.claude/skills/} and \texttt {\~{}/.agents/skills/}---cover 4 of 5 ecosystems; only Hermes requires a dedicated path}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Cross-Agent Skill Distribution}{7}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:distribution}{{3.4}{7}{Cross-Agent Skill Distribution}{subsection.3.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces \textbf  {Trigger mechanisms across 10 systems + xskill.} ``Async'' = non-blocking; ``Per-turn'' = can fire during a live conversation; ``User-transparent'' = the user does not explicitly request skill generation.}}{8}{table.3}\protected@file@percent }
+\newlabel{tab:trigger}{{3}{8}{\textbf {Trigger mechanisms across 10 systems + xskill.} ``Async'' = non-blocking; ``Per-turn'' = can fire during a live conversation; ``User-transparent'' = the user does not explicitly request skill generation}{table.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Design Dimensions: A Comparative Analysis}{8}{section.4}\protected@file@percent }
+\newlabel{sec:dimensions}{{4}{8}{Design Dimensions: A Comparative Analysis}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Trigger Mechanism}{8}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Skill Production}{8}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Deduplication and Merging}{8}{subsection.4.3}\protected@file@percent }
+\citation{zheng2024judging}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces \textbf  {Skill injection strategies.} xskill does not inject skills itself---it publishes to disk, and the host runtime's loader handles injection. This decoupling is deliberate: it preserves each runtime's native caching, trimming, and compaction behavior.}}{9}{table.4}\protected@file@percent }
+\newlabel{tab:injection}{{4}{9}{\textbf {Skill injection strategies.} xskill does not inject skills itself---it publishes to disk, and the host runtime's loader handles injection. This decoupling is deliberate: it preserves each runtime's native caching, trimming, and compaction behavior}{table.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Evaluation and Retirement}{9}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Skill Injection}{9}{subsection.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Discussion}{9}{section.5}\protected@file@percent }
+\newlabel{sec:discussion}{{5}{9}{Discussion}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Design Trade-offs}{9}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Pull vs.\ Push trajectory collection.}{9}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Cumulative evidence vs.\ single-trajectory skill creation.}{9}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{UX scoring vs.\ LLM judging.}{9}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Limitations}{9}{subsection.5.2}\protected@file@percent }
+\bibstyle{plainnat}
+\bibcite{anthropic2025claude}{{1}{2025}{{Anthropic}}{{}}}
+\bibcite{openai2025codex}{{2}{2025}{{OpenAI}}{{}}}
+\bibcite{sst2025opencode}{{3}{2025}{{SST}}{{}}}
+\bibcite{hku2025openspace}{{4}{2025}{{Chen et~al.}}{{}}}
+\bibcite{sentient2025evoskill}{{5}{2025}{{Wang et~al.}}{{}}}
+\bibcite{ecnu2025autoskill}{{6}{2025}{{Li et~al.}}{{}}}
+\bibcite{alibaba2025trace2skill}{{7}{2025}{{Qwen}}{{}}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Broader Impact}{10}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Conclusion}{10}{section.6}\protected@file@percent }
+\newlabel{sec:conclusion}{{6}{10}{Conclusion}{section.6}{}}
+\bibcite{agentevolver2025}{{8}{2025}{{ModelScope}}{{}}}
+\bibcite{memskill2025}{{9}{2025}{{Axelsen}}{{}}}
+\bibcite{evoagentx2025}{{10}{2025}{{EvoAgentX}}{{}}}
+\bibcite{seagent2025}{{11}{2025}{{Xu et~al.}}{{}}}
+\bibcite{skillrl2025}{{12}{2025}{{Aiming Lab}}{{}}}
+\bibcite{gepa2025}{{13}{2025}{{GEPA}}{{}}}
+\bibcite{zheng2024judging}{{14}{2024}{{Zheng et~al.}}{{}}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Full Comparison Matrix}{12}{appendix.A}\protected@file@percent }
+\newlabel{app:matrix}{{A}{12}{Full Comparison Matrix}{appendix.A}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces \textbf  {Cross-system comparison on ``skill'' definition.} The term ``skill'' refers to fundamentally different artifacts across systems, complicating direct comparison.}}{12}{table.5}\protected@file@percent }
+\newlabel{tab:skill-def}{{5}{12}{\textbf {Cross-system comparison on ``skill'' definition.} The term ``skill'' refers to fundamentally different artifacts across systems, complicating direct comparison}{table.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {B}AtomTask Schema}{12}{appendix.B}\protected@file@percent }
+\newlabel{app:atomtask}{{B}{12}{AtomTask Schema}{appendix.B}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {C}Canary Guard Conditions}{12}{appendix.C}\protected@file@percent }
+\newlabel{app:canary-guards}{{C}{12}{Canary Guard Conditions}{appendix.C}{}}
+\gdef \@abspage@last{13}

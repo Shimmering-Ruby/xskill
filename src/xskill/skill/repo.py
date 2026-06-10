@@ -21,7 +21,7 @@ from xskill.skill.git import commit_changes
 if TYPE_CHECKING:
     from xskill.pipeline.registry import Registry
 
-logger = logging.getLogger("skill_manager")
+logger = logging.getLogger("xskill.skill_manager")
 
 
 class SkillRepo:

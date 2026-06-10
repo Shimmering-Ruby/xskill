@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background: #fff; font-family: 'Helvetica Neue', Arial, sans-serif; padding: 24px; width: 700px; }
+.container { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+
+.branches { display: flex; gap: 80px; justify-content: center; }
+
+.branch { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.branch-label {
+  font-weight: 800; font-size: 15px; padding: 8px 28px;
+  border-radius: 8px; border: 2.5px solid;
+}
+.main-label { background: #ECFDF5; border-color: #10B981; color: #065F46; }
+.staging-label { background: #FFF7ED; border-color: #F97316; color: #9A3412; }
+
+.users { display: flex; gap: 8px; }
+.user {
+  width: 36px; height: 36px; border-radius: 50%; display: flex;
+  align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+  border: 2px solid;
+}
+.u-main { background: #D1FAE5; border-color: #10B981; color: #065F46; }
+.u-staging { background: #FED7AA; border-color: #F97316; color: #9A3412; }
+
+.score-box {
+  border: 1.5px dashed; border-radius: 6px; padding: 6px 16px;
+  font-size: 13px; font-weight: 600; text-align: center;
+}
+.score-main { border-color: #10B981; color: #065F46; background: #F0FDF4; }
+.score-staging { border-color: #F97316; color: #9A3412; background: #FFFBEB; }
+
+.comparison {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 14px; font-weight: 600; color: #374151;
+  padding: 8px 20px; border-radius: 8px; background: #F9FAFB; border: 1px solid #E5E7EB;
+}
+
+.decisions { display: flex; gap: 40px; }
+.decision {
+  padding: 10px 24px; border-radius: 8px; border: 2.5px solid;
+  font-weight: 800; font-size: 14px; text-align: center;
+}
+.promote { background: #ECFDF5; border-color: #10B981; color: #065F46; }
+.freeze { background: #FEF2F2; border-color: #EF4444; color: #991B1B; }
+.decision .sub { font-size: 10px; font-weight: 400; margin-top: 2px; font-style: italic; }
+
+.flow-line { color: #9CA3AF; font-size: 10px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="branches">
+    <div class="branch">
+      <div class="branch-label main-label">main</div>
+      <div class="users">
+        <div class="user u-main">u<sub>1</sub></div>
+        <div class="user u-main">u<sub>2</sub></div>
+        <div class="user u-main">u<sub>3</sub></div>
+      </div>
+      <div class="score-box score-main">s&#772;<sub>main</sub> = 6.8 &nbsp; (&sigma; = 1.2)</div>
+    </div>
+
+    <div class="branch">
+      <div class="branch-label staging-label">staging</div>
+      <div class="users">
+        <div class="user u-staging">u<sub>4</sub></div>
+        <div class="user u-staging">u<sub>5</sub></div>
+      </div>
+      <div class="score-box score-staging">s&#772;<sub>staging</sub> = 7.4 &nbsp; (&sigma; = 1.1)</div>
+    </div>
+  </div>
+
+  <div style="color:#9CA3AF; font-size: 18px;">&#x25BC;</div>
+
+  <div class="comparison">
+    <span>s&#772;<sub>staging</sub> &gt; s&#772;<sub>main</sub> ?</span>
+    <span style="color:#9CA3AF; font-size:11px;">(Welch's <i>t</i>-test, &alpha; = 0.05, <i>n</i><sub>min</sub> = 20)</span>
+  </div>
+
+  <div style="display: flex; gap: 100px;">
+    <div style="color:#10B981; text-align:center; font-size:12px;">yes &#x25BC;</div>
+    <div style="color:#EF4444; text-align:center; font-size:12px;">no &#x25BC;</div>
+  </div>
+
+  <div class="decisions">
+    <div class="decision promote">PROMOTE<div class="sub">staging &rarr; new main</div></div>
+    <div class="decision freeze">FREEZE<div class="sub">retain for audit, hide from runtime</div></div>
+  </div>
+
+</div>
+</body></html>

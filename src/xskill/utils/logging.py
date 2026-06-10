@@ -61,23 +61,32 @@ class StreamLog:
                         encoding="utf-8")
 
 
-# 每个 namespace 单独一个 file handler；其余 logger 走 root（→ xskill.log）。
-# 写在这里方便统一加/减组件。
+# 每个 namespace 单独一个 file handler；其余 xskill.* 子 logger 不单开文件，
+# 靠 propagate 冒泡进 xskill.log 汇总视图。
+#
+# 约定（统一在 xskill.* 命名空间下，保证都能冒泡进 xskill.log）：
+#   - 只给"会被独立排查"的高价值组件单开文件：流水线 / 三个核心 agent /
+#     评分 / 灰度 / 生态 / 注册表 / server。
+#   - 低频组件（config/prices/usage/runtime/candidates/search/skill_manager/
+#     git_lock/skill_tools/tasks/...）不单开文件，只进 xskill.log——避免一堆
+#     几乎不写的空 .log（旧版 git_lock.log / skill_tools.log 即此问题）。
+#   - 非 xskill 命名空间的第三方（agno / httpx）单独隔离免污染。
 _PER_LOGGER_FILES: dict[str, str] = {
-    "xskill.watcher":    "xskill.watcher.log",
-    "xskill.server":     "xskill.server.log",
-    "xskill":            "xskill.log",              # 兜底（含其它子 logger）
-    "xskill.canary":     "xskill.canary.log",
-    "xskill.ux_score":   "xskill.ux_score.log",
-    "xskill.ecosystems": "xskill.ecosystems.log",
-    "xskill.registry":   "xskill.registry.log",
-    "ux_score":          "xskill.ux_score.log",     # src/xskill/ux_score.py 用 "ux_score"
-    "skill_tools":       "xskill.agents.skill_tools.log",
-    "git_lock":          "xskill.git_lock.log",
-    "agno":              "agno.log",                # agno 内部，单独隔离免污染
-    "httpx":             "httpx.log",
-    "httpcore":          "httpx.log",
-    "openai":            "httpx.log",
+    "xskill":                    "xskill.log",        # 全 xskill.* 合并视图（兜底）
+    "xskill.watcher":            "xskill.watcher.log",
+    "xskill.process":            "xskill.watcher.log",  # 同属流水线，并入 watcher
+    "xskill.server":             "xskill.server.log",
+    "xskill.canary":             "xskill.canary.log",
+    "xskill.ux_score":           "xskill.ux_score.log",
+    "xskill.ecosystems":         "xskill.ecosystems.log",
+    "xskill.registry":           "xskill.registry.log",
+    "xskill.task_agent":         "xskill.task_agent.log",
+    "xskill.task_cluster_agent": "xskill.task_cluster_agent.log",
+    "xskill.skill_edit_agent":   "xskill.skill_edit_agent.log",
+    "agno":                      "agno.log",          # agno 内部，单独隔离免污染
+    "httpx":                     "httpx.log",
+    "httpcore":                  "httpx.log",
+    "openai":                    "httpx.log",
 }
 
 # 日常 noisy 但不重要的 logger 默认 WARNING，避免 xskill.log 被淹
@@ -142,17 +151,24 @@ def configure_logging(
     # 都会冒泡到 root 进 xskill.log；root 上不挂 file，只挂 stdout。
     # xskill.log 这份汇总文件挂在 logger="xskill" 上，下面所有 xskill.*
     # 都会经过它。
+    # 多个 logger 可能映射到同一文件（如 xskill.process + xskill.watcher 都进
+    # xskill.watcher.log）——按文件路径去重复用同一个 handler 对象，避免两个
+    # RotatingFileHandler 指同一文件时 rollover 互相打架。
+    _handler_by_path: dict[Path, logging.Handler] = {}
     for name, fname in _PER_LOGGER_FILES.items():
         fpath = logs_dir / fname
-        fh = logging.handlers.RotatingFileHandler(
-            fpath,
-            maxBytes=rotate_max_bytes,
-            backupCount=rotate_backups,
-            encoding="utf-8",
-        )
-        fh.setLevel(root_level)
-        fh.setFormatter(common_fmt)
-        fh._xskill_managed = True  # type: ignore[attr-defined]
+        fh = _handler_by_path.get(fpath)
+        if fh is None:
+            fh = logging.handlers.RotatingFileHandler(
+                fpath,
+                maxBytes=rotate_max_bytes,
+                backupCount=rotate_backups,
+                encoding="utf-8",
+            )
+            fh.setLevel(root_level)
+            fh.setFormatter(common_fmt)
+            fh._xskill_managed = True  # type: ignore[attr-defined]
+            _handler_by_path[fpath] = fh
         logger = logging.getLogger(name)
         logger.addHandler(fh)
         logger.setLevel(root_level)

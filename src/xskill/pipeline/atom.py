@@ -26,7 +26,7 @@ from typing import Iterator
 
 import numpy as np
 
-logger = logging.getLogger("ux_score")
+logger = logging.getLogger("xskill.ux_score")
 
 
 @dataclass

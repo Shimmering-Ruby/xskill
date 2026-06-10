@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background: #fff; font-family: 'Helvetica Neue', Arial, sans-serif; padding: 20px; width: 620px; }
+
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th { text-align: center; padding: 8px 6px; font-weight: 700; color: #374151; border-bottom: 2px solid #E5E7EB; }
+th:first-child { text-align: left; min-width: 120px; }
+td { text-align: center; padding: 7px 6px; border-bottom: 1px solid #F3F4F6; }
+td:first-child { text-align: left; font-weight: 600; color: #374151; }
+
+.yes { color: #10B981; font-weight: 800; font-size: 16px; }
+.no { color: #D1D5DB; font-size: 14px; }
+
+tr.highlight td { background: #ECFDF5; border-bottom: 2px solid #10B981; }
+tr.highlight td:first-child { color: #065F46; font-weight: 800; font-size: 14px; }
+
+tr.sep td { border-bottom: 2.5px solid #374151; }
+</style>
+</head>
+<body>
+<table>
+<thead>
+<tr>
+  <th>System</th>
+  <th>Async<br><span style="font-weight:400;font-size:10px;color:#9CA3AF;">Trigger</span></th>
+  <th>Multi-eco<br><span style="font-weight:400;font-size:10px;color:#9CA3AF;">Support</span></th>
+  <th>Dedup<br><span style="font-weight:400;font-size:10px;color:#9CA3AF;">Mechanism</span></th>
+  <th>Canary<br><span style="font-weight:400;font-size:10px;color:#9CA3AF;">A/B Test</span></th>
+  <th>UX Score<br><span style="font-weight:400;font-size:10px;color:#9CA3AF;">Behavioral</span></th>
+</tr>
+</thead>
+<tbody>
+<tr><td>OpenSpace</td><td class="yes">&#x2713;</td><td class="no">&times;</td><td class="yes">&#x2713;</td><td class="no">&times;</td><td class="no">&times;</td></tr>
+<tr><td>AutoSkill</td><td class="yes">&#x2713;</td><td class="no">&times;</td><td class="yes">&#x2713;</td><td class="no">&times;</td><td class="no">&times;</td></tr>
+<tr><td>EvoSkill</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td></tr>
+<tr><td>Trace2Skill</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td></tr>
+<tr><td>GEPA</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td></tr>
+<tr class="sep"><td>MemSkill</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td><td class="no">&times;</td></tr>
+<tr class="highlight"><td>xskill</td><td class="yes">&#x2713;</td><td class="yes">&#x2713;</td><td class="yes">&#x2713;</td><td class="yes">&#x2713;</td><td class="yes">&#x2713;</td></tr>
+</tbody>
+</table>
+</body></html>

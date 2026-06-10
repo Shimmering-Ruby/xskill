@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background: #fff; font-family: 'Helvetica Neue', Arial, sans-serif; padding: 24px; width: 780px; }
+.pipeline { display: flex; align-items: flex-start; gap: 16px; justify-content: center; }
+
+.stage {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  min-width: 170px;
+}
+
+.agent-box {
+  border: 2.5px solid; border-radius: 10px; padding: 14px 20px;
+  text-align: center; width: 170px;
+}
+.agent-box .name { font-weight: 800; font-size: 14px; }
+.agent-box .desc { font-size: 11px; font-weight: 400; margin-top: 4px; opacity: 0.8; }
+
+.ta { border-color: #3B82F6; background: #EFF6FF; color: #1E40AF; }
+.tca { border-color: #8B5CF6; background: #F5F3FF; color: #5B21B6; }
+.sea { border-color: #F97316; background: #FFF7ED; color: #9A3412; }
+
+.io {
+  font-size: 10px; font-family: monospace; padding: 4px 10px;
+  border-radius: 4px; border: 1px dashed #D1D5DB; background: #F9FAFB;
+  color: #6B7280; text-align: center;
+}
+.io.input { border-color: #93C5FD; }
+.io.output { border-color: #FCA5A5; }
+
+.flow-arrow {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; align-self: center; margin-top: 30px;
+}
+.flow-arrow .arr { font-size: 28px; font-weight: 300; }
+.flow-arrow .lbl { font-size: 10px; color: #9CA3AF; font-style: italic; }
+
+.threshold {
+  margin-top: 12px; text-align: center;
+  font-size: 11px; color: #F97316; font-weight: 600;
+  border-top: 2px solid #FED7AA; padding-top: 8px; width: 100%;
+}
+</style>
+</head>
+<body>
+<div class="pipeline">
+
+  <div class="stage">
+    <div class="io input">traj_*.md</div>
+    <div style="color:#93C5FD;">&#x25BC;</div>
+    <div class="agent-box ta">
+      <div class="name">TaskAgent</div>
+      <div class="desc">Decompose trajectory into single-intent AtomTasks</div>
+    </div>
+    <div style="color:#93C5FD;">&#x25BC;</div>
+    <div class="io output">AtomTask JSON</div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="lbl">per atom</div>
+    <div class="arr" style="color:#8B5CF6;">&#x27A1;</div>
+  </div>
+
+  <div class="stage">
+    <div class="io input">atom + skill catalog</div>
+    <div style="color:#C4B5FD;">&#x25BC;</div>
+    <div class="agent-box tca">
+      <div class="name">TaskCluster<br>Agent</div>
+      <div class="desc">Route atom to existing or new skill with weightscore</div>
+    </div>
+    <div style="color:#C4B5FD;">&#x25BC;</div>
+    <div class="io output">.candidates.yml</div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="lbl">&Sigma; weight &ge; &theta;</div>
+    <div class="arr" style="color:#F97316;">&#x27A1;</div>
+  </div>
+
+  <div class="stage">
+    <div class="io input">candidates + SKILL.md</div>
+    <div style="color:#FDBA74;">&#x25BC;</div>
+    <div class="agent-box sea">
+      <div class="name">SkillEdit<br>Agent</div>
+      <div class="desc">Produce or update SKILL.md via git commit</div>
+    </div>
+    <div style="color:#FDBA74;">&#x25BC;</div>
+    <div class="io output">git commit</div>
+    <div class="threshold">cumulative evidence threshold</div>
+  </div>
+
+</div>
+</body></html>

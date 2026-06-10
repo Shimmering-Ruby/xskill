@@ -88,3 +88,90 @@ def test_debug_flag_sets_root_to_debug(tmp_path):
     configure_logging(tmp_path, debug=True, stdout=False)
     assert logging.getLogger().level == logging.DEBUG
     assert logging.getLogger("xskill.watcher").level == logging.DEBUG
+
+
+# ── 日志有效性三判据（0.6.1a1 子项目 C）────────────────────────────
+
+def _flush_all():
+    for name in list(logging.Logger.manager.loggerDict.keys()) + [""]:
+        for h in logging.getLogger(name).handlers:
+            try:
+                h.flush()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+
+# (primary logger, declared file, level) —— 每个声明文件至少有一个主 logger 往里写
+_COMPONENT_MATRIX = [
+    ("xskill", "xskill.log", logging.INFO),
+    ("xskill.watcher", "xskill.watcher.log", logging.INFO),
+    ("xskill.process", "xskill.watcher.log", logging.INFO),
+    ("xskill.server", "xskill.server.log", logging.INFO),
+    ("xskill.canary", "xskill.canary.log", logging.INFO),
+    ("xskill.ux_score", "xskill.ux_score.log", logging.INFO),
+    ("xskill.ecosystems", "xskill.ecosystems.log", logging.INFO),
+    ("xskill.registry", "xskill.registry.log", logging.INFO),
+    ("xskill.task_agent", "xskill.task_agent.log", logging.INFO),
+    ("xskill.task_cluster_agent", "xskill.task_cluster_agent.log", logging.INFO),
+    ("xskill.skill_edit_agent", "xskill.skill_edit_agent.log", logging.INFO),
+    ("agno", "agno.log", logging.WARNING),
+    ("httpx", "httpx.log", logging.WARNING),
+]
+
+
+def test_judge1_no_empty_component_files(tmp_path):
+    """判据①：每个声明的 .log 在对应主 logger 写一条后都非空——
+    杜绝 unfunctional 空文件（旧版 canary.log 因 logger 名错配永远空）。"""
+    from xskill.utils.logging import configure_logging
+    configure_logging(tmp_path, debug=False, quiet=False, stdout=False)
+
+    for logger_name, _fname, level in _COMPONENT_MATRIX:
+        logging.getLogger(logger_name).log(level, "probe from %s", logger_name)
+    _flush_all()
+
+    declared = {f for _, f, _ in _COMPONENT_MATRIX}
+    for fname in declared:
+        fpath = tmp_path / fname
+        assert fpath.is_file(), f"{fname} not created"
+        assert fpath.read_text(encoding="utf-8").strip(), f"{fname} is empty (unfunctional)"
+
+
+def test_judge2_no_cross_talk_between_components(tmp_path):
+    """判据②：不串台——一个组件的日志不出现在别的组件文件里。
+    watcher 的消息只进 watcher.log（+ 冒泡进 xskill.log 汇总），绝不进 server.log。"""
+    from xskill.utils.logging import configure_logging
+    configure_logging(tmp_path, debug=False, stdout=False)
+
+    logging.getLogger("xskill.watcher").info("WATCHER_ONLY_MARKER")
+    logging.getLogger("xskill.server").info("SERVER_ONLY_MARKER")
+    _flush_all()
+
+    server_log = (tmp_path / "xskill.server.log").read_text(encoding="utf-8")
+    watcher_log = (tmp_path / "xskill.watcher.log").read_text(encoding="utf-8")
+    assert "WATCHER_ONLY_MARKER" not in server_log, "watcher 串进了 server.log"
+    assert "SERVER_ONLY_MARKER" not in watcher_log, "server 串进了 watcher.log"
+    # 但两者都应冒泡进 xskill.log 汇总
+    agg = (tmp_path / "xskill.log").read_text(encoding="utf-8")
+    assert "WATCHER_ONLY_MARKER" in agg and "SERVER_ONLY_MARKER" in agg
+
+
+def test_judge3_key_events_land_in_correct_file(tmp_path):
+    """判据③：关键事件（拆分/cluster/edit/灰度决策/install）各自落到正确的
+    component 文件——核心 agent 与灰度/生态事件可独立排查。"""
+    from xskill.utils.logging import configure_logging
+    configure_logging(tmp_path, debug=False, stdout=False)
+
+    events = {
+        "xskill.task_agent": ("xskill.task_agent.log", "EV_SPLIT"),
+        "xskill.task_cluster_agent": ("xskill.task_cluster_agent.log", "EV_CLUSTER"),
+        "xskill.skill_edit_agent": ("xskill.skill_edit_agent.log", "EV_EDIT"),
+        "xskill.canary": ("xskill.canary.log", "EV_CANARY_DECISION"),
+        "xskill.ecosystems": ("xskill.ecosystems.log", "EV_INSTALL"),
+    }
+    for logger_name, (_f, marker) in events.items():
+        logging.getLogger(logger_name).info(marker)
+    _flush_all()
+
+    for _logger_name, (fname, marker) in events.items():
+        content = (tmp_path / fname).read_text(encoding="utf-8")
+        assert marker in content, f"{marker} 未落到 {fname}"

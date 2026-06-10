@@ -1,0 +1,145 @@
+@startuml
+!theme plain
+
+skinparam class {
+    BackgroundColor #f8f9fa
+    BorderColor #1a1a2e
+    ArrowColor #1a1a2e
+    FontSize 12
+}
+
+class Trajectory {
+    + path: Path
+    + md_text: str
+    + meta: dict
+    + raw_json: dict
+    + is_success: bool
+    + skill_used: str | None
+    + skill_generated: str | None
+    + canary_side: str | None
+    + status: str | None
+    - _registry: Registry | None
+    - _meta_cache: dict | None
+    --
+    + __init__(path, registry)
+    + load(path, registry): Trajectory
+    + _row(): dict | None
+}
+
+class TrajectoryValidation {
+    + valid: bool
+    + reason: str | None
+    + detail: str
+    + user_intent_count: int
+}
+
+class TrajectoryHit {
+    + trajectory: Trajectory
+    + similarity: float
+}
+
+class Registry {
+    + trajectory_status(traj_path): dict | None
+    + trajectories_using(skill_name): list[Path]
+}
+
+class WatchDir {
+    + id: int
+    + path: Path
+    + label: str
+    + auto_index: bool
+    + traj_count: int
+    + indexed_count: int
+    + ecosystem: str
+}
+
+class Candidate {
+    + pattern: str
+    + kind: Literal["step", "warning", "decision_branch"]
+    + attach_to: str | None
+    + supporting_trajs: list[str]
+    + first_seen: date | None
+    + promoted: bool
+}
+
+class UxScoreResult {
+    + scored: bool
+    + score: int | None
+    + reasons: str
+    + decision: dict
+}
+
+class SkillHit {
+    + skill: Skill
+    + similarity: float
+}
+
+' === File three-piece ===
+package "File Three-piece" {
+    class "traj_<id>.md" as TrajMd {
+        + markdown dialogue
+        + ## User / ## Assistant sections
+    }
+    class "traj_<id>.md.meta" as TrajMeta {
+        + success: bool
+        + source: str
+        + source_model: str
+        + user_intent_count: int
+        + adapter_version: str
+    }
+    class "traj_<id>.json" as TrajJson {
+        + conversation_id: str
+        + model: str
+        + turns: list
+        + total_tokens: int
+        + adapter: str
+    }
+}
+
+' === DB table ===
+package "DB trajectories table" {
+    class TrajectoryRow {
+        + id: int
+        + watch_dir_id: int
+        + filename: str
+        + has_meta: bool
+        + has_embedding: bool
+        + status: str
+        + process_action: str
+        + skill_generated: str
+        + skill_used: str
+        + canary_side: str
+        + source_model: str
+        + source_harness: str
+        + ux_score: float
+        + error_msg: str | None
+        + retry_count: int
+    }
+}
+
+' === Relationships ===
+Trajectory --> "1" Registry : uses
+Trajectory --> "0..1" TrajectoryRow : DB row
+TrajectoryHit --> Trajectory
+TrajectoryRow --> WatchDir : watch_dir_id FK
+Trajectory ..> TrajMd : reads
+Trajectory ..> TrajMeta : reads
+Trajectory ..> TrajJson : reads
+
+' === Status enum ===
+enum Status {
+    discovered
+    indexed
+    promoted
+}
+
+TrajectoryRow --> Status
+
+note top of Trajectory
+  File three-piece view layer.
+  No LLM, no DB session.
+end note
+
+note bottom of Trajectory : discovered -> indexed -> promoted
+
+@enduml

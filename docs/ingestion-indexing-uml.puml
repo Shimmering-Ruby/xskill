@@ -1,0 +1,257 @@
+@startuml
+skinparam packageStyle rectangle
+skinparam class {
+    BackgroundColor #f8f9fa
+    BorderColor #1a1a2e
+    ArrowColor #34568b
+    FontSize 12
+}
+skinparam package {
+    BorderColor #2c3e50
+    BackgroundColor #ecf0f1
+}
+skinparam note {
+    BackgroundColor #fffacd
+    BorderColor #b8860b
+}
+
+package "CLI Layer" {
+    class XSkill {
+        +serve(host, port)
+        +connect(source, label)
+        +registry_*()
+    }
+    class cli_main {
+        +build_parser()
+        +cmd_serve()
+        +main()
+    }
+    cli_main --> XSkill : instantiates
+}
+
+package "Server Layer" {
+    class create_app {
+        +startup()
+        +_ensure_ingesters()
+    }
+    XSkill --> create_app : calls
+}
+
+package "Ecosystem Ingesters" {
+    abstract class BaseIngester {
+        #spec: EcosystemSpec
+        #watch_dir: Path
+        +start()
+        +stop()
+        #_loop()
+        #scan_and_bridge()
+    }
+    class JsonlIngester {
+        +submit_trajectory()
+    }
+    class SqliteIngester {
+        +submit_trajectory()
+    }
+    class CCSessionIngester {
+        +inject_canary_header()
+    }
+    class EcosystemSpec {
+        +glob_pattern: str
+        +session_id_regex: str
+        +adapter: str
+    }
+    BaseIngester <|-- JsonlIngester
+    BaseIngester <|-- SqliteIngester
+    JsonlIngester <|-- CCSessionIngester
+    JsonlIngester --> EcosystemSpec
+    JsonlIngester --> "writes" TrajectoryFile
+}
+
+package "Watcher" {
+    class DirectoryWatcher {
+        -_executor: ThreadPoolExecutor
+        -_futures: dict
+        +start()
+        +stop()
+        -_loop()
+        -_scan_once()
+        -_scan_dir(wd)
+        -_harvest()
+        -_do_split(traj_path)
+        -_do_atom_index(wd)
+        -_do_cluster(traj_path)
+        -_on_split_done(future)
+        -_on_embed_done(future)
+        -_on_cluster_done(future)
+    }
+    note right of DirectoryWatcher::_scan_dir
+        v2 status flow:
+        discovered -> splitting
+        -> split_done -> indexed
+        -> clustering -> done
+    end note
+}
+
+package "Registry" {
+    class Registry {
+        +add(path, label, ecosystem) WatchDir
+        +remove(path) bool
+        +list() list~WatchDir~
+        +trajectory_status(traj_path) dict
+        +trajectories_using(skill_name) list~Path~
+    }
+    class WatchDir {
+        +id: int
+        +path: Path
+        +label: str
+        +auto_index: bool
+        +traj_count: int
+        +indexed_count: int
+        +ecosystem: str
+    }
+    class TrajectoryRow {
+        <<DB table>>
+        +id: int
+        +watch_dir_id: int
+        +filename: str
+        +has_meta: bool
+        +has_embedding: bool
+        +status: str
+        +process_action: str
+        +skill_generated: str
+        +skill_used: str
+        +canary_side: str
+        +source_model: str
+        +source_harness: str
+        +ux_score: float
+        +error_msg: str | None
+        +retry_count: int
+    }
+    Registry --> WatchDir : returns
+    Registry ..> TrajectoryRow : queries
+}
+
+class discover_trajectories {
+    +scan dir for traj_*.md
+    +upsert into DB
+    +detect mtime changes
+}
+class update_traj_status {
+    +set status + action + error
+}
+class update_traj_offset {
+    +store atom-split progress
+}
+class get_trajs_by_status {
+    +query by status with retry filter
+}
+
+package "Trajectory Entity" {
+    class Trajectory {
+        +path: Path
+        +md_text: str
+        +meta: dict
+        +raw_json: dict
+        +is_success: bool
+        +status: str | None
+        +skill_used: str | None
+        +skill_generated: str | None
+        +canary_side: str | None
+        -_registry: Registry | None
+    }
+    class TrajectoryValidation {
+        +valid: bool
+        +reason: str | None
+        +detail: str
+        +user_intent_count: int
+    }
+    class TrajectoryFile {
+        <<file three-piece>>
+        +traj_<id>.md
+        +traj_<id>.md.meta
+        +traj_<id>.json
+    }
+    Trajectory --> TrajectoryFile : reads
+    Trajectory --> Registry : uses
+    Trajectory ..> TrajectoryRow : DB data
+}
+
+package "Task Agent" {
+    class TaskAgent {
+        +run(traj_path, store) list~AtomTask~
+        -_annotate_user_lines()
+        -_build_user_msg()
+        -_run_agent()
+        -_derive_ranges()
+    }
+    class SubmitAtomTool {
+        <<tool>>
+        +validate start_line
+        +accumulate atoms
+    }
+    class TaskClusterAgent {
+        +process(atom)
+        -_build_skill_catalog()
+    }
+    TaskAgent --> SubmitAtomTool : uses
+}
+
+package "Atom Model" {
+    class AtomTask {
+        +atom_id: str
+        +traj_id: str
+        +offset_start: int
+        +offset_end: int
+        +intent: str
+        +summary: str
+        +tags: list~str~
+        +used_skills: list~str~
+        +ux_score: int | None
+        +pre_atom_id: str | None
+        +post_atom_id: str | None
+        +context_prefix: str
+        +raw_segment: str
+        +source_model: str
+    }
+    class AtomTaskStore {
+        -root: Path
+        -index: list | None
+        +save(atom)
+        +load(atom_id) AtomTask
+        +list_by_traj(traj_id) list~AtomTask~
+        +all_atoms() iterator
+        +last_offset(traj_id) int
+        +last_atom_id(traj_id) str | None
+        +rebuild_vector_index(embed_client)
+        +vector_search(query, embed_client, top_k) list
+    }
+    AtomTaskStore --> AtomTask : stores
+    AtomTask --> "linked list" AtomTask : pre/post
+}
+
+enum TrajStatus {
+    discovered
+    splitting
+    split_done
+    indexed
+    clustering
+    done
+    error
+    updated
+}
+TrajectoryRow --> TrajStatus
+
+' === Flow relationships ===
+create_app --> BaseIngester : starts
+create_app --> DirectoryWatcher : starts
+DirectoryWatcher --> Registry : reads/writes
+DirectoryWatcher --> discover_trajectories : calls
+DirectoryWatcher --> update_traj_status : calls
+DirectoryWatcher --> Trajectory : loads
+DirectoryWatcher --> TaskAgent : submits split
+DirectoryWatcher --> AtomTaskStore : rebuilds index
+DirectoryWatcher --> TaskClusterAgent : submits cluster
+BaseIngester --> Registry : register_dir
+BaseIngester --> TrajectoryFile : writes
+
+@enduml

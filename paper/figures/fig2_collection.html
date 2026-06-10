@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background: #fff; font-family: 'Helvetica Neue', Arial, sans-serif; padding: 20px; width: 820px; }
+.container { display: flex; align-items: center; gap: 24px; justify-content: center; }
+
+.sources { display: flex; flex-direction: column; gap: 6px; }
+.src {
+  display: flex; align-items: center; justify-content: space-between;
+  border: 1.5px solid #93C5FD; border-radius: 6px; padding: 7px 14px;
+  background: #EFF6FF; font-size: 12px; min-width: 300px;
+}
+.src .name { font-weight: 700; color: #1E40AF; }
+.src .method { font-size: 10px; color: #6B7280; background: #F3F4F6; padding: 2px 8px; border-radius: 10px; }
+
+.arrow-col { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.arr { color: #3B82F6; font-size: 18px; }
+
+.normalizer {
+  border: 2px solid #10B981; border-radius: 10px; padding: 16px 20px;
+  background: #ECFDF5; text-align: center; min-width: 160px;
+}
+.normalizer .title { font-weight: 700; color: #065F46; font-size: 14px; }
+.normalizer .fields { font-size: 10px; color: #6B7280; margin-top: 6px; line-height: 1.6; }
+.normalizer .fields code { background: #D1FAE5; padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+
+.out-arrow { color: #10B981; font-size: 24px; }
+
+.output {
+  border: 2px solid #F97316; border-radius: 10px; padding: 14px 18px;
+  background: #FFF7ED; text-align: center; min-width: 150px;
+}
+.output .title { font-weight: 700; color: #9A3412; font-size: 13px; }
+.output .path { font-size: 10px; color: #6B7280; margin-top: 4px; font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="sources">
+    <div class="src"><span class="name">Claude Code</span> <span style="font-size:10px; color:#374151; font-family:monospace;">~/.claude/projects/*/*.jsonl</span> <span class="method">JSONL tail</span></div>
+    <div class="src"><span class="name">Codex</span> <span style="font-size:10px; color:#374151; font-family:monospace;">~/.codex/sessions/YYYY/MM/DD/*.jsonl</span> <span class="method">JSONL tail</span></div>
+    <div class="src"><span class="name">OpenClaw</span> <span style="font-size:10px; color:#374151; font-family:monospace;">~/.openclaw/agents/*/sessions/*.jsonl</span> <span class="method">JSONL tail</span></div>
+    <div class="src"><span class="name">OpenCode</span> <span style="font-size:10px; color:#374151; font-family:monospace;">~/.local/share/opencode/opencode.db</span> <span class="method">SQLite poll</span></div>
+    <div class="src"><span class="name">Hermes</span> <span style="font-size:10px; color:#374151; font-family:monospace;">&lt;cwd&gt;/trajectory_samples.jsonl</span> <span class="method">file watch</span></div>
+  </div>
+
+  <div class="arrow-col">
+    <div class="arr">&#x2192;</div>
+    <div class="arr">&#x2192;</div>
+    <div class="arr">&#x2192;</div>
+    <div class="arr">&#x2192;</div>
+    <div class="arr">&#x2192;</div>
+  </div>
+
+  <div class="normalizer">
+    <div class="title">Trajectory<br>Normalizer</div>
+    <div class="fields">
+      <code>source</code> <code>session_id</code><br>
+      <code>ts</code> <code>kind</code> <code>data</code>
+    </div>
+  </div>
+
+  <div class="out-arrow">&#x27A1;</div>
+
+  <div class="output">
+    <div class="title">Unified Trajectory</div>
+    <div class="path">traj_&lt;agent&gt;_&lt;hash&gt;.md</div>
+    <div style="font-size:10px; color:#9A3412; margin-top:4px;">~/.xskill/&lt;agent&gt;_sessions/</div>
+  </div>
+</div>
+</body></html>

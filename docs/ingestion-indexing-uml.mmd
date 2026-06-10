@@ -1,0 +1,294 @@
+classDiagram
+    direction TB
+
+    namespace CLILayer {
+        class XSkill {
+            +serve(host, port)
+            +connect(source, label)
+            +registry_ops()
+        }
+        class cli_main {
+            +build_parser()
+            +cmd_serve()
+            +main()
+        }
+    }
+
+    namespace ServerLayer {
+        class create_app {
+            +startup()
+            +_ensure_ingesters()
+        }
+    }
+
+    namespace EcosystemIngesters {
+        class JsonlIngester {
+            +EcosystemSpec spec
+            +Optional~Callable~ on_new_sessions
+            +start()
+            +stop()
+            +is_running bool
+            +stats dict
+            +scan_and_bridge(target_traj_dir, home_root) list
+            -_make_traj_id(content, sid) str
+        }
+        class SqliteIngester {
+            +SqliteEcosystemSpec spec
+            +start()
+            +stop()
+            +is_running bool
+            +stats dict
+            +run_once() list
+            +db_path Path
+            +cursor_ms int
+        }
+        class CCSessionIngester {
+            +Path target_traj_dir
+            +Optional~InstallHistory~ history
+            +Optional~SessionAssignments~ assignments
+            +start()
+            +stop()
+            +run_once() list
+            -_flip(skill_name)
+        }
+        class TraeIngester {
+            +Path target_traj_dir
+            +start()
+            +stop()
+            +scan_and_bridge()
+            -_bridge_workspace_storage()
+            -_bridge_agent_trajectories()
+        }
+        class EcosystemSpec {
+            <<dataclass frozen>>
+            +str name
+            +str source_kind
+            +Callable sessions_path
+            +str sessions_glob
+            +Callable session_id_from_path
+            +Callable cwd_from_content
+            +str adapter_format
+            +str traj_id_prefix
+            +Callable skills_install_path
+            +str label
+        }
+        class SqliteEcosystemSpec {
+            <<dataclass frozen>>
+            +str name
+            +str source_kind
+            +Callable path_resolver
+            +str cursor_strategy
+            +str label
+            +str traj_id_prefix
+        }
+    }
+
+    namespace WatcherLayer {
+        class DirectoryWatcher {
+            -ThreadPoolExecutor _executor
+            -dict _futures
+            +start()
+            +stop()
+            -_loop()
+            -_scan_once()
+            -_scan_dir(wd)
+            -_harvest()
+            -_do_split(traj_path)
+            -_do_atom_index(wd)
+            -_do_cluster(traj_path)
+            -_on_split_done(future)
+            -_on_embed_done(future)
+            -_on_cluster_done(future)
+        }
+    }
+
+    namespace RegistryLayer {
+        class Registry {
+            +add(path, label, ecosystem) WatchDir
+            +remove(path) bool
+            +list() List~WatchDir~
+            +trajectory_status(traj_path) dict
+            +trajectories_using(skill_name) List~Path~
+        }
+        class WatchDir {
+            +int id
+            +Path path
+            +str label
+            +bool auto_index
+            +int traj_count
+            +int indexed_count
+            +str ecosystem
+        }
+        class TrajectoryRow {
+            <<DB table>>
+            +int id
+            +int watch_dir_id
+            +str filename
+            +bool has_meta
+            +bool has_embedding
+            +str status
+            +str process_action
+            +str skill_generated
+            +str skill_used
+            +str canary_side
+            +str source_model
+            +str source_harness
+            +float ux_score
+            +Optional~str~ error_msg
+            +int retry_count
+        }
+    }
+
+    namespace DBHelpers {
+        class discover_trajectories {
+            +scan_dir_for_traj_md()
+            +upsert_into_db()
+            +detect_mtime_changes()
+        }
+        class update_traj_status {
+            +set_status_action_error()
+        }
+        class update_traj_offset {
+            +store_atom_split_progress()
+        }
+        class get_trajs_by_status {
+            +query_by_status_with_retry_filter()
+        }
+    }
+
+    namespace TrajectoryEntity {
+        class Trajectory {
+            +Path path
+            +str md_text
+            +dict meta
+            +dict raw_json
+            +bool is_success
+            +Optional~str~ status
+            +Optional~str~ skill_used
+            +Optional~str~ skill_generated
+            +Optional~str~ canary_side
+            -Optional~Registry~ _registry
+        }
+        class TrajectoryValidation {
+            +bool valid
+            +Optional~str~ reason
+            +str detail
+            +int user_intent_count
+        }
+        class TrajectoryFile {
+            <<file three-piece>>
+            +traj_id_md
+            +traj_id_md_meta
+            +traj_id_json
+        }
+    }
+
+    namespace TaskAgentLayer {
+        class TaskAgent {
+            +run(traj_path, store) List~AtomTask~
+            -_annotate_user_lines()
+            -_build_user_msg()
+            -_run_agent()
+            -_derive_ranges()
+        }
+        class SubmitAtomTool {
+            <<tool>>
+            +validate_start_line()
+            +accumulate_atoms()
+        }
+        class TaskClusterAgent {
+            +process(atom)
+            -_build_skill_catalog()
+        }
+    }
+
+    namespace AtomModel {
+        class AtomTask {
+            +str atom_id
+            +str traj_id
+            +int offset_start
+            +int offset_end
+            +str intent
+            +str summary
+            +List~str~ tags
+            +List~str~ used_skills
+            +Optional~int~ ux_score
+            +Optional~str~ pre_atom_id
+            +Optional~str~ post_atom_id
+            +str context_prefix
+            +str raw_segment
+            +str source_model
+        }
+        class AtomTaskStore {
+            -Path root
+            -Optional~list~ index
+            +save(atom)
+            +load(atom_id) AtomTask
+            +list_by_traj(traj_id) List~AtomTask~
+            +all_atoms() Iterator
+            +last_offset(traj_id) int
+            +last_atom_id(traj_id) Optional~str~
+            +rebuild_vector_index(embed_client)
+            +vector_search(query, embed_client, top_k) list
+        }
+    }
+
+    class TrajStatus {
+        <<enumeration>>
+        discovered
+        splitting
+        split_done
+        indexed
+        clustering
+        done
+        error
+        updated
+    }
+
+    %% === CLI / Server wiring ===
+    cli_main --> XSkill : instantiates
+    XSkill --> create_app : calls
+
+    %% === Ingesters: 4 parallel classes, spec-driven (no shared base class) ===
+    JsonlIngester --> EcosystemSpec : driven by
+    SqliteIngester --> SqliteEcosystemSpec : driven by
+    CCSessionIngester ..> JsonlIngester : reuses scan_and_bridge
+    JsonlIngester --> TrajectoryFile : bridges
+    SqliteIngester --> TrajectoryFile : bridges
+    CCSessionIngester --> TrajectoryFile : bridges
+    TraeIngester --> TrajectoryFile : bridges
+
+    %% === Registry relationships ===
+    Registry --> WatchDir : returns
+    Registry ..> TrajectoryRow : queries
+    TrajectoryRow --> TrajStatus
+
+    %% === Trajectory entity ===
+    Trajectory --> TrajectoryFile : reads
+    Trajectory --> Registry : uses
+    Trajectory ..> TrajectoryRow : DB data
+
+    %% === Task agent ===
+    TaskAgent --> SubmitAtomTool : uses
+
+    %% === Atom model ===
+    AtomTaskStore --> AtomTask : stores
+    AtomTask --> AtomTask : pre/post linked list
+
+    %% === Flow relationships ===
+    create_app --> CCSessionIngester : starts (claude_code)
+    create_app --> JsonlIngester : starts (codex/cursor/openclaw)
+    create_app --> SqliteIngester : starts (opencode/ngagent)
+    create_app --> TraeIngester : starts (trae)
+    create_app --> DirectoryWatcher : starts
+    create_app --> Registry : detect_known_ecosystems register_dir
+    DirectoryWatcher --> Registry : reads/writes
+    DirectoryWatcher --> discover_trajectories : calls
+    DirectoryWatcher --> update_traj_status : calls
+    DirectoryWatcher --> Trajectory : loads
+    DirectoryWatcher --> TaskAgent : submits split
+    DirectoryWatcher --> AtomTaskStore : rebuilds index
+    DirectoryWatcher --> TaskClusterAgent : submits cluster
+
+    note for DirectoryWatcher "v2 status flow: discovered -> splitting -> split_done -> indexed -> clustering -> done"
+    note for EcosystemSpec "spec-driven reuse (class chosen by storage form, not product): codex/cursor/openclaw -> JsonlIngester(*_SPEC); opencode/ngagent -> SqliteIngester(*_SPEC); claude_code -> CCSessionIngester; trae -> TraeIngester"

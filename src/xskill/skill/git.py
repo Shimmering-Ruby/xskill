@@ -40,7 +40,7 @@ from dulwich.errors import NotGitRepository
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
 
-logger = logging.getLogger("git_lock")
+logger = logging.getLogger("xskill.git_lock")
 
 
 # ═══════════════════════════════════════════════════════════════════

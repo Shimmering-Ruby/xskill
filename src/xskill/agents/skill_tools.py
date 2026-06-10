@@ -20,7 +20,7 @@ from xskill.skill.frontmatter import (
     FrontmatterError,
 )
 
-logger = logging.getLogger("skill_tools")
+logger = logging.getLogger("xskill.skill_tools")
 
 # Global context — initialized by process.py / server.py / cli.py
 _ctx = {
