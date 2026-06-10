@@ -791,16 +791,26 @@ class DirectoryWatcher:
         ``discovered`` 走同一条路径——TaskAgent 内部用 last_offset 续接点只拆
         新增内容。
         """
+        import time
         from xskill.agents.task_agent import TaskAgent
         md_path = dir_path / fname
         validation = validate_trajectory_source(md_path)
         if not validation.valid:
+            logger.info("⊘ split 跳过 %s（%s）", fname, validation.reason or "invalid")
             return (
                 fname, 0, 0, None,
                 validation.reason or "invalid_trajectory",
             )
         traj_id = md_path.stem
         store = self._store_for(dir_path)
+        # 处理前：打一条"开始拆"(带行数)——这是真正干活的边界,让人看到它在跑、
+        # 跑哪条、多大,而不是只看 cluster 阶段无脑刷 0-total。
+        try:
+            n_lines = sum(1 for _ in md_path.open(encoding="utf-8", errors="ignore"))
+        except OSError:
+            n_lines = -1
+        logger.info("⟳ split 开始 %s（%d 行）", fname, n_lines)
+        t0 = time.monotonic()
         atoms = TaskAgent(
             agno_agent_factory=self._factory(),
             store=store,
@@ -809,6 +819,12 @@ class DirectoryWatcher:
         ).run(traj_id=traj_id, traj_path=md_path)
         last_off = store.last_offset(traj_id)
         last_id = store.last_atom_id(traj_id)
+        # 处理后：打一条"拆完"(带 atom 数 + 耗时),0 个也明确说明是"无可拆 User 回合"。
+        dt = time.monotonic() - t0
+        if atoms:
+            logger.info("✓ split 完成 %s → %d atoms（%.1fs）", fname, len(atoms), dt)
+        else:
+            logger.info("✓ split 完成 %s → 0 atoms（无可拆 User 回合,%.1fs）", fname, dt)
         return (fname, len(atoms), last_off, last_id, None)
 
     def _do_atom_index(self, dir_path, wd_id, filenames):
@@ -909,7 +925,10 @@ class DirectoryWatcher:
 
         # 总结行：把 n_total / in_skills / dropped / errors 拆开，让 grep 能区分
         # silent drop 和真正的 LLM 异常。
-        logger.info(
+        # n_total==0（该 traj 没拆出 atom，cluster 是 no-op）降到 DEBUG——否则
+        # 每轮 scan 对一堆 0-atom 轨迹无脑刷 INFO,纯噪音盖住真正有信息的 split 日志。
+        _emit = logger.info if n_total > 0 else logger.debug
+        _emit(
             "%s → clustered (%d total, %d in skills, %d dropped, %d errors)",
             fname, n_total, len(in_skills), len(dropped), n_errors,
         )

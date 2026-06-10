@@ -26,6 +26,7 @@ from xskill.team.shared.protocol import (
     PushEditResponse, RegisterRequest, RegisterResponse,
     UploadRejection, UploadRequest, UploadResponse,
 )
+from xskill.utils.sanitize import sanitize_trajectory_text
 
 logger = logging.getLogger("xskill.team.server.api")
 router = APIRouter(prefix="/api/v1/team")
@@ -132,7 +133,10 @@ async def team_upload(
         if sidecar:
             (sessions_dir / f"{t.traj_id}.json").write_text(
                 json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
-        (sessions_dir / f"{t.traj_id}.md").write_text(t.content, encoding="utf-8")
+        # sha256 完整性校验已过（上面），落盘前再做一遍内容清洗：客户端桥接常把
+        # 终端 ANSI 码 / 控制字符灌进 .md，会让 splitlines 行号错位、污染模型输入。
+        clean = sanitize_trajectory_text(t.content)
+        (sessions_dir / f"{t.traj_id}.md").write_text(clean, encoding="utf-8")
         accepted.append(t.traj_id)
     logger.info("team upload from %s: %d accepted, %d rejected",
                 client_id, len(accepted), len(rejected))

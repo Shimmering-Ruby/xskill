@@ -656,6 +656,11 @@ def submit_trajectory(
 
     md_content, json_metadata = adapt_trajectory(content, format, metadata)
 
+    # 落盘前清洗：去 ANSI 转义 + 控制字符（终端/tool 原始输出常掺入），
+    # 保证 splitlines 行数 == \n 行数（atom offset 与人类行号一致）、不喂垃圾给模型。
+    from xskill.utils.sanitize import sanitize_trajectory_text
+    md_content = sanitize_trajectory_text(md_content)
+
     # Write markdown
     md_path = traj_dir / f"{traj_id}.md"
     md_path.write_text(md_content, encoding="utf-8")
