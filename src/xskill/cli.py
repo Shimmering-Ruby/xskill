@@ -39,7 +39,23 @@ def cmd_serve(args, xskill) -> int:
         if not home_root.is_dir():
             print(f"error: --home 目录不存在: {home_root}", file=sys.stderr)
             return 2
-    from xskill.runtime import write_running
+    from xskill.runtime import read_status, write_running
+    # ── 单实例守卫：已有活 daemon 时拒绝启动 ──
+    # 双 daemon 会抢同一 registry（rebuild 后旧 daemon 可能用旧模型抢先处理）。
+    # read_status 已校验 pid 存活，陈旧运行态文件不会误拦。--force 强行接管。
+    status = read_status()
+    if status.get("running") and not args.force:
+        print(
+            f"✗ 已有 xskill daemon 在运行（pid {status.get('pid')}, "
+            f"端口 {status.get('port')}）。",
+            file=sys.stderr,
+        )
+        print(
+            "  双 daemon 会抢同一 registry，导致换模型 rebuild 被旧 daemon 抢去用旧"
+            "模型处理。\n  先停掉它再起；确认要强行接管可加 --force。",
+            file=sys.stderr,
+        )
+        return 2
     write_running(port=args.port, mode="server" if args.server else "standalone")
     xskill.serve(host=args.host, port=args.port, home_root=home_root,
                  server_mode=args.server)
@@ -330,9 +346,34 @@ def cmd_rebuild(args, xskill) -> int:
 
     默认：重置目标轨迹状态/offset，让运行中的 watcher 从头重拆重聚。
     ``--force``：额外清空 skill 仓 + 已拆原子（删除重建）。
+
+    换模型护栏：rebuild 的重跑是交给**正在运行的 daemon**，而 daemon 的模型是
+    启动时缓存的（改 config 不重启不生效）。若 daemon 在跑且其模型 ≠ 当前 config
+    模型 → 默认拒绝并提示先重启 serve，否则会静默用旧模型重生成（`--ignore-
+    model-mismatch` 可强行用当前运行的模型重跑）。
     """
     from xskill.pipeline.registry import reset_trajectories
-    from xskill.runtime import read_status
+    from xskill.runtime import config_models, read_status
+
+    # ── 换模型护栏（先于任何清仓/重置）──
+    status = read_status()
+    if status.get("running") and not args.ignore_model_mismatch:
+        daemon_model = status.get("llm_model")
+        cfg_model = config_models().get("llm_model")
+        if daemon_model != cfg_model:
+            print(
+                f"✗ 运行中的 daemon 在用模型 {daemon_model!r}，但 config.yaml "
+                f"现在是 {cfg_model!r}。",
+                file=sys.stderr,
+            )
+            print(
+                "  daemon 的模型是启动时缓存的——直接 rebuild 会用旧模型重生成。\n"
+                "  换模型请先干净重启：停掉 serve（确认进程真退了）→ 重新 "
+                "`xskill serve` → 再 rebuild。\n"
+                "  确认就是要用当前运行的模型重跑，可加 --ignore-model-mismatch。",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.force:
         from xskill.config import get_skill_dir
@@ -386,6 +427,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--server", action="store_true",
         help="team server 模式：收 client 上传轨迹、跑全部 agent、"
              "提供 /api/v1/team/* 同步接口。不加则 standalone（仅本机）。",
+    )
+    p_serve.add_argument(
+        "--force", action="store_true",
+        help="已有 daemon 在跑时强行接管（默认拒绝启动，防双 daemon 抢 registry）",
     )
 
     p_reg = sub.add_parser("registry", help="Manage watched directories")
@@ -450,6 +495,10 @@ def build_parser() -> argparse.ArgumentParser:
                            help="只重跑某生态的轨迹（默认全部）")
     p_rebuild.add_argument("--traj", default=None,
                            help="只重跑某条轨迹 id（调试用）")
+    p_rebuild.add_argument(
+        "--ignore-model-mismatch", action="store_true",
+        help="跳过'daemon 模型≠config 模型'护栏，用当前运行的模型重跑",
+    )
 
     return p
 

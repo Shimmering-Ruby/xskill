@@ -1,11 +1,16 @@
-"""tests/test_rebuild.py — `xskill rebuild` 重置轨迹 + --force 清仓清原子（子项目 A）"""
+"""tests/test_rebuild.py — `xskill rebuild` 重置轨迹 + --force 清仓清原子（子项目 A）
+
+并含换模型护栏（0.6.1a2）：daemon 模型 ≠ config 模型时默认拒绝。
+"""
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
 import pytest
 
+from xskill.cli import cmd_rebuild
 from xskill.pipeline.registry import (
     register_dir,
     discover_trajectories,
@@ -15,6 +20,12 @@ from xskill.pipeline.registry import (
     reset_trajectories,
 )
 from xskill.skill.repo import SkillRepo
+
+
+def _rebuild_args(**over):
+    base = dict(force=False, eco=None, traj=None, ignore_model_mismatch=False)
+    base.update(over)
+    return argparse.Namespace(**base)
 
 
 @pytest.fixture()
@@ -104,3 +115,57 @@ def test_wipe_all_skills_removes_skill_dirs_keeps_references(tmp_path):
     assert n == 2
     assert not foo.exists() and not bar.exists()
     assert refs.exists(), "references 不应被删"
+
+
+# ── 换模型护栏（0.6.1a2）──────────────────────────────────────────
+
+def test_rebuild_refuses_on_model_mismatch(monkeypatch, capsys):
+    """daemon 在跑且其模型 ≠ config 模型 → 拒绝(返回2)，且不重置轨迹。"""
+    monkeypatch.setattr("xskill.runtime.read_status",
+                        lambda: {"running": True, "llm_model": "old-model"})
+    monkeypatch.setattr("xskill.runtime.config_models",
+                        lambda: {"llm_model": "new-model"})
+    called = {"reset": False}
+    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
+                        lambda **kw: called.__setitem__("reset", True))
+
+    rc = cmd_rebuild(_rebuild_args(), None)
+
+    assert rc == 2
+    assert called["reset"] is False, "拒绝时不应重置轨迹"
+    err = capsys.readouterr().err
+    assert "old-model" in err and "new-model" in err
+
+
+def test_rebuild_proceeds_when_models_match(monkeypatch):
+    monkeypatch.setattr("xskill.runtime.read_status",
+                        lambda: {"running": True, "llm_model": "m"})
+    monkeypatch.setattr("xskill.runtime.config_models",
+                        lambda: {"llm_model": "m"})
+    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
+                        lambda **kw: 0)
+
+    assert cmd_rebuild(_rebuild_args(), None) == 0
+
+
+def test_rebuild_ignore_flag_bypasses_mismatch(monkeypatch):
+    monkeypatch.setattr("xskill.runtime.read_status",
+                        lambda: {"running": True, "llm_model": "old"})
+    monkeypatch.setattr("xskill.runtime.config_models",
+                        lambda: {"llm_model": "new"})
+    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
+                        lambda **kw: 0)
+
+    assert cmd_rebuild(_rebuild_args(ignore_model_mismatch=True), None) == 0
+
+
+def test_rebuild_no_guard_when_daemon_not_running(monkeypatch):
+    """daemon 没跑 → 不比对(重启 serve 时会读新 config),正常重置。"""
+    monkeypatch.setattr("xskill.runtime.read_status",
+                        lambda: {"running": False})
+    monkeypatch.setattr("xskill.runtime.config_models",
+                        lambda: {"llm_model": "new"})
+    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
+                        lambda **kw: 0)
+
+    assert cmd_rebuild(_rebuild_args(), None) == 0
