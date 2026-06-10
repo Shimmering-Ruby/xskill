@@ -825,6 +825,62 @@ def update_traj_offset(
         conn.close()
 
 
+def reset_trajectories(
+    *,
+    eco: Optional[str] = None,
+    traj_id: Optional[str] = None,
+    wipe_atoms: bool = False,
+    db_path: Optional[Path] = None,
+) -> int:
+    """把轨迹重置回 ``discovered`` 让 watcher 从头重拆（``xskill rebuild`` 用）。
+
+    重置内容：``status='discovered'``、``last_offset=0``、``last_atom_id=NULL``、
+    ``tasks_extracted=0``——下一轮 watcher scan 会像新轨迹一样全量重拆重聚。
+
+    Args:
+        eco: 只重置该生态（``watch_dirs.ecosystem``）的轨迹；None=全部。
+        traj_id: 只重置该轨迹（按文件名 stem 匹配）；None=不按轨迹过滤。
+        wipe_atoms: True 时额外删除每条轨迹已拆的 ``<traj_id>/tasks/atom_*.json``，
+            强制 TaskAgent 用新模型重拆（``--force`` 走这条）。
+
+    Returns:
+        被重置的轨迹行数。
+    """
+    conn = get_connection(db_path)
+    try:
+        sql = (
+            "SELECT t.id, t.filename, w.path FROM trajectories t "
+            "JOIN watch_dirs w ON t.watch_dir_id = w.id WHERE 1=1"
+        )
+        params: list = []
+        if eco:
+            sql += " AND w.ecosystem = ?"
+            params.append(eco)
+        if traj_id:
+            sql += " AND (t.filename = ? OR t.filename = ?)"
+            params += [traj_id, f"{traj_id}.md"]
+        rows = conn.execute(sql, params).fetchall()
+
+        for r in rows:
+            conn.execute(
+                "UPDATE trajectories SET status='discovered', last_offset=0, "
+                "last_atom_id=NULL, tasks_extracted=0, "
+                "updated_at=datetime('now') WHERE id=?",
+                (r["id"],),
+            )
+            if wipe_atoms:
+                stem = (r["filename"][:-3] if r["filename"].endswith(".md")
+                        else r["filename"])
+                tasks_dir = Path(r["path"]) / stem / "tasks"
+                if tasks_dir.is_dir():
+                    for af in tasks_dir.glob("atom_*.json"):
+                        af.unlink()
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
 def get_trajs_by_status(
     watch_dir_id: int,
     status: str,

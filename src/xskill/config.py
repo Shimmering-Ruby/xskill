@@ -261,6 +261,17 @@ def get_traj_dir() -> Path:
     return Path(dirs[0]["path"])
 
 
+def get_uploads_dir() -> Path:
+    """上传 db 文件的落盘根目录（``~/.xskill/uploads``）。
+
+    HTTP 上传端口把收到的 db 存到 ``uploads/<eco>/<client_id>/`` 下，再由
+    ``xskill read`` 入库。按 client 分子目录隔离多用户同名 ``ngagent.db``。
+    """
+    d = XSKILL_HOME / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def get_registry_db_path() -> Path:
     return REGISTRY_DB
 

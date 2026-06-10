@@ -184,6 +184,21 @@ _KNOWN_ECOSYSTEMS: list[dict] = [
 ]
 
 
+def bridge_dir_for(eco_id: str, home_root: Path | str | None = None) -> Path:
+    """某生态 bridged 轨迹的落盘目录（``<home>/.xskill/<eco>_sessions``）。
+
+    ``xskill read`` / 上传入库把 db 桥成的 ``traj_*.md`` 写到这里——与 daemon
+    常驻 ingester 用同一个目录，watcher 注册后即可统一捡起。eco_id 未知直接抛
+    （CLAUDE.md：不兜底）。
+    """
+    home = Path(home_root) if home_root else Path.home()
+    for e in _KNOWN_ECOSYSTEMS:
+        if e["id"] == eco_id:
+            return home / e["bridge_subpath"]
+    known = ", ".join(e["id"] for e in _KNOWN_ECOSYSTEMS)
+    raise ValueError(f"unknown ecosystem {eco_id!r}; known: {known}")
+
+
 def detect_known_ecosystems(home_root: Path | str | None = None) -> list[dict]:
     """Probe the user's HOME for known agent tools and report which ones
     have something on disk. Returns a list of detection records:

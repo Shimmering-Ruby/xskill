@@ -18,6 +18,7 @@ import sys
 
 from xskill import __version__
 from xskill.config import set_overrides
+from xskill.ecosystems import SQLITE_SPEC_BY_ECO
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -302,6 +303,55 @@ def cmd_search(args, xskill) -> int:
     return 1
 
 
+def cmd_read(args, xskill) -> int:
+    """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
+    from xskill.pipeline.db_ingest import read_db_files
+    try:
+        summary = read_db_files(
+            args.path,
+            eco=args.eco,
+            register=not args.no_register,
+            recursive=args.recursive,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(
+        f"read: {len(summary['db_files'])} db 文件 → 桥接 {summary['bridged']} "
+        f"条轨迹到 {summary['target_dir']}"
+    )
+    if not args.no_register:
+        print("已注册为 watch_dir —— 启动 `xskill serve` 后将自动拆分入库。")
+    return 0
+
+
+def cmd_rebuild(args, xskill) -> int:
+    """`xskill rebuild [--force]` —— 用现有原始轨迹重跑蒸馏。
+
+    默认：重置目标轨迹状态/offset，让运行中的 watcher 从头重拆重聚。
+    ``--force``：额外清空 skill 仓 + 已拆原子（删除重建）。
+    """
+    from xskill.pipeline.registry import reset_trajectories
+    from xskill.runtime import read_status
+
+    if args.force:
+        from xskill.config import get_skill_dir
+        from xskill.skill.repo import SkillRepo
+        n_skills = SkillRepo(get_skill_dir()).wipe_all_skills()
+        print(f"--force: 清空 skill 仓（删 {n_skills} 个 skill）")
+
+    n = reset_trajectories(
+        eco=args.eco, traj_id=args.traj, wipe_atoms=args.force,
+    )
+    print(f"rebuild: 重置 {n} 条轨迹（{'含清原子' if args.force else '保留原子'}）")
+
+    if read_status().get("running"):
+        print("watcher 运行中 —— 30s 内将自动重跑这些轨迹。")
+    else:
+        print("⚠ 未检测到运行中的 daemon —— 请 `xskill serve` 启动后才会重跑。")
+    return 0
+
+
 # ═══════════════════════════════════════════════════════════════
 # argparse
 # ═══════════════════════════════════════════════════════════════
@@ -376,6 +426,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--watch", action="store_true",
                          help="htop 式整屏刷新（每 2s）")
 
+    p_read = sub.add_parser(
+        "read", help="批量从指定位置读取 db 文件并入库（ngagent/opencode）",
+    )
+    p_read.add_argument("path", type=str,
+                        help="db 文件，或包含 db 文件的目录")
+    p_read.add_argument("--eco", default="ngagent",
+                        choices=sorted(SQLITE_SPEC_BY_ECO),
+                        help="db 所属生态（默认 ngagent）")
+    p_read.add_argument("--recursive", "-r", action="store_true",
+                        help="目录模式下递归查找 *.db")
+    p_read.add_argument("--no-register", action="store_true",
+                        help="只桥接不注册 watch_dir（一般不用）")
+
+    p_rebuild = sub.add_parser(
+        "rebuild", help="用现有原始轨迹重跑蒸馏（换强模型重生成 skill）",
+    )
+    p_rebuild.add_argument(
+        "--force", action="store_true",
+        help="先清空 skill 仓 + 已拆原子再全量重跑（删除重建）",
+    )
+    p_rebuild.add_argument("--eco", default=None,
+                           help="只重跑某生态的轨迹（默认全部）")
+    p_rebuild.add_argument("--traj", default=None,
+                           help="只重跑某条轨迹 id（调试用）")
+
     return p
 
 
@@ -432,6 +507,13 @@ def main() -> int:
     # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
     if args.command == "stats":
         return cmd_stats(args)
+
+    # read / rebuild 只动 registry + 文件，不需要 llm.api_key / facade——
+    # 重跑由运行中的 watcher 完成，本命令只做"重置/桥接"。
+    if args.command == "read":
+        return cmd_read(args, None)
+    if args.command == "rebuild":
+        return cmd_rebuild(args, None)
 
     # team 客户端的 `registry list`：本机是 client（有 team_client.json）且没有
     # standalone 数据（watch_dirs 为空）时，改走现算视图。放在 config/facade
