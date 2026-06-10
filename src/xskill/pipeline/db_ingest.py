@@ -49,7 +49,8 @@ def read_db_files(
     home_root: Path | str | None = None,
     register: bool = True,
     recursive: bool = False,
-    db_path: Optional[Path] = None,
+    target_dir: Path | str | None = None,
+    register_label: str | None = None,
 ) -> dict:
     """把 ``path`` 下的 db 文件批量桥接入库。
 
@@ -59,6 +60,10 @@ def read_db_files(
         home_root: bridge 目录的家目录根（默认 ``~``）；测试可指向 tmp。
         register: True 时把 bridge 目录注册成 watch_dir（让 watcher 捡起）。
         recursive: 目录模式下是否递归找 ``*.db``。
+        target_dir: 显式落盘目录覆盖（团队服务器按 client 分桶时用，传
+            ``clients/<client_id>/sessions``）；None 则用 ``bridge_dir_for(eco)``。
+        register_label: 注册 watch_dir 的 label（团队服务器传 client_id 让
+            watcher 能做 CS 归因）；None 则用 eco。
 
     Returns:
         ``{"eco", "target_dir", "db_files": [...], "bridged": N, "trajectories": [...]}``
@@ -77,25 +82,26 @@ def read_db_files(
             f"{src} 下没有找到 db 文件（eco={eco}）——确认路径或上传是否成功"
         )
 
-    target_dir = bridge_dir_for(eco, home_root)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(target_dir) if target_dir else bridge_dir_for(eco, home_root)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     bridged: list[dict] = []
     for dbf in db_files:
         ing = SqliteIngester(
-            target_dir, home_root=home_root, spec=spec, db_path=dbf,
+            out_dir, home_root=home_root, spec=spec, db_path=dbf,
         )
         results = ing.run_once()
         logger.info(
             "read_db_files: %s → bridged %d session(s) into %s",
-            dbf, len(results), target_dir,
+            dbf, len(results), out_dir,
         )
         bridged.extend(results)
 
     if register:
         # 函数内 import 避免 registry↔config↔ecosystems 成环
         from xskill.pipeline.registry import register_dir
-        register_dir(str(target_dir), label=eco, ecosystem=eco)
+        register_dir(str(out_dir), label=register_label or eco, ecosystem=eco)
+    target_dir = out_dir
 
     return {
         "eco": eco,

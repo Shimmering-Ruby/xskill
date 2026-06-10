@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Callable
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
 from xskill.team.server.client_registry import ClientRegistry
@@ -137,6 +137,47 @@ async def team_upload(
     logger.info("team upload from %s: %d accepted, %d rejected",
                 client_id, len(accepted), len(rejected))
     return UploadResponse(accepted=accepted, rejected=rejected)
+
+
+@router.post("/ingest-db")
+async def team_ingest_db(
+    file: UploadFile = File(...),
+    eco: str = Form("ngagent"),
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+) -> dict:
+    """收一个原始 db 文件（ngagent/opencode SQLite），落盘后桥接入库。
+
+    给没装 sshpass / 不愿手敲密码的 Windows 用户用：``upload_ngagent_db.ps1``
+    直接 POST db 文件到这里，免 scp。落盘到 ``uploads/<eco>/<client_id>/``，
+    再 ``read_db_files`` 桥成 traj 落到该 client 的 sessions 桶（label=client_id
+    让 watcher 做 CS 归因），watcher 后续按常规流水线出 skill。
+    """
+    client_id = _auth(x_xskill_token, x_xskill_client)
+
+    from xskill.config import get_uploads_dir
+    from xskill.pipeline.db_ingest import read_db_files
+
+    # 落盘：uploads/<eco>/<client_id>/<安全文件名>
+    safe_name = Path(file.filename or "upload.db").name
+    dest_dir = get_uploads_dir() / eco / client_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / safe_name
+    dest.write_bytes(await file.read())
+
+    # 桥接到该 client 的 sessions 桶，label=client_id（与 team_upload 一致）
+    sessions_dir = _ctx.traj_root / "clients" / client_id / "sessions"
+    try:
+        summary = read_db_files(
+            dest, eco=eco, target_dir=sessions_dir, register_label=client_id,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    logger.info("team ingest-db from %s: %s → bridged %d traj",
+                client_id, safe_name, summary["bridged"])
+    return {"client_id": client_id, "saved": str(dest),
+            "bridged": summary["bridged"]}
 
 
 @router.get("/sync")
