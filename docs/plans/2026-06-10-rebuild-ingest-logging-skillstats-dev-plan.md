@@ -198,6 +198,22 @@ C（日志，独立最快）→ B（read/上传/脚本，链路）→ A（rebuil
 
 ---
 
+## 6.5 实现结果与偏差（0.6.1a1 实做记录）
+
+- **全部 4 子项目已实现 + 单测**：A(rebuild)/B(read+上传端点+PS脚本)/C(日志治理)/D(看板)。
+  `make test` 772 通过；`make e2e`（Docker fake-LLM hermetic）2 scenario 全过。
+- **唯一红测 `test_canary_flip_promote_and_install_new_version` 是已知环境 flaky**
+  （需 16 次真实 claude API；DeepSeek 限流时 180s 超时）。同一份基线代码 45 分钟前后
+  一过一挂证明与本次改动无关，见记忆 [[project_flaky_watcher_atom_test]]。
+- **偏差①（D7 sha 落库 → 改 query-time 解析）**：未给 trajectories 加 `skill_sha`/
+  `client_id` 列。版本(sha)改为看板查询时从 traj .md 头分析式解析、用户由 JOIN
+  watch_dirs.label 现算——更贴合"分析而非埋点"，免迁移、不动打分写路径。
+- **偏差②（D10 扩展 header 注入到所有 main 版本：未做）**：当前 header 仍只在灰度期 +
+  session 真用到时注入。后果：**版本统计只覆盖有 header 的轨迹（灰度跟踪过的）**，
+  纯 main 日常使用的轨迹 sha 解析为 `unknown`，归到 "unknown" 版本桶。要让每个历史
+  main 版本都有独立触发曲线，仍需扩展 `CCSessionIngester` 对所有已装 skill 注入
+  header——列为 0.6.1 之后的后续项。
+
 ## 7. 验收度量（度量先于实现）
 
 | 子项目 | 单调收敛指标 |
