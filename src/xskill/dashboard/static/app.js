@@ -144,13 +144,118 @@ async function loadSkills() {
   const parts = Object.keys(bs).sort().map(k => `${k} ${bs[k]}`).join(' · ');
   put('skills.summary', `共 ${d.total} 个 · ${parts}`);
   rows('skills-body', (d.skills || []).map(s =>
-    `<tr><td>${esc(s.name)}</td>`
+    `<tr><td><a href="#" class="skill-link" data-skill="${esc(s.name)}">${esc(s.name)}</a></td>`
     + `<td><span class="badge ${STATE_BADGE[s.state] || 'bg-secondary-lt'}">${esc(s.state)}</span></td>`
     + `<td class="text-secondary" style="max-width:520px">${esc(s.description) || '—'}</td>`
     + `<td class="text-end">v${esc(s.version)}</td>`
     + `<td class="text-end">${s.candidates || 0}</td>`
     + `<td class="text-end">${s.use_count || 0}</td></tr>`).join(''));
 }
+
+// ── 单 skill 详情 drill-in（子项目 D2）─────────────────────────────
+
+// 确定性 SVG 折线（给定数据必出同图，不靠图表库；符合"骨架由确定性工具产出"）
+function sparkline(points, w = 320, h = 60) {
+  const vals = points.map(p => Number(p) || 0);
+  if (!vals.length) return '<span class="text-secondary">无数据</span>';
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const span = (max - min) || 1, n = vals.length;
+  const dx = n > 1 ? (w - 8) / (n - 1) : 0;
+  const pts = vals.map((v, i) =>
+    `${(4 + i * dx).toFixed(1)},${(h - 4 - (v - min) / span * (h - 8)).toFixed(1)}`).join(' ');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`
+    + `<polyline fill="none" stroke="#206bc4" stroke-width="2" points="${pts}"/>`
+    + vals.map((v, i) => `<circle cx="${(4 + i * dx).toFixed(1)}" cy="${(h - 4 - (v - min) / span * (h - 8)).toFixed(1)}" r="2.5" fill="#206bc4"/>`).join('')
+    + `</svg>`;
+}
+
+// diff 文本 → 红绿 HTML（+ 绿 / - 红）
+function renderDiff(diff) {
+  if (!diff) return '<span class="text-secondary">无 diff</span>';
+  return '<pre class="diff-view" style="font-size:12px;line-height:1.4">' + diff.split('\n').map(line => {
+    const e = esc(line);
+    if (line.startsWith('+') && !line.startsWith('+++')) return `<span style="background:#e6ffed;color:#22863a">${e}</span>`;
+    if (line.startsWith('-') && !line.startsWith('---')) return `<span style="background:#ffeef0;color:#b31d28">${e}</span>`;
+    if (line.startsWith('@@')) return `<span style="color:#6f42c1">${e}</span>`;
+    return e;
+  }).join('\n') + '</pre>';
+}
+
+function detailBox() {
+  let box = document.getElementById('skill-detail');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'skill-detail';
+    box.className = 'card mt-3';
+    const sec = document.getElementById('pg-skills') || document.body;
+    sec.appendChild(box);
+  }
+  return box;
+}
+
+async function loadSkillDetail(name) {
+  const box = detailBox();
+  box.innerHTML = `<div class="card-body">加载 ${esc(name)} …</div>`;
+  const [d, tree] = await Promise.all([
+    j('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/detail'),
+    j('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/tree'),
+  ]);
+  const vrows = (d.versions || []).map(v =>
+    `<tr><td><code>${esc((v.sha || '').slice(0, 8))}</code></td><td class="text-end">${v.triggers}</td>`
+    + `<td class="text-end">${ux(v.avg_ux)}</td><td class="text-end">${v.avg_tool_calls}</td>`
+    + `<td class="text-end">${tok(v.avg_tokens)}</td></tr>`).join('')
+    || '<tr><td colspan="5" class="text-secondary">还没有版本触发数据</td></tr>';
+  const userRows = (d.by_user || []).map(u =>
+    `<tr><td>${esc(u.user)}</td><td class="text-end">${u.triggers}</td><td class="text-end">${ux(u.avg_ux)}</td></tr>`).join('');
+  const trend = (d.trend || []).map(p => p.ux);
+  const fileItems = (tree.files || []).map(f =>
+    `<a href="#" class="list-group-item list-group-item-action py-1 px-2 skf" data-skill="${esc(name)}" data-path="${esc(f.path)}">${esc(f.path)} <span class="text-secondary">(${f.size})</span></a>`).join('');
+  const gitItems = (d.versions_git || []).map(g =>
+    `<a href="#" class="list-group-item list-group-item-action py-1 px-2 skd" data-skill="${esc(name)}" data-sha="${esc(g.sha)}"><code>${esc(g.short)}</code> ${esc(g.subject)}</a>`).join('');
+
+  box.innerHTML = `<div class="card-body">
+    <div class="d-flex justify-content-between"><h3>${esc(name)}</h3>
+      <div>总触发 <strong>${d.total_triggers}</strong> 次</div></div>
+    <div class="row mt-2">
+      <div class="col-md-7">
+        <div class="subheader">版本统计（每版本触发 / UX / 平均工具调用 / 平均 token）</div>
+        <table class="table table-sm"><thead><tr><th>版本</th><th class="text-end">触发</th><th class="text-end">UX</th><th class="text-end">工具/atom</th><th class="text-end">token/atom</th></tr></thead><tbody>${vrows}</tbody></table>
+        <div class="subheader mt-2">跨版本 UX 进化趋势</div>${sparkline(trend)}
+        <div class="subheader mt-3">按用户</div>
+        <table class="table table-sm"><tbody>${userRows || '<tr><td class="text-secondary">无</td></tr>'}</tbody></table>
+      </div>
+      <div class="col-md-5">
+        <div class="subheader">文件目录</div>
+        <div class="list-group list-group-flush" style="max-height:160px;overflow:auto">${fileItems}</div>
+        <div class="subheader mt-2">版本（点击看红绿 diff）</div>
+        <div class="list-group list-group-flush" style="max-height:140px;overflow:auto">${gitItems}</div>
+      </div>
+    </div>
+    <div class="mt-2"><div class="subheader">预览 / diff</div><div id="skill-preview" class="border rounded p-2" style="max-height:320px;overflow:auto"><span class="text-secondary">点左侧文件或版本查看</span></div></div>
+  </div>`;
+  box.scrollIntoView({ behavior: 'smooth' });
+}
+
+// 点击：技能名 → 详情；文件 → 预览；版本 → diff
+document.addEventListener('click', async e => {
+  const sl = e.target.closest('.skill-link');
+  if (sl) { e.preventDefault(); loadSkillDetail(sl.dataset.skill).catch(console.error); return; }
+  const fl = e.target.closest('.skf');
+  if (fl) {
+    e.preventDefault();
+    const r = await j('api/v1/dashboard/skill/' + encodeURIComponent(fl.dataset.skill) + '/file?path=' + encodeURIComponent(fl.dataset.path));
+    document.getElementById('skill-preview').innerHTML = r.content != null
+      ? `<pre style="font-size:12px">${esc(r.content)}</pre>` : `<span class="text-danger">${esc(r.error || 'error')}</span>`;
+    return;
+  }
+  const dl = e.target.closest('.skd');
+  if (dl) {
+    e.preventDefault();
+    const r = await j('api/v1/dashboard/skill/' + encodeURIComponent(dl.dataset.skill) + '/diff?sha=' + encodeURIComponent(dl.dataset.sha));
+    document.getElementById('skill-preview').innerHTML = renderDiff(r.diff);
+    return;
+  }
+});
 
 async function loadDirs() {
   const d = await j('api/v1/dashboard/dirs');

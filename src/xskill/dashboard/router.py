@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
 from xskill.dashboard.metrics import DashboardMetrics, skills_catalog
@@ -111,7 +111,102 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
             states[s["state"]] = states.get(s["state"], 0) + 1
         return {"total": len(cat), "by_state": states, "skills": cat}
 
+    # ── 单 skill 详情（drill-in）：统计 / 文件树 / 预览 / 版本 / diff ──
+
+    @router.get("/api/v1/dashboard/skill/{name}/detail")
+    def skill_detail(name: str) -> dict:
+        """该 skill 真实总触发 + 每版本统计(触发/UX/工具/token) + 按用户 + 趋势。"""
+        d = metrics.skill_detail(name)
+        d["versions_git"] = _git_versions(_skill_path(skill_dir, name))
+        return d
+
+    @router.get("/api/v1/dashboard/skill/{name}/tree")
+    def skill_tree(name: str) -> dict:
+        """skill 目录的文件树（相对路径 + 类型 + 大小）。"""
+        root = _skill_path(skill_dir, name)
+        return {"name": name, "files": _file_tree(root)}
+
+    @router.get("/api/v1/dashboard/skill/{name}/file")
+    def skill_file(name: str, path: str) -> dict:
+        """读 skill 目录内单文件内容（越权防御：path 必须落在 skill 目录内）。"""
+        root = _skill_path(skill_dir, name)
+        target = _safe_join(root, path)
+        if not target.is_file():
+            return {"path": path, "error": "not a file"}
+        try:
+            content = target.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            return {"path": path, "error": "binary or unreadable"}
+        return {"path": path, "content": content}
+
+    @router.get("/api/v1/dashboard/skill/{name}/diff")
+    def skill_diff(name: str, sha: str) -> dict:
+        """某版本相对其父提交的 unified diff（前端渲染红绿）。"""
+        return {"sha": sha, "diff": _git_show(_skill_path(skill_dir, name), sha)}
+
     return router
+
+
+# ── skill 目录读取 + git 只读助手（自包含，不依赖主 app）─────────────
+
+def _skill_path(skill_dir: Path, name: str) -> Path:
+    """解析并校验 skill 子目录，防 name 里塞 ``../`` 越权。"""
+    root = (Path(skill_dir) / name).resolve()
+    if root.parent != Path(skill_dir).resolve() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"invalid skill name: {name!r}")
+    return root
+
+
+def _safe_join(root: Path, rel: str) -> Path:
+    """把相对路径安全拼到 root 下；逃逸到 root 之外直接抛（越权防御）。"""
+    root = root.resolve()
+    target = (root / rel).resolve()
+    if root not in target.parents and target != root:
+        raise HTTPException(status_code=400, detail="path escapes skill dir")
+    return target
+
+
+def _file_tree(root: Path) -> list[dict]:
+    """列 root 下所有文件（跳过 .git），返回相对路径 + 大小，按路径排序。"""
+    out: list[dict] = []
+    if not root.is_dir():
+        return out
+    for p in sorted(root.rglob("*")):
+        if ".git" in p.parts:
+            continue
+        if p.is_file():
+            out.append({"path": p.relative_to(root).as_posix(),
+                        "type": "file", "size": p.stat().st_size})
+    return out
+
+
+def _git(root: Path, args: list[str]) -> str:
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(root)] + args,
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _git_versions(root: Path) -> list[dict]:
+    """git log → [{sha, short, date, subject}]（最新在前）。非 git 仓返回空。"""
+    out = _git(root, ["log", "--format=%H%x09%cI%x09%s", "-n", "50"])
+    versions = []
+    for line in out.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            versions.append({"sha": parts[0], "short": parts[0][:8],
+                             "date": parts[1], "subject": parts[2]})
+    return versions
+
+
+def _git_show(root: Path, sha: str) -> str:
+    """某 commit 相对父的 unified diff 文本。sha 白名单校验防注入。"""
+    if not sha or not all(c in "0123456789abcdefABCDEF" for c in sha):
+        raise HTTPException(status_code=400, detail="invalid sha")
+    return _git(root, ["show", "--format=", "--no-color", sha])
 
 
 def _price_health() -> Optional[dict]:

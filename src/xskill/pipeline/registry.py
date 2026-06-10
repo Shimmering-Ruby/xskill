@@ -552,6 +552,13 @@ def mark_skill_used(
     *,
     db_path: Optional[Path] = None,
 ) -> None:
+    """记录该轨迹触发了哪个 skill / 哪个灰度 side。
+
+    设计：skill 版本(sha) / 用户**不落 trajectories 列**,而是看板 metrics 查询时
+    从 traj .md 头 `<!-- xskill:skill=X side=Y sha=Z -->` 分析式解析(版本)、JOIN
+    watch_dirs.label 现算(用户)。与工具调用/ token 同属"按轨迹文本现算",保持
+    "分析而非埋点"一致——免迁移、不改这条打分热路径的写入语义。
+    """
     conn = get_connection(db_path)
     try:
         conn.execute(
