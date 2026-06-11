@@ -126,6 +126,7 @@ skill_opt:
   seed:               42     # fixed RNG seed → deterministic split
   catalog_max_skills: 12     # decoy-catalog size (mirrors CC listing budget)
   catalog_desc_cap:   256    # per-skill description truncation fed to the probe
+  rerun_enabled:      true    # dashboard "re-run case" action endpoint on/off
 
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:

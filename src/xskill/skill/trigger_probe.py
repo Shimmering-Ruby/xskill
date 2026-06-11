@@ -27,6 +27,7 @@ from typing import Any, Callable
 import numpy as np
 
 from xskill.canary import main_sha
+from xskill.skill import frontmatter as fm
 from xskill.skill.repo import SkillRepo
 
 logger = logging.getLogger("xskill.skill_edit_agent")
@@ -219,3 +220,55 @@ def probe_trigger(
         logger.warning("probe_trigger 代理异常（视作未触发）: %s", exc)
 
     return record.get("triggered") or "NONE"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 看板"重跑单 case"（Phase 2 action 端点用，按需现建 factory/embed）
+# ═══════════════════════════════════════════════════════════════════
+
+def rerun_probe_case(
+    skill_root: Path, skill_name: str, query: str, *, config: dict,
+) -> dict:
+    """对单条 query 用 skill 当前描述重跑探针（runs_per_case 轮），返回结果。
+
+    给看板"重新触发"按钮用：现读 SKILL.md 当前 description、现建诱饵清单 +
+    agno 工厂 + embed_client，跑完即弃。不改归档历史（归档是某次优化的记录），
+    结果只回前端内联展示。
+    """
+    from xskill.agents.agno_factory import make_default_factory
+    from xskill.utils.llm import create_embed_client
+
+    opt = dict(config.get("skill_opt", {}) or {})
+    runs = int(opt.get("runs_per_case", 3))
+    max_skills = int(opt.get("catalog_max_skills", 12))
+    desc_cap = int(opt.get("catalog_desc_cap", 256))
+
+    skill_md = Path(skill_root) / skill_name / "SKILL.md"
+    fm_dict, _ = fm.parse(skill_md.read_text(encoding="utf-8"))
+    desc = str(fm_dict.get("description") or "").strip()
+    if not desc:
+        raise ValueError(f"{skill_name} 无 description，无法重跑探针")
+
+    embed = create_embed_client(config)
+    catalog = build_probe_catalog(
+        query, skill_name, skill_root=Path(skill_root), embed_client=embed,
+        max_skills=max_skills, desc_cap=desc_cap,
+    )
+    factory = make_default_factory(config)
+    n_hit = 0
+    runs_rec: list[dict] = []
+    for _ in range(runs):
+        chosen = probe_trigger(
+            query, skill_name, desc, catalog,
+            agno_agent_factory=factory, desc_cap=desc_cap,
+        )
+        hit = (chosen == skill_name)
+        if hit:
+            n_hit += 1
+        runs_rec.append({"triggered_skill": chosen, "hit": hit})
+    return {
+        "query": query,
+        "did_trigger": (n_hit / runs) >= 0.5 if runs else False,
+        "catalog": [e["name"] for e in catalog],
+        "runs": runs_rec,
+    }

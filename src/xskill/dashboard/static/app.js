@@ -231,9 +231,38 @@ async function loadSkillDetail(name) {
         <div class="list-group list-group-flush" style="max-height:140px;overflow:auto">${gitItems}</div>
       </div>
     </div>
+    <div id="skill-trigger" class="mt-3"><div class="text-secondary">加载触发率…</div></div>
     <div class="mt-2"><div class="subheader">预览 / diff</div><div id="skill-preview" class="border rounded p-2" style="max-height:320px;overflow:auto"><span class="text-secondary">点左侧文件或版本查看</span></div></div>
   </div>`;
   box.scrollIntoView({ behavior: 'smooth' });
+  loadTriggerPanel(name).catch(console.error);
+}
+
+// 离线探针触发率面板（描述质量信号；区别于上方"总触发"的线上真实使用率）
+function pctf(x) { return Math.round((Number(x) || 0) * 100) + '%'; }
+
+async function loadTriggerPanel(name) {
+  const el = document.getElementById('skill-trigger');
+  if (!el) return;
+  let hist = { history: [] }, cases = { cases: [], exp: null };
+  try { hist = await j('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/trigger'); } catch (e) { /* 空 */ }
+  try { cases = await j('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/trigger/cases'); } catch (e) { /* 空 */ }
+  const hrows = (hist.history || []).map(h =>
+    `<tr><td><code>${esc((h.version_sha || '—').slice(0, 8))}</code></td><td class="text-end">${pctf(h.test_score)}</td>`
+    + `<td class="text-end">${pctf(h.train_score)}</td><td class="text-end">${h.n_cases}</td>`
+    + `<td class="text-end">${h.catalog_size}</td><td class="text-secondary">${esc((h.ts || '').slice(0, 16))}</td></tr>`).join('')
+    || '<tr><td colspan="6" class="text-secondary">还没有离线触发评测</td></tr>';
+  const crows = (cases.cases || []).map(c =>
+    `<tr><td>${esc(c.query)}</td><td class="text-center">${c.should_trigger ? '是' : '否'}</td>`
+    + `<td class="text-center">${c.did_trigger ? '触发' : '未触发'}</td>`
+    + `<td class="text-center">${c.passed ? '✓' : '✗'}</td>`
+    + `<td class="text-secondary small">${esc((c.catalog || []).join(', '))}</td>`
+    + `<td><button class="btn btn-sm btn-outline-primary trig-rerun" data-skill="${esc(name)}" data-query="${esc(c.query)}">重跑</button></td></tr>`).join('')
+    || '<tr><td colspan="6" class="text-secondary">无 case（该 skill 还没跑过触发优化）</td></tr>';
+  el.innerHTML = `<div class="subheader">离线探针触发率 <span class="text-secondary">（描述质量信号——真跑代理在语义相关技能清单里抢触发；区别于上方"总触发"的线上真实使用）</span></div>
+    <table class="table table-sm"><thead><tr><th>版本</th><th class="text-end">test 触发率</th><th class="text-end">train</th><th class="text-end">cases</th><th class="text-end">诱饵数</th><th>时间</th></tr></thead><tbody>${hrows}</tbody></table>
+    <div class="subheader mt-2">逐 case <span class="text-secondary">（实验 ${esc(cases.exp || '—')}；点"重跑"用当前描述真跑一轮探针）</span></div>
+    <table class="table table-sm"><thead><tr><th>query</th><th class="text-center">应触发</th><th class="text-center">实测</th><th class="text-center">通过</th><th>诱饵清单</th><th></th></tr></thead><tbody>${crows}</tbody></table>`;
 }
 
 // 点击：技能名 → 详情；文件 → 预览；版本 → diff
@@ -253,6 +282,24 @@ document.addEventListener('click', async e => {
     e.preventDefault();
     const r = await j('api/v1/dashboard/skill/' + encodeURIComponent(dl.dataset.skill) + '/diff?sha=' + encodeURIComponent(dl.dataset.sha));
     document.getElementById('skill-preview').innerHTML = renderDiff(r.diff);
+    return;
+  }
+  // 逐 case"重跑"：用当前描述真跑一轮探针（action 端点），结果回填按钮
+  const rb = e.target.closest('.trig-rerun');
+  if (rb) {
+    e.preventDefault();
+    rb.disabled = true; const old = rb.textContent; rb.textContent = '跑…';
+    try {
+      const resp = await fetch('api/v1/dashboard/skill/' + encodeURIComponent(rb.dataset.skill) + '/trigger/rerun',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: rb.dataset.query }) });
+      const data = await resp.json();
+      rb.classList.remove('btn-outline-primary');
+      if (data.error) { rb.textContent = '错误'; rb.classList.add('btn-outline-danger'); }
+      else if (data.did_trigger) { rb.textContent = '触发 ✓'; rb.classList.add('btn-outline-success'); }
+      else { rb.textContent = '未触发'; rb.classList.add('btn-outline-secondary'); }
+      rb.title = '诱饵清单: ' + ((data.catalog || []).join(', ') || '空');
+    } catch (err) { rb.textContent = '错误'; }
+    rb.disabled = false; void old;
     return;
   }
 });

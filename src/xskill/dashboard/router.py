@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, Response
 from xskill.dashboard.metrics import DashboardMetrics, skills_catalog
 from xskill.pipeline.registry import (
     usage_summary, model_share, harness_share, list_watch_dirs,
+    trigger_eval_for_skill,
 )
 
 _STATIC = Path(__file__).with_name("static")
@@ -144,7 +145,80 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         """某版本相对其父提交的 unified diff（前端渲染红绿）。"""
         return {"sha": sha, "diff": _git_show(_skill_path(skill_dir, name), sha)}
 
+    # ── 离线探针触发率（Phase 2）：历史 / 逐 case / 重跑 action ──────
+
+    @router.get("/api/v1/dashboard/skill/{name}/trigger")
+    def skill_trigger(name: str) -> dict:
+        """该 skill 的离线探针触发率历史(按 skill/版本)——区别于线上真实使用率。"""
+        _skill_path(skill_dir, name)  # 越权校验
+        return {"name": name, "history": trigger_eval_for_skill(name, db_path=db_path)}
+
+    @router.get("/api/v1/dashboard/skill/{name}/trigger/cases")
+    def skill_trigger_cases(name: str, exp: Optional[str] = None) -> dict:
+        """某次优化实验的逐 case 明细(默认最新实验)。读盘,不依赖埋点。"""
+        root = _skill_path(skill_dir, name)
+        return _trigger_cases(root, exp)
+
+    @router.post("/api/v1/dashboard/skill/{name}/trigger/rerun")
+    def skill_trigger_rerun(name: str, body: dict) -> dict:
+        """用 skill 当前描述对单条 query 重跑探针(action 端点;受控写/算)。
+
+        gating on config.skill_opt.rerun_enabled;走看板既有访问中间件鉴权;
+        单次跑 runs_per_case 轮,失败回 error 不崩看板。
+        """
+        from xskill.config import get_config
+        cfg = get_config()
+        opt = (cfg.get("skill_opt") or {})
+        if not opt.get("rerun_enabled", True):
+            raise HTTPException(status_code=403, detail="rerun disabled")
+        query = str((body or {}).get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="query required")
+        root = _skill_path(skill_dir, name)
+        try:
+            from xskill.skill.trigger_probe import rerun_probe_case
+            return rerun_probe_case(root.parent, name, query, config=cfg)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            return {"query": query, "error": str(exc)}
+
     return router
+
+
+def _trigger_cases(root: Path, exp: Optional[str]) -> dict:
+    """读 <skill>/.description_optimization/{exp}/ 下的逐 case json + summary。
+
+    exp 为空 → 取实验号最大的目录。每个 case json 形如
+    {should_trigger, did_trigger, passed, query, topic, triggered_skill, ...}。
+    """
+    import json
+    opt_root = root / ".description_optimization"
+    if not opt_root.is_dir():
+        return {"exp": None, "exps": [], "cases": [], "summary": None}
+    exps = sorted(
+        (d.name for d in opt_root.iterdir()
+         if d.is_dir() and d.name.split("_", 1)[0].isdigit()),
+        key=lambda n: int(n.split("_", 1)[0]),
+    )
+    if not exps:
+        return {"exp": None, "exps": [], "cases": [], "summary": None}
+    chosen = exp if (exp in exps) else exps[-1]
+    exp_dir = opt_root / chosen
+    cases: list[dict] = []
+    for p in sorted(exp_dir.rglob("*.json")):
+        if p.name == "summary.json":
+            continue
+        try:
+            cases.append(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    summary = None
+    sp = exp_dir / "summary.json"
+    if sp.is_file():
+        try:
+            summary = json.loads(sp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            summary = None
+    return {"exp": chosen, "exps": exps, "cases": cases, "summary": summary}
 
 
 # ── skill 目录读取 + git 只读助手（自包含，不依赖主 app）─────────────
