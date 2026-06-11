@@ -117,13 +117,15 @@ canary:
 # calls reuse the `llm` above (rate_limit applies). Failure never blocks the
 # commit. Archived under `<skill>/.description_optimization/` (NOT versioned).
 skill_opt:
-  enabled:        true   # set false to disable optimization entirely (no-op)
-  n_cases:        20     # eval queries generated per skill (cached + reused)
-  runs_per_case:  3      # LLM-judge runs per query; trigger = hit >= 0.5 of runs
-  max_iters:      5      # max improve-description iterations (candidates)
-  max_llm_calls:  400    # hard cap on total LLM calls per optimization run
-  train_frac:     0.6    # stratified train fraction; the rest is held-out test
-  seed:           42     # fixed RNG seed → deterministic split
+  enabled:            true   # set false to disable optimization entirely (no-op)
+  n_cases:            20     # eval queries generated per skill (cached + reused)
+  runs_per_case:      3      # probe runs per query; trigger = hit >= 0.5 of runs
+  max_iters:          5      # max improve-description iterations (candidates)
+  max_llm_calls:      400    # hard cap on total LLM/probe calls per run
+  train_frac:         0.6    # stratified train fraction; rest is held-out test
+  seed:               42     # fixed RNG seed → deterministic split
+  catalog_max_skills: 12     # decoy-catalog size (mirrors CC listing budget)
+  catalog_desc_cap:   256    # per-skill description truncation fed to the probe
 
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:

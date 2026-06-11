@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from xskill.skill import frontmatter as fm
+from xskill.skill.trigger_probe import build_probe_catalog, probe_trigger
 
 logger = logging.getLogger("xskill.skill_edit_agent")
 
@@ -43,23 +44,6 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents" / "prompts"
 
 # description 硬限制（Claude 截断阈值）
 DESC_HARD_LIMIT = 1024
-
-# LLM-judge catalog 里给的通用 decoy skill（other_skill_catalog 为 None 时用），
-# 让"选哪个 skill"这个判定不至于只有一个候选可选（那样永远触发）。
-_GENERIC_DECOYS = [
-    {
-        "name": "general-coding-helper",
-        "description": "Use this skill for general programming questions, writing "
-        "or explaining code, and routine software development tasks that don't "
-        "match any more specific skill.",
-    },
-    {
-        "name": "web-search-research",
-        "description": "Use this skill when the user needs up-to-date information "
-        "from the web, fact-checking, or researching a topic across multiple "
-        "online sources.",
-    },
-]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -80,22 +64,30 @@ def optimize_description(
     *,
     llm: Any,
     config: dict,
-    other_skill_catalog: list[dict] | None = None,
+    agno_agent_factory: Any,
+    embed_client: Any,
+    skill_root: Path,
 ) -> dict:
     """优化 skill_dir/SKILL.md 的 frontmatter.description 触发准确率。
+
+    触发判定走真跑代理的闭环探针（trigger_probe），诱饵清单 = 与 query 语义
+    最近的 main 分支 skill（见 docs/plans/2026-06-11-trigger-probe-...）。
 
     参数
     ----
     skill_dir:
         skill 子目录（含 SKILL.md）。
     llm:
-        ``xskill.utils.llm.LLMClient``（已含 rate_limit + retry）。只用
-        ``llm.chat(prompt)``。
+        ``xskill.utils.llm.LLMClient``（已含 rate_limit + retry）。case 生成 /
+        improve / shorten 走 ``llm.chat(prompt)``。
     config:
         全局 config dict；本函数只读 ``config["skill_opt"]``。
-    other_skill_catalog:
-        其它 skill 的 ``[{"name", "description"}, ...]``，拼进伪
-        available_skills catalog 提高 LLM-judge 真实度。None → 用通用 decoy。
+    agno_agent_factory:
+        ``(*, instructions, tools, **kwargs) -> agno Agent``，探针真跑代理用。
+    embed_client:
+        embedding 客户端，给诱饵清单 query 锚点检索用。
+    skill_root:
+        skill 仓根（含各 skill 子目录 + ``.skill_index.pkl``），诱饵清单来源。
 
     返回
     ----
@@ -118,6 +110,8 @@ def optimize_description(
     max_llm_calls = int(opt_cfg.get("max_llm_calls", 400))
     train_frac = float(opt_cfg.get("train_frac", 0.6))
     seed = int(opt_cfg.get("seed", 42))
+    catalog_max_skills = int(opt_cfg.get("catalog_max_skills", 12))
+    catalog_desc_cap = int(opt_cfg.get("catalog_desc_cap", 256))
 
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.is_file():
@@ -131,9 +125,8 @@ def optimize_description(
     if not current_description:
         raise ValueError(f"SKILL.md 没有 description，无法优化: {skill_md}")
 
-    catalog_others = _resolve_other_catalog(other_skill_catalog, skill_name)
-
-    # LLM 调用计数器（闭包共享，命中 max_llm_calls 抛 _LLMBudgetExhausted）
+    # LLM 调用计数器（闭包共享，命中 max_llm_calls 抛 _LLMBudgetExhausted）。
+    # case 生成/improve/shorten 走 budget.chat；探针每跑一轮走 budget.consume。
     budget = _Budget(max_calls=max_llm_calls)
 
     opt_root = skill_dir / ".description_optimization"
@@ -152,6 +145,17 @@ def optimize_description(
         skill_name, len(cases), len(train), len(test),
     )
 
+    # 诱饵清单按 query 预算一次（同 query 跨候选/跨轮复用，省 embedding）。
+    # 每个 query 的竞争对手可不同——这正是"不同技能列表触发率不同"的来源。
+    catalog_by_query = {
+        c["query"]: build_probe_catalog(
+            c["query"], skill_name, skill_root=skill_root,
+            embed_client=embed_client, max_skills=catalog_max_skills,
+            desc_cap=catalog_desc_cap,
+        )
+        for c in cases
+    }
+
     # 实验目录
     exp_id = _next_exp_id(opt_root)
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -168,8 +172,9 @@ def optimize_description(
     def _record_candidate(iteration: int, desc: str) -> dict:
         """评 train，落 attempts.jsonl + per-case json，返回候选条目（test 分后填）。"""
         train_score, train_results = _score_description(
-            desc, train, llm, budget, skill_name, catalog_others,
-            runs_per_case, exp_dir, tag=f"iter{iteration}_train",
+            desc, train, budget, skill_name, catalog_by_query,
+            runs_per_case, exp_dir, agno_agent_factory=agno_agent_factory,
+            desc_cap=catalog_desc_cap, tag=f"iter{iteration}_train",
         )
         entry = {
             "iter": iteration,
@@ -228,8 +233,9 @@ def optimize_description(
 
     # ── 5. 筛选（test 选优；D3/D4）──────────────────────────────
     best = _select_best_on_test(
-        candidates, test, llm, budget, skill_name, catalog_others,
+        candidates, test, budget, skill_name, catalog_by_query,
         runs_per_case, exp_dir, current_description, attempts_path,
+        agno_agent_factory=agno_agent_factory, desc_cap=catalog_desc_cap,
     )
 
     # ── 6. 写回 frontmatter ─────────────────────────────────────
@@ -251,6 +257,27 @@ def optimize_description(
         exp_dir, skill_name, train, test, candidates, best,
         current_description,
     )
+
+    # 持久化离线探针触发率（看板用）。version_sha = 当前 main（本次写回将由随后
+    # 的 commit 产新 sha，故此处记的是父版本/首版可空）。失败只 log 不阻断。
+    try:
+        from xskill.canary import main_sha as _main_sha
+        from xskill.pipeline.registry import record_trigger_eval
+        avg_catalog = 0
+        if cases:
+            avg_catalog = round(
+                sum(len(catalog_by_query.get(c["query"], [])) for c in cases)
+                / len(cases)
+            )
+        record_trigger_eval(
+            skill=skill_name, version_sha=_main_sha(skill_dir),
+            exp_id=exp_id, train_score=float(best["train_score"]),
+            test_score=float(best["test_score"] or 0.0),
+            n_cases=len(cases), catalog_size=avg_catalog,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("record_trigger_eval 失败（不阻断）: %s", skill_name)
+
     return {
         "enabled": True,
         "best_description": best_desc,
@@ -274,16 +301,20 @@ class _LLMBudgetExhausted(Exception):
 
 
 class _Budget:
-    """计数每一次 llm.chat 调用，命中上限抛 _LLMBudgetExhausted。"""
+    """计数每一次 LLM 消耗（llm.chat 或探针跑一轮），命中上限抛 _LLMBudgetExhausted。"""
 
     def __init__(self, max_calls: int) -> None:
         self.max_calls = max_calls
         self.used = 0
 
-    def chat(self, llm: Any, prompt: str) -> str:
+    def consume(self) -> None:
+        """计一次消耗（探针真跑一轮用），命中上限抛 _LLMBudgetExhausted。"""
         if self.used >= self.max_calls:
             raise _LLMBudgetExhausted()
         self.used += 1
+
+    def chat(self, llm: Any, prompt: str) -> str:
+        self.consume()
         return llm.chat(prompt)
 
 
@@ -394,71 +425,20 @@ def stratified_split(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# LLM-as-judge 触发判定
+# 触发判定（真跑代理闭环探针，见 trigger_probe.py）
 # ═══════════════════════════════════════════════════════════════════
 
-def _resolve_other_catalog(
-    other_skill_catalog: list[dict] | None, skill_name: str,
-) -> list[dict]:
-    if other_skill_catalog:
-        out = []
-        for s in other_skill_catalog:
-            nm = str(s.get("name") or "").strip()
-            ds = str(s.get("description") or "").strip()
-            if nm and nm != skill_name and ds:
-                out.append({"name": nm, "description": ds})
-        if out:
-            return out
-    return list(_GENERIC_DECOYS)
-
-
-def _judge_trigger(
-    llm: Any, budget: _Budget, query: str, skill_name: str,
-    candidate_desc: str, catalog_others: list[dict],
-) -> str:
-    """问 LLM：给定 available_skills catalog + 用户 query，会调哪个 skill？
-
-    返回它选中的 skill name（或 "NONE"）。
-    """
-    entries = [{"name": skill_name, "description": candidate_desc}]
-    entries.extend(catalog_others)
-    catalog_lines = "\n".join(
-        f"- {e['name']}: {e['description']}" for e in entries
-    )
-    valid_names = ", ".join(e["name"] for e in entries) + ", NONE"
-    prompt = (
-        "You are Claude Code deciding which skill (if any) to invoke for a "
-        "user's query. Here is the available_skills list:\n\n"
-        f"{catalog_lines}\n\n"
-        f"User query:\n{query}\n\n"
-        "Based solely on the skill names and descriptions, which single skill "
-        "would you invoke? If none of them fit, answer NONE.\n"
-        f"Respond with ONLY the skill name (one of: {valid_names}), nothing else."
-    )
-    raw = budget.chat(llm, prompt)
-    return _match_skill_name(raw, [e["name"] for e in entries])
-
-
-def _match_skill_name(raw: str, names: list[str]) -> str:
-    """把 LLM 回复归一到某个已知 name 或 NONE。"""
-    text = (raw or "").strip()
-    low = text.lower()
-    # 精确/包含匹配已知 name（取最长名优先，避免子串误命中）
-    for nm in sorted(names, key=len, reverse=True):
-        if nm.lower() in low:
-            return nm
-    return "NONE"
-
-
 def _score_description(
-    desc: str, split: list[dict], llm: Any, budget: _Budget,
-    skill_name: str, catalog_others: list[dict], runs_per_case: int,
-    exp_dir: Path, *, tag: str,
+    desc: str, split: list[dict], budget: _Budget,
+    skill_name: str, catalog_by_query: dict, runs_per_case: int,
+    exp_dir: Path, *, agno_agent_factory: Any, desc_cap: int, tag: str,
 ) -> tuple[float, list[dict]]:
-    """对一个 split 评 desc：每 case 跑 runs_per_case 次判触发，
+    """对一个 split 评 desc：每 case 真跑 runs_per_case 轮探针判触发，
     triggered = 命中本 skill ≥ 0.5；case pass = triggered == should_trigger。
 
-    返回 (pass_fraction, per_case_results)。per_case 同时落 {topic}/{job}.json。
+    诱饵清单 = catalog_by_query[query]（query 锚点的真实 main 分支竞争对手）。
+    返回 (pass_fraction, per_case_results)。per_case 同时落 {topic}/{job}.json，
+    含 catalog 快照供看板逐 case 展示/复盘。
     """
     results: list[dict] = []
     if not split:
@@ -469,11 +449,14 @@ def _score_description(
         query = case["query"]
         should = bool(case["should_trigger"])
         topic = case.get("topic", "misc")
+        catalog = catalog_by_query.get(query, [])
         runs: list[dict] = []
         n_hit = 0
         for _ in range(runs_per_case):
-            chosen = _judge_trigger(
-                llm, budget, query, skill_name, desc, catalog_others,
+            budget.consume()  # 每跑一轮探针计一次预算（命中上限抛 _LLMBudgetExhausted）
+            chosen = probe_trigger(
+                query, skill_name, desc, catalog,
+                agno_agent_factory=agno_agent_factory, desc_cap=desc_cap,
             )
             hit = (chosen == skill_name)
             if hit:
@@ -491,6 +474,7 @@ def _score_description(
             "query": query,
             "topic": topic,
             "triggered_skill": triggered_skill,
+            "catalog": [e["name"] for e in catalog],
             "runs": runs,
         }
         results.append(rec)
@@ -566,16 +550,18 @@ def _enforce_limit(desc: str, llm: Any, budget: _Budget) -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 def _select_best_on_test(
-    candidates: list[dict], test: list[dict], llm: Any, budget: _Budget,
-    skill_name: str, catalog_others: list[dict], runs_per_case: int,
+    candidates: list[dict], test: list[dict], budget: _Budget,
+    skill_name: str, catalog_by_query: dict, runs_per_case: int,
     exp_dir: Path, current_description: str, attempts_path: Path,
+    *, agno_agent_factory: Any, desc_cap: int,
 ) -> dict:
     """每个候选在 TEST 上评分，选 test_score 最高；平手偏好原始 desc。"""
     for c in candidates:
         try:
             test_score, _ = _score_description(
-                c["description"], test, llm, budget, skill_name,
-                catalog_others, runs_per_case, exp_dir,
+                c["description"], test, budget, skill_name,
+                catalog_by_query, runs_per_case, exp_dir,
+                agno_agent_factory=agno_agent_factory, desc_cap=desc_cap,
                 tag=f"iter{c['iter']}_test",
             )
         except _LLMBudgetExhausted:

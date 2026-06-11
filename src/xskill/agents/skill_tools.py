@@ -771,33 +771,6 @@ def list_files(path: str) -> str:
 # SkillEditAgent 专用 commit 工具（不要给 ClusterAgent）
 # ═══════════════════════════════════════════════════════════════════
 
-def _other_skill_catalog(skill_root: Path, self_slug: str) -> list[dict]:
-    """收集 skill_root 下除 self_slug 外其它 skill 的 name+desc。
-
-    给 description_opt 的 LLM-as-judge 拼伪 available_skills catalog 用（提高
-    触发判定的真实度，机制同构 ``build_skill_catalog_block``——从各 skill
-    SKILL.md frontmatter 取 description）。
-    """
-    out: list[dict] = []
-    if skill_root is None or not Path(skill_root).is_dir():
-        return out
-    for d in sorted(Path(skill_root).iterdir()):
-        if not d.is_dir() or d.name.startswith(".") or d.name == self_slug:
-            continue
-        md = d / "SKILL.md"
-        if not md.is_file():
-            continue
-        try:
-            fm, _ = fm_parse(md.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        nm = str(fm.get("name") or d.name).strip()
-        ds = str(fm.get("description") or "").strip().replace("\n", " ")
-        if nm and ds:
-            out.append({"name": nm, "description": ds})
-    return out
-
-
 def _run_description_optimization(target: Path, slug: str) -> None:
     """commit 前跑 description 触发优化（D1：硬编码进 workflow，不做 agent tool）。
 
@@ -809,17 +782,20 @@ def _run_description_optimization(target: Path, slug: str) -> None:
     if not (config.get("skill_opt", {}) or {}).get("enabled", True):
         return
     llm = _ctx.get("llm_client")
-    if llm is None:
+    embed = _ctx.get("embed_client")
+    if llm is None or embed is None:
         logger.warning(
-            "skip description_opt: _ctx['llm_client'] 未初始化（%s）", slug,
+            "skip description_opt: _ctx llm_client/embed_client 未初始化（%s）", slug,
         )
         return
     try:
+        from xskill.agents.agno_factory import make_default_factory
         from xskill.skill.description_opt import optimize_description
         skill_root = _ctx_v2["skill_dir"]
-        catalog = _other_skill_catalog(skill_root, slug)
         optimize_description(
-            target, llm=llm, config=config, other_skill_catalog=catalog,
+            target, llm=llm, config=config,
+            agno_agent_factory=make_default_factory(config),
+            embed_client=embed, skill_root=skill_root,
         )
     except Exception:
         logger.exception(

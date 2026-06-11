@@ -1,8 +1,11 @@
 """description 触发优化（skill/description_opt.py）单测。
 
+触发判定已换成真跑代理探针（trigger_probe）；这里用 StubProbeFactory 模拟
+"代理调了哪个 skill 工具"，不调真 LLM/agno。
+
 覆盖：
   - train/test split 分层 + 确定性
-  - LLM-as-judge 触发判定（stub llm）
+  - 探针触发判定（majority over runs）
   - <1024 字符硬闸 + 超长重写兜底
   - archival 文件结构（cases.json / summary.json / attempts.jsonl / {topic}/{job}.json）
   - test 集选优（构造 train 偏 A、test 偏 B → 必须选 B）防过拟合
@@ -17,10 +20,11 @@ import pytest
 
 from xskill.skill import description_opt as DO
 from xskill.skill import frontmatter as FM
+from xskill.skill import trigger_probe as TP
 
 
 # ════════════════════════════════════════════════════════════════════
-# 工具：造一个最小 skill + 可编程 stub llm
+# 工具：最小 skill + 可编程 stub llm + stub 探针工厂
 # ════════════════════════════════════════════════════════════════════
 
 def _write_skill(skill_dir: Path, name: str, desc: str) -> None:
@@ -33,18 +37,11 @@ def _write_skill(skill_dir: Path, name: str, desc: str) -> None:
 
 
 class StubLLM:
-    """可编程 stub：按 prompt 内容路由到 case-gen / judge / improve / shorten。
+    """case-gen / improve / shorten 三类 prompt 的可编程 stub（触发判定不再走 llm）。"""
 
-    - case_gen_response: 生成 cases 时返回的 JSON 字符串
-    - judge_fn(query, desc) -> 选中的 skill name（模拟触发判定）
-    - improve_descs: improve loop 每轮依次返回的新 desc（list）
-    - shorten_response: shorten prompt 的返回
-    """
-
-    def __init__(self, *, case_gen_response, judge_fn,
+    def __init__(self, *, case_gen_response,
                  improve_descs=None, shorten_response=None):
         self.case_gen_response = case_gen_response
-        self.judge_fn = judge_fn
         self.improve_descs = list(improve_descs or [])
         self.shorten_response = shorten_response
         self.calls = []
@@ -60,31 +57,56 @@ class StubLLM:
                 d = self.improve_descs.pop(0)
                 return f"<new_description>{d}</new_description>"
             return "no change"
-        if "which single skill" in prompt:
-            # judge：从 prompt 里抠出 user query，再交给 judge_fn
-            chosen = self._judge(prompt)
-            return chosen
         return ""
 
-    def _judge(self, prompt: str) -> str:
-        # prompt 里 "User query:\n<query>\n\nBased solely" 之间是 query
-        marker = "User query:\n"
-        i = prompt.find(marker)
-        j = prompt.find("\n\nBased solely", i)
-        query = prompt[i + len(marker):j].strip()
-        # 从 catalog 行里抠当前候选 desc（第一行 "- <name>: <desc>"）
-        desc = ""
-        for line in prompt.splitlines():
-            if line.startswith("- ") and ":" in line:
-                desc = line.split(":", 1)[1].strip()
-                break
-        return self.judge_fn(query, desc)
+
+class _StubProbeAgent:
+    def __init__(self, tools, judge_fn):
+        self.tools = tools
+        self.judge_fn = judge_fn
+
+    def run(self, query):
+        # tools[0] 是候选 skill 工具，__doc__ = 截断后的候选描述
+        candidate_desc = self.tools[0].__doc__ or ""
+        chosen = self.judge_fn(query, candidate_desc)  # 返回 skill name 或 "NONE"
+        if chosen and chosen != "NONE":
+            target = TP._slug_to_tool(chosen)
+            for t in self.tools:
+                if t.__name__ == target:
+                    try:
+                        t()
+                    except Exception:  # StopAgentRun —— agno 内部会吞
+                        pass
+                    return
+
+
+class StubProbeFactory:
+    """模拟 agno 工厂：用 judge_fn(query, candidate_desc) 决定调哪个 skill 工具。"""
+
+    def __init__(self, judge_fn):
+        self.judge_fn = judge_fn
+
+    def __call__(self, *, instructions, tools, **kwargs):  # noqa: ARG002
+        return _StubProbeAgent(tools, self.judge_fn)
+
+
+class _DummyEmbed:
+    def encode(self, text):  # noqa: ARG002
+        raise AssertionError("无 skill_index 时不该 embed")
 
 
 def _cases_json(specs):
-    """specs: [(query, should_trigger, topic), ...] → JSON 字符串。"""
     arr = [{"query": q, "should_trigger": s, "topic": t} for q, s, t in specs]
     return json.dumps(arr)
+
+
+def _opt(sd, llm, judge_fn, **skill_opt):
+    """优化入口的测试包装：注入 stub 探针工厂 + dummy embed + skill_root。"""
+    return DO.optimize_description(
+        sd, llm=llm, config={"skill_opt": skill_opt},
+        agno_agent_factory=StubProbeFactory(judge_fn),
+        embed_client=_DummyEmbed(), skill_root=sd.parent,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -108,38 +130,39 @@ class TestSplit:
         assert any(not c["should_trigger"] for c in train)
         assert any(c["should_trigger"] for c in test)
         assert any(not c["should_trigger"] for c in test)
-        # 无重叠、无遗漏
         assert len(train) + len(test) == len(cases)
 
 
 # ════════════════════════════════════════════════════════════════════
-# 2. LLM-judge 触发判定
+# 2. 探针触发判定（majority over runs）
 # ════════════════════════════════════════════════════════════════════
 
-class TestJudge:
-    def test_trigger_detection_uses_majority(self):
+class TestProbeScore:
+    def test_trigger_detection_uses_majority(self, tmp_path):
         budget = DO._Budget(max_calls=100)
-        # judge 永远返回 my-skill → triggered
-        calls = {"n": 0}
-
-        class _LLM:
-            def chat(self, prompt, system=""):
-                calls["n"] += 1
-                return "my-skill"
-
+        factory = StubProbeFactory(lambda q, d: "my-skill")  # 永远触发
         score, results = DO._score_description(
             "desc", [{"query": "q", "should_trigger": True, "topic": "t"}],
-            _LLM(), budget, "my-skill", [{"name": "o", "description": "d"}],
-            runs_per_case=3, exp_dir=Path("/tmp"), tag="x",
+            budget, "my-skill", {"q": []},
+            runs_per_case=3, exp_dir=tmp_path,
+            agno_agent_factory=factory, desc_cap=256, tag="x",
         )
-        # 3 runs all hit → did_trigger True, should True → pass
         assert score == 1.0
         assert results[0]["did_trigger"] is True
         assert results[0]["passed"] is True
+        assert budget.used == 3  # 每 run 计一次预算
 
-    def test_match_skill_name_none(self):
-        assert DO._match_skill_name("none of these fit", ["a", "b"]) == "NONE"
-        assert DO._match_skill_name("I'd pick b here", ["a", "b"]) == "b"
+    def test_no_trigger_when_agent_picks_nothing(self, tmp_path):
+        budget = DO._Budget(max_calls=100)
+        factory = StubProbeFactory(lambda q, d: "NONE")
+        score, results = DO._score_description(
+            "desc", [{"query": "q", "should_trigger": False, "topic": "t"}],
+            budget, "my-skill", {"q": []},
+            runs_per_case=1, exp_dir=tmp_path,
+            agno_agent_factory=factory, desc_cap=256, tag="x",
+        )
+        assert score == 1.0  # should_trigger False & 未触发 → pass
+        assert results[0]["did_trigger"] is False
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -188,13 +211,10 @@ def test_disabled_is_noop(tmp_path):
 
     class _LLM:
         def chat(self, *a, **k):
-            raise AssertionError("LLM should not be called when disabled")
+            raise AssertionError("disabled 时不该调 LLM")
 
-    out = DO.optimize_description(
-        sd, llm=_LLM(), config={"skill_opt": {"enabled": False}},
-    )
+    out = _opt(sd, _LLM(), lambda q, d: "NONE", enabled=False)
     assert out == {"enabled": False}
-    # SKILL.md 未变 + 没建实验目录
     fm, _ = FM.parse((sd / "SKILL.md").read_text())
     assert fm["description"] == "original desc"
     assert not (sd / ".description_optimization").exists()
@@ -220,21 +240,17 @@ def test_archival_and_writeback(tmp_path):
     ]
 
     def judge(query, desc):
-        # improved desc 触发所有 csv，positive；负例永不触发
         if "clean" in desc.lower() or "csv" in desc.lower():
-            return "csv-cleaner" if "csv" in query.lower() or "column" in query.lower() else "NONE"
-        # 原始 "bad original" 谁都不触发
-        return "NONE"
+            return ("csv-cleaner"
+                    if "csv" in query.lower() or "column" in query.lower()
+                    else "NONE")
+        return "NONE"  # 原始 "bad original" 谁都不触发
 
     llm = StubLLM(
         case_gen_response=_cases_json(specs),
-        judge_fn=judge,
         improve_descs=["Use this skill to clean and dedupe CSV files and columns."],
     )
-    out = DO.optimize_description(
-        sd, llm=llm,
-        config={"skill_opt": {"runs_per_case": 1, "max_iters": 1}},
-    )
+    out = _opt(sd, llm, judge, runs_per_case=1, max_iters=1)
     assert out["enabled"] is True
 
     opt_root = sd / ".description_optimization"
@@ -244,9 +260,7 @@ def test_archival_and_writeback(tmp_path):
     exp = exp_dirs[0]
     assert (exp / "summary.json").is_file()
     assert (exp / "attempts.jsonl").is_file()
-    # 至少一个 {topic}/{job}.json，结构含指定字段
-    case_jsons = list(exp.rglob("*.json"))
-    case_jsons = [p for p in case_jsons if p.name not in ("summary.json",)]
+
     sample = None
     for p in exp.iterdir():
         if p.is_dir():
@@ -256,16 +270,15 @@ def test_archival_and_writeback(tmp_path):
                 break
     assert sample is not None
     for key in ("should_trigger", "did_trigger", "query", "topic",
-                "triggered_skill", "runs"):
+                "triggered_skill", "catalog", "runs"):
         assert key in sample
 
     summary = json.loads((exp / "summary.json").read_text())
     assert "split" in summary and "candidates" in summary and "best" in summary
     assert "train" in summary["split"] and "test" in summary["split"]
 
-    # best 写回 frontmatter（improved desc 应胜出原始）
     fm, _ = FM.parse((sd / "SKILL.md").read_text())
-    assert "CSV" in fm["description"] or "csv" in fm["description"].lower()
+    assert "csv" in fm["description"].lower()
     assert fm["description"] != "bad original"
 
 
@@ -274,14 +287,9 @@ def test_archival_and_writeback(tmp_path):
 # ════════════════════════════════════════════════════════════════════
 
 def test_selects_by_test_not_train(tmp_path):
-    """构造场景：候选 A(=原始) 在 train 上全过、test 上全挂；
-    候选 B(=improve 产出) 在 train 上挂、test 上全过。
-    test 选优 → 必须选 B（写回 B）。"""
     sd = tmp_path / "skill-x"
     _write_skill(sd, "skill-x", "DESC_A")
 
-    # 8 cases，split(seed=42,0.6) 把哪些进 train/test 是确定的；用 query 名标记。
-    # 我们让 judge 的命中规则依赖 (desc, query 所属 split)。
     specs = [
         ("trainpos1", True, "g"),
         ("trainpos2", True, "g"),
@@ -295,41 +303,26 @@ def test_selects_by_test_not_train(tmp_path):
     cases = [{"query": q, "should_trigger": s, "topic": t} for q, s, t in specs]
     train, test = DO.stratified_split(cases, train_frac=0.6, seed=42)
     train_q = {c["query"] for c in train}
-    test_q = {c["query"] for c in test}
 
     def judge(query, desc):
         is_train = query in train_q
         should = query.startswith(("trainpos", "testpos"))
-        if desc == "DESC_A":
-            # A: train 上完美（pos→trigger, neg→not），test 上全反
+        if desc == "DESC_A":      # A：train 完美、test 全反
             if is_train:
                 return "skill-x" if should else "NONE"
-            else:
-                return "NONE" if should else "skill-x"
-        else:  # DESC_B
-            # B: test 上完美，train 上全反
-            if not is_train:
-                return "skill-x" if should else "NONE"
-            else:
-                return "NONE" if should else "skill-x"
+            return "NONE" if should else "skill-x"
+        # DESC_B：test 完美、train 全反
+        if not is_train:
+            return "skill-x" if should else "NONE"
+        return "NONE" if should else "skill-x"
 
-    llm = StubLLM(
-        case_gen_response=json.dumps(
-            [{"query": q, "should_trigger": s, "topic": t}
-             for q, s, t in specs]),
-        judge_fn=judge,
-        improve_descs=["DESC_B"],
-    )
-    out = DO.optimize_description(
-        sd, llm=llm,
-        config={"skill_opt": {"runs_per_case": 1, "max_iters": 1, "seed": 42,
-                              "train_frac": 0.6}},
-    )
-    # B 在 test 上更高 → best 应为 DESC_B
+    llm = StubLLM(case_gen_response=_cases_json(specs), improve_descs=["DESC_B"])
+    out = _opt(sd, llm, judge, runs_per_case=1, max_iters=1, seed=42,
+               train_frac=0.6)
+
     assert out["best_description"] == "DESC_B"
     fm, _ = FM.parse((sd / "SKILL.md").read_text())
     assert fm["description"] == "DESC_B"
-    # sanity：A 的 train 分应高于 B 的 train 分（验证构造正确）
     cand = {c["iter"]: c for c in out["candidates"]}
     assert cand[0]["train_score"] > cand[1]["train_score"]
     assert cand[1]["test_score"] > cand[0]["test_score"]

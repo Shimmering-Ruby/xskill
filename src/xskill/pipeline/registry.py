@@ -109,6 +109,19 @@ CREATE TABLE IF NOT EXISTS canary_decision (
     staging_samples INTEGER,
     age_days        REAL
 );
+
+CREATE TABLE IF NOT EXISTS skill_trigger_eval (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT DEFAULT (datetime('now')),
+    skill        TEXT,        -- skill slug
+    version_sha  TEXT,        -- 评测时该 skill 的 main sha(首版/未提交可空)
+    exp_id       TEXT,        -- .description_optimization 实验目录号
+    train_score  REAL,        -- 中选描述在 train 集触发准确率
+    test_score   REAL,        -- 中选描述在 held-out test 集触发准确率(选优依据)
+    n_cases      INTEGER,     -- 合成 case 总数
+    catalog_size INTEGER      -- 诱饵清单平均大小(竞争对手数)
+);
+CREATE INDEX IF NOT EXISTS idx_trig_skill ON skill_trigger_eval(skill);
 """
 
 
@@ -233,6 +246,43 @@ def record_atom_adoption(*, atom_id: str, skill: str, weightscore: int,
             (atom_id, skill, int(weightscore), 1 if was_new else 0),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def record_trigger_eval(*, skill: str, version_sha: Optional[str], exp_id: str,
+                        train_score: float, test_score: float, n_cases: int,
+                        catalog_size: int,
+                        db_path: Optional[Path] = None) -> None:
+    """记一次离线探针触发评测结果(中选描述的 train/test 触发准确率)。
+
+    供看板展示 per-skill/版本"离线探针触发率"——区别于 mark_skill_used 记的
+    线上真实使用频次,两者语义不同不可混。
+    """
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO skill_trigger_eval"
+            "(skill,version_sha,exp_id,train_score,test_score,n_cases,catalog_size)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (skill, version_sha, exp_id, float(train_score), float(test_score),
+             int(n_cases), int(catalog_size)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def trigger_eval_for_skill(skill: str, *, db_path: Optional[Path] = None) -> list:
+    """取某 skill 的离线触发评测历史(按时间升序),供看板趋势图。"""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT ts,version_sha,exp_id,train_score,test_score,n_cases,"
+            "catalog_size FROM skill_trigger_eval WHERE skill=? ORDER BY id ASC",
+            (skill,),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
