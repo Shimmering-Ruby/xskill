@@ -108,6 +108,23 @@ canary:
   total_samples: 20             # model-scoped path: total UX scores needed on
                                 # each side before a weighted decision
 
+# ===== Skill description trigger optimization =====
+# Before each promotion commit (baby→main / main→staging) the daemon runs a
+# deterministic hill-climb to tune the SKILL.md frontmatter `description` for
+# trigger accuracy: it generates ~N eval queries, asks the LLM-as-judge which
+# skill it would invoke, iteratively rewrites the description, and keeps the
+# variant that scores highest on a held-out TEST split (anti-overfit). All LLM
+# calls reuse the `llm` above (rate_limit applies). Failure never blocks the
+# commit. Archived under `<skill>/.description_optimization/` (NOT versioned).
+skill_opt:
+  enabled:        true   # set false to disable optimization entirely (no-op)
+  n_cases:        20     # eval queries generated per skill (cached + reused)
+  runs_per_case:  3      # LLM-judge runs per query; trigger = hit >= 0.5 of runs
+  max_iters:      5      # max improve-description iterations (candidates)
+  max_llm_calls:  400    # hard cap on total LLM calls per optimization run
+  train_frac:     0.6    # stratified train fraction; the rest is held-out test
+  seed:           42     # fixed RNG seed → deterministic split
+
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:
   poll_interval:  30            # seconds between scans of every watch_dir

@@ -771,6 +771,62 @@ def list_files(path: str) -> str:
 # SkillEditAgent 专用 commit 工具（不要给 ClusterAgent）
 # ═══════════════════════════════════════════════════════════════════
 
+def _other_skill_catalog(skill_root: Path, self_slug: str) -> list[dict]:
+    """收集 skill_root 下除 self_slug 外其它 skill 的 name+desc。
+
+    给 description_opt 的 LLM-as-judge 拼伪 available_skills catalog 用（提高
+    触发判定的真实度，机制同构 ``build_skill_catalog_block``——从各 skill
+    SKILL.md frontmatter 取 description）。
+    """
+    out: list[dict] = []
+    if skill_root is None or not Path(skill_root).is_dir():
+        return out
+    for d in sorted(Path(skill_root).iterdir()):
+        if not d.is_dir() or d.name.startswith(".") or d.name == self_slug:
+            continue
+        md = d / "SKILL.md"
+        if not md.is_file():
+            continue
+        try:
+            fm, _ = fm_parse(md.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        nm = str(fm.get("name") or d.name).strip()
+        ds = str(fm.get("description") or "").strip().replace("\n", " ")
+        if nm and ds:
+            out.append({"name": nm, "description": ds})
+    return out
+
+
+def _run_description_optimization(target: Path, slug: str) -> None:
+    """commit 前跑 description 触发优化（D1：硬编码进 workflow，不做 agent tool）。
+
+    gating on ``config.skill_opt.enabled``；任何失败只 log，绝不阻断 commit
+    （退回 agent 写的 description 继续提交）。走 ``_ctx["llm_client"]``——daemon
+    起来时已含 rate_limit，不另起进程/线程。
+    """
+    config = _ctx.get("config") or {}
+    if not (config.get("skill_opt", {}) or {}).get("enabled", True):
+        return
+    llm = _ctx.get("llm_client")
+    if llm is None:
+        logger.warning(
+            "skip description_opt: _ctx['llm_client'] 未初始化（%s）", slug,
+        )
+        return
+    try:
+        from xskill.skill.description_opt import optimize_description
+        skill_root = _ctx_v2["skill_dir"]
+        catalog = _other_skill_catalog(skill_root, slug)
+        optimize_description(
+            target, llm=llm, config=config, other_skill_catalog=catalog,
+        )
+    except Exception:
+        logger.exception(
+            "description_opt 失败（不阻断 commit，沿用 agent 写的 desc）: %s", slug,
+        )
+
+
 def commit_baby_to_main(skill_name: str, message: str) -> str:
     """SkillEditAgent 首次为某 skill 出版本时调用。
 
@@ -799,6 +855,9 @@ def commit_baby_to_main(skill_name: str, message: str) -> str:
     msg = (message or "").strip()
     if not msg:
         return "error: commit message 必填"
+    # commit 前先跑 description 触发优化（best desc 写回 frontmatter），优化产物
+    # 随 add . 一起进 commit。失败只 log，不阻断 commit。
+    _run_description_optimization(target, slug)
     ok = commit_baby_to_main_branch(str(target), msg)
     if not ok:
         return f"error: commit_baby_to_main 失败（不在 baby 分支？看 daemon 日志）"
@@ -834,6 +893,9 @@ def commit_to_staging(skill_name: str, message: str) -> str:
     msg = (message or "").strip()
     if not msg:
         return "error: commit message 必填"
+    # commit 前先跑 description 触发优化（best desc 写回 frontmatter）。失败只
+    # log，不阻断 commit。
+    _run_description_optimization(target, slug)
     ok = commit_to_staging_branch(str(target), msg)
     if not ok:
         return ("error: commit_to_staging 失败"

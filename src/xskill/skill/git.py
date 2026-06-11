@@ -327,6 +327,12 @@ def _stage_all(repo: Repo, root: Path) -> bool:
         parts = rel.parts
         if not parts or parts[0] == ".git":
             continue
+        # description 触发优化的实验留档 NEVER staged。新建仓库的 .gitignore
+        # 模板已含 .description_optimization/，但对**预先存在**的 skill 仓
+        # （.gitignore 可能没这条）这里硬编码兜底跳过，绝不版本化高频写入的
+        # 优化实验数据。
+        if ".description_optimization" in parts:
+            continue
         rel_str = str(rel).replace(os.sep, "/")
         if _is_ignored(rel_str, ignore_patterns):
             continue

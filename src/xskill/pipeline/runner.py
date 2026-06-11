@@ -303,6 +303,12 @@ class DirectoryWatcher:
             skill_dir=self.skill_dir, store=store,
             embed_client=self.embed_client, traj_root=traj_root,
         )
+        # 同时填 v1 ctx：commit 工具内的 description 触发优化要从 _ctx 取
+        # llm_client + config（走既有 rate_limit 的 llm，不另起进程）。
+        ST.init_context(
+            self.skill_dir, self.skill_dir, self.llm,
+            self.embed_client, self.config,
+        )
         for d in sorted(self.skill_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("."):
                 continue

@@ -48,9 +48,16 @@ def test_rebuild_skill_index_accepts_explicit_kwargs(tmp_path):
     assert (tmp_path / ".skill_index.pkl").is_file()
 
 
-def test_rebuild_skill_index_fail_loud_when_both_missing():
+def test_rebuild_skill_index_fail_loud_when_both_missing(monkeypatch):
     """两路都没填（既没 kwarg 又没 init_context）→ RuntimeError，
-    fail-loud；不要拿着 None 接着跑出更难懂的 AttributeError。"""
+    fail-loud；不要拿着 None 接着跑出更难懂的 AttributeError。
+
+    模块级 ``_ctx`` 是全局可变状态；别的测试（驱动真实 watcher cycle 会调
+    ``init_context``）可能在本测试前把它填上。本测试的契约是"未初始化"，所以
+    先把 ``_ctx`` 的 skill_dir/embed_client 显式清空，保证测的是真不变量。"""
+    from xskill.agents import skill_tools as ST
+    monkeypatch.setitem(ST._ctx, "skill_dir", None)
+    monkeypatch.setitem(ST._ctx, "embed_client", None)
     with pytest.raises(RuntimeError, match="skill_dir"):
         rebuild_skill_index()  # _ctx 在测试上下文里没初始化
 
