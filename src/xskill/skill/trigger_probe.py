@@ -262,7 +262,7 @@ def rerun_probe_case(
             query, skill_name, desc, catalog,
             agno_agent_factory=factory, desc_cap=desc_cap,
         )
-        hit = (chosen == skill_name)
+        hit = chosen == skill_name
         if hit:
             n_hit += 1
         runs_rec.append({"triggered_skill": chosen, "hit": hit})

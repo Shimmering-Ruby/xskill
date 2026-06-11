@@ -381,7 +381,7 @@ def _parse_cases_json(raw: str) -> list[dict]:
 
 def _normalize_cases(data: list[dict]) -> list[dict]:
     out: list[dict] = []
-    for i, c in enumerate(data):
+    for c in data:
         if not isinstance(c, dict):
             continue
         query = str(c.get("query") or "").strip()
@@ -458,12 +458,12 @@ def _score_description(
                 query, skill_name, desc, catalog,
                 agno_agent_factory=agno_agent_factory, desc_cap=desc_cap,
             )
-            hit = (chosen == skill_name)
+            hit = chosen == skill_name
             if hit:
                 n_hit += 1
             runs.append({"triggered_skill": chosen, "hit": hit})
         did_trigger = (n_hit / runs_per_case) >= 0.5
-        passed = (did_trigger == should)
+        passed = did_trigger == should
         if passed:
             n_pass += 1
         triggered_skill = skill_name if did_trigger else "NONE"
