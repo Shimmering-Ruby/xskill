@@ -102,21 +102,31 @@ def _flush_all():
 
 
 # (primary logger, declared file, level) —— 每个声明文件至少有一个主 logger 往里写
+# 只列真会写 INFO 的 logger——死/只 WARN 的(task_agent/task_cluster_agent/
+# ux_score/registry)已不单开文件,故不在此矩阵里。
 _COMPONENT_MATRIX = [
     ("xskill", "xskill.log", logging.INFO),
     ("xskill.watcher", "xskill.watcher.log", logging.INFO),
     ("xskill.process", "xskill.watcher.log", logging.INFO),
     ("xskill.server", "xskill.server.log", logging.INFO),
     ("xskill.canary", "xskill.canary.log", logging.INFO),
-    ("xskill.ux_score", "xskill.ux_score.log", logging.INFO),
     ("xskill.ecosystems", "xskill.ecosystems.log", logging.INFO),
-    ("xskill.registry", "xskill.registry.log", logging.INFO),
-    ("xskill.task_agent", "xskill.task_agent.log", logging.INFO),
-    ("xskill.task_cluster_agent", "xskill.task_cluster_agent.log", logging.INFO),
     ("xskill.skill_edit_agent", "xskill.skill_edit_agent.log", logging.INFO),
     ("agno", "agno.log", logging.WARNING),
     ("httpx", "httpx.log", logging.WARNING),
 ]
+
+
+def test_no_dead_logger_files_declared():
+    """回归：不再声明"死 logger"专属文件（源码从不打 INFO 的那些）——
+    task_agent/task_cluster_agent 源码零 logger 调用,ux_score/registry 只 WARN,
+    它们的真日志都在 xskill.watcher 名下。声明专属文件 = 永远 0 字节空文件。"""
+    from xskill.utils.logging import _PER_LOGGER_FILES
+    dead = {"xskill.task_agent", "xskill.task_cluster_agent",
+            "xskill.ux_score", "xskill.registry"}
+    assert dead.isdisjoint(_PER_LOGGER_FILES), (
+        "死 logger 不该单开文件(会永远空): "
+        f"{dead & set(_PER_LOGGER_FILES)}")
 
 
 def test_judge1_no_empty_component_files(tmp_path):
@@ -161,9 +171,9 @@ def test_judge3_key_events_land_in_correct_file(tmp_path):
     from xskill.utils.logging import configure_logging
     configure_logging(tmp_path, debug=False, stdout=False)
 
+    # 拆分/聚类的运行日志实际在 xskill.watcher 名下(runner.py),不是 agent 自己打。
     events = {
-        "xskill.task_agent": ("xskill.task_agent.log", "EV_SPLIT"),
-        "xskill.task_cluster_agent": ("xskill.task_cluster_agent.log", "EV_CLUSTER"),
+        "xskill.watcher": ("xskill.watcher.log", "EV_SPLIT_CLUSTER"),
         "xskill.skill_edit_agent": ("xskill.skill_edit_agent.log", "EV_EDIT"),
         "xskill.canary": ("xskill.canary.log", "EV_CANARY_DECISION"),
         "xskill.ecosystems": ("xskill.ecosystems.log", "EV_INSTALL"),

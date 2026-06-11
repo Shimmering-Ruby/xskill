@@ -132,6 +132,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # ── trajectories ──
     cur = conn.execute("PRAGMA table_info(trajectories)")
     cols = {row[1] for row in cur.fetchall()}
+    # status 列是否本次才补上——决定要不要跑下方那条历史状态回填(只该一次性)。
+    status_was_missing = "status" not in cols
     migrations = [
         ("status", "TEXT DEFAULT 'discovered'"),
         ("process_action", "TEXT"),
@@ -164,15 +166,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
         # 已有行历史上都是用户手动 register，标 'manual'
         conn.execute("UPDATE watch_dirs SET ecosystem='manual' WHERE ecosystem IS NULL")
-    # Backfill status from has_meta/has_embedding for pre-existing rows
-    conn.execute(
-        "UPDATE trajectories SET status='indexed'"
-        " WHERE has_embedding=1 AND (status IS NULL OR status='discovered')"
-    )
-    conn.execute(
-        "UPDATE trajectories SET status='meta_done'"
-        " WHERE has_meta=1 AND has_embedding=0 AND (status IS NULL OR status='discovered')"
-    )
+    # Backfill status from has_meta/has_embedding —— **只在首次补 status 列时跑一次**。
+    # 以前每次 get_connection 都跑这条,会把任何 status='discovered' 的**活行**
+    # （rebuild 重置 / error 重试 / 僵尸清理刚翻回的）在下次连接时打回 'indexed'，
+    # 导致 watcher 永不重拆（0 atom/0 skill 的真凶,见 test_rebuild_resplit_repro）。
+    # 真·一次性迁移只该在那个加列的连接里跑,之后 status 是权威状态,不能再覆盖。
+    if status_was_missing:
+        conn.execute(
+            "UPDATE trajectories SET status='indexed'"
+            " WHERE has_embedding=1 AND (status IS NULL OR status='discovered')"
+        )
+        conn.execute(
+            "UPDATE trajectories SET status='meta_done'"
+            " WHERE has_meta=1 AND has_embedding=0 AND (status IS NULL OR status='discovered')"
+        )
     conn.commit()
 
 
@@ -878,6 +885,7 @@ def reset_trajectories(
             conn.execute(
                 "UPDATE trajectories SET status='discovered', last_offset=0, "
                 "last_atom_id=NULL, tasks_extracted=0, "
+                "has_meta=0, has_embedding=0, indexed_at=NULL, "
                 "updated_at=datetime('now') WHERE id=?",
                 (r["id"],),
             )

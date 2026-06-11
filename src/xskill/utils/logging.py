@@ -64,12 +64,13 @@ class StreamLog:
 # 每个 namespace 单独一个 file handler；其余 xskill.* 子 logger 不单开文件，
 # 靠 propagate 冒泡进 xskill.log 汇总视图。
 #
-# 约定（统一在 xskill.* 命名空间下，保证都能冒泡进 xskill.log）：
-#   - 只给"会被独立排查"的高价值组件单开文件：流水线 / 三个核心 agent /
-#     评分 / 灰度 / 生态 / 注册表 / server。
-#   - 低频组件（config/prices/usage/runtime/candidates/search/skill_manager/
-#     git_lock/skill_tools/tasks/...）不单开文件，只进 xskill.log——避免一堆
-#     几乎不写的空 .log（旧版 git_lock.log / skill_tools.log 即此问题）。
+# 约定：**只给真会写 INFO 的 logger 单开文件**，否则就是永远空的死文件。
+#   - 关键教训（实测踩坑）：task_agent / task_cluster_agent 这两个 agent 源码里
+#     **一句 logger 都不打**——拆分/聚类的运行日志全在 runner.py 的 xskill.watcher
+#     名下；ux_score / registry 也只在解析失败时打 WARNING，平时无 INFO。给它们
+#     单开文件 = 一堆 0 字节空 .log。故**不给它们单开文件**，让其冒泡进 xskill.log。
+#   - 真会写 INFO 的才单开：流水线(watcher) / server / 灰度(canary) / 生态
+#     (ecosystems) / SkillEdit(只在真出 edit 时写,事件型) 。
 #   - 非 xskill 命名空间的第三方（agno / httpx）单独隔离免污染。
 _PER_LOGGER_FILES: dict[str, str] = {
     "xskill":                    "xskill.log",        # 全 xskill.* 合并视图（兜底）
@@ -77,12 +78,8 @@ _PER_LOGGER_FILES: dict[str, str] = {
     "xskill.process":            "xskill.watcher.log",  # 同属流水线，并入 watcher
     "xskill.server":             "xskill.server.log",
     "xskill.canary":             "xskill.canary.log",
-    "xskill.ux_score":           "xskill.ux_score.log",
     "xskill.ecosystems":         "xskill.ecosystems.log",
-    "xskill.registry":           "xskill.registry.log",
-    "xskill.task_agent":         "xskill.task_agent.log",
-    "xskill.task_cluster_agent": "xskill.task_cluster_agent.log",
-    "xskill.skill_edit_agent":   "xskill.skill_edit_agent.log",
+    "xskill.skill_edit_agent":   "xskill.skill_edit_agent.log",  # 事件型,出 edit 才写
     "agno":                      "agno.log",          # agno 内部，单独隔离免污染
     "httpx":                     "httpx.log",
     "httpcore":                  "httpx.log",
