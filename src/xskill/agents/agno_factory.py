@@ -173,14 +173,73 @@ def build_chat_model(llm_cfg: dict, log: StreamLog | None = None):
         if log:
             log(f"使用 agno DeepSeek model class (base_url=api.deepseek.com)", "step")
         model = DeepSeek(**common_kwargs)
-        return _wrap_with_trace(_wrap_with_context_mgmt(
-            _wrap_with_rate_limit(model, llm_cfg), llm_cfg))
+        return _wrap_with_trace(_wrap_with_retry(_wrap_with_context_mgmt(
+            _wrap_with_rate_limit(model, llm_cfg), llm_cfg), llm_cfg))
 
     from agno.models.openai import OpenAIChat
     _inject_verify_off_if_requested(OpenAIChat, common_kwargs, log)
     model = OpenAIChat(**common_kwargs)
-    return _wrap_with_trace(_wrap_with_context_mgmt(
-        _wrap_with_rate_limit(model, llm_cfg), llm_cfg))
+    return _wrap_with_trace(_wrap_with_retry(_wrap_with_context_mgmt(
+        _wrap_with_rate_limit(model, llm_cfg), llm_cfg), llm_cfg))
+
+
+# 瞬时错误特征（可重试）；明确不可重试的(上下文超长/400 invalid)单独排除。
+_TRANSIENT_HINTS = (
+    "429", "rate limit", "ratelimit", "too many requests", "rpm exhausted",
+    "timeout", "timed out", "connection", "connreset", "reset by peer",
+    "temporarily", "overloaded", "unavailable", "502", "503", "504",
+    "internal server error", "请求过于频繁",
+)
+_NON_RETRYABLE_HINTS = (
+    "maximum input length", "reduce the length", "invalid_request",
+    "context length", "context_length",
+)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    t = f"{exc}".lower()
+    if any(h in t for h in _NON_RETRYABLE_HINTS):
+        return False
+    return any(h in t for h in _TRANSIENT_HINTS)
+
+
+def _wrap_with_retry(model, llm_cfg: dict):
+    """对脆弱用户 API 做**强壮持续重试**：瞬时错误（429/5xx/超时/连接断）指数退避
+    重试，次数/退避上限可配。
+
+    设计取舍：
+    - **同步在 worker 线程里 sleep + 重发**——不起子进程/不另开线程，**无僵尸进程**。
+    - **有界**：到 ``max_retries`` 次或撞非瞬时错（400/上下文超长）即抛，绝不无限挂死
+      （挂死会永占线程池 worker）。抛出后该 traj 标 error，watcher 下轮自然重排。
+    - 退避 ``base * 2^(n-1)`` 封顶 ``retry_max_delay``。
+
+    配置（``llm`` 段，全可选）：``max_retries``(默认 8) / ``retry_base_delay``(2.0s)
+    / ``retry_max_delay``(60.0s)。
+    """
+    import time as _time
+    max_retries = int(llm_cfg.get("max_retries", 8) or 8)
+    base = float(llm_cfg.get("retry_base_delay", 2.0) or 2.0)
+    cap = float(llm_cfg.get("retry_max_delay", 60.0) or 60.0)
+    original_invoke = model.invoke
+
+    def retrying_invoke(messages, **kwargs):
+        attempt = 0
+        while True:
+            try:
+                return original_invoke(messages, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                attempt += 1
+                if attempt >= max_retries or not _is_transient_error(exc):
+                    raise
+                delay = min(cap, base * (2 ** (attempt - 1)))
+                import logging
+                logging.getLogger("xskill.agno_factory").warning(
+                    "LLM 瞬时错误,第 %d/%d 次重试(%.0fs 后): %s",
+                    attempt, max_retries, delay, str(exc)[:160])
+                _time.sleep(delay)
+
+    model.invoke = retrying_invoke
+    return model
 
 
 def _wrap_with_trace(model):

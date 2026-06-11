@@ -113,6 +113,9 @@ SKILL_GITIGNORE = """# xskill v2 skill 仓库的 ignore 规则
 .ux_scores.jsonl
 .canary/
 
+# description 触发优化的实验留档（高频写入,不版本化）
+.description_optimization/
+
 # 旧锁文件
 .lock
 """
