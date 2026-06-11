@@ -117,6 +117,20 @@ _COMPONENT_MATRIX = [
 ]
 
 
+def test_delay_no_empty_file_for_silent_logger(tmp_path):
+    """best practice 回归：配置后但没往某 component 写过 → 它的 .log **不存在**
+    （delay=True 让文件只在第一次真写入时才创建,死/事件型 logger 永不产空文件）。"""
+    from xskill.utils.logging import configure_logging
+    configure_logging(tmp_path, debug=False, stdout=False)
+    # 只往 watcher 写,不碰 canary / ecosystems / skill_edit
+    logging.getLogger("xskill.watcher").info("only watcher writes")
+    _flush_all()
+    assert (tmp_path / "xskill.watcher.log").is_file()           # 写了 → 有
+    assert not (tmp_path / "xskill.canary.log").exists()         # 没写 → 不建空文件
+    assert not (tmp_path / "xskill.ecosystems.log").exists()
+    assert not (tmp_path / "xskill.skill_edit_agent.log").exists()
+
+
 def test_no_dead_logger_files_declared():
     """回归：不再声明"死 logger"专属文件（源码从不打 INFO 的那些）——
     task_agent/task_cluster_agent 源码零 logger 调用,ux_score/registry 只 WARN,

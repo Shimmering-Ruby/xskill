@@ -2,6 +2,20 @@
 utils/logging.py — StreamLog 流式日志 + 按 component 拆分文件日志
 =================================================================
 
+日志设计约定（best practice）
+------------------------------
+1. **库只 log、入口配置**：各模块用 ``getLogger("xskill.<component>")`` 直接打日志，
+   handler / level / 落盘**只**在这里的 ``configure_logging`` 配置。
+2. **level 是语义不是路由**：
+   - DEBUG —— 排查用细节（默认关，``--debug`` 才开）。
+   - INFO  —— 正常运行里程碑（split 开始/完成、cluster 结果、install、灰度决策）。
+   - WARNING —— 可恢复异常（atom 被 drop、重试、限流）。
+   - ERROR / exception —— 失败。
+3. **永不产空文件**：file handler 用 ``delay=True``——文件只在第一次真写入时创建。
+   所以"声明了文件但 logger 不写"的死/事件型 logger **不会**留下 0 字节空 .log。
+4. **一份汇总 + 按需分组**：``xskill.log`` 是全 ``xskill.*`` 合并视图（真源）；
+   其余分组文件（watcher/server/canary/ecosystems/skill_edit）是便利,懒创建。
+
 StreamLog —— 带前缀的流式日志，方便 grep 和观测。
 
 按 component 把 logging 拆到独立文件
@@ -161,6 +175,8 @@ def configure_logging(
                 maxBytes=rotate_max_bytes,
                 backupCount=rotate_backups,
                 encoding="utf-8",
+                delay=True,   # 关键：文件只在**第一次真写入**时才创建——
+                              # 没写过的 logger(死/事件型)就不落盘,从根上杜绝空 .log。
             )
             fh.setLevel(root_level)
             fh.setFormatter(common_fmt)

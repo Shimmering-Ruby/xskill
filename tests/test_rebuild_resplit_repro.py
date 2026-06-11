@@ -183,3 +183,54 @@ def test_root_cause_migrate_backfill_undoes_reset(tmp_path):
         "回归：reset_trajectories 写的 'discovered' 不应被 _migrate 回填覆盖"
         f"（实得 {status_after_migrate!r}）——见 registry._migrate 的 status_was_missing 闸"
     )
+
+
+# ── 补 guard 测试：迁移闸 + reset 清标志 ────────────────────────────
+
+def test_legacy_migration_backfills_status_once(tmp_path):
+    """旧库(无 status 列)首次连接 → 一次性回填生效：has_embedding=1 → indexed。
+    确认把回填改成"只跑一次"没有破坏对真·老库的迁移。"""
+    db = tmp_path / "old.db"
+    raw = sqlite3.connect(str(db))
+    raw.execute("CREATE TABLE watch_dirs (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " path TEXT UNIQUE, label TEXT)")
+    raw.execute("CREATE TABLE trajectories (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " watch_dir_id INTEGER, filename TEXT, has_meta INTEGER DEFAULT 0,"
+                " has_embedding INTEGER DEFAULT 0, UNIQUE(watch_dir_id, filename))")
+    raw.execute("INSERT INTO watch_dirs (path) VALUES ('/x')")
+    raw.execute("INSERT INTO trajectories (watch_dir_id, filename, has_embedding)"
+                " VALUES (1, 'traj_a.md', 1)")
+    raw.execute("INSERT INTO trajectories (watch_dir_id, filename, has_meta)"
+                " VALUES (1, 'traj_b.md', 1)")
+    raw.commit()
+    raw.close()
+
+    conn = get_connection(db)  # 触发 _migrate：补 status 列 + 一次性回填
+    rows = dict(conn.execute(
+        "SELECT filename, status FROM trajectories").fetchall())
+    conn.close()
+    assert rows["traj_a.md"] == "indexed"     # has_embedding=1 → indexed
+    assert rows["traj_b.md"] == "meta_done"   # has_meta=1,无 embedding → meta_done
+
+
+def test_reset_clears_embedding_meta_flags(tmp_path):
+    """reset_trajectories 必须清掉 has_embedding/has_meta——否则 _migrate 的回填
+    谓词仍可能命中(belt-and-suspenders)。"""
+    db = tmp_path / "reg.db"
+    d = tmp_path / "ng_sessions"
+    d.mkdir()
+    (d / "traj_x.md").write_text("## User\nhi\n", encoding="utf-8")
+    wid = register_dir(d, ecosystem="ngagent", db_path=db)
+    discover_trajectories(wid, d, db_path=db)
+    mark_indexed(wid, "traj_x.md", db_path=db)          # 置 has_embedding=1
+    update_traj_status(wid, "traj_x.md", "done", db_path=db)
+
+    reset_trajectories(eco="ngagent", db_path=db)
+
+    conn = get_connection(db)
+    row = conn.execute(
+        "SELECT has_embedding, has_meta, status FROM trajectories"
+        " WHERE filename='traj_x.md'").fetchone()
+    conn.close()
+    assert row["has_embedding"] == 0 and row["has_meta"] == 0
+    assert row["status"] == "discovered"   # 且没被回填打回
