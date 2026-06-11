@@ -173,14 +173,34 @@ def build_chat_model(llm_cfg: dict, log: StreamLog | None = None):
         if log:
             log(f"使用 agno DeepSeek model class (base_url=api.deepseek.com)", "step")
         model = DeepSeek(**common_kwargs)
-        return _wrap_with_context_mgmt(
-            _wrap_with_rate_limit(model, llm_cfg), llm_cfg)
+        return _wrap_with_trace(_wrap_with_context_mgmt(
+            _wrap_with_rate_limit(model, llm_cfg), llm_cfg))
 
     from agno.models.openai import OpenAIChat
     _inject_verify_off_if_requested(OpenAIChat, common_kwargs, log)
     model = OpenAIChat(**common_kwargs)
-    return _wrap_with_context_mgmt(
-        _wrap_with_rate_limit(model, llm_cfg), llm_cfg)
+    return _wrap_with_trace(_wrap_with_context_mgmt(
+        _wrap_with_rate_limit(model, llm_cfg), llm_cfg))
+
+
+def _wrap_with_trace(model):
+    """最外层包装：每次 ``model.invoke`` 后把该轮交互写进当前线程的 agent trace sink
+    （由 ``agent_trace.trace_to`` 设定）。没设 sink 时零开销。放最外层 → 看到的是
+    实际发出的请求（rate_limit/裁剪之后）+ 真实响应。
+    """
+    from xskill.agents import agent_trace
+    original_invoke = model.invoke
+
+    def traced_invoke(messages, **kwargs):
+        resp = original_invoke(messages, **kwargs)
+        try:
+            agent_trace.record(messages, resp)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        return resp
+
+    model.invoke = traced_invoke
+    return model
 
 
 def make_default_factory(config: dict) -> Callable[..., Any]:

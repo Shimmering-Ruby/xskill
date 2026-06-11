@@ -278,5 +278,11 @@ class TaskClusterAgent:
             instructions=[sysprompt],
             tools=self.tools,
         )
-        result = agent.run(user_msg)
+        # 逐轮 CoT/工具调用 → logs/agents/task_cluster_agents/<traj_id>/<atom_id>.log
+        from xskill.agents.agent_trace import trace_to
+        from xskill.config import get_logs_dir
+        sink = (get_logs_dir() / "agents" / "task_cluster_agents"
+                / atom.traj_id / f"{atom.atom_id}.log")
+        with trace_to(sink):
+            result = agent.run(user_msg)
         return getattr(result, "content", "") or ""

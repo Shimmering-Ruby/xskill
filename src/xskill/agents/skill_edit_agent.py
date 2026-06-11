@@ -303,4 +303,12 @@ class SkillEditAgent:
                 ST.commit_to_staging,
             ],
         )
-        agent.run(user_msg)
+        # 逐轮 CoT/工具调用 → logs/agents/skill_edit_agents/skills/<skill>_<ts>.log
+        import time as _time
+        from xskill.agents.agent_trace import trace_to
+        from xskill.config import get_logs_dir
+        _ts = _time.strftime("%Y%m%d-%H%M%S")
+        sink = (get_logs_dir() / "agents" / "skill_edit_agents" / "skills"
+                / f"{self.skill_dir.name}_{_ts}.log")
+        with trace_to(sink):
+            agent.run(user_msg)

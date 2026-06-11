@@ -534,7 +534,12 @@ class TaskAgent:
             instructions=[SYSTEM_PROMPT],
             tools=[look, submit_atom, context_budget, my_atoms],
         )
-        run_response = agent.run(user_msg)
+        # 把这次拆分的逐轮 CoT/工具调用流式写进 logs/agents/task_agents/<traj_id>.log
+        from xskill.agents.agent_trace import trace_to
+        from xskill.config import get_logs_dir
+        sink = get_logs_dir() / "agents" / "task_agents" / f"{traj_id}.log"
+        with trace_to(sink):
+            run_response = agent.run(user_msg)
         self._check_run_status(traj_id, run_response)
         return submitted
 
