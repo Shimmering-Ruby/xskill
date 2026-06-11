@@ -1,6 +1,6 @@
 # 触发评测改造：真跑代理闭环探针 + 真实技能清单 + 触发率看板
 
-状态：设计已定，待实现（两期）
+状态：已实现并发版 0.6.1a8（Phase 1 引擎 commit b87415b；Phase 2 看板 commit e272f36）
 作者：xskill
 日期：2026-06-11
 关联：取代 [2026-06-11-skill-description-optimization-design.md](./2026-06-11-skill-description-optimization-design.md) 里的 LLM-as-judge 触发判定
