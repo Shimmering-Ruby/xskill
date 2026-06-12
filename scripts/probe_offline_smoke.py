@@ -197,7 +197,31 @@ def build_fixtures(skill_root: Path) -> Path:
 # main
 # ─────────────────────────────────────────────────────────────────
 
+# 全脚本墙钟看门狗：要求 <60s 跑完。任何组件意外阻塞（网络/SDK/agno 内部）
+# 都不许吊死冒烟——超时直接打印 FAIL + 强制退出（守护线程，正常跑完零影响）。
+_WATCHDOG_SECONDS = 55.0
+
+
+def _arm_watchdog() -> None:
+    import os
+    import threading
+    import faulthandler
+
+    def _kill():
+        print(f"\nRESULT: FAIL — 冒烟超过墙钟上限 {_WATCHDOG_SECONDS:.0f}s"
+              "（疑似挂死，dump 各线程栈如下）", flush=True)
+        faulthandler.dump_traceback()
+        os._exit(2)
+
+    t = threading.Timer(_WATCHDOG_SECONDS, _kill)
+    t.daemon = True
+    t.start()
+
+
 def main() -> int:
+    import time as _time
+    t_start = _time.monotonic()
+    _arm_watchdog()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--workdir", type=Path, default=None,
                     help="工作目录（缺省临时目录）；registry.db 也落这里，绝不碰 ~/.xskill")
@@ -268,7 +292,10 @@ def main() -> int:
     # 冒烟判定：有竞争 catalog、落库 1 条、逐 case 文件非空
     ok = (out["catalog_size"] > 0 and len(rows) == 1
           and any(exp_dir.glob("*/*.json")))
+    elapsed = _time.monotonic() - t_start
     print(f"\nSMOKE {'OK' if ok else 'FAILED'}")
+    print(f"RESULT: {'PASS' if ok else 'FAIL'} "
+          f"(elapsed {elapsed:.1f}s, exit code {0 if ok else 1})")
     return 0 if ok else 1
 
 
