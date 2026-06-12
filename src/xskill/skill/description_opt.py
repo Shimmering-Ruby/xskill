@@ -112,6 +112,8 @@ def optimize_description(
     seed = int(opt_cfg.get("seed", 42))
     catalog_max_skills = int(opt_cfg.get("catalog_max_skills", 12))
     catalog_desc_cap = int(opt_cfg.get("catalog_desc_cap", 256))
+    # 探针单 case 墙钟兜底（秒）；0/负数=关闭。见 trigger_probe.probe_trigger。
+    probe_case_timeout = float(opt_cfg.get("probe_case_timeout", 60.0) or 0.0)
 
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.is_file():
@@ -192,6 +194,7 @@ def optimize_description(
             desc, train, budget, skill_name, catalog_by_query,
             runs_per_case, exp_dir, agno_agent_factory=agno_agent_factory,
             desc_cap=catalog_desc_cap, tag=f"iter{iteration}_train",
+            case_timeout=probe_case_timeout,
         )
         entry = {
             "iter": iteration,
@@ -253,6 +256,7 @@ def optimize_description(
         candidates, test, budget, skill_name, catalog_by_query,
         runs_per_case, exp_dir, current_description, attempts_path,
         agno_agent_factory=agno_agent_factory, desc_cap=catalog_desc_cap,
+        case_timeout=probe_case_timeout,
     )
 
     # ── 6. 写回 frontmatter ─────────────────────────────────────
@@ -446,6 +450,7 @@ def _score_description(
     desc: str, split: list[dict], budget: _Budget,
     skill_name: str, catalog_by_query: dict, runs_per_case: int,
     exp_dir: Path, *, agno_agent_factory: Any, desc_cap: int, tag: str,
+    case_timeout: float = 60.0,
 ) -> tuple[float, list[dict]]:
     """对一个 split 评 desc：每 case 真跑 runs_per_case 轮探针判触发，
     triggered = 命中本 skill ≥ 0.5；case pass = triggered == should_trigger。
@@ -471,6 +476,7 @@ def _score_description(
             chosen = probe_trigger(
                 query, skill_name, desc, catalog,
                 agno_agent_factory=agno_agent_factory, desc_cap=desc_cap,
+                case_timeout=case_timeout,
             )
             hit = chosen == skill_name
             if hit:
@@ -567,7 +573,7 @@ def _select_best_on_test(
     candidates: list[dict], test: list[dict], budget: _Budget,
     skill_name: str, catalog_by_query: dict, runs_per_case: int,
     exp_dir: Path, current_description: str, attempts_path: Path,
-    *, agno_agent_factory: Any, desc_cap: int,
+    *, agno_agent_factory: Any, desc_cap: int, case_timeout: float = 60.0,
 ) -> dict:
     """每个候选在 TEST 上评分，选 test_score 最高；平手偏好原始 desc。"""
     for c in candidates:
@@ -576,7 +582,7 @@ def _select_best_on_test(
                 c["description"], test, budget, skill_name,
                 catalog_by_query, runs_per_case, exp_dir,
                 agno_agent_factory=agno_agent_factory, desc_cap=desc_cap,
-                tag=f"iter{c['iter']}_test",
+                tag=f"iter{c['iter']}_test", case_timeout=case_timeout,
             )
         except _LLMBudgetExhausted:
             # 预算耗尽：未评的候选 test_score 留 None，不参与选优

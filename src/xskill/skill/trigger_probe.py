@@ -205,6 +205,7 @@ def probe_trigger(
     *,
     agno_agent_factory: Callable[..., Any],
     desc_cap: int,
+    case_timeout: float | None = 60.0,
 ) -> str:
     """真跑一轮代理，返回它触发的 skill name（或 "NONE"）。
 
@@ -215,6 +216,11 @@ def probe_trigger(
     catalog: build_probe_catalog 产的真实诱饵清单 ``[{"name","description"}]``。
     agno_agent_factory: ``(*, instructions, tools, **kwargs) -> agno Agent``。
     desc_cap: 候选描述喂给代理前的截断上限（与诱饵同一上限）。
+    case_timeout: 单 case 墙钟上限（秒），配置项 ``skill_opt.probe_case_timeout``
+        （默认 60）。模型层超时（``llm.request_timeout``）是第一道防线，这里是
+        总兜底：把 ``agent.run`` 放守护线程里跑，超时即视作"未触发"并告警——
+        任何底层组件（网络/SDK/agno 内部）的意外阻塞都不能挂死优化循环。
+        传 None/0 关闭兜底（仅限测试用）。
     """
     record: dict = {}
     tools: list[Callable] = []
@@ -246,12 +252,29 @@ def probe_trigger(
         tools=tools,
         tool_call_limit=_PROBE_TOOL_CALL_LIMIT,
     )
-    try:
-        agent.run(query)
-    except Exception as exc:  # noqa: BLE001
-        # StopAgentRun 已被 agno 内部吞掉；这里兜真实异常（网络等）——记日志，
-        # 当作"未触发"，绝不让一条 case 崩掉整个优化。
-        logger.warning("probe_trigger 代理异常（视作未触发）: %s", exc)
+    def _run_agent() -> None:
+        try:
+            agent.run(query)
+        except Exception as exc:  # noqa: BLE001
+            # StopAgentRun 已被 agno 内部吞掉；这里兜真实异常（网络等）——记日志，
+            # 当作"未触发"，绝不让一条 case 崩掉整个优化。
+            logger.warning("probe_trigger 代理异常（视作未触发）: %s", exc)
+
+    if case_timeout and case_timeout > 0:
+        import threading
+        worker = threading.Thread(target=_run_agent, daemon=True,
+                                  name=f"probe-{skill_name}")
+        worker.start()
+        worker.join(case_timeout)
+        if worker.is_alive():
+            # 守护线程留它自生自灭（底层超时最终会让它退出）；本 case 按
+            # "未触发"计——宁可保守扣分，不能挂死整个优化循环。
+            logger.warning(
+                "probe_trigger 超过单 case 墙钟上限 %.0fs（视作未触发）: "
+                "skill=%s query=%.60s", case_timeout, skill_name, query,
+            )
+    else:
+        _run_agent()
 
     return record.get("triggered") or "NONE"
 
@@ -276,6 +299,7 @@ def rerun_probe_case(
     runs = int(opt.get("runs_per_case", 3))
     max_skills = int(opt.get("catalog_max_skills", 12))
     desc_cap = int(opt.get("catalog_desc_cap", 256))
+    case_timeout = float(opt.get("probe_case_timeout", 60.0) or 0.0)
 
     skill_md = Path(skill_root) / skill_name / "SKILL.md"
     fm_dict, _ = fm.parse(skill_md.read_text(encoding="utf-8"))
@@ -295,6 +319,7 @@ def rerun_probe_case(
         chosen = probe_trigger(
             query, skill_name, desc, catalog,
             agno_agent_factory=factory, desc_cap=desc_cap,
+            case_timeout=case_timeout,
         )
         hit = chosen == skill_name
         if hit:
