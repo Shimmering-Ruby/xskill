@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from xskill.skill import candidates as C
-from xskill.agents.skill_edit_agent import SkillEditAgent
+from xskill.agents.skill_edit_agent import SkillEditAgent, SYSTEM_PROMPT_TEMPLATE
 from xskill.skill.git import init_skill_repo_on_baby, run_git
 
 
@@ -334,3 +334,75 @@ class TestUserMsgContext:
         assert "main" in msg
         assert "旧版的核心 description" in msg
         assert "现有 SKILL.md version: 3" in msg
+
+
+# ────────────────────────────────────────────────────────────────────
+# 写作纪律：SYSTEM_PROMPT_TEMPLATE 是模型行为的唯一指令源——知识提炼
+# 的关键纪律词必须以确定字符串呈现，旧的"完整可执行"导向必须删干净。
+# ────────────────────────────────────────────────────────────────────
+
+class TestWritingDisciplineInPrompt:
+    def test_template_still_formats(self):
+        """模板里新增的表格/示例不能引入裸 {}，否则 .format 会 KeyError。"""
+        out = SYSTEM_PROMPT_TEMPLATE.format(scenario_block="SCN", branch_now="baby")
+        assert "SCN" in out and "baby" in out
+
+    def test_has_knowledge_distillation_goal(self):
+        """目标改为知识提炼，不再是把执行过程复述一遍。"""
+        assert "提炼可泛化的知识" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_has_anti_pattern_blacklist(self):
+        """反模式黑名单三件套必须明示。"""
+        for kw in ("反模式", "任务流程复述", "实例细节搬运", "触发表述抄题面"):
+            assert kw in SYSTEM_PROMPT_TEMPLATE, f"缺反模式纪律词 {kw!r}"
+
+    def test_has_generalization_gate(self):
+        """泛化自检闸必须在场。"""
+        assert "泛化自检" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_has_pitfall_quadruple(self):
+        """坑位四元组（错误模式→症状→根因→修法）必须明示。"""
+        assert "坑位四元组" in SYSTEM_PROMPT_TEMPLATE
+        for col in ("错误模式", "症状", "根因", "修法"):
+            assert col in SYSTEM_PROMPT_TEMPLATE, f"坑位四元组缺列 {col!r}"
+
+    def test_has_evidence_strength(self):
+        """证据强度标注三档 + [推断] 上限。"""
+        assert "证据强度" in SYSTEM_PROMPT_TEMPLATE
+        assert "[实证：N 条轨迹]" in SYSTEM_PROMPT_TEMPLATE
+        assert "[单例]" in SYSTEM_PROMPT_TEMPLATE
+        assert "[推断]" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_has_param_no_fallback(self):
+        """参数化禁兜底——禁止硬编码默认值。"""
+        assert "禁止任何具体值兜底" in SYSTEM_PROMPT_TEMPLATE
+        assert "somefile.xlsx" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_has_failure_mining(self):
+        """失败挖掘三规则：死因回溯 / 成败差分 / 无症状死亡。"""
+        for kw in ("死因", "成败差分", "无症状死亡"):
+            assert kw in SYSTEM_PROMPT_TEMPLATE, f"缺失败挖掘纪律词 {kw!r}"
+
+    def test_has_length_budget_and_deletion_rule(self):
+        """≤200 行长度预算 + 删减铁律（宁删整条弱规则不砍强规则半条）。"""
+        assert "200 行" in SYSTEM_PROMPT_TEMPLATE
+        assert "宁可删掉整条弱规则" in SYSTEM_PROMPT_TEMPLATE
+
+    def test_has_four_section_structure(self):
+        """V4 四段结构：核心原则 / 领域规则 / 坑位清单 / 工具。"""
+        for sec in ("## 核心原则", "## 领域规则", "## 坑位清单", "## 工具"):
+            assert sec in SYSTEM_PROMPT_TEMPLATE, f"缺正文结构段 {sec!r}"
+
+    def test_old_full_executable_guidance_removed(self):
+        """旧的伪技能导向措辞必须删干净。"""
+        assert "完整可执行" not in SYSTEM_PROMPT_TEMPLATE
+        assert "精确到命令/文件/函数" not in SYSTEM_PROMPT_TEMPLATE
+
+    def test_pipeline_contract_parts_kept(self):
+        """管线契约部分（场景块占位/commit 工具/隐私守护/frontmatter/工具清单）保留不动。"""
+        assert "{scenario_block}" in SYSTEM_PROMPT_TEMPLATE
+        assert "{branch_now}" in SYSTEM_PROMPT_TEMPLATE
+        assert "commit_baby_to_main" in SYSTEM_PROMPT_TEMPLATE
+        assert "commit_to_staging" in SYSTEM_PROMPT_TEMPLATE
+        assert "隐私守护" in SYSTEM_PROMPT_TEMPLATE
+        assert "AtomTaskRead" in SYSTEM_PROMPT_TEMPLATE
