@@ -154,10 +154,28 @@ def build_chat_model(llm_cfg: dict, log: StreamLog | None = None):
     model_id = llm_cfg.get("model", "gpt-4o")
     api_key = llm_cfg.get("api_key") or os.environ.get("LLM_API_KEY", "")
 
+    # ── 显式网络超时（fail-loud，绝不挂死）────────────────────────
+    # 不可达端点（防火墙 DROP / 黑洞路由）下，openai SDK 缺省行为可能长时间
+    # 阻塞在 connect/DNS；这里给底层 httpx 显式 connect + 总超时，数秒内抛
+    # 清晰异常。agno 的 ``timeout`` kwarg 直通 openai client，httpx.Timeout
+    # 对象合法（openai SDK 原生支持）。
+    # 配置（``llm`` 段，全可选）：``request_timeout``(默认 60s 单次请求总上限)
+    # / ``connect_timeout``(默认 10s 建连上限) / ``client_max_retries``
+    # (默认 0——瞬时错误重试统一由 ``_wrap_with_retry`` 负责，client 层再
+    #  retry 会跟它相乘，故缺省关掉)。
+    import httpx as _httpx
+    request_timeout = float(llm_cfg.get("request_timeout", 60.0) or 60.0)
+    connect_timeout = float(llm_cfg.get("connect_timeout", 10.0) or 10.0)
+    timeout = _httpx.Timeout(request_timeout,
+                             connect=min(connect_timeout, request_timeout))
+    client_max_retries = int(llm_cfg.get("client_max_retries", 0) or 0)
+
     common_kwargs = dict(
         id=model_id,
         base_url=llm_cfg.get("base_url", ""),
         api_key=api_key,
+        timeout=timeout,
+        max_retries=client_max_retries,
         role_map={
             "system": "system",
             "user": "user",
@@ -286,6 +304,11 @@ def make_default_factory(config: dict) -> Callable[..., Any]:
         kwargs.setdefault("retries", 3)
         kwargs.setdefault("exponential_backoff", True)
         kwargs.setdefault("delay_between_retries", 2)
+        # agno 遥测默认开（telemetry=True）：每次 agent.run() 结束会同步 POST
+        # https://os-api.agno.com/telemetry/runs。无外网/丢包环境下该请求长时间
+        # 阻塞甚至挂死（实测单次 run 多挂 3~60s+，这正是探针冒烟测试/脚本
+        # "吊死"的根因）。生产/探针都不该把运行数据报给厂商——一律关掉。
+        kwargs.setdefault("telemetry", False)
         return Agent(
             model=model,
             instructions=instructions,
