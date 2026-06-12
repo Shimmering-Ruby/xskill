@@ -138,6 +138,23 @@ watcher:
                                 # docs/adr/0001-rate-limit-diy-not-litellm.md
   cold_start_threshold: 3       # defer process while >= N trajectories un-indexed
 
+# ===== Ingest (bridging native agent sessions into traj_*.md) =====
+# 各生态 session ingester（claude_code / codex / openclaw / cursor 的 JSONL
+# 桥接）入库行为。
+ingest:
+  settle_seconds: 120   # 入库完成屏障：源 session 文件最后修改距今 < N 秒视为
+                        # "还在写"，本轮不入库，等停笔满 N 秒后的下一轮 poll 再
+                        # 转换——避免把刚开跑的 session 定格成只有题面的残骸。
+                        # 已入库后源文件又增长的 session 会被重新转换覆盖
+                        # （并重置该轨迹已拆出的 atom，等价 rebuild --traj）。
+                        # 真实用户 session 动辄几十分钟，调太小会截断；
+                        # 评测场景（脚本批量产 session、写完即定稿）建议 5~15。
+  mask_patterns: []     # 去壳掩码：正则列表。入库转换写 md 之前，把命中的文本段
+                        # 替换为 [MASKED_HARNESS_PROMPT] 占位符——用于剥掉评测
+                        # harness 每题固定的 turn-0 提示词，防聚类被任务外壳吸住。
+                        # 默认空列表 = 完全不替换（现网用户不受影响）。
+                        # 跨行匹配用内联 flag，例：'(?s)HARNESS_BEGIN.*?HARNESS_END'
+
 # ===== Team C/S mode (only read by `xskill serve --server`) =====
 # 仅 server 端读这一段。客户端（`xskill connect <host:port> --token ...`）是瘦
 # 进程，不读 config.yaml——连接信息落 ~/.xskill/team_client.json；每个 server 的
@@ -246,6 +263,53 @@ def dashboard_attribution_defaults(path: Optional[Path] = None) -> dict:
         with open(cfg_path, encoding="utf-8") as f:
             section = (yaml.safe_load(f) or {}).get("dashboard") or {}
     return _resolve_attribution(section)
+
+
+# ingest.settle_seconds 缺省值。区间权衡：真实用户 session 动辄几十分钟，
+# 过短（<60s）在长思考/长工具调用间隙就会误判"已写完"提前定格；过长则新
+# session 入库延迟无谓变大。120s 落在建议区间（90~180s）中段。
+INGEST_SETTLE_SECONDS_DEFAULT = 120.0
+
+
+def ingest_config(path: Optional[Path] = None) -> dict:
+    """读 config.yaml 的 ingest 段，缺字段用显式默认（非 fallback 兼容）。
+
+    与 ``dashboard_attribution_defaults`` 同性质：**不校验 llm/embedding
+    api_key**——team 瘦客户端 / 一次性 CLI 桥接（没配 key 的环境）也要能
+    桥轨迹；config.yaml 不存在时返回全默认。
+
+    返回 ``{"settle_seconds": float, "mask_patterns": list[str]}``。
+    ``mask_patterns`` 在此即编译校验——坏正则 / 非列表直接抛 ValueError
+    （CLAUDE.md：遇到问题 throw error，不静默吞掉让掩码失效）。
+    """
+    import re as _re
+
+    cfg_path = Path(path) if path else CONFIG_PATH
+    section: dict = {}
+    if cfg_path.exists():
+        with open(cfg_path, encoding="utf-8") as f:
+            section = (yaml.safe_load(f) or {}).get("ingest") or {}
+
+    settle = section.get("settle_seconds", INGEST_SETTLE_SECONDS_DEFAULT)
+    raw_patterns = section.get("mask_patterns") or []
+    if not isinstance(raw_patterns, list):
+        raise ValueError(
+            f"ingest.mask_patterns 必须是正则列表，got {type(raw_patterns).__name__}"
+        )
+    patterns: list[str] = []
+    for i, p in enumerate(raw_patterns):
+        if not isinstance(p, str):
+            raise ValueError(
+                f"ingest.mask_patterns[{i}] 必须是字符串正则，got {type(p).__name__}"
+            )
+        try:
+            _re.compile(p)
+        except _re.error as e:
+            raise ValueError(
+                f"ingest.mask_patterns[{i}] 不是合法正则 {p!r}: {e}"
+            ) from e
+        patterns.append(p)
+    return {"settle_seconds": float(settle), "mask_patterns": patterns}
 
 
 def get_skill_dir() -> Path:
