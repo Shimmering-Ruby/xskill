@@ -177,8 +177,109 @@ def test_build_catalog_respects_max_skills(tmp_path, monkeypatch):
 
 
 def test_build_catalog_empty_when_index_missing(tmp_path):
+    # 空仓（无任何 skill 目录）→ 无竞争模式：返回 []，但不许静默——必须 WARNING
     catalog = tp.build_probe_catalog(
         "q", "self", skill_root=tmp_path,
         embed_client=_FakeEmbed([1.0]), max_skills=5, desc_cap=0,
     )
     assert catalog == []
+
+
+# ─────────────────────────────────────────────────────────────────
+# index 缺失时的行为（rebuild --force 必现路径，不是边角条件）
+# ─────────────────────────────────────────────────────────────────
+
+class _FakeBatchEmbed:
+    """带 encode_batch 的 fake embed（rebuild_skill_index 需要）。"""
+
+    def __init__(self, dim=3):
+        self.dim = dim
+        self.batch_calls = 0
+
+    def _vec(self, text):
+        # 确定性 hash → 向量（同文本同向量）
+        h = abs(hash(text))
+        v = np.asarray([(h >> (8 * i)) % 251 + 1 for i in range(self.dim)],
+                       dtype=np.float32)
+        return v
+
+    def encode(self, text):
+        return self._vec(text)
+
+    def encode_batch(self, texts):
+        self.batch_calls += 1
+        return np.stack([self._vec(t) for t in texts])
+
+
+class _BoomEmbed:
+    """encode/encode_batch 一律炸——用于断言某路径绝不触 embedding。"""
+
+    def encode(self, text):  # noqa: ARG002
+        raise AssertionError("不该调 encode")
+
+    def encode_batch(self, texts):  # noqa: ARG002
+        raise RuntimeError("embedding backend down")
+
+
+def _make_skill_dir(root: Path, name: str, description: str) -> Path:
+    d = root / name
+    d.mkdir()
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n"
+        "metadata:\n  version: 1\n---\n\n# x\n\nbody\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_build_catalog_rebuilds_index_from_main_when_missing(
+        tmp_path, monkeypatch):
+    """index 缺失 + 存在 main 竞争技能 → 自动重建索引，诱饵清单非空。"""
+    _make_skill_dir(tmp_path, "self-skill", "the candidate skill")
+    _make_skill_dir(tmp_path, "decoy-a", "analyze logs and error traces")
+    _make_skill_dir(tmp_path, "decoy-b", "deploy apps to kubernetes")
+    monkeypatch.setattr(tp, "main_sha", lambda p: "deadbeef")
+
+    embed = _FakeBatchEmbed()
+    catalog = tp.build_probe_catalog(
+        "find the error in my log", "self-skill",
+        skill_root=tmp_path, embed_client=embed, max_skills=5, desc_cap=256,
+    )
+    assert (tmp_path / ".skill_index.pkl").is_file(), "重建后索引必须落盘"
+    assert embed.batch_calls == 1
+    got = {e["name"] for e in catalog}
+    assert got == {"decoy-a", "decoy-b"}      # self 排除，两个 main 竞争者都在
+
+
+def test_build_catalog_no_competition_mode_warns_and_skips_embed(
+        tmp_path, monkeypatch, caplog):
+    """全库只有本 skill（重建也不会有竞争者）→ 降级无竞争模式：
+    显式 WARNING + catalog_size=0 标记语，且绝不触 embedding。"""
+    _make_skill_dir(tmp_path, "self-skill", "the candidate skill")
+    monkeypatch.setattr(tp, "main_sha", lambda p: "deadbeef")
+
+    with caplog.at_level("WARNING", logger="xskill.skill_edit_agent"):
+        catalog = tp.build_probe_catalog(
+            "q", "self-skill", skill_root=tmp_path,
+            embed_client=_BoomEmbed(), max_skills=5, desc_cap=0,
+        )
+    assert catalog == []
+    text = caplog.text
+    assert "无竞争" in text
+    assert "catalog_size=0" in text
+
+
+def test_build_catalog_rebuild_failure_degrades_with_warning(
+        tmp_path, monkeypatch, caplog):
+    """有竞争者但重建失败（embedding 后端炸）→ 不抛、WARNING、返回空清单。"""
+    _make_skill_dir(tmp_path, "self-skill", "candidate")
+    _make_skill_dir(tmp_path, "decoy-a", "analyze logs")
+    monkeypatch.setattr(tp, "main_sha", lambda p: "deadbeef")
+
+    with caplog.at_level("WARNING", logger="xskill.skill_edit_agent"):
+        catalog = tp.build_probe_catalog(
+            "q", "self-skill", skill_root=tmp_path,
+            embed_client=_BoomEmbed(), max_skills=5, desc_cap=0,
+        )
+    assert catalog == []
+    assert "重建" in caplog.text and "catalog_size=0" in caplog.text

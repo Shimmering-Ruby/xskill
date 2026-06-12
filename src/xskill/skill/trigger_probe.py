@@ -84,15 +84,56 @@ def build_probe_catalog(
       看到的就是真实会看到的截断版）。
     - 排除本 skill 自身（它由 probe_trigger 注入候选描述）。
 
-    返回 ``[{"name", "description"}, ...]``；索引缺失/为空时返回 ``[]``（探针
-    退化为"只有本 skill"，调用方应知此时触发率无区分度）。
+    索引缺失（``rebuild --force`` 清掉 index.pkl 后是**必现路径**）时不再静默
+    返回空清单，而是：
+
+    1. 先数 main 分支竞争者——全库只有本 skill 时重建也无意义，直接降级为
+       **无竞争模式**（显式 WARNING + 调用方按 catalog_size=0 标记结果，
+       不许悄悄当正常分），且不触 embedding。
+    2. 有竞争者 → 用 ``rebuild_skill_index`` 从 main 技能现场重建索引再走
+       正常检索；重建失败同样显式 WARNING 后降级。
+
+    返回 ``[{"name", "description"}, ...]``；空清单 = 无竞争模式。
     """
     skill_root = Path(skill_root)
+
+    # main 分支过滤 + name→description（竞争者画像，索引缺失判定也用它）
+    main_desc: dict[str, str] = {}
+    for sk in SkillRepo(skill_root):
+        if sk.name == skill_name:
+            continue
+        if main_sha(sk.path):
+            main_desc[sk.name] = sk.description
+
     index_path = skill_root / ".skill_index.pkl"
     if not index_path.is_file():
-        logger.warning("build_probe_catalog: .skill_index.pkl 缺失 (%s)，"
-                       "诱饵清单为空", skill_root)
-        return []
+        if not main_desc:
+            logger.warning(
+                "build_probe_catalog: .skill_index.pkl 缺失且全库无 main 竞争"
+                " skill (%s) → 降级无竞争模式 catalog_size=0：触发率只剩"
+                "“有/没有触发”，无竞争区分度", skill_root,
+            )
+            return []
+        logger.warning(
+            "build_probe_catalog: .skill_index.pkl 缺失 (%s)，从 %d 个 main"
+            " skill 现场重建索引", skill_root, len(main_desc),
+        )
+        try:
+            from xskill.agents.skill_tools import rebuild_skill_index
+            rebuild_skill_index(skill_dir=skill_root,
+                                embed_client=embed_client)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "build_probe_catalog: 索引重建失败（%s）→ 降级无竞争模式"
+                " catalog_size=0", exc,
+            )
+            return []
+        if not index_path.is_file():
+            logger.warning(
+                "build_probe_catalog: 重建后索引仍缺失 (%s) → 降级无竞争模式"
+                " catalog_size=0", skill_root,
+            )
+            return []
 
     import pickle
     with open(index_path, "rb") as f:
@@ -100,16 +141,9 @@ def build_probe_catalog(
     names: list[str] = list(index.get("skill_names") or [])
     embeddings = index.get("embeddings")
     if not names or embeddings is None or len(names) != len(embeddings):
-        logger.warning("build_probe_catalog: skill_index 结构异常，诱饵清单为空")
+        logger.warning("build_probe_catalog: skill_index 结构异常，诱饵清单为空"
+                       "（无竞争模式 catalog_size=0）")
         return []
-
-    # main 分支过滤 + name→description
-    main_desc: dict[str, str] = {}
-    for sk in SkillRepo(skill_root):
-        if sk.name == skill_name:
-            continue
-        if main_sha(sk.path):
-            main_desc[sk.name] = sk.description
 
     # query 向量 L2 归一 → cosine = embeddings @ q
     q = np.asarray(embed_client.encode(query), dtype=np.float32)

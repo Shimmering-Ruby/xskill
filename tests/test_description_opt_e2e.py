@@ -154,6 +154,56 @@ def test_trigger_eval_persisted(tmp_path):
     assert 0.0 <= rows[0]["test_score"] <= 1.0
 
 
+def test_no_competition_mode_marked_in_result_and_registry(tmp_path, caplog):
+    """skill_root 只有本 skill（rebuild --force 后必现）→ 不许悄悄当正常分：
+    结果显式带 catalog_size=0 + no_competition=True，WARNING 落日志，
+    registry 行 catalog_size=0。"""
+    from xskill.pipeline import registry
+    sd = tmp_path / "log-analyzer"
+    sd.mkdir()
+    (sd / "SKILL.md").write_text(
+        "---\nname: log-analyzer\ndescription: does stuff\n"
+        "metadata:\n  version: 1\n---\n\n# x\n\nbody\n",
+        encoding="utf-8",
+    )
+    llm = ScriptedLLM(_CASES, "Use this skill to analyze log files and error traces.")
+    with caplog.at_level("WARNING", logger="xskill.skill_edit_agent"):
+        out = _opt(sd, llm, runs_per_case=1, max_iters=1, seed=42)
+    assert out["catalog_size"] == 0
+    assert out["no_competition"] is True
+    assert "无竞争" in caplog.text
+    rows = registry.trigger_eval_for_skill("log-analyzer")
+    assert len(rows) == 1
+    assert rows[0]["catalog_size"] == 0
+    # summary.json 同样带标记（看板/复盘读这里）
+    opt = sd / ".description_optimization"
+    exp = [d for d in opt.iterdir() if d.is_dir()][0]
+    summary = json.loads((exp / "summary.json").read_text())
+    assert summary["catalog_size"] == 0
+    assert summary["no_competition"] is True
+
+
+def test_per_case_results_archived_on_disk(tmp_path):
+    """D8：逐 case 结果按 {topic}/{tag}_{idx}.json 落盘，含 catalog 快照。"""
+    sd = tmp_path / "log-analyzer"
+    sd.mkdir()
+    (sd / "SKILL.md").write_text(
+        "---\nname: log-analyzer\ndescription: does stuff\n"
+        "metadata:\n  version: 1\n---\n\n# x\n\nbody\n",
+        encoding="utf-8",
+    )
+    llm = ScriptedLLM(_CASES, "Use this skill to analyze log files and error traces.")
+    _opt(sd, llm, runs_per_case=1, max_iters=1, seed=42)
+    opt = sd / ".description_optimization"
+    exp = [d for d in opt.iterdir() if d.is_dir()][0]
+    case_files = sorted(exp.glob("*/*.json"))
+    assert case_files, "逐 case json 必须落盘"
+    rec = json.loads(case_files[0].read_text())
+    for key in ("query", "should_trigger", "did_trigger", "passed",
+                "triggered_skill", "catalog", "runs"):
+        assert key in rec, f"逐 case 记录缺字段 {key}"
+
+
 def test_max_llm_calls_cap_does_not_hang(tmp_path):
     sd = tmp_path / "log-analyzer"
     sd.mkdir()

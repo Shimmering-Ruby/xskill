@@ -156,6 +156,23 @@ def optimize_description(
         for c in cases
     }
 
+    # 无竞争模式显式标记：诱饵清单全空（索引缺失重建失败 / 全库只有本 skill）
+    # 时分数没有竞争区分度——绝不许悄悄当正常分。catalog_size 随结果/registry/
+    # summary 一路带出去，看板与复盘据此降权。
+    avg_catalog = 0
+    if cases:
+        avg_catalog = round(
+            sum(len(catalog_by_query.get(c["query"], [])) for c in cases)
+            / len(cases)
+        )
+    no_competition = avg_catalog == 0
+    if no_competition:
+        logger.warning(
+            "description_opt[%s]: 诱饵清单全空（catalog_size=0，无竞争模式）"
+            "——触发率只反映“有/没有触发”，与有竞争场景的分数不可比",
+            skill_name,
+        )
+
     # 实验目录
     exp_id = _next_exp_id(opt_root)
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -255,7 +272,8 @@ def optimize_description(
 
     summary = _write_summary(
         exp_dir, skill_name, train, test, candidates, best,
-        current_description,
+        current_description, catalog_size=avg_catalog,
+        no_competition=no_competition,
     )
 
     # 持久化离线探针触发率（看板用）。version_sha = 当前 main（本次写回将由随后
@@ -263,12 +281,6 @@ def optimize_description(
     try:
         from xskill.canary import main_sha as _main_sha
         from xskill.pipeline.registry import record_trigger_eval
-        avg_catalog = 0
-        if cases:
-            avg_catalog = round(
-                sum(len(catalog_by_query.get(c["query"], [])) for c in cases)
-                / len(cases)
-            )
         record_trigger_eval(
             skill=skill_name, version_sha=_main_sha(skill_dir),
             exp_id=exp_id, train_score=float(best["train_score"]),
@@ -282,6 +294,8 @@ def optimize_description(
         "enabled": True,
         "best_description": best_desc,
         "chosen_reason": summary["chosen_reason"],
+        "catalog_size": avg_catalog,
+        "no_competition": no_competition,
         "candidates": [
             {"iter": c["iter"], "description": c["description"],
              "train_score": c["train_score"], "test_score": c["test_score"]}
@@ -634,6 +648,7 @@ def _append_jsonl(path: Path, obj: dict) -> None:
 def _write_summary(
     exp_dir: Path, skill_name: str, train: list[dict], test: list[dict],
     candidates: list[dict], best: dict, current_description: str,
+    *, catalog_size: int = 0, no_competition: bool = False,
 ) -> dict:
     if best["description"] == current_description:
         reason = (
@@ -668,6 +683,9 @@ def _write_summary(
             "test_score": best["test_score"],
         },
         "chosen_reason": reason,
+        # 无竞争模式标记：catalog_size=0 时分数无竞争区分度，复盘/看板降权
+        "catalog_size": int(catalog_size),
+        "no_competition": bool(no_competition),
     }
     (exp_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",
