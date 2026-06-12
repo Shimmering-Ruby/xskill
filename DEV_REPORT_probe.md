@@ -108,3 +108,86 @@ registry 落 1 行；退出码 0。支持 `--skill-dir` 指向现成 skill 复�
    真模型行为差异仍需 live 评测（`pytest -m live_agent` 一类）兜底。
 5. **version_sha 为空**：commit 前评测按设计记父版本（首版为空）；看板按
    版本聚合时需把空 sha 当"首版"处理。
+
+## 挂死缺陷修复（agno 遥测出网 + 不可达端点无超时）
+
+### 症状与评审定位
+
+独立评审报告：真 agno Agent（2.5.13）在 model 初始化阶段遇到不可达端点会
+无限挂死。受害者：`test_agno_factory_probe_smoke.py`（120s+ 超时）和
+`scripts/probe_offline_smoke.py`（120-180s 超时跑不完）。
+
+### 复核后的真根因（与评审定位有偏差）
+
+逐步计时 + httpx 请求埋点（instrumentation，在代码里插记录点）实测：
+
+- **黑洞 base_url（127.0.0.1:9）本身不挂**：agno model 构造是惰性的（不建连），
+  工厂构造测试单跑只要 0.46s；`model.invoke` 在测试里已被脚本替身换掉。
+- **真凶是 agno 遥测**：agno Agent 默认 `telemetry=True`，每次 `agent.run()`
+  结束后**同步** POST `https://os-api.agno.com/telemetry/runs`。无外网/DNS
+  慢的环境下该请求每次阻塞 3~60s+（防火墙丢包环境则无限挂死）。探针每 case
+  跑一次 agent.run → 逐 case 累加，正好呈现"120s+ 吊死"的观感。
+  实测受害测试文件 4 例 74.3s，其中 decoy 单例 61s 全耗在遥测 POST 上。
+
+### 修法（三层防御，全部落地）
+
+1. **关遥测（根治）**：`make_default_factory` 对 Agent 构造
+   `kwargs.setdefault("telemetry", False)`——生产/探针都不该把运行数据报给
+   厂商，更不能让它挂死流程。
+2. **模型层显式网络超时**：`build_chat_model` 给 agno model 注入
+   `timeout=httpx.Timeout(request_timeout, connect=connect_timeout)`（直通
+   openai SDK client）+ `max_retries=client_max_retries`。配置（`llm` 段，
+   全可选）：`request_timeout`（默认 60s）/ `connect_timeout`（默认 10s）/
+   `client_max_retries`（默认 0——瞬时重试统一由 `_wrap_with_retry` 负责，
+   client 层再 retry 会与之相乘）。不可达端点从"无限挂"变成秒级抛清晰异常。
+3. **探针单 case 墙钟兜底**：`probe_trigger` 新参 `case_timeout`（配置
+   `skill_opt.probe_case_timeout`，默认 60s，0=关闭），`agent.run` 放守护
+   线程跑、`join(timeout)`，超时记 WARNING 视作"未触发"——任何底层组件
+   （网络/SDK/agno 内部）的意外阻塞都不能挂死优化循环。`description_opt`
+   与 `rerun_probe_case` 全程透传该配置（只动超时管道，不碰评分算法）。
+
+### 测试与脚本修正
+
+- `test_factory_builds_real_agno_agent`：加断言 `agent.telemetry is False`、
+  `agent.model.timeout is not None`（挂死缺陷回归）。
+- 新增 `test_blackhole_unresponsive_endpoint_fails_loud_within_seconds`：
+  本地"陷阱"端口（接受 TCP 永不回包，模拟防火墙 DROP）上**真发请求**，
+  实测 3.2s 抛 `ModelProviderError: Request timed out`（断言 <15s）。
+  注意调用约定：工厂包装链 `traced_invoke(messages, **kwargs)` 只收一个
+  位置参数，`model.invoke` 必须**关键字传参**（与 agno 内部一致）。
+- 新增 `test_blackhole_refused_endpoint_fails_fast`：拒连黑洞秒级抛错（<10s）。
+- 测试共享 `_CFG` 加 `request_timeout: 3 / connect_timeout: 2 / max_retries: 1`，
+  任何漏 mock 的真出网都秒级 fail-loud。
+- `probe_offline_smoke.py`：加 55s 墙钟看门狗（超时打印 FAIL + 各线程栈 +
+  `os._exit(2)`），结尾打印 `RESULT: PASS/FAIL (elapsed, exit code)`。
+
+### 实测耗时（修复前 → 后）
+
+| 受害者 | 修复前 | 修复后 |
+| --- | --- | --- |
+| test_agno_factory_probe_smoke.py（4→6 例） | 74.3s（decoy 单例 61s） | 6 passed in ~1-5s |
+| scripts/probe_offline_smoke.py | 120-180s 超时跑不完 | RESULT: PASS, 1.8s |
+| 核心逻辑 test_trigger_probe + description_opt_e2e | — | 20 passed in 1.4s（未动算法，保持绿） |
+
+### 全量测试与既有失败的归属判定（非本次改动引入）
+
+全量 `make test`（`pytest tests/ --ignore=docker_e2e --ignore=live`，本次加
+`--timeout=120` 防吊死）：**1 failed, 850 passed in 225.90s**。唯一失败是
+`test_e2e_xskill_serve_auto.py::test_canary_flip_promote_and_install_new_version`
+（"canary controller promote staging→main" 轮询 180s 预算耗尽）。
+
+**复核结论：该失败是负载诱发的偶发（flaky），非确定性故障，与本次改动无关。**
+证据（本次亲测，非沿用前一版报告的推断）：
+
+- **单独跑必过**：把该 e2e 单测隔离跑，clean HEAD（ff1e2cf，stash 掉本次 7 个
+  改动）**1 passed in 69.42s**；带本次全部改动**1 passed in 68.75s**——两者都过、
+  耗时几乎一致。说明本次改动不碰它、也没拖慢它。
+- **失败只在满负载全量套件里出现**：该 e2e 用 180s 轮询预算等 canary 控制器把
+  staging 升 main，全量套件并发跑时系统负载高 → 轮询超预算 → 偶发超时。它驱动真
+  claude CLI + 假 LLM + daemon 全链路，对机器负载敏感，是已知的 flaky e2e。
+- **去掉该 flaky 后全绿**：全量套件 deselect 这一条 → **850 passed, 1 deselected
+  in 103.97s**，其余每条确定性通过。
+
+故判定：该失败属既有 flaky e2e（机器负载相关），不在本分支处理范围，与挂死修复无关。
+本次改动相关的所有测试（探针冒烟 6 例、核心 trigger/desc 逻辑、3 条挂死回归）全部
+稳定通过。基线对比：套件实际收集 851 条，本次新增 2 条挂死回归测试（数量只增不减）。
