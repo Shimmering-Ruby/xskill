@@ -112,6 +112,8 @@ def optimize_description(
     seed = int(opt_cfg.get("seed", 42))
     catalog_max_skills = int(opt_cfg.get("catalog_max_skills", 12))
     catalog_desc_cap = int(opt_cfg.get("catalog_desc_cap", 256))
+    # 探针单 case 墙钟兜底（秒）；0/负数=关闭。见 trigger_probe.probe_trigger。
+    probe_case_timeout = float(opt_cfg.get("probe_case_timeout", 60.0) or 0.0)
 
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.is_file():
@@ -156,6 +158,23 @@ def optimize_description(
         for c in cases
     }
 
+    # 无竞争模式显式标记：诱饵清单全空（索引缺失重建失败 / 全库只有本 skill）
+    # 时分数没有竞争区分度——绝不许悄悄当正常分。catalog_size 随结果/registry/
+    # summary 一路带出去，看板与复盘据此降权。
+    avg_catalog = 0
+    if cases:
+        avg_catalog = round(
+            sum(len(catalog_by_query.get(c["query"], [])) for c in cases)
+            / len(cases)
+        )
+    no_competition = avg_catalog == 0
+    if no_competition:
+        logger.warning(
+            "description_opt[%s]: 诱饵清单全空（catalog_size=0，无竞争模式）"
+            "——触发率只反映“有/没有触发”，与有竞争场景的分数不可比",
+            skill_name,
+        )
+
     # 实验目录
     exp_id = _next_exp_id(opt_root)
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -175,6 +194,7 @@ def optimize_description(
             desc, train, budget, skill_name, catalog_by_query,
             runs_per_case, exp_dir, agno_agent_factory=agno_agent_factory,
             desc_cap=catalog_desc_cap, tag=f"iter{iteration}_train",
+            case_timeout=probe_case_timeout,
         )
         entry = {
             "iter": iteration,
@@ -236,6 +256,7 @@ def optimize_description(
         candidates, test, budget, skill_name, catalog_by_query,
         runs_per_case, exp_dir, current_description, attempts_path,
         agno_agent_factory=agno_agent_factory, desc_cap=catalog_desc_cap,
+        case_timeout=probe_case_timeout,
     )
 
     # ── 6. 写回 frontmatter ─────────────────────────────────────
@@ -255,7 +276,8 @@ def optimize_description(
 
     summary = _write_summary(
         exp_dir, skill_name, train, test, candidates, best,
-        current_description,
+        current_description, catalog_size=avg_catalog,
+        no_competition=no_competition,
     )
 
     # 持久化离线探针触发率（看板用）。version_sha = 当前 main（本次写回将由随后
@@ -263,12 +285,6 @@ def optimize_description(
     try:
         from xskill.canary import main_sha as _main_sha
         from xskill.pipeline.registry import record_trigger_eval
-        avg_catalog = 0
-        if cases:
-            avg_catalog = round(
-                sum(len(catalog_by_query.get(c["query"], [])) for c in cases)
-                / len(cases)
-            )
         record_trigger_eval(
             skill=skill_name, version_sha=_main_sha(skill_dir),
             exp_id=exp_id, train_score=float(best["train_score"]),
@@ -282,6 +298,8 @@ def optimize_description(
         "enabled": True,
         "best_description": best_desc,
         "chosen_reason": summary["chosen_reason"],
+        "catalog_size": avg_catalog,
+        "no_competition": no_competition,
         "candidates": [
             {"iter": c["iter"], "description": c["description"],
              "train_score": c["train_score"], "test_score": c["test_score"]}
@@ -432,6 +450,7 @@ def _score_description(
     desc: str, split: list[dict], budget: _Budget,
     skill_name: str, catalog_by_query: dict, runs_per_case: int,
     exp_dir: Path, *, agno_agent_factory: Any, desc_cap: int, tag: str,
+    case_timeout: float = 60.0,
 ) -> tuple[float, list[dict]]:
     """对一个 split 评 desc：每 case 真跑 runs_per_case 轮探针判触发，
     triggered = 命中本 skill ≥ 0.5；case pass = triggered == should_trigger。
@@ -457,6 +476,7 @@ def _score_description(
             chosen = probe_trigger(
                 query, skill_name, desc, catalog,
                 agno_agent_factory=agno_agent_factory, desc_cap=desc_cap,
+                case_timeout=case_timeout,
             )
             hit = chosen == skill_name
             if hit:
@@ -553,7 +573,7 @@ def _select_best_on_test(
     candidates: list[dict], test: list[dict], budget: _Budget,
     skill_name: str, catalog_by_query: dict, runs_per_case: int,
     exp_dir: Path, current_description: str, attempts_path: Path,
-    *, agno_agent_factory: Any, desc_cap: int,
+    *, agno_agent_factory: Any, desc_cap: int, case_timeout: float = 60.0,
 ) -> dict:
     """每个候选在 TEST 上评分，选 test_score 最高；平手偏好原始 desc。"""
     for c in candidates:
@@ -562,7 +582,7 @@ def _select_best_on_test(
                 c["description"], test, budget, skill_name,
                 catalog_by_query, runs_per_case, exp_dir,
                 agno_agent_factory=agno_agent_factory, desc_cap=desc_cap,
-                tag=f"iter{c['iter']}_test",
+                tag=f"iter{c['iter']}_test", case_timeout=case_timeout,
             )
         except _LLMBudgetExhausted:
             # 预算耗尽：未评的候选 test_score 留 None，不参与选优
@@ -634,6 +654,7 @@ def _append_jsonl(path: Path, obj: dict) -> None:
 def _write_summary(
     exp_dir: Path, skill_name: str, train: list[dict], test: list[dict],
     candidates: list[dict], best: dict, current_description: str,
+    *, catalog_size: int = 0, no_competition: bool = False,
 ) -> dict:
     if best["description"] == current_description:
         reason = (
@@ -668,6 +689,9 @@ def _write_summary(
             "test_score": best["test_score"],
         },
         "chosen_reason": reason,
+        # 无竞争模式标记：catalog_size=0 时分数无竞争区分度，复盘/看板降权
+        "catalog_size": int(catalog_size),
+        "no_competition": bool(no_competition),
     }
     (exp_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",

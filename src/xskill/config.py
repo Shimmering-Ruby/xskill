@@ -63,6 +63,13 @@ llm:
                          # to YOUR model's real context limit (e.g. 128000 for
                          # gpt-4o, 64000 for deepseek-chat).
   # temperature: 0.0     # optional; default 0 (deterministic)
+  # request_timeout: 60  # optional; per-request wall-clock cap in seconds
+                         # (default 60). Explicit so an unreachable endpoint
+                         # fails loud instead of hanging forever.
+  # connect_timeout: 10  # optional; TCP-connect cap in seconds (default 10).
+  # client_max_retries: 0 # optional; openai-SDK client retries (default 0 —
+                         # transient-error retries are handled by xskill's own
+                         # retry wrapper; client retries would multiply).
   # rate_limit:          # optional; absent = unlimited (good for self-hosted)
   #   rpm: 60            # requests per minute; match your provider plan
   #   tpm: 100000        # tokens per minute (optional within rate_limit)
@@ -126,6 +133,9 @@ skill_opt:
   seed:               42     # fixed RNG seed → deterministic split
   catalog_max_skills: 12     # decoy-catalog size (mirrors CC listing budget)
   catalog_desc_cap:   256    # per-skill description truncation fed to the probe
+  probe_case_timeout: 60     # per-probe-case wall-clock cap (seconds); a stuck
+                             # probe counts as "not triggered" instead of
+                             # hanging the optimization loop. 0 disables.
   rerun_enabled:      true    # dashboard "re-run case" action endpoint on/off
 
 # ===== Watcher (the directory poller inside `serve`) =====

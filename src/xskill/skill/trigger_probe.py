@@ -84,15 +84,56 @@ def build_probe_catalog(
       看到的就是真实会看到的截断版）。
     - 排除本 skill 自身（它由 probe_trigger 注入候选描述）。
 
-    返回 ``[{"name", "description"}, ...]``；索引缺失/为空时返回 ``[]``（探针
-    退化为"只有本 skill"，调用方应知此时触发率无区分度）。
+    索引缺失（``rebuild --force`` 清掉 index.pkl 后是**必现路径**）时不再静默
+    返回空清单，而是：
+
+    1. 先数 main 分支竞争者——全库只有本 skill 时重建也无意义，直接降级为
+       **无竞争模式**（显式 WARNING + 调用方按 catalog_size=0 标记结果，
+       不许悄悄当正常分），且不触 embedding。
+    2. 有竞争者 → 用 ``rebuild_skill_index`` 从 main 技能现场重建索引再走
+       正常检索；重建失败同样显式 WARNING 后降级。
+
+    返回 ``[{"name", "description"}, ...]``；空清单 = 无竞争模式。
     """
     skill_root = Path(skill_root)
+
+    # main 分支过滤 + name→description（竞争者画像，索引缺失判定也用它）
+    main_desc: dict[str, str] = {}
+    for sk in SkillRepo(skill_root):
+        if sk.name == skill_name:
+            continue
+        if main_sha(sk.path):
+            main_desc[sk.name] = sk.description
+
     index_path = skill_root / ".skill_index.pkl"
     if not index_path.is_file():
-        logger.warning("build_probe_catalog: .skill_index.pkl 缺失 (%s)，"
-                       "诱饵清单为空", skill_root)
-        return []
+        if not main_desc:
+            logger.warning(
+                "build_probe_catalog: .skill_index.pkl 缺失且全库无 main 竞争"
+                " skill (%s) → 降级无竞争模式 catalog_size=0：触发率只剩"
+                "“有/没有触发”，无竞争区分度", skill_root,
+            )
+            return []
+        logger.warning(
+            "build_probe_catalog: .skill_index.pkl 缺失 (%s)，从 %d 个 main"
+            " skill 现场重建索引", skill_root, len(main_desc),
+        )
+        try:
+            from xskill.agents.skill_tools import rebuild_skill_index
+            rebuild_skill_index(skill_dir=skill_root,
+                                embed_client=embed_client)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "build_probe_catalog: 索引重建失败（%s）→ 降级无竞争模式"
+                " catalog_size=0", exc,
+            )
+            return []
+        if not index_path.is_file():
+            logger.warning(
+                "build_probe_catalog: 重建后索引仍缺失 (%s) → 降级无竞争模式"
+                " catalog_size=0", skill_root,
+            )
+            return []
 
     import pickle
     with open(index_path, "rb") as f:
@@ -100,16 +141,9 @@ def build_probe_catalog(
     names: list[str] = list(index.get("skill_names") or [])
     embeddings = index.get("embeddings")
     if not names or embeddings is None or len(names) != len(embeddings):
-        logger.warning("build_probe_catalog: skill_index 结构异常，诱饵清单为空")
+        logger.warning("build_probe_catalog: skill_index 结构异常，诱饵清单为空"
+                       "（无竞争模式 catalog_size=0）")
         return []
-
-    # main 分支过滤 + name→description
-    main_desc: dict[str, str] = {}
-    for sk in SkillRepo(skill_root):
-        if sk.name == skill_name:
-            continue
-        if main_sha(sk.path):
-            main_desc[sk.name] = sk.description
 
     # query 向量 L2 归一 → cosine = embeddings @ q
     q = np.asarray(embed_client.encode(query), dtype=np.float32)
@@ -171,6 +205,7 @@ def probe_trigger(
     *,
     agno_agent_factory: Callable[..., Any],
     desc_cap: int,
+    case_timeout: float | None = 60.0,
 ) -> str:
     """真跑一轮代理，返回它触发的 skill name（或 "NONE"）。
 
@@ -181,6 +216,11 @@ def probe_trigger(
     catalog: build_probe_catalog 产的真实诱饵清单 ``[{"name","description"}]``。
     agno_agent_factory: ``(*, instructions, tools, **kwargs) -> agno Agent``。
     desc_cap: 候选描述喂给代理前的截断上限（与诱饵同一上限）。
+    case_timeout: 单 case 墙钟上限（秒），配置项 ``skill_opt.probe_case_timeout``
+        （默认 60）。模型层超时（``llm.request_timeout``）是第一道防线，这里是
+        总兜底：把 ``agent.run`` 放守护线程里跑，超时即视作"未触发"并告警——
+        任何底层组件（网络/SDK/agno 内部）的意外阻塞都不能挂死优化循环。
+        传 None/0 关闭兜底（仅限测试用）。
     """
     record: dict = {}
     tools: list[Callable] = []
@@ -212,12 +252,29 @@ def probe_trigger(
         tools=tools,
         tool_call_limit=_PROBE_TOOL_CALL_LIMIT,
     )
-    try:
-        agent.run(query)
-    except Exception as exc:  # noqa: BLE001
-        # StopAgentRun 已被 agno 内部吞掉；这里兜真实异常（网络等）——记日志，
-        # 当作"未触发"，绝不让一条 case 崩掉整个优化。
-        logger.warning("probe_trigger 代理异常（视作未触发）: %s", exc)
+    def _run_agent() -> None:
+        try:
+            agent.run(query)
+        except Exception as exc:  # noqa: BLE001
+            # StopAgentRun 已被 agno 内部吞掉；这里兜真实异常（网络等）——记日志，
+            # 当作"未触发"，绝不让一条 case 崩掉整个优化。
+            logger.warning("probe_trigger 代理异常（视作未触发）: %s", exc)
+
+    if case_timeout and case_timeout > 0:
+        import threading
+        worker = threading.Thread(target=_run_agent, daemon=True,
+                                  name=f"probe-{skill_name}")
+        worker.start()
+        worker.join(case_timeout)
+        if worker.is_alive():
+            # 守护线程留它自生自灭（底层超时最终会让它退出）；本 case 按
+            # "未触发"计——宁可保守扣分，不能挂死整个优化循环。
+            logger.warning(
+                "probe_trigger 超过单 case 墙钟上限 %.0fs（视作未触发）: "
+                "skill=%s query=%.60s", case_timeout, skill_name, query,
+            )
+    else:
+        _run_agent()
 
     return record.get("triggered") or "NONE"
 
@@ -242,6 +299,7 @@ def rerun_probe_case(
     runs = int(opt.get("runs_per_case", 3))
     max_skills = int(opt.get("catalog_max_skills", 12))
     desc_cap = int(opt.get("catalog_desc_cap", 256))
+    case_timeout = float(opt.get("probe_case_timeout", 60.0) or 0.0)
 
     skill_md = Path(skill_root) / skill_name / "SKILL.md"
     fm_dict, _ = fm.parse(skill_md.read_text(encoding="utf-8"))
@@ -261,6 +319,7 @@ def rerun_probe_case(
         chosen = probe_trigger(
             query, skill_name, desc, catalog,
             agno_agent_factory=factory, desc_cap=desc_cap,
+            case_timeout=case_timeout,
         )
         hit = chosen == skill_name
         if hit:
