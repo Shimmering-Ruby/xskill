@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Literal, Optional
 
-from xskill.config import get_traj_dir
+from xskill.config import get_traj_dir, ingest_config
 from xskill.ecosystems._fallback import (
     InstallMode, _is_link_or_junction, install_dir,
 )
@@ -638,6 +638,7 @@ def submit_trajectory(
     metadata: Optional[dict] = None,
     traj_id: Optional[str] = None,
     traj_dir: Optional[Path] = None,
+    mask_patterns: Optional[list[str]] = None,
 ) -> dict:
     """
     Complete submission flow:
@@ -647,6 +648,10 @@ def submit_trajectory(
     3. Adapt the input format to standard markdown + JSON metadata.
     4. Write ``traj_{id}.md`` and optionally ``traj_{id}.json``.
     5. Return ``{"traj_id": ..., "path": ..., "status": "stored"}``.
+
+    ``mask_patterns``：去壳掩码正则列表；``None`` 时取 config 的
+    ``ingest.mask_patterns``（默认空 = 不替换）。命中段在写 md 之前替换为
+    占位符——剥掉评测 harness 的固定外壳，防聚类被任务外壳吸住。
     """
     traj_dir = Path(traj_dir) if traj_dir else get_traj_dir()
     traj_dir.mkdir(parents=True, exist_ok=True)
@@ -658,8 +663,14 @@ def submit_trajectory(
 
     # 落盘前清洗：去 ANSI 转义 + 控制字符（终端/tool 原始输出常掺入），
     # 保证 splitlines 行数 == \n 行数（atom offset 与人类行号一致）、不喂垃圾给模型。
-    from xskill.utils.sanitize import sanitize_trajectory_text
+    from xskill.utils.sanitize import apply_mask_patterns, sanitize_trajectory_text
     md_content = sanitize_trajectory_text(md_content)
+
+    # 去壳掩码：在入库转换阶段（写 md 之前）做，不在拆分阶段——落盘文本
+    # 本身已去壳，下游拆分/聚类/embedding 一律看不到外壳原文。
+    if mask_patterns is None:
+        mask_patterns = ingest_config()["mask_patterns"]
+    md_content = apply_mask_patterns(md_content, mask_patterns)
 
     # Write markdown
     md_path = traj_dir / f"{traj_id}.md"
