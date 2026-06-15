@@ -28,7 +28,7 @@ import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from pathlib import Path
 
 from xskill.canary import CanaryConfig
@@ -304,9 +304,28 @@ class DirectoryWatcher:
             self.skill_dir, self.skill_dir, self.llm,
             self.embed_client, self.config,
         )
-        for d in sorted(self.skill_dir.iterdir()):
-            if not d.is_dir() or d.name.startswith("."):
-                continue
+        # ── 跨技能并行写正文 ──
+        # 每个 skill 文件夹是独立 git 仓（skill/git.py 各自 git init），仓锁
+        # _repo_lock_for(repo_dir) 是 per-skill 的 → 不同技能 = 不同锁 = 零冲突，
+        # 跨技能并发安全。skill_tools 的 _ctx / _ctx_v2 在循环外已用同一个 skill
+        # 根目录初始化好，且只读共享根——maybe_run 期间不再改写它；write_file /
+        # commit_baby_to_main / commit_to_staging / skill_read 都按 skill_name
+        # 实参解析目标子目录（target = skill_dir / slug），不依赖任何 per-skill
+        # 全局态。因此把每个技能的 maybe_run() 丢进线程池并发跑是安全的。
+        #
+        # 仅并行 LLM 写正文（maybe_run）这一段；结果收齐后回主线程串行做
+        # _stats 自增 + 即时 install——避免对无锁的 self._stats 做并发自增，
+        # install 是廉价的文件系统活，串行无碍。
+        skill_dirs = [
+            d for d in sorted(self.skill_dir.iterdir())
+            if d.is_dir() and not d.name.startswith(".")
+        ]
+        if not skill_dirs:
+            return
+
+        def _run_one(d):
+            """在 pool 工作线程里跑单个 skill 的 maybe_run；返回 (d, promoted)。
+            异常吞在这里 log，不抛回 future 以免中断整批收集。"""
             editor = SkillEditAgent(
                 skill_dir=d, store=store,
                 agno_agent_factory=factory,
@@ -314,15 +333,29 @@ class DirectoryWatcher:
                 traj_root=traj_root,
             )
             try:
-                if editor.maybe_run():
-                    self._stats["skills_edited"] += 1
-                    logger.info("SkillEditAgent promoted: %s", d.name)
-                    # 即时 install 让 Claude Code 立刻看到新生成的 SKILL.md
-                    # 不必等 daemon 重启。install_to_claude_code 现在走 symlink，
-                    # 后续 xskill 改 SKILL.md 也会被 CC 立即感知。
-                    self._install_skill_to_all_detected(d)
+                return d, bool(editor.maybe_run())
             except Exception:
                 logger.exception("SkillEditAgent failed: %s", d.name)
+                return d, False
+
+        futures = {self._pool.submit(_run_one, d): d for d in skill_dirs}
+        promoted: list = []
+        for fut in as_completed(futures):
+            d, ok = fut.result()
+            if ok:
+                promoted.append(d)
+
+        # 回主线程串行汇总：_stats 自增（无锁，必须单线程）+ 即时 install。
+        for d in promoted:
+            self._stats["skills_edited"] += 1
+            logger.info("SkillEditAgent promoted: %s", d.name)
+            # 即时 install 让 Claude Code 立刻看到新生成的 SKILL.md
+            # 不必等 daemon 重启。install_to_claude_code 现在走 symlink，
+            # 后续 xskill 改 SKILL.md 也会被 CC 立即感知。
+            try:
+                self._install_skill_to_all_detected(d)
+            except Exception:
+                logger.exception("install after SkillEdit failed: %s", d.name)
 
     def _resolve_target_root(self):
         """target_root 优先级：
