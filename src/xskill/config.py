@@ -146,7 +146,17 @@ watcher:
                                 # above. Raise to 20-30 for self-hosted vLLM
                                 # or accounts with no concurrency cap. See
                                 # docs/adr/0001-rate-limit-diy-not-litellm.md
-  cold_start_threshold: 3       # defer process while >= N trajectories un-indexed
+  # cluster_batch_size: 8       # atoms consumed per ClusterAgent call. The
+                                # watcher pools un-clustered atoms ACROSS all
+                                # indexed trajectories, drops those already in a
+                                # skill's .candidates.yml, then feeds up to N at
+                                # a time to ONE ClusterAgent (one LLM round-trip
+                                # handles N atom positions instead of one). The
+                                # agent still reads each atom's content on demand
+                                # via tools — only the positions are batched.
+                                # Clustering stays serial (one batch in flight per
+                                # watch dir). Default 8; set 1 for the old
+                                # one-atom-per-call behavior.
 
 # ===== Ingest (bridging native agent sessions into traj_*.md) =====
 # 各生态 session ingester（claude_code / codex / openclaw / cursor 的 JSONL

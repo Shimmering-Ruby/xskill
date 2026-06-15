@@ -57,7 +57,6 @@ def _make_watcher(*, db, wd, skill_dir, store, server_mode):
         poll_interval=0.0,
         max_concurrent=4,
         db_path=db,
-        cold_start_threshold=999,  # disable cold-start gate
         store=store,
         agno_agent_factory=_StubAgno,
         home_root=wd.parent,

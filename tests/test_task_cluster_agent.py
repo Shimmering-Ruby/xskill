@@ -179,3 +179,62 @@ class TestClusterAgentPrompt:
         assert "weightscore" in sys_text.lower() or "权重" in sys_text
         # 严格分档表关键词
         assert "10" in sys_text and "立即触发" in sys_text
+
+    def test_process_batch_lists_all_atoms_in_one_call(self, tmp_path):
+        """process_batch 把整批 atom 的位置列进**一次** user_msg，每个 atom_id 都在。"""
+        skill_dir = tmp_path / "skill"
+        _make_skill(skill_dir, "fix-django", "django migration 修复")
+        store = AtomTaskStore(root=tmp_path / "cc-sessions")
+        atoms = []
+        for i in range(3):
+            a = AtomTask(
+                atom_id=f"atom_t_{i:04d}", traj_id="t",
+                offset_start=i * 10, offset_end=i * 10 + 5,
+                intent=f"intent {i}", summary=f"summary {i}",
+                tags=[], used_skills=[], ux_score=7,
+            )
+            store.save(a)
+            atoms.append(a)
+
+        captured = {"runs": 0}
+
+        class _StubAgnoAgent:
+            def __init__(self, *, instructions, tools):
+                captured["instructions"] = instructions
+
+            def run(self, user_msg, **kw):
+                captured["runs"] += 1
+                captured["user_msg"] = user_msg
+                class _R: pass
+                r = _R(); r.content = ""
+                return r
+
+        agent = TaskClusterAgent(
+            skill_dir=skill_dir, store=store,
+            agno_agent_factory=lambda **kw: _StubAgnoAgent(**kw),
+            llm_cfg={}, tools=[],
+        )
+        agent.process_batch(atoms)
+        # 一批 = 一次 LLM 调用（少往返的本质）
+        assert captured["runs"] == 1
+        # 三个 atom 的位置都在同一条 user_msg 里
+        for i in range(3):
+            assert f"atom_t_{i:04d}" in captured["user_msg"]
+        assert "共 3 个" in captured["user_msg"]
+
+    def test_process_batch_empty_is_noop(self, tmp_path):
+        """空批次直接返回空串，不调 agent。"""
+        skill_dir = tmp_path / "skill"; skill_dir.mkdir()
+        store = AtomTaskStore(root=tmp_path / "cc-sessions")
+        called = {"n": 0}
+
+        def _factory(**kw):
+            called["n"] += 1
+            raise AssertionError("空批次不应构造 agent")
+
+        agent = TaskClusterAgent(
+            skill_dir=skill_dir, store=store,
+            agno_agent_factory=_factory, llm_cfg={}, tools=[],
+        )
+        assert agent.process_batch([]) == ""
+        assert called["n"] == 0

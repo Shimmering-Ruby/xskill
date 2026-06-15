@@ -185,8 +185,13 @@ def _inject(template: str, **vals: str) -> str:
 
 
 def _is_user_header(body: str) -> bool:
-    """该行（已 rstrip）是否是 ``## User`` 回合标题。"""
-    return body == "## User" or body.startswith("## User ")
+    """该行（已 rstrip）是否是 ``## User`` 或 ``## Initial Query`` 回合标题。
+
+    ``## Initial Query`` 是所有 ecosystem adapter 写入的首条用户消息标题，
+    语义等同于 ``## User``，应作为合法拆分边界。
+    """
+    return (body == "## User" or body.startswith("## User ")
+            or body == "## Initial Query" or body.startswith("## Initial Query "))
 
 
 # ── 容噪过滤（F0）：纯机器签名块判别（确定性,零 LLM）─────────────────

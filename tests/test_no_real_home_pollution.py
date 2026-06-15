@@ -81,7 +81,6 @@ class TestNoRealHomePollution:
             poll_interval=0.0,
             max_concurrent=4,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,  # 关键：所有 install 都落 tmp
