@@ -63,6 +63,13 @@ llm:
                          # to YOUR model's real context limit (e.g. 128000 for
                          # gpt-4o, 64000 for deepseek-chat).
   # temperature: 0.0     # optional; default 0 (deterministic)
+  # request_timeout: 60  # optional; per-request wall-clock cap in seconds
+                         # (default 60). Explicit so an unreachable endpoint
+                         # fails loud instead of hanging forever.
+  # connect_timeout: 10  # optional; TCP-connect cap in seconds (default 10).
+  # client_max_retries: 0 # optional; openai-SDK client retries (default 0 —
+                         # transient-error retries are handled by xskill's own
+                         # retry wrapper; client retries would multiply).
   # rate_limit:          # optional; absent = unlimited (good for self-hosted)
   #   rpm: 60            # requests per minute; match your provider plan
   #   tpm: 100000        # tokens per minute (optional within rate_limit)
@@ -126,6 +133,9 @@ skill_opt:
   seed:               42     # fixed RNG seed → deterministic split
   catalog_max_skills: 12     # decoy-catalog size (mirrors CC listing budget)
   catalog_desc_cap:   256    # per-skill description truncation fed to the probe
+  probe_case_timeout: 60     # per-probe-case wall-clock cap (seconds); a stuck
+                             # probe counts as "not triggered" instead of
+                             # hanging the optimization loop. 0 disables.
   rerun_enabled:      true    # dashboard "re-run case" action endpoint on/off
 
 # ===== Watcher (the directory poller inside `serve`) =====
@@ -136,7 +146,34 @@ watcher:
                                 # above. Raise to 20-30 for self-hosted vLLM
                                 # or accounts with no concurrency cap. See
                                 # docs/adr/0001-rate-limit-diy-not-litellm.md
-  cold_start_threshold: 3       # defer process while >= N trajectories un-indexed
+  # cluster_batch_size: 8       # atoms consumed per ClusterAgent call. The
+                                # watcher pools un-clustered atoms ACROSS all
+                                # indexed trajectories, drops those already in a
+                                # skill's .candidates.yml, then feeds up to N at
+                                # a time to ONE ClusterAgent (one LLM round-trip
+                                # handles N atom positions instead of one). The
+                                # agent still reads each atom's content on demand
+                                # via tools — only the positions are batched.
+                                # Clustering stays serial (one batch in flight per
+                                # watch dir). Default 8; set 1 for the old
+                                # one-atom-per-call behavior.
+
+# ===== Ingest (bridging native agent sessions into traj_*.md) =====
+# 各生态 session ingester（claude_code / codex / openclaw / cursor 的 JSONL
+# 桥接）入库行为。
+ingest:
+  settle_seconds: 120   # 入库完成屏障：源 session 文件最后修改距今 < N 秒视为
+                        # "还在写"，本轮不入库，等停笔满 N 秒后的下一轮 poll 再
+                        # 转换——避免把刚开跑的 session 定格成只有题面的残骸。
+                        # 已入库后源文件又增长的 session 会被重新转换覆盖
+                        # （并重置该轨迹已拆出的 atom，等价 rebuild --traj）。
+                        # 真实用户 session 动辄几十分钟，调太小会截断；
+                        # 评测场景（脚本批量产 session、写完即定稿）建议 5~15。
+  mask_patterns: []     # 去壳掩码：正则列表。入库转换写 md 之前，把命中的文本段
+                        # 替换为 [MASKED_HARNESS_PROMPT] 占位符——用于剥掉评测
+                        # harness 每题固定的 turn-0 提示词，防聚类被任务外壳吸住。
+                        # 默认空列表 = 完全不替换（现网用户不受影响）。
+                        # 跨行匹配用内联 flag，例：'(?s)HARNESS_BEGIN.*?HARNESS_END'
 
 # ===== Team C/S mode (only read by `xskill serve --server`) =====
 # 仅 server 端读这一段。客户端（`xskill connect <host:port> --token ...`）是瘦
@@ -246,6 +283,53 @@ def dashboard_attribution_defaults(path: Optional[Path] = None) -> dict:
         with open(cfg_path, encoding="utf-8") as f:
             section = (yaml.safe_load(f) or {}).get("dashboard") or {}
     return _resolve_attribution(section)
+
+
+# ingest.settle_seconds 缺省值。区间权衡：真实用户 session 动辄几十分钟，
+# 过短（<60s）在长思考/长工具调用间隙就会误判"已写完"提前定格；过长则新
+# session 入库延迟无谓变大。120s 落在建议区间（90~180s）中段。
+INGEST_SETTLE_SECONDS_DEFAULT = 120.0
+
+
+def ingest_config(path: Optional[Path] = None) -> dict:
+    """读 config.yaml 的 ingest 段，缺字段用显式默认（非 fallback 兼容）。
+
+    与 ``dashboard_attribution_defaults`` 同性质：**不校验 llm/embedding
+    api_key**——team 瘦客户端 / 一次性 CLI 桥接（没配 key 的环境）也要能
+    桥轨迹；config.yaml 不存在时返回全默认。
+
+    返回 ``{"settle_seconds": float, "mask_patterns": list[str]}``。
+    ``mask_patterns`` 在此即编译校验——坏正则 / 非列表直接抛 ValueError
+    （CLAUDE.md：遇到问题 throw error，不静默吞掉让掩码失效）。
+    """
+    import re as _re
+
+    cfg_path = Path(path) if path else CONFIG_PATH
+    section: dict = {}
+    if cfg_path.exists():
+        with open(cfg_path, encoding="utf-8") as f:
+            section = (yaml.safe_load(f) or {}).get("ingest") or {}
+
+    settle = section.get("settle_seconds", INGEST_SETTLE_SECONDS_DEFAULT)
+    raw_patterns = section.get("mask_patterns") or []
+    if not isinstance(raw_patterns, list):
+        raise ValueError(
+            f"ingest.mask_patterns 必须是正则列表，got {type(raw_patterns).__name__}"
+        )
+    patterns: list[str] = []
+    for i, p in enumerate(raw_patterns):
+        if not isinstance(p, str):
+            raise ValueError(
+                f"ingest.mask_patterns[{i}] 必须是字符串正则，got {type(p).__name__}"
+            )
+        try:
+            _re.compile(p)
+        except _re.error as e:
+            raise ValueError(
+                f"ingest.mask_patterns[{i}] 不是合法正则 {p!r}: {e}"
+            ) from e
+        patterns.append(p)
+    return {"settle_seconds": float(settle), "mask_patterns": patterns}
 
 
 def get_skill_dir() -> Path:

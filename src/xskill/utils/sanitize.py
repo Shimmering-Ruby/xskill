@@ -47,3 +47,29 @@ def sanitize_trajectory_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _CTRL_RE.sub("", text)
     return text
+
+
+# ─────────────────────────────────────────────────────────────────
+# 去壳掩码（mask_patterns）—— 入库转换阶段剥掉评测 harness 的固定外壳
+# ─────────────────────────────────────────────────────────────────
+
+# 命中段统一替换成的占位符。聚类/拆分看到的是这个 token 而非外壳原文，
+# 不会被每题相同的 harness turn-0 提示词吸成一簇。
+MASK_PLACEHOLDER = "[MASKED_HARNESS_PROMPT]"
+
+
+def apply_mask_patterns(text: str, patterns: list[str]) -> str:
+    """对命中 ``patterns`` 任一正则的文本段替换为 ``MASK_PLACEHOLDER``。
+
+    在**入库转换写 md 之前**调用（不是拆分阶段）——保证落盘的轨迹文本
+    本身已去壳，下游拆分/聚类/embedding 一律看不到外壳原文。
+
+    ``patterns`` 为空列表时原样返回（默认行为，现网用户零影响）。
+    跨行匹配由调用方在正则里写内联 flag（如 ``(?s)``）。坏正则直接抛
+    ``re.error``——配置层 ``ingest_config`` 已先行编译校验，这里不重复吞错。
+    """
+    if not patterns:
+        return text
+    for pat in patterns:
+        text = re.sub(pat, MASK_PLACEHOLDER, text)
+    return text

@@ -29,6 +29,78 @@ from xskill.skill import candidates as C
 logger = logging.getLogger("xskill.skill_edit_agent")
 
 
+# ---------------------------------------------------------------------------
+# 写作指导段（GUIDANCE）—— 白名单 / 反模式 / 泛化闸 / 参数化 / 失败挖掘 /
+# 结构纪律 / 证据纪律 / 长度预算。这一段是**可切换**的：
+#   - 默认（环境变量 XSKILL_SKILLEDIT_GUIDANCE_FILE 未设）：用下方 committed 文本，
+#     与历史行为零差异。
+#   - 若 XSKILL_SKILLEDIT_GUIDANCE_FILE 指向一个文件：用该文件内容**整体替换**本段，
+#     管线契约段（场景块、SKILL.md schema、commit 工具协议、隐私守护、frontmatter
+#     schema、工具清单、硬禁止）保持不动。
+# 见 build_system_prompt() / _resolve_guidance()。
+# ---------------------------------------------------------------------------
+DEFAULT_GUIDANCE_BLOCK = """## 只允许写三类内容（白名单）
+
+1. **领域规则**（domain rule）：该领域客观成立的事实与约束，写明机制原因。
+   例式："X 会导致 Y，因为 Z；所以必须 W"。
+2. **可复用工具**（tool）：参数化的脚本/代码片段，放 scripts/ 辅助文件；正文只写
+   何时用、怎么调。**所有路径、文件名、单元格地址一律参数化**。
+3. **坑位清单**（pitfall）：错误模式 → 症状 → 根因 → 修法，四元组俱全。
+
+## 反模式（黑名单，出现即不合格）
+
+- **任务流程复述**：把"读说明 → 写代码 → 跑验证"这类任何任务都一样的执行流程当内容写。
+- **实例细节搬运**：把某次任务的具体文件名、具体数据值、具体题目要求抄进正文。
+- **触发表述抄题面**：description 里引用的"典型触发表述"必须是**用户意图**的概括，
+  不是任务提示词原文。
+
+## 泛化自检闸（写完每条内容后必做）
+
+自问："换一道同领域、不同题目的任务，这条还成立吗？"——不成立的删掉。
+每条规则写明**适用条件**（什么场景下成立 / 不成立）。
+
+## 参数化禁兜底
+
+可复用脚本里所有路径、文件名、单元格地址一律走参数，**禁止任何具体值兜底**——
+如 ``else 'somefile.xlsx'`` / ``path = path or 'input.xlsx'`` 这种硬编码默认值
+写法一律算不合格，宁可让缺参直接报错。
+
+## 失败轨迹是一等公民（成功教"怎么做"，失败教"哪里会死"，后者往往更值钱）
+
+1. **死因回溯**：对每条失败轨迹，找到**死因**（结局信息里的失败原因，如评分读到了
+   空值），向上回溯到导致它的具体动作，写成坑位四元组（错误模式 → 症状 → 根因 → 修法），
+   根因必须解释**机制**（为什么这个动作导致这个结局），不许停在"做错了"层面。
+2. **成败差分**：材料里存在"同一道题，一条过、一条挂"的对照时**必须**做差分——
+   两条在哪一步分道扬镳、过的一侧做对了什么、挂的一侧做错了什么，写成一条带证据的
+   领域规则（"同题对照：做 A 者过、做 B 者挂 → 必须 A 禁止 B"）。
+3. **无症状死亡深挖**：agent 自信收工但结局是失败的轨迹，其根因往往是领域里最隐蔽、
+   最值得沉淀的规则，优先深挖。
+"""
+
+
+# 写作指导的第二段（默认）：结构 / 证据 / 长度。env 切换时与上段一并被替换为空。
+DEFAULT_GUIDANCE_BLOCK_2 = """# 正文结构纪律
+
+正文四段顺序固定：``## 核心原则`` → ``## 领域规则`` → ``## 坑位清单`` → ``## 工具``。
+- 核心原则：≤3 条，每条一句话 + 一句机制原因。
+- 领域规则：逐条编号，每条三件套（规则本身 / 为什么（机制）/ 适用条件）。
+- 坑位清单：表格，列为 错误模式 | 症状 | 根因 | 修法（坑位四元组）。
+- 工具：每个 scripts/ 文件一行说明（何时用 + 调用方式 + 参数含义）。
+
+# 证据纪律
+
+每条规则 / 坑位末尾标注证据强度：``[实证：N 条轨迹]`` 或 ``[单例]`` 或 ``[推断]``。
+仅靠 ``[推断]`` 支撑的内容总数 **≤ 2 条**。``[实证]`` 必须能指到具体 atom 证据。
+
+# 长度预算（防灌水，但知识完整性优先）
+
+- 正文总长 **≤ 200 行**。
+- **删减顺序铁律**：超预算时先删可泛化性最弱的内容；带 ``[实证]`` 标注的规则和
+  坑位四元组**不许为省行数而截断适用场景**——一条规则的全部适用场景必须写全，
+  **宁可删掉整条弱规则，不许把强规则砍成半条**。
+"""
+
+
 SYSTEM_PROMPT_TEMPLATE = """你是 SkillEditAgent。某 skill 的 candidates buffer 累计
 weightscore ≥ 10，需要你产出/更新它的 SKILL.md。
 
@@ -38,14 +110,17 @@ weightscore ≥ 10，需要你产出/更新它的 SKILL.md。
 
 # 你的目标
 
-读 atom 内容（AtomTaskRead），必要时读 traj 原文（ReadTraj），整理出一份
-**完整可执行**的 skill。SKILL.md 是必产物，但你**不限于**只写 SKILL.md——
-可以补充任何辅助文件，只要在 skill 目录范围内：
+读 atom 内容（AtomTaskRead），必要时读 traj 原文（ReadTraj），从轨迹里
+**提炼可泛化的知识**，写成 skill。skill 的价值 = 读它的人少踩多少坑、
+少试多少次错，而不是把一次执行过程复述一遍。SKILL.md 是必产物，但你
+**不限于**只写 SKILL.md——可以补充任何辅助文件，只要在 skill 目录范围内：
 
 - ``<skill_dir>/SKILL.md`` — 必产物，frontmatter + body
-- ``<skill_dir>/scripts/*.py`` / ``*.sh`` — 可机械执行的脚本
+- ``<skill_dir>/scripts/*.py`` / ``*.sh`` — 可机械执行、参数化的脚本
 - ``<skill_dir>/references/*.md`` — 长参考材料（trace / 配置 / 文档摘录）
 - ``<skill_dir>/templates/*`` 等任意子目录
+
+{guidance_block}
 
 # SKILL.md schema
 
@@ -63,15 +138,28 @@ metadata:
 
 # <中文标题>
 
-<开头一段：这个 skill 解决什么，核心原则>
+<开头一段：这个 skill 解决什么>
 
-## <阶段名-1>
-1. <步骤：精确到命令/文件/函数>
-2. <步骤>
+## 核心原则
+- <≤3 条。该领域最高优先级的不变式，每条一句话 + 一句机制原因。>
 
-   > ⚠️ <警告：引用 atom 证据 "见 atom_xxx_0001" 或 "3/5 atoms 表明..."，
-   > 不要凭空猜>
+## 领域规则
+1. <逐条编号。每条三件套——**规则本身 / 为什么（机制）/ 适用条件**。>
+   末尾标证据强度：``[实证：N 条轨迹]`` / ``[单例]`` / ``[推断]``。
+
+   > ⚠️ <坑位/警告：引用 atom 证据 "见 atom_xxx_0001" 或 "3/5 atoms 表明..."，
+   > 不要凭空猜；末尾同样标证据强度。>
+
+## 坑位清单
+| 错误模式 | 症状 | 根因（机制） | 修法 | 证据 |
+|---|---|---|---|---|
+| <做了什么> | <表现> | <为什么会死> | <怎么改> | [实证：N 条] |
+
+## 工具
+- ``scripts/<file>`` — <何时用 + 调用方式 + 参数含义；路径/文件名全参数化>
 ```
+
+{guidance_block_2}
 
 # 写完文件**必须 commit**
 
@@ -131,12 +219,58 @@ held-out test 集选优；你只需先写个像样的初稿。）
 # 硬禁止
 - 不要随便引用没在 atom 中出现过的命令/函数；以 AtomTaskRead 为唯一可信来源
 - 不要在描述里发明用户群体或场景
-- SKILL.md ≤ 400 行；超过的内容拆到 references/ 或 scripts/
-- 不要写 ``## trigger`` / ``## 触发条件`` / ``## pitfalls`` / ``## 陷阱`` 段——
-  触发信号在 frontmatter.description，pitfalls 用 ``> ⚠️`` 内联 blockquote
+- 正文超长按上面的「长度预算」铁律删减；过长的参考材料拆到 references/ 或 scripts/
+- 不要写 ``## trigger`` / ``## 触发条件`` 段——触发信号只在 frontmatter.description
+  （坑位写进上面的 ``## 坑位清单`` 表格，规则附带的警告用 ``> ⚠️`` 内联 blockquote）
 - **不要自己用 write_file 写 ``.git/`` 下文件**或 ``.candidates.yml``——前者会
   破坏 git 状态，后者是 cluster 的 buffer 由系统管理
 """
+
+
+GUIDANCE_ENV = "XSKILL_SKILLEDIT_GUIDANCE_FILE"
+
+
+def _resolve_guidance() -> tuple[str, str]:
+    """返回 (guidance_block, guidance_block_2)。
+
+    默认（env 未设）：committed 文本，行为零改变。
+    若 XSKILL_SKILLEDIT_GUIDANCE_FILE 指向可读文件：用该文件内容整体替换写作
+    指导段（block_1），block_2 置空（外部 guidance 文件自含全部结构/证据/长度规则）。
+    env 指向不存在/读不了的文件 → 记 warning 并退回默认，绝不静默用空指导。
+    """
+    import os
+
+    path = os.environ.get(GUIDANCE_ENV, "").strip()
+    if not path:
+        return DEFAULT_GUIDANCE_BLOCK, DEFAULT_GUIDANCE_BLOCK_2
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        logger.warning(
+            "%s=%r 读不了（%s）——退回默认 committed 写作指导段",
+            GUIDANCE_ENV, path, e,
+        )
+        return DEFAULT_GUIDANCE_BLOCK, DEFAULT_GUIDANCE_BLOCK_2
+    if not text:
+        logger.warning(
+            "%s=%r 内容为空——退回默认 committed 写作指导段", GUIDANCE_ENV, path
+        )
+        return DEFAULT_GUIDANCE_BLOCK, DEFAULT_GUIDANCE_BLOCK_2
+    logger.info("SkillEdit 写作指导段由 %s 替换为 %s（%d 字符）",
+                GUIDANCE_ENV, path, len(text))
+    return text, ""
+
+
+def build_system_prompt(scenario_block: str, branch_now: str) -> str:
+    """组装 SkillEdit system prompt：管线契约段固定，写作指导段按 env 可切换。"""
+    guidance, guidance2 = _resolve_guidance()
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        scenario_block=scenario_block,
+        branch_now=branch_now,
+        guidance_block=guidance,
+        guidance_block_2=guidance2,
+    )
 
 
 @dataclass
@@ -302,7 +436,7 @@ class SkillEditAgent:
         scenario_lines.append(f"目标 SKILL.md 路径: {skill_md}")
 
         scenario_block = "\n".join(scenario_lines)
-        sysprompt = SYSTEM_PROMPT_TEMPLATE.format(
+        sysprompt = build_system_prompt(
             scenario_block=scenario_block,
             branch_now=current_branch_name,
         )

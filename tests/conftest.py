@@ -45,6 +45,21 @@ def _isolate_registry_db(tmp_path_factory, monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────
+# ingest 配置隔离：测试不读真实 ~/.xskill/config.yaml 的 ingest 段
+# ─────────────────────────────────────────────────────────────────
+# 入库完成屏障（settle barrier）默认 120s——既有测试普遍"写完 session 文件
+# 立刻扫描"，不隔离会被屏障全部挡掉；且测试不该依赖开发机真实 config.yaml。
+# 统一钉成 settle=0 / 掩码空。要测屏障/掩码本身的测试显式传
+# settle_seconds / mask_patterns 参数（参数优先于这里的 config 默认），不受影响。
+@pytest.fixture(autouse=True)
+def _isolate_ingest_config(monkeypatch):
+    monkeypatch.setattr(
+        "xskill.ecosystems._shared.ingest_config",
+        lambda path=None: {"settle_seconds": 0.0, "mask_patterns": []},
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
 # 真实 ~/.claude/skills/ 防污染快照
 # ─────────────────────────────────────────────────────────────────
 

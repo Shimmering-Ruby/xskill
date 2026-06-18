@@ -41,12 +41,13 @@ class _StubAgno:
             # 这类毫秒级旁路开销相对可忽略,贴近生产时序(否则瞬时 stub 会放大
             # 旁路写入、扰动 candidates 晋升竞态)。
             _t.sleep(0.03)
-            m = re.search(r"atom_id:\s*(\S+)", user_msg)
-            atom_id = m.group(1) if m else None
-            if "new_skill_folder" in self.tools:
-                self.tools["new_skill_folder"]("auto-skill", "stub desc")
-            if "add_task_to_skill" in self.tools and atom_id:
-                self.tools["add_task_to_skill"]("auto-skill", atom_id, 10)
+            # 跨轨迹批处理：一次调用可能拿到多个 atom 的位置，逐个归类。
+            atom_ids = re.findall(r"atom_id:\s*(\S+)", user_msg)
+            for atom_id in atom_ids:
+                if "new_skill_folder" in self.tools:
+                    self.tools["new_skill_folder"]("auto-skill", "stub desc")
+                if "add_task_to_skill" in self.tools:
+                    self.tools["add_task_to_skill"]("auto-skill", atom_id, 10)
         elif "SkillEditAgent" in head:
             import re
             m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
@@ -107,7 +108,6 @@ class TestZombieCleanup:
             poll_interval=0.0,
             max_concurrent=2,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,
@@ -140,7 +140,6 @@ class TestZombieCleanup:
             poll_interval=0.0,
             max_concurrent=2,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,
@@ -151,36 +150,49 @@ class TestZombieCleanup:
                or len(watcher._futures) > 0
 
 
-class TestColdStartSerial:
-    """冷启动期间 cluster 强制串行（max_concurrent=1）：避免并发 cluster
-    agent 创建近义 baby slug——逐条决策让 catalog 演化可见。"""
+def _seed_indexed_with_atoms(wd, store, db, n_trajs, atoms_per_traj):
+    """造 n_trajs 条 indexed 轨迹，每条若干真 atom（跳过 split/embed）。返回 wd_id。"""
+    from xskill.pipeline.atom import AtomTask
+    for n in range(n_trajs):
+        (wd / f"traj_{n}.md").write_text(_TRAJ_MD, encoding="utf-8")
+        for i in range(atoms_per_traj):
+            store.save(AtomTask(
+                atom_id=f"atom_traj_{n}_{i:04d}", traj_id=f"traj_{n}",
+                offset_start=1 + i * 10, offset_end=10 + i * 10,
+                intent="i", summary="s", tags=[], used_skills=[], ux_score=7,
+            ))
+    wd_id = register_dir(wd, db_path=db)
+    discover_trajectories(wd_id, wd, db_path=db)
+    for n in range(n_trajs):
+        update_traj_status(wd_id, f"traj_{n}.md", "indexed", db_path=db)
+    return wd_id
 
-    def test_only_one_cluster_in_flight_during_cold_start(self, tmp_path):
-        """pending pre-index ≥ threshold 时，单轮 scan 最多提交 1 个 cluster job。"""
+
+class TestClusterSerial:
+    """聚类始终串行：同 wd 同时只允许一个 cluster batch future 在飞——逐批让
+    catalog 演化可见，避免并发 cluster agent 创建近义 baby slug。"""
+
+    def _blocking_factory(self):
+        class _BlockingStub:
+            def __init__(self, **kw):
+                pass
+
+            def run(self, msg, **kw):
+                import time
+                time.sleep(5)  # 模拟 cluster 长时间运行，让 future 留在飞
+                class _R: pass
+                r = _R(); r.content = ""; return r
+        return lambda **k: _BlockingStub(**k)
+
+    def test_only_one_cluster_batch_in_flight(self, tmp_path):
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
-        # 5 条 traj，2 条 indexed（待 cluster），3 条 split_done（pending pre-index）
-        for i in range(5):
-            (wd / f"traj_{i}.md").write_text(_TRAJ_MD, encoding="utf-8")
-
-        wd_id = register_dir(wd, db_path=db)
-        discover_trajectories(wd_id, wd, db_path=db)
-        for fname in ("traj_0.md", "traj_1.md"):
-            update_traj_status(wd_id, fname, "indexed", db_path=db)
-        for fname in ("traj_2.md", "traj_3.md", "traj_4.md"):
-            update_traj_status(wd_id, fname, "split_done", db_path=db)
-
-        # cluster 一直挂着不返回，让我们能观察 in-flight 数
-        class _BlockingStub:
-            def __init__(self, **kw): pass
-            def run(self, msg, **kw):
-                import time
-                time.sleep(5)  # 模拟 cluster 长时间运行
-                class _R: pass
-                r = _R(); r.content = ""; return r
-
         store = AtomTaskStore(root=wd)
+        # 4 条 indexed 轨迹 × 2 atom，batch_size=2 → 即便有 8 个待消费 atom、
+        # 4 个批次的量，同 wd 也只起 1 个 batch future（串行）。
+        wd_id = _seed_indexed_with_atoms(wd, store, db, n_trajs=4, atoms_per_traj=2)
+
         watcher = DirectoryWatcher(
             llm=_AutoSplitLLM(),
             embed_client=_FakeEmbed(),
@@ -189,78 +201,33 @@ class TestColdStartSerial:
             poll_interval=0.0,
             max_concurrent=30,
             db_path=db,
-            cold_start_threshold=3,
             store=store,
-            agno_agent_factory=lambda **k: _BlockingStub(**k),
+            agno_agent_factory=self._blocking_factory(),
             home_root=tmp_path,
+            cluster_batch_size=2,
         )
         watcher._scan_once()
-        # cold-start 应该只让 1 个 cluster 在飞
         cluster_in_flight = sum(
             1 for i in watcher._futures.values() if i["stage"] == "cluster"
         )
         assert cluster_in_flight == 1, (
-            f"冷启动期间 cluster 应串行（1 in-flight），实际 {cluster_in_flight}"
+            f"cluster 应串行（1 batch in-flight），实际 {cluster_in_flight}"
         )
-        # 再 scan 一次：cluster 还在飞 → 不应再提交新的
+        # 再 scan 一次：上一个 batch 还在飞 → 不应再提交新的
         watcher._scan_once()
         cluster_in_flight = sum(
             1 for i in watcher._futures.values() if i["stage"] == "cluster"
         )
-        assert cluster_in_flight == 1, "第二轮 scan 不应增加 cluster in-flight"
-        # cleanup: 不等 sleep(5) 跑完，主测试就完成
-        watcher._pool.shutdown(wait=False)
-
-    def test_steady_state_allows_max_concurrent(self, tmp_path):
-        """稳态（backlog < threshold）→ 允许 max_concurrent 并发。"""
-        db = tmp_path / "test.db"
-        wd = tmp_path / "wd"; wd.mkdir()
-        skill_dir = tmp_path / "skill"; skill_dir.mkdir()
-        # 2 条 traj indexed，threshold=10 → 远低于阈值，稳态
-        for i in range(2):
-            (wd / f"traj_{i}.md").write_text(_TRAJ_MD, encoding="utf-8")
-        wd_id = register_dir(wd, db_path=db)
-        discover_trajectories(wd_id, wd, db_path=db)
-        for i in range(2):
-            update_traj_status(wd_id, f"traj_{i}.md", "indexed", db_path=db)
-
-        class _BlockingStub:
-            def __init__(self, **kw): pass
-            def run(self, msg, **kw):
-                import time
-                time.sleep(5)
-                class _R: pass
-                r = _R(); r.content = ""; return r
-
-        store = AtomTaskStore(root=wd)
-        watcher = DirectoryWatcher(
-            llm=_AutoSplitLLM(),
-            embed_client=_FakeEmbed(),
-            config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
-            skill_dir=skill_dir,
-            poll_interval=0.0,
-            max_concurrent=30,
-            db_path=db,
-            cold_start_threshold=10,  # 高阈值 → 2 条不触发 cold-start
-            store=store,
-            agno_agent_factory=lambda **k: _BlockingStub(**k),
-            home_root=tmp_path,
-        )
-        watcher._scan_once()
-        cluster_in_flight = sum(
-            1 for i in watcher._futures.values() if i["stage"] == "cluster"
-        )
-        assert cluster_in_flight == 2, (
-            f"稳态（backlog < threshold）应并发 2 个，实际 {cluster_in_flight}"
-        )
+        assert cluster_in_flight == 1, "batch 在飞时第二轮 scan 不应再起新 batch"
         watcher._pool.shutdown(wait=False)
 
 
 class TestClusterAllFailed:
-    """LLM 余额耗尽 / 全部 atom cluster 抛异常时，traj 必须标 error 让下轮 retry，
-    不能被假冒成 ``done``（实跑暴露的 bug：原 ``_on_cluster_done`` 无条件标 done）。"""
+    """整批 cluster 抛异常（LLM 余额耗尽等）→ atom 未落地 → 轨迹留在 indexed
+    等下一轮重新进池重试，**不**被假冒成 done，也**不**再标 error（跨轨迹批处理
+    无 per-traj cluster 错误态——重池化即重试，靠 cluster prompt 保证终将落地）。"""
 
-    def test_all_atoms_failed_marks_traj_error(self, tmp_path):
+    def test_all_atoms_failed_traj_stays_indexed(self, tmp_path):
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
@@ -291,31 +258,30 @@ class TestClusterAllFailed:
             poll_interval=0.0,
             max_concurrent=2,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
-            max_retries=0,  # 不让 watcher 自动 retry，便于断言"留在 error"
+            max_retries=0,
             agno_agent_factory=lambda **kw: _AlwaysFailAgno(**kw),
             home_root=tmp_path,
         )
 
-        # 跑足够多轮把 traj 推到 cluster 阶段
-        for _ in range(10):
+        # 跑足够多轮：split 成功 → indexed → 每轮 cluster batch 抛异常
+        for _ in range(8):
             watcher._scan_once()
             for _ in range(20):
                 if not watcher._futures:
                     break
                 time.sleep(0.05)
                 watcher._harvest()
-            wd_id = register_dir(wd, db_path=db)
-            if "traj_x.md" in get_trajs_by_status(wd_id, "error", db_path=db):
-                break
 
         wd_id = register_dir(wd, db_path=db)
-        # 关键断言：cluster 全失败 → traj 必须是 error，不能是 done
+        # cluster 全失败 → 不 done、不 error，留在 indexed 等重池化重试
         assert "traj_x.md" not in get_trajs_by_status(wd_id, "done", db_path=db), \
-            "全部 atom cluster 失败的 traj 不应被标 done"
-        assert "traj_x.md" in get_trajs_by_status(wd_id, "error", db_path=db), \
-            "全部 atom cluster 失败的 traj 应被标 error 等待 retry"
+            "cluster 全失败的 traj 不应被标 done"
+        assert "traj_x.md" not in get_trajs_by_status(
+            wd_id, "error", db_path=db, max_retries=999), \
+            "跨轨迹批处理无 per-traj cluster error 态"
+        assert "traj_x.md" in get_trajs_by_status(wd_id, "indexed", db_path=db), \
+            "cluster 全失败的 traj 应留在 indexed 等下轮重新进池"
 
 
 class TestIndependentSkillEditScan:
@@ -375,7 +341,6 @@ class TestIndependentSkillEditScan:
             poll_interval=0.0,
             max_concurrent=2,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
             agno_agent_factory=lambda **kw: _MixedStub(**kw),
             home_root=tmp_path,
@@ -438,7 +403,6 @@ class TestUxScoreAtomLevel:
             poll_interval=0.0,
             max_concurrent=2,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,
@@ -494,7 +458,6 @@ class TestUxScoreAtomLevel:
             poll_interval=0.0,
             max_concurrent=2,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,
@@ -546,7 +509,6 @@ class TestContinuationResplit:
             poll_interval=0.0,
             max_concurrent=4,
             db_path=db,
-            cold_start_threshold=999,
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,
@@ -616,7 +578,6 @@ class TestPipelineRun:
             poll_interval=0.0,
             max_concurrent=4,
             db_path=db,
-            cold_start_threshold=999,  # 关闭门控避免阻塞
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,

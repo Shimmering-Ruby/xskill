@@ -537,6 +537,14 @@ def sandbox(tmp_path, fake_server):
             "min_samples": CANARY_MIN_SAMPLES, "max_days_hold": 14,
         },
         "watcher": {"poll_interval": 2},
+        # 入库完成屏障（settle barrier，src/xskill 的 ingest 路径，默认 120s）
+        # 会把"刚写完即扫描"的 session 全挡在窗口外 → daemon 子进程读本
+        # config.yaml 拿到默认值，E2E 等不到桥接而超时。评测场景里 session
+        # 由脚本一次性写完即定稿，关掉屏障（=0）即"出现即入库"。
+        # 注意：conftest 的 _isolate_ingest_config 只 monkeypatch 进程内
+        # ingest_config，管不到 ``xskill serve`` 子进程；子进程只认这份
+        # config.yaml，故必须在此显式写 0。
+        "ingest": {"settle_seconds": 0},
     }
     (xhome / "config.yaml").write_text(
         yaml.safe_dump(config_yaml, allow_unicode=True), encoding="utf-8",
