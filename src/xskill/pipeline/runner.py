@@ -108,7 +108,7 @@ class DirectoryWatcher:
             Path(install_history_path) if install_history_path
             else XSKILL_HOME / "install_history.jsonl"
         )
-        # 冷启动 epoch 屏障：config['cold_start'] 控制。默认关闭（active=False）
+        # 冷启动批量 flush 屏障：config['cold_start'] 控制。默认关闭（active=False）
         # → 走正常在线增量。屏障 sentinel 默认落在 home_root（测试注入的 tmp 或
         # daemon --home）下，缺省回退 XSKILL_HOME。见 pipeline/cold_start.py。
         from xskill.pipeline.cold_start import ColdStartController
@@ -274,15 +274,16 @@ class DirectoryWatcher:
         """Step 5 的冷启动感知封装。
 
         冷启动阶段（``_cold_start.active``）：hold 住增量 SkillEdit，让 candidates
-        攒满整个 epoch；直到算法落屏障 sentinel → 用 ``flush_threshold`` 一次性
-        批量毕业所有有候选的 skill，然后消费屏障（epoch 计数 +1，跑满即转在线）。
+        攒满当前批量导入轮次；直到外部编排落屏障 sentinel → 用
+        ``flush_threshold`` 一次性批量毕业所有有候选的 skill，然后消费屏障
+        （轮次计数 +1，跑满即转在线）。
         非冷启动（默认/已转在线）：走正常阈值在线增量。
         """
         cs = self._cold_start
         if cs.active:
             if cs.barrier_reached():
                 logger.info(
-                    "冷启动 epoch 屏障到达 → 批量 flush SkillEdit (flush_threshold=%d)",
+                    "冷启动批量 flush 屏障到达 → SkillEdit (flush_threshold=%d)",
                     cs.flush_threshold,
                 )
                 self._check_pending_skill_edits(threshold=cs.flush_threshold)

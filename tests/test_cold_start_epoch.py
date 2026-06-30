@@ -1,4 +1,4 @@
-"""冷启动 epoch 屏障回归测试（轨迹堰塞修复）。
+"""冷启动批量 flush 屏障回归测试（轨迹堰塞修复）。
 
 验证：
   1. ColdStartController 纯逻辑：from_config 缺省关闭、字段解析、非法配置抛错、
@@ -7,9 +7,9 @@
      **不会**毕业任何技能（这就是堰塞——小数据下没有技能能毕业）。
   3. 冷启动 hold：启用冷启动、屏障未到 → _run_skill_edit_step 不写正文，
      baby 技能继续停在 baby，candidates 不清。
-  4. 屏障 flush：算法落 sentinel → _run_skill_edit_step 用 flush_threshold 一次性
+  4. 屏障 flush：外部编排落 sentinel → _run_skill_edit_step 用 flush_threshold 一次性
      把所有有候选的 baby 技能批量毕业到 main，candidates 清空，sentinel 被消费。
-  5. flush 后 epoch 跑满 → 转在线：新的低分技能重回正常阈值，不再被强制毕业。
+  5. flush 轮次跑满 → 转在线：新的低分技能重回正常阈值，不再被强制毕业。
 """
 from __future__ import annotations
 
@@ -18,7 +18,10 @@ import threading
 import pytest
 
 from xskill.pipeline.atom import AtomTaskStore
-from xskill.pipeline.cold_start import ColdStartController
+from xskill.pipeline.cold_start import (
+    ColdStartController,
+    DEFAULT_BARRIER_FILENAME,
+)
 from xskill.pipeline.registry import register_dir
 from xskill.pipeline.runner import DirectoryWatcher
 from xskill.skill import candidates as C
@@ -80,7 +83,7 @@ class TestColdStartController:
             {"cold_start": {"enabled": True}}, tmp_path)
         assert cs.enabled and cs.active
         assert cs.flush_threshold == 1 and cs.epochs == 1
-        assert cs.barrier_path == tmp_path / "EPOCH_FLUSH"
+        assert cs.barrier_path == tmp_path / DEFAULT_BARRIER_FILENAME
 
     def test_explicit_barrier_path(self, tmp_path):
         p = tmp_path / "sub" / "FLUSH"
@@ -97,7 +100,7 @@ class TestColdStartController:
                 {"cold_start": {"enabled": True, **bad}}, tmp_path)
 
     def test_barrier_lifecycle(self, tmp_path):
-        bp = tmp_path / "EPOCH_FLUSH"
+        bp = tmp_path / DEFAULT_BARRIER_FILENAME
         cs = ColdStartController.from_config(
             {"cold_start": {"enabled": True, "epochs": 1}}, tmp_path)
         assert cs.barrier_reached() is False           # sentinel 不存在
@@ -106,7 +109,7 @@ class TestColdStartController:
         cs.consume_barrier()
         assert not bp.exists()                         # 被消费删除
         assert cs._epochs_done == 1
-        assert cs.active is False                      # 跑满 1 epoch → 转在线
+        assert cs.active is False                      # 跑满 1 轮 → 转在线
         bp.touch()
         assert cs.barrier_reached() is False           # 已非 active，屏障不再触发
 
@@ -137,8 +140,8 @@ class TestColdStartEpochFlush:
             assert current_branch(str(sd)) == "baby", f"{s} 不该在 hold 阶段毕业"
             assert C.load_candidates(sd)["candidates"], f"{s} hold 阶段候选不该清"
 
-        # 算法落 epoch sentinel → 批量 flush
-        (tmp_path / "EPOCH_FLUSH").touch()
+        # 外部编排落 sentinel → 批量 flush
+        (tmp_path / DEFAULT_BARRIER_FILENAME).touch()
         w._run_skill_edit_step()
 
         for s, sd in dirs.items():
@@ -148,22 +151,22 @@ class TestColdStartEpochFlush:
             assert f"body-of-{s}" in body
         assert w._stats["skills_edited"] == len(slugs)
         # sentinel 被消费
-        assert not (tmp_path / "EPOCH_FLUSH").exists()
+        assert not (tmp_path / DEFAULT_BARRIER_FILENAME).exists()
 
     def test_online_after_epoch_exhausted(self, tmp_path):
-        """flush 跑满 epochs 后转在线：新低分技能重回正常阈值，不被强制毕业。"""
+        """flush 轮次跑满后转在线：新低分技能重回正常阈值，不被强制毕业。"""
         skill_root = tmp_path / "skill"; skill_root.mkdir()
         first = _seed_baby(skill_root, "sk-first", weightscore=3)
         w = _make_watcher(tmp_path, skill_root,
                           cold_start_cfg={"enabled": True, "epochs": 1})
-        # 冷启动 epoch：落屏障 flush
-        (tmp_path / "EPOCH_FLUSH").touch()
+        # 冷启动批量导入完成：落屏障 flush
+        (tmp_path / DEFAULT_BARRIER_FILENAME).touch()
         w._run_skill_edit_step()
         assert current_branch(str(first)) == "main"
         assert w._cold_start.active is False  # 跑满 → 在线
 
         # 在线阶段：新低分技能 + 再落屏障，也不应被强制毕业（屏障对非 active 无效）
         second = _seed_baby(skill_root, "sk-second", weightscore=3)
-        (tmp_path / "EPOCH_FLUSH").touch()
+        (tmp_path / DEFAULT_BARRIER_FILENAME).touch()
         w._run_skill_edit_step()
         assert current_branch(str(second)) == "baby", "在线阶段低分技能不该毕业"

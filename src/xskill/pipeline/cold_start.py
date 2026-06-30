@@ -1,19 +1,19 @@
-"""冷启动 epoch 屏障控制器（轨迹堰塞修复）。
+"""冷启动批量 flush 屏障控制器（轨迹堰塞修复）。
 
 问题：默认在线流水线里，每个 cluster batch 一到晋升阈值就触发 SkillEdit；
 小数据冷启动场景下 atom 稀少且散落，weightscore 永远到不了阈值 → 没有任何
 技能毕业到 main → 交付空壳。即便到了阈值，也是在 atom 池不完整时过早写正文。
 
-修复：冷启动阶段（前 ``epochs`` 个 epoch）**hold 住所有增量 SkillEdit**，让整个
-epoch 的全部子轨迹 atom 攒进各 skill 的 ``.candidates.yml``；epoch 训练结束后由
-算法落一个 sentinel 文件（屏障）。watcher 检出屏障后，用极低的 ``flush_threshold``
-对每个有候选的 skill 一次性批量写正文——引用该 epoch 累积的全部子轨迹 atom——
-把 baby 技能批量毕业到 main。消费屏障后 epoch 计数 +1；跑满 ``epochs`` 即转入
-正常在线增量 + 灰度路径（后续 epoch 在线进化）。
+修复：冷启动阶段（前 ``epochs`` 个批量 flush 轮次）**hold 住所有增量
+SkillEdit**，让本轮导入的全部子轨迹 atom 攒进各 skill 的 ``.candidates.yml``；
+外部编排在一轮导入完成后落一个 sentinel 文件（屏障）。watcher 检出屏障后，用
+``flush_threshold`` 对每个有候选的 skill 一次性批量写正文——引用本轮累积的全部
+子轨迹 atom——把 baby 技能批量毕业到 main。消费屏障后轮次计数 +1；跑满
+``epochs`` 即转入正常在线增量 + 灰度路径。
 
 设计原则：默认 ``enabled=False`` → 对既有部署零行为变化；非法配置直接抛错
-（不做兜底回退）。屏障用文件 sentinel 而非新增 CLI 子命令，算法在 epoch 训练
-结束后 ``touch`` 约定路径即可触发。
+（不做兜底回退）。屏障用文件 sentinel 而非新增 CLI 子命令，外部批量导入编排
+在一轮导入结束后 ``touch`` 约定路径即可触发。
 """
 from __future__ import annotations
 
@@ -21,9 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_BARRIER_FILENAME = "COLD_START_FLUSH"
+
+
 @dataclass
 class ColdStartController:
-    """持有冷启动 epoch 状态，回答 watcher 两个问题：当前是否该 hold 增量
+    """持有冷启动批量 flush 状态，回答 watcher 两个问题：当前是否该 hold 增量
     SkillEdit、屏障是否到达可以批量 flush。"""
 
     enabled: bool = False
@@ -39,8 +42,9 @@ class ColdStartController:
         - ``enabled``：是否启用冷启动屏障（默认 False）。
         - ``flush_threshold``：屏障 flush 时的 weightscore 门槛（默认 1，即任何
           有候选的 skill 都批量毕业）；必须 ≥1。
-        - ``epochs``：hold+flush 的冷启动 epoch 数（默认 1）；必须 ≥1。
-        - ``barrier_path``：sentinel 绝对路径；缺省 ``<default_base>/EPOCH_FLUSH``。
+        - ``epochs``：hold+flush 的冷启动批量轮次数（默认 1）；必须 ≥1。
+        - ``barrier_path``：sentinel 绝对路径；缺省
+          ``<default_base>/COLD_START_FLUSH``。
         """
         sec = (config or {}).get("cold_start", {}) or {}
         flush_threshold = int(sec.get("flush_threshold", 1))
@@ -51,7 +55,9 @@ class ColdStartController:
         if epochs < 1:
             raise ValueError(f"cold_start.epochs 必须 ≥1，得到 {epochs}")
         bp = sec.get("barrier_path")
-        barrier_path = Path(bp) if bp else (Path(default_base) / "EPOCH_FLUSH")
+        barrier_path = (
+            Path(bp) if bp else (Path(default_base) / DEFAULT_BARRIER_FILENAME)
+        )
         return cls(
             enabled=bool(sec.get("enabled", False)),
             flush_threshold=flush_threshold,
@@ -61,11 +67,11 @@ class ColdStartController:
 
     @property
     def active(self) -> bool:
-        """仍处于冷启动阶段：已启用且未跑满预定 epoch 数。"""
+        """仍处于冷启动阶段：已启用且未跑满预定 flush 轮数。"""
         return self.enabled and self._epochs_done < self.epochs
 
     def barrier_reached(self) -> bool:
-        """sentinel 存在 = 当前 epoch 训练结束，可批量 flush。"""
+        """sentinel 存在 = 当前冷启动批量导入轮次结束，可批量 flush。"""
         return (
             self.active
             and self.barrier_path is not None
@@ -73,7 +79,7 @@ class ColdStartController:
         )
 
     def consume_barrier(self) -> None:
-        """消费屏障：删 sentinel + epoch 计数 +1（跑满后 active 自动转 False）。"""
+        """消费屏障：删 sentinel + 轮次计数 +1（跑满后 active 自动转 False）。"""
         if self.barrier_path is not None and self.barrier_path.exists():
             self.barrier_path.unlink()
         self._epochs_done += 1
