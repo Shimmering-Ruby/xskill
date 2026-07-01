@@ -208,9 +208,10 @@ class MultiAtomTaskStore:
     跨 client 的 atom 必然 ``FileNotFoundError`` → ``atom_task_read`` 返回
     not found → 规则只能凭通用知识标 ``[推断]``，技能质量塌方。
 
-    本类把多个底层 store 串起来：``load`` 依次问每个 store，命中即返回；
+    本类把多个底层 store 串起来：``load`` 依次问每个 store，唯一命中即返回；
     ``read_traj`` 用的 traj 文件路径由 ``traj_root_for(traj_id)`` 跨所有 root
-    解析。**单 store（单机 / cold_flush）路径不经过本类**——runner 仅在
+    解析。若多个 store 同时命中同一个 atom/traj，直接 fail loud，避免按 store
+    顺序静默读错。**单 store（单机 / cold_flush）路径不经过本类**——runner 仅在
     ``len(stores) > 1`` 时才包一层，行为零回归。
 
     只暴露 SkillEdit / cluster 工具链实际用到的读接口（``load`` /
@@ -235,33 +236,53 @@ class MultiAtomTaskStore:
         ``traj_root_for`` / ``roots``。"""
         return self.stores[0].root
 
-    def _store_holding(self, atom_id: str) -> "AtomTaskStore | None":
+    def _stores_holding(self, atom_id: str) -> list["AtomTaskStore"]:
+        hits: list["AtomTaskStore"] = []
         for s in self.stores:
             try:
                 s.load(atom_id)
-                return s
+                hits.append(s)
             except FileNotFoundError:
                 continue
-        return None
+        return hits
+
+    @staticmethod
+    def _ambiguous_atom(atom_id: str, stores: list["AtomTaskStore"]) -> FileNotFoundError:
+        roots = ", ".join(str(s.root) for s in stores)
+        return FileNotFoundError(
+            f"atom id is ambiguous across stores: {atom_id} ({roots})"
+        )
 
     def load(self, atom_id: str) -> AtomTask:
-        for s in self.stores:
-            try:
-                return s.load(atom_id)
-            except FileNotFoundError:
-                continue
+        hits = self._stores_holding(atom_id)
+        if len(hits) == 1:
+            return hits[0].load(atom_id)
+        if len(hits) > 1:
+            raise self._ambiguous_atom(atom_id, hits)
         raise FileNotFoundError(f"atom not found in any store: {atom_id}")
 
     def save(self, atom: AtomTask) -> Path:
-        holder = self._store_holding(atom.atom_id)
-        target = holder if holder is not None else self.stores[0]
+        holders = self._stores_holding(atom.atom_id)
+        if len(holders) > 1:
+            raise self._ambiguous_atom(atom.atom_id, holders)
+        target = holders[0] if holders else self.stores[0]
         return target.save(atom)
 
     def list_by_traj(self, traj_id: str) -> list[AtomTask]:
+        hits: list[list[AtomTask]] = []
+        roots: list[Path] = []
         for s in self.stores:
             atoms = s.list_by_traj(traj_id)
             if atoms:
-                return atoms
+                hits.append(atoms)
+                roots.append(s.root)
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            root_msg = ", ".join(str(p) for p in roots)
+            raise FileNotFoundError(
+                f"traj id is ambiguous across stores: {traj_id} ({root_msg})"
+            )
         return []
 
     def all_atoms(self) -> Iterator[AtomTask]:
@@ -273,9 +294,17 @@ class MultiAtomTaskStore:
 
         ``read_traj`` 用它定位轨迹原文：atom 来自哪个 client 的 watch_dir，
         其 traj.md 就落在那个 root 下。"""
+        hits: list[Path] = []
         for s in self.stores:
             if (s.root / f"{traj_id}.md").is_file():
-                return s.root
+                hits.append(s.root)
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            roots = ", ".join(str(p) for p in hits)
+            raise FileNotFoundError(
+                f"traj id is ambiguous across stores: {traj_id} ({roots})"
+            )
         return None
 
     def vector_search(self, query: str, embed_client, top_k: int = 5) -> list[dict]:

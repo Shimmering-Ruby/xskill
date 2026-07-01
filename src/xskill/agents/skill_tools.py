@@ -618,7 +618,10 @@ def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
     store = _ctx_v2["store"]
     resolver = getattr(store, "traj_root_for", None)
     if callable(resolver):
-        resolved = resolver(traj_id)
+        try:
+            resolved = resolver(traj_id)
+        except FileNotFoundError as e:
+            return f"error: {e}"
         if resolved is not None:
             traj_root = resolved
     p = traj_root / f"{traj_id}.md"

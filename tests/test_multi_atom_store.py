@@ -94,6 +94,43 @@ class TestMultiStoreRouting:
         with pytest.raises(ValueError):
             MultiAtomTaskStore([])
 
+    def test_duplicate_atom_id_fails_loud(self, tmp_path):
+        store_a, store_b = _two_client_stores(tmp_path)
+        # 模拟两个 client 上传了同名 traj，TaskAgent 生成相同 atom_id。
+        store_a.save(_atom(
+            "atom_traj_same_0001", "traj_same",
+            summary="client A duplicate atom",
+        ))
+        store_b.save(_atom(
+            "atom_traj_same_0001", "traj_same",
+            summary="client B duplicate atom",
+        ))
+        multi = MultiAtomTaskStore([store_a, store_b])
+
+        import pytest
+        with pytest.raises(FileNotFoundError, match="ambiguous"):
+            multi.load("atom_traj_same_0001")
+
+    def test_duplicate_traj_id_fails_loud(self, tmp_path):
+        store_a, store_b = _two_client_stores(tmp_path)
+        store_a.save(_atom(
+            "atom_traj_same_0001", "traj_same",
+            summary="client A duplicate traj",
+        ))
+        store_b.save(_atom(
+            "atom_traj_same_0002", "traj_same",
+            summary="client B duplicate traj",
+        ))
+        (store_a.root / "traj_same.md").write_text("A\n", encoding="utf-8")
+        (store_b.root / "traj_same.md").write_text("B\n", encoding="utf-8")
+        multi = MultiAtomTaskStore([store_a, store_b])
+
+        import pytest
+        with pytest.raises(FileNotFoundError, match="ambiguous"):
+            multi.list_by_traj("traj_same")
+        with pytest.raises(FileNotFoundError, match="ambiguous"):
+            multi.traj_root_for("traj_same")
+
 
 class TestSkillToolsAcrossStores:
     """SkillEdit 工具（atom_task_read / read_traj）在多 store ctx 下能读跨 client atom。
@@ -129,6 +166,22 @@ class TestSkillToolsAcrossStores:
         )
         out = ST.read_traj("traj_cc_b", offset_start=1, offset_end=3)
         assert out == "B1\nB2\n"
+
+    def test_read_traj_reports_ambiguous_traj(self, tmp_path):
+        store_a, store_b = _two_client_stores(tmp_path)
+        (store_a.root / "traj_same.md").write_text("A\n", encoding="utf-8")
+        (store_b.root / "traj_same.md").write_text("B\n", encoding="utf-8")
+        multi = MultiAtomTaskStore([store_a, store_b])
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        ST.init_context_v2(
+            skill_dir=skill_dir, store=multi,
+            embed_client=_FakeEmbed(), traj_root=store_a.root,
+        )
+
+        out = ST.read_traj("traj_same", offset_start=1, offset_end=2)
+        assert out.startswith("error:")
+        assert "ambiguous" in out
 
     def test_single_store_behavior_unchanged(self, tmp_path):
         """单 store 路径（单机/cold_flush）：直接绑 AtomTaskStore，行为不回归。"""
