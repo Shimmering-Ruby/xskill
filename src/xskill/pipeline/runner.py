@@ -813,9 +813,13 @@ class DirectoryWatcher:
                     self._futures[fut] = {
                         "wd_id": wd_id, "stage": "cluster", "atom_ids": batch,
                     }
+                    cluster_in_flight = True
 
             # ── done 标记：轨迹的 atom 全部落地 → done（+ 触发 ux 打分）──
-            self._sweep_done_trajs(wd_id, dir_path, **kw)
+            # Windows 对正在被 cluster future 原子替换的 atom JSON 会报
+            # PermissionError；等 future 被 harvest 后下一轮再 sweep。
+            if not cluster_in_flight:
+                self._sweep_done_trajs(wd_id, dir_path, **kw)
 
         # ── ux_score（对有 xskill header 的新轨迹）──
         if self.llm and self.skill_dir and new:
