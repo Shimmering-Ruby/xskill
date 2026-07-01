@@ -23,7 +23,14 @@ from xskill.skill.repo import SkillRepo
 
 
 def _rebuild_args(**over):
-    base = dict(force=False, eco=None, traj=None, ignore_model_mismatch=False)
+    base = dict(
+        force=False,
+        eco=None,
+        traj=None,
+        ignore_model_mismatch=False,
+        cold_start=False,
+        no_cold_start=True,
+    )
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -173,3 +180,44 @@ def test_rebuild_no_guard_when_daemon_not_running(monkeypatch):
                         lambda **kw: 0)
 
     assert cmd_rebuild(_rebuild_args(), None) == 0
+
+
+def test_rebuild_requests_cold_start_by_default_in_standalone(
+    monkeypatch, tmp_path,
+):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("cold_start: {}\n", encoding="utf-8")
+    monkeypatch.setattr("xskill.config.CONFIG_PATH", cfg)
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path)
+    monkeypatch.setattr(
+        "xskill.runtime.read_status",
+        lambda: {"running": False, "role": "standalone"},
+    )
+    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
+                        lambda **kw: 0)
+
+    assert cmd_rebuild(_rebuild_args(no_cold_start=False), None) == 0
+
+    assert (tmp_path / "COLD_START_REQUEST").exists()
+
+
+def test_rebuild_server_requires_explicit_cold_start(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("cold_start: {}\n", encoding="utf-8")
+    monkeypatch.setattr("xskill.config.CONFIG_PATH", cfg)
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path)
+    monkeypatch.setattr(
+        "xskill.runtime.read_status",
+        lambda: {"running": False, "role": "server", "mode": "server"},
+    )
+    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
+                        lambda **kw: 0)
+
+    assert cmd_rebuild(_rebuild_args(no_cold_start=False), None) == 0
+    assert not (tmp_path / "COLD_START_REQUEST").exists()
+
+    assert cmd_rebuild(
+        _rebuild_args(no_cold_start=False, cold_start=True),
+        None,
+    ) == 0
+    assert (tmp_path / "COLD_START_REQUEST").exists()

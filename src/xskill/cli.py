@@ -385,6 +385,43 @@ def cmd_rebuild(args, xskill) -> int:
     n = reset_trajectories(eco=args.eco, traj_id=args.traj)
     print(f"rebuild: 重置 {n} 条轨迹（已删 atom + index.pkl，将从头重拆）")
 
+    from xskill.config import CONFIG_PATH, XSKILL_HOME
+    from xskill.pipeline.cold_start import (
+        ColdStartController,
+        request_cold_start_flush,
+    )
+    try:
+        import yaml
+        raw_config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:  # pylint: disable=broad-exception-caught
+        raw_config = {}
+
+    server_mode = status.get("mode") == "server" or (
+        not status.get("mode") and status.get("role") == "server"
+    )
+    cs = ColdStartController.from_config(
+        raw_config, XSKILL_HOME, server_mode=server_mode,
+    )
+    if getattr(args, "no_cold_start", False):
+        should_request_cold_start = False
+    elif getattr(args, "cold_start", False):
+        should_request_cold_start = True
+    else:
+        should_request_cold_start = cs.enabled
+
+    if should_request_cold_start:
+        if cs.explicitly_disabled:
+            print(
+                "cold-start: config.yaml 中 cold_start.enabled=false，跳过请求。",
+                file=sys.stderr,
+            )
+        else:
+            p = request_cold_start_flush(raw_config, XSKILL_HOME)
+            print(
+                "cold-start: 已请求 watcher 在本次 rebuild 处理完成后 flush "
+                f"({p})"
+            )
+
     if read_status().get("running"):
         print("watcher 运行中 —— 30s 内将自动重跑这些轨迹。")
     else:
@@ -497,6 +534,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_rebuild.add_argument(
         "--ignore-model-mismatch", action="store_true",
         help="跳过'daemon 模型≠config 模型'护栏，用当前运行的模型重跑",
+    )
+    p_rebuild.add_argument(
+        "--cold-start", action="store_true",
+        help="本次 rebuild 完成后触发一次 cold-start flush（server 模式需显式传）",
+    )
+    p_rebuild.add_argument(
+        "--no-cold-start", action="store_true",
+        help="本次 rebuild 不触发 cold-start flush",
     )
 
     return p

@@ -108,12 +108,12 @@ class DirectoryWatcher:
             Path(install_history_path) if install_history_path
             else XSKILL_HOME / "install_history.jsonl"
         )
-        # 冷启动批量 flush 屏障：config['cold_start'] 控制。默认关闭（active=False）
-        # → 走正常在线增量。屏障 sentinel 默认落在 home_root（测试注入的 tmp 或
-        # daemon --home）下，缺省回退 XSKILL_HOME。见 pipeline/cold_start.py。
+        # 冷启动批量 flush：standalone 默认接受 request/barrier 文件，team server
+        # 默认不接受；没有文件时不改变在线 SkillEdit 路径。
         from xskill.pipeline.cold_start import ColdStartController
         self._cold_start = ColdStartController.from_config(
             self.config, self.home_root or XSKILL_HOME,
+            server_mode=self.server_mode,
         )
         self.poll_interval = poll_interval
         self.max_concurrent = max_concurrent
@@ -273,30 +273,48 @@ class DirectoryWatcher:
     def _run_skill_edit_step(self):
         """Step 5 的冷启动感知封装。
 
-        冷启动阶段（``_cold_start.active``）：hold 住增量 SkillEdit，让 candidates
-        攒满当前批量导入轮次；直到外部编排落屏障 sentinel → 用
-        ``flush_threshold`` 一次性批量毕业所有有候选的 skill，然后消费屏障
-        （轮次计数 +1，跑满即转在线）。
-        非冷启动（默认/已转在线）：走正常阈值在线增量。
+        有 cold-start request 时 hold 增量 SkillEdit，等本次 rebuild 触发的轨迹
+        重新处理完成，再按既有候选晋升阈值做一次 SkillEdit 扫描。外部编排若
+        已确认批量导入结束，也可以直接落 barrier 文件立即触发这次扫描。
         """
         cs = self._cold_start
         if cs.active:
-            if cs.barrier_reached():
+            if cs.barrier_reached(pipeline_idle=self._cold_start_pipeline_idle()):
+                from xskill.skill import candidates as C
                 logger.info(
-                    "冷启动批量 flush 屏障到达 → SkillEdit (flush_threshold=%d)",
-                    cs.flush_threshold,
+                    "冷启动批量 flush 触发 → SkillEdit (threshold=%d)",
+                    C.ATOM_PROMOTION_THRESHOLD,
                 )
-                self._check_pending_skill_edits(threshold=cs.flush_threshold)
+                self._check_pending_skill_edits(
+                    threshold=C.ATOM_PROMOTION_THRESHOLD,
+                )
                 cs.consume_barrier()
-            # 屏障未到：hold，本轮不写正文（让 atom 继续攒进 candidates）
+            # request 已到但流水线尚未空闲：hold，本轮不写正文。
             return
         self._check_pending_skill_edits()
+
+    def _cold_start_pipeline_idle(self) -> bool:
+        """当前 watcher 没有待处理轨迹或后台任务时，cold-start request 可 flush。"""
+        if self._futures:
+            return False
+        pending_statuses = (
+            "discovered", "updated", "splitting", "split_done",
+            "indexed", "clustering",
+        )
+        for wd in list_watch_dirs(**self._db_kw()):
+            wd_id = wd["id"]
+            for status in pending_statuses:
+                if get_trajs_by_status(
+                    wd_id, status, limit=1, **self._db_kw(),
+                ):
+                    return False
+        return True
 
     def _check_pending_skill_edits(self, threshold=None):
         """遍历每个 skill 目录调 SkillEditAgent.maybe_run()。
 
-        ``threshold``：None 时各 skill 用默认 ATOM_PROMOTION_THRESHOLD（在线增量）；
-        冷启动屏障 flush 传入低门槛（如 1）→ 任何有候选的 skill 都批量毕业。
+        ``threshold``：None 时各 skill 用默认 ATOM_PROMOTION_THRESHOLD；cold
+        start 显式传同一个常量，避免在配置里散落另一套数值。
 
         独立于 process_atom_task：不依赖任何 atom 处理成功；只看 candidates.yml
         当前累计 weightscore 是否够阈值。即便某次 cluster 抛异常导致 buffer
