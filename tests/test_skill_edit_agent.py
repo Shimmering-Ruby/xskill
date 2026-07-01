@@ -102,12 +102,25 @@ class _StagingStubAgno(_BabyStubAgno):
         return r
 
 
+class _InspectingStagingStubAgno(_StagingStubAgno):
+    """记录普通 main->staging 路径给 agent 的工具和启动场景。"""
+    tool_names: set[str] = set()
+
+    def __init__(self, *, instructions, tools):
+        super().__init__(instructions=instructions, tools=tools)
+        type(self).tool_names = set(self.tools)
+
+
 def _baby_factory(*, instructions, tools):
     return _BabyStubAgno(instructions=instructions, tools=tools)
 
 
 def _staging_factory(*, instructions, tools):
     return _StagingStubAgno(instructions=instructions, tools=tools)
+
+
+def _inspecting_staging_factory(*, instructions, tools):
+    return _InspectingStagingStubAgno(instructions=instructions, tools=tools)
 
 
 @pytest.fixture(autouse=True)
@@ -130,11 +143,12 @@ def _init_atom_task_tool_context(tmp_path):
     )
     yield
     agent_tools.agent_tool_config.restore(saved_context)
-    for cls in (_BabyStubAgno, _StagingStubAgno):
+    for cls in (_BabyStubAgno, _StagingStubAgno, _InspectingStagingStubAgno):
         cls.invoked = False
         cls.user_msg = ""
         cls.writes_skill_md_with = None
         cls.calls_commit = True
+    _InspectingStagingStubAgno.tool_names = set()
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -250,6 +264,33 @@ class TestMainNeedsUxScoreBeforeStaging:
         # candidates 清空
         data2 = C.load_candidates(skill_dir)
         assert data2["candidates"] == []
+
+    def test_regular_path_exposes_read_file_base_path_and_tree(self, tmp_path):
+        """普通 SkillEditAgent 更新路径应能读辅助文件，并在启动时看到 base path/tree。"""
+        skill_dir = _make_main_skill(tmp_path / "skill", "with-helper")
+        helper = skill_dir / "scripts" / "helper.py"
+        helper.write_text("print('helper')\n", encoding="utf-8")
+        run_git(["add", "-A"], cwd=str(skill_dir))
+        run_git(["commit", "-m", "add helper script"], cwd=str(skill_dir))
+        _add_ux_score(skill_dir)
+        data = {"candidates": []}
+        data, _ = C.add_atom_contribution(data, "atom_a", 10)
+        C.save_candidates(skill_dir, data)
+        _InspectingStagingStubAgno.writes_skill_md_with = (
+            "---\nname: with-helper\ndescription: updated\n"
+            "metadata:\n  version: 2\n---\n# body\n"
+        )
+
+        agent = SkillEditAgent(
+            skill_dir=skill_dir, store=None,
+            agno_agent_factory=_inspecting_staging_factory,
+            llm_cfg={}, traj_root=tmp_path,
+        )
+
+        assert agent.maybe_run() is True
+        assert "read_file" in _InspectingStagingStubAgno.tool_names
+        assert f"skill_base_path: {skill_dir}" in _InspectingStagingStubAgno.user_msg
+        assert "scripts/helper.py" in _InspectingStagingStubAgno.user_msg
 
 
 # ────────────────────────────────────────────────────────────────────

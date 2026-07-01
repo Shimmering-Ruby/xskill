@@ -197,6 +197,7 @@ commit message 写明本次基于哪些 atom_id 整理，例如：
 - AtomTaskRead(atom_id) — 读 atom JSON
 - ReadTraj(traj_id, offset_start, offset_end) — 按行号取轨迹原文（offset 即 1-based 行号）
 - SkillRead(skill_name) — 读现有 SKILL.md（更新场景用）
+- read_file(path) — 读取 skill_base_path 下任意已有文件内容（如 scripts/、references/）
 - list_files(path) — 列目录文件
 - write_file(path, content) — 写任意文件到 skill_dir 下
 - commit_baby_to_main(skill_name, message) — 仅 baby 分支可用
@@ -306,6 +307,28 @@ class SkillEditAgent:
     traj_root: Path
     threshold: int = C.ATOM_PROMOTION_THRESHOLD
     jam_threshold: int = 50
+
+    def _skill_tree_context_lines(self, max_entries: int = 80) -> list[str]:
+        """返回当前 skill 根目录与文件树，供 agent 决定是否 read_file。"""
+        lines = [
+            "",
+            f"skill_base_path: {self.skill_dir}",
+            "# 当前 skill 文件树（相对 skill_base_path；需要内容时用 read_file 读取）",
+        ]
+        entries: list[str] = []
+        for path in sorted(self.skill_dir.rglob("*")):
+            rel = path.relative_to(self.skill_dir)
+            if ".git" in rel.parts:
+                continue
+            if rel.name in {".candidates.yml", ".ux_scores.jsonl", ".lock"}:
+                continue
+            suffix = "/" if path.is_dir() else ""
+            entries.append(f"- {rel.as_posix()}{suffix}")
+            if len(entries) >= max_entries:
+                entries.append(f"- ... truncated after {max_entries} entries")
+                break
+        lines.extend(entries or ["- (empty)"])
+        return lines
 
     def maybe_run(self) -> bool:
         """检查所有守门条件 → 触发 agent → 验证落盘 → 清 buffer。
@@ -474,7 +497,7 @@ class SkillEditAgent:
                 f"skill_name: {self.skill_dir.name}（**main 分支 · 轨迹堰塞强砍合并**）",
                 f"现有 main 正文：用 skill_read('{self.skill_dir.name}') 读。",
                 f"staging 正文路径（用 read_file 读）：{staging_body}",
-                "",
+                *self._skill_tree_context_lines(),
                 "# 待合并候选（按 weightscore 倒序）",
             ]
             for c in sorted(ready, key=lambda x: x.get("weightscore", 0), reverse=True):
@@ -549,6 +572,7 @@ class SkillEditAgent:
                 scenario_lines.append(f"现有 SKILL.md version: {cur_ver}")
             except Exception:
                 pass
+        scenario_lines.extend(self._skill_tree_context_lines())
         scenario_lines.append("")
         scenario_lines.append("# 待整理 candidates（按 weightscore 倒序）")
         for c in sorted(
@@ -576,6 +600,7 @@ class SkillEditAgent:
                 agent_tools.atom_task_read,
                 agent_tools.read_traj,
                 agent_tools.skill_read,
+                agent_tools.read_file,
                 agent_tools.list_files,
                 agent_tools.write_file,
                 agent_tools.commit_baby_to_main,
