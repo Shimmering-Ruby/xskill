@@ -25,6 +25,15 @@ from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM, autosplit_submit
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # stub agent factories（cluster 分支解析**所有** atom_id —— 批量）
 # ─────────────────────────────────────────────────────────────────────
@@ -42,7 +51,7 @@ class _TransientFailStub:
 
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = {getattr(t, "__name__", ""): t for t in tools}
+        self.tools = {_tool_name(t): t for t in tools}
 
     def run(self, user_msg, **kw):
         head = (self.instructions[0] if self.instructions else "")[:80]
@@ -55,9 +64,9 @@ class _TransientFailStub:
                 raise RuntimeError(f"stub LLM 402 (call {type(self).calls})")
             for aid in re.findall(r"atom_id:\s*(\S+)", user_msg):
                 if "new_skill_folder" in self.tools:
-                    self.tools["new_skill_folder"](type(self).target, "stub desc")
+                    _call_tool(self.tools["new_skill_folder"], type(self).target, "stub desc")
                 if "add_task_to_skill" in self.tools:
-                    self.tools["add_task_to_skill"](type(self).target, aid, 3)
+                    _call_tool(self.tools["add_task_to_skill"], type(self).target, aid, 3)
             return _R("clustered")
         return _R("stub")
 
@@ -69,7 +78,7 @@ class _CountingClusterStub:
 
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = {getattr(t, "__name__", ""): t for t in tools}
+        self.tools = {_tool_name(t): t for t in tools}
 
     def run(self, user_msg, **kw):
         head = (self.instructions[0] if self.instructions else "")[:80]
@@ -80,9 +89,9 @@ class _CountingClusterStub:
             for aid in re.findall(r"atom_id:\s*(\S+)", user_msg):
                 type(self).sent.append(aid)
                 if "new_skill_folder" in self.tools:
-                    self.tools["new_skill_folder"](type(self).target, "stub desc")
+                    _call_tool(self.tools["new_skill_folder"], type(self).target, "stub desc")
                 if "add_task_to_skill" in self.tools:
-                    self.tools["add_task_to_skill"](type(self).target, aid, 3)
+                    _call_tool(self.tools["add_task_to_skill"], type(self).target, aid, 3)
             return _R("clustered")
         return _R("stub")
 
@@ -232,7 +241,7 @@ class TestPerAtomLog:
         class _DropAllStub:
             def __init__(self, *, instructions, tools):
                 self.instructions = instructions
-                self.tools = {getattr(t, "__name__", ""): t for t in tools}
+                self.tools = {_tool_name(t): t for t in tools}
 
             def run(self, msg, **kw):
                 head = (self.instructions[0] if self.instructions else "")[:80]

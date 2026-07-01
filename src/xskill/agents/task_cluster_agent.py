@@ -144,7 +144,6 @@ add_task_to_skill）。**每个 AtomTask 都必须 add_task_to_skill，一个都
 
 # 可用工具
 - AtomTaskRead(atom_id) — 读 atom 完整 JSON（intent / summary / raw_segment 全字段）
-- AtomTaskSearch(query) — 混合检索其他 atom（语义向量 + BM25 关键字 union）
 - ReadTraj(traj_id, offset_start, offset_end) — 按行号读 traj.md 原文片段（offset 即 1-based 行号）
 - SkillRead(skill_name) — 读 skill 的 SKILL.md（baby 返回 stub，main/staging 返回正版）
 - ReadSkillTasks(skill_name) — **看某 skill 的 candidates buffer 内已有哪些 atom**
@@ -200,9 +199,8 @@ add_task_to_skill）。**每个 AtomTask 都必须 add_task_to_skill，一个都
 
 # 处理流程（v2.2 重点：复用 > 整合 > 新建）
 
-## Step 1: 看路由表 + 搜相似 atom
+## Step 1: 看路由表
 - 路由表里所有 baby/main/staging skill 全看一遍，重点找 desc 同类的
-- AtomTaskSearch 找语义/关键字相似 atom，看它们归在哪些 skill 上
 
 ## Step 2: 复用判断
 - 找到 1 个 desc 精准匹配的 → 直接 add_task_to_skill（流程结束）
@@ -237,7 +235,7 @@ slug。同一批里如给了多个 atom，也请逐个处理、彼此独立。
 
 # 硬禁止
 - 不要为了"做点事"乱打高分。低质 atom 就别加，会污染 candidates 触发劣质 skill。
-- 不要伪造 atom_id；只用我给的或 AtomTaskSearch 返回的真实 id。
+- 不要伪造 atom_id；只用我给的真实 id。
 - 不要直接写 SKILL.md——那是 SkillEditAgent 的职责。
 - RenameSkill 只对 baby 用；main/staging 工具会拒绝。
 - 两个 baby 都已存在时 → 用 MoveTaskTo 而不是 RenameSkill（避免冲突）。

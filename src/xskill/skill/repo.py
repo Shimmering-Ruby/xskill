@@ -11,9 +11,12 @@ skill/repo.py — SkillRepo 集合 + 集合级 git 操作
 from __future__ import annotations
 
 import logging
+import pickle
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Optional
+
+import numpy
 
 from xskill.skill.skill import Skill, _load_skill
 from xskill.skill.git import commit_changes
@@ -76,15 +79,14 @@ class SkillRepo:
     def rebuild_index(self) -> None:
         """重建 .skill_index.pkl（向量检索用）。
 
-        显式给 ``rebuild_skill_index`` 传参，**不**走 ``init_context``——后者
+        显式给 ``rebuild_skill_index`` 传参，**不**走工具上下文初始化——后者
         会要求 ``data_dir`` / ``llm_client`` 等本路径用不到的字段（早先版本
         传 ``None`` 进去会触发 ``Path(None)`` TypeError，rebuild 直接挂）。
         """
-        from xskill.agents.skill_tools import rebuild_skill_index
         from xskill.config import get_config
         from xskill.utils.llm import create_embed_client
-        embed = create_embed_client(get_config())
-        rebuild_skill_index(skill_dir=self.root, embed_client=embed)
+        embed_client = create_embed_client(get_config())
+        rebuild_skill_index(skill_dir=self.root, embed_client=embed_client)
 
     # ─── 清空（rebuild --force 用）──────────────────────────────
     def wipe_all_skills(self) -> int:
@@ -149,6 +151,92 @@ def list_skills(skill_dir: Path) -> list[dict]:
             "frozen": bool(meta.get("frozen", False)),
         }
         results.append(entry)
+
+    return results
+
+
+def rebuild_skill_index(*, skill_dir: Path, embed_client) -> None:
+    """Rebuild ``<skill_dir>/.skill_index.pkl`` for skill semantic search."""
+    skill_root = Path(skill_dir)
+    if embed_client is None:
+        raise RuntimeError("rebuild_skill_index: embed_client is required")
+
+    entries = []
+    for skill_path in sorted(skill_root.iterdir()):
+        if not skill_path.is_dir() or skill_path.name.startswith("."):
+            continue
+        frontmatter, _body, _path = _load_skill(skill_path)
+        if not frontmatter:
+            continue
+        metadata = frontmatter.get("metadata", {}) or {}
+        description = (frontmatter.get("description") or "").strip()
+        summary = (metadata.get("summary") or "").strip()
+        tags = metadata.get("tags", []) or []
+        text = f"{description} | tags: {', '.join(tags)} | {summary}".strip()
+        entries.append((skill_path.name, text))
+
+    if not entries:
+        logger.info("no skills to index")
+        return
+
+    skill_names, index_texts = zip(*entries)
+    embeddings = embed_client.encode_batch(list(index_texts))
+    norms = numpy.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    embeddings = embeddings / norms
+
+    index_data = {
+        "skill_names": list(skill_names),
+        "texts": list(index_texts),
+        "embeddings": embeddings,
+        "method": "api",
+    }
+
+    index_path = skill_root / ".skill_index.pkl"
+    with open(index_path, "wb") as index_file:
+        pickle.dump(index_data, index_file)
+
+    logger.info("skill index rebuilt: %d entries -> %s", len(skill_names), index_path)
+
+
+def search_skill_index(*, skill_dir: Path, query: str, embed_client, top_k: int = 5) -> list[dict]:
+    """Search ``<skill_dir>/.skill_index.pkl`` by semantic similarity."""
+    skill_root = Path(skill_dir)
+    index_path = skill_root / ".skill_index.pkl"
+
+    if not index_path.exists():
+        return []
+    if embed_client is None:
+        raise RuntimeError("search_skill_index: embed_client is required")
+
+    with open(index_path, "rb") as index_file:
+        index_data = pickle.load(index_file)
+
+    embeddings = index_data["embeddings"]
+    skill_names = index_data["skill_names"]
+    query_embedding = embed_client.encode(query)
+    norm = numpy.linalg.norm(query_embedding)
+    if norm > 0:
+        query_embedding = query_embedding / norm
+
+    similarities = embeddings @ query_embedding
+    ranked = sorted(
+        enumerate(similarities), key=lambda item: item[1], reverse=True,
+    )
+
+    results = []
+    for skill_index, similarity in ranked[:top_k]:
+        skill_name = skill_names[skill_index]
+        skill_path = skill_root / skill_name
+        frontmatter, _body, _path = _load_skill(skill_path)
+        metadata = frontmatter.get("metadata", {}) or {}
+        results.append({
+            "skill_name": skill_name,
+            "similarity": round(float(similarity), 4),
+            "description": (frontmatter.get("description") or "").strip(),
+            "tags": metadata.get("tags", []),
+            "version": metadata.get("version", 0),
+        })
 
     return results
 

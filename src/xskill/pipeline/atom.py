@@ -20,6 +20,7 @@ import json
 import logging
 import pickle
 import re
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -103,10 +104,12 @@ class AtomTaskStore:
     # ── IO ────────────────────────────────────────────────────────
 
     def save(self, atom: AtomTask) -> Path:
-        p = self._path(atom)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(atom.to_json(), encoding="utf-8")
-        return p
+        atom_path = self._path(atom)
+        atom_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = atom_path.with_name(f".{atom_path.name}.{uuid.uuid4().hex}.tmp")
+        temporary_path.write_text(atom.to_json(), encoding="utf-8")
+        temporary_path.replace(atom_path)
+        return atom_path
 
     def load(self, atom_id: str) -> AtomTask:
         """跨 traj_id 子目录查找。命中第一条即返回；找不到抛 FileNotFoundError。
@@ -124,6 +127,18 @@ class AtomTaskStore:
             if cand.is_file():
                 return AtomTask.from_json(cand.read_text(encoding="utf-8"))
         raise FileNotFoundError(f"atom not found: {atom_id}")
+
+    def path_for_atom(self, atom_id: str) -> Path | None:
+        """返回 atom JSON 路径；找不到返回 None。"""
+        if not self.root.is_dir():
+            return None
+        for d in self.root.iterdir():
+            if not d.is_dir():
+                continue
+            cand = d / "tasks" / f"{atom_id}.json"
+            if cand.is_file():
+                return cand
+        return None
 
     def list_by_traj(self, traj_id: str) -> list[AtomTask]:
         d = self._traj_dir(traj_id)
@@ -196,6 +211,145 @@ class AtomTaskStore:
             {"atom_id": data["atom_ids"][i], "similarity": float(s)}
             for i, s in ranked
         ]
+
+
+class MultiAtomTaskStore:
+    """跨多个 ``AtomTaskStore`` 路由的只读门面（team-CS 多 client 场景）。
+
+    背景：team server 把每个 client 上传的轨迹注册成一个独立 ``watch_dir``
+    （``label=client_id``），各自一份 ``AtomTaskStore``（root 各不相同）。
+    SkillEditAgent 蒸馏某个 skill 时，其 ``.candidates.yml`` 里的 atom 可能
+    来自**任意** client 的 store——单 store 的 ``load`` 只在自己 root 下找，
+    跨 client 的 atom 必然 ``FileNotFoundError`` → ``atom_task_read`` 返回
+    not found → 规则只能凭通用知识标 ``[推断]``，技能质量塌方。
+
+    本类把多个底层 store 串起来：``load`` 依次问每个 store，唯一命中即返回；
+    ``read_traj`` 用的 traj 文件路径由 ``traj_root_for(traj_id)`` 跨所有 root
+    解析。若多个 store 同时命中同一个 atom/traj，记录 warning 后返回 mtime
+    最新的内容；mtime 相同时按 store 顺序取第一个。**单 store（单机 /
+    cold_flush）路径不经过本类**——runner 仅在
+    ``len(stores) > 1`` 时才包一层，行为零回归。
+
+    只暴露 SkillEdit / cluster 工具链实际用到的读接口（``load`` /
+    ``list_by_traj`` / ``all_atoms`` / ``save`` / ``roots``）。``save`` 路由到
+    atom 所属 traj 已存在的那个 store，找不到则落首个 store（``score_task``
+    改 ux_score 时用——atom 必已存在于某 store）。
+    """
+
+    def __init__(self, stores: list["AtomTaskStore"]):
+        if not stores:
+            raise ValueError("MultiAtomTaskStore 需要至少一个底层 store")
+        self.stores = list(stores)
+
+    @property
+    def roots(self) -> list[Path]:
+        return [s.root for s in self.stores]
+
+    @property
+    def root(self) -> Path:
+        """兼容单 store 接口的 ``.root`` 读取方（如 process_atom_task 取 traj_root）。
+        多 store 下返回首个 store 的 root——调用方若需跨 root 解析应改用
+        ``traj_root_for`` / ``roots``。"""
+        return self.stores[0].root
+
+    @staticmethod
+    def _choose_latest(
+        hits: list[tuple[int, "AtomTaskStore", Path]],
+        *,
+        label: str,
+    ) -> tuple["AtomTaskStore", Path] | None:
+        if not hits:
+            return None
+        if len(hits) > 1:
+            logger.warning(
+                "%s duplicated across atom stores; using newest: %s",
+                label,
+                [str(path) for _, _, path in hits],
+            )
+        _idx, store, path = max(
+            hits,
+            key=lambda h: (h[2].stat().st_mtime_ns, -h[0]),
+        )
+        return store, path
+
+    def _atom_hits(self, atom_id: str) -> list[tuple[int, "AtomTaskStore", Path]]:
+        hits: list[tuple[int, "AtomTaskStore", Path]] = []
+        for idx, s in enumerate(self.stores):
+            path = s.path_for_atom(atom_id)
+            if path is not None:
+                hits.append((idx, s, path))
+        return hits
+
+    def _traj_hits(
+        self,
+        traj_id: str,
+        *,
+        require_atoms: bool = False,
+    ) -> list[tuple[int, "AtomTaskStore", Path]]:
+        hits: list[tuple[int, "AtomTaskStore", Path]] = []
+        for idx, s in enumerate(self.stores):
+            marker = s.root / f"{traj_id}.md"
+            if marker.is_file() and not require_atoms:
+                hits.append((idx, s, marker))
+                continue
+
+            atoms = s.list_by_traj(traj_id)
+            if require_atoms and not atoms:
+                continue
+
+            if marker.is_file():
+                hits.append((idx, s, marker))
+                continue
+            if atoms:
+                tasks_dir = s.root / traj_id / "tasks"
+                hits.append((idx, s, tasks_dir))
+        return hits
+
+    def load(self, atom_id: str) -> AtomTask:
+        hit = self._choose_latest(
+            self._atom_hits(atom_id),
+            label=f"atom id {atom_id}",
+        )
+        if hit is not None:
+            _store, path = hit
+            return AtomTask.from_json(path.read_text(encoding="utf-8"))
+        raise FileNotFoundError(f"atom not found in any store: {atom_id}")
+
+    def save(self, atom: AtomTask) -> Path:
+        hit = self._choose_latest(
+            self._atom_hits(atom.atom_id),
+            label=f"atom id {atom.atom_id}",
+        )
+        target = hit[0] if hit is not None else self.stores[0]
+        return target.save(atom)
+
+    def list_by_traj(self, traj_id: str) -> list[AtomTask]:
+        hit = self._choose_latest(
+            self._traj_hits(traj_id, require_atoms=True),
+            label=f"traj id {traj_id}",
+        )
+        if hit is not None:
+            store, _path = hit
+            return store.list_by_traj(traj_id)
+        return []
+
+    def all_atoms(self) -> Iterator[AtomTask]:
+        for s in self.stores:
+            yield from s.all_atoms()
+
+    def traj_root_for(self, traj_id: str) -> Path | None:
+        """返回含 ``<traj_id>.md`` 的 store root；找不到返回 None。
+
+        ``read_traj`` 用它定位轨迹原文：atom 来自哪个 client 的 watch_dir，
+        其 traj.md 就落在那个 root 下。"""
+        hit = self._choose_latest(
+            self._traj_hits(traj_id),
+            label=f"traj id {traj_id}",
+        )
+        if hit is not None:
+            store, _path = hit
+            return store.root
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════

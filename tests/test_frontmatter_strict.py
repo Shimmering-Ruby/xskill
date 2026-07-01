@@ -6,7 +6,7 @@ test_frontmatter_strict.py -- SKILL.md frontmatter 写后校验钩子的度量�
 背景
 ----
 `xskill.skill.frontmatter.parse()` 遇到坏 YAML 会**静默返回 ({}, text)**，
-`skill_tools.write_file()` 在 fm={} 时退化成原样写盘——两处都是"静默放行"：
+`agent_tools.write_file.entrypoint()` 在 fm={} 时退化成原样写盘——两处都是"静默放行"：
 LLM 写出残缺的 SKILL.md（最典型是多行 description 没用块标量，被 YAML 解析
 成嵌套 mapping/非字符串）会被悄悄写进库，事后才在加载端暴雷。
 

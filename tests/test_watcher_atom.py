@@ -16,6 +16,15 @@ from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM, autosplit_submit
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args)
+
+
 class _StubAgno:
     """根据 sysprompt 头分发：
     - split agent (AtomTask 拆分员) → 扫 [line:N] 标记逐个 submit_atom
@@ -26,7 +35,7 @@ class _StubAgno:
     """
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = {getattr(t, "__name__", ""): t for t in tools}
+        self.tools = {_tool_name(t): t for t in tools}
 
     def run(self, user_msg, **kw):
         head = (self.instructions[0] if self.instructions else "")[:80]
@@ -45,27 +54,32 @@ class _StubAgno:
             atom_ids = re.findall(r"atom_id:\s*(\S+)", user_msg)
             for atom_id in atom_ids:
                 if "new_skill_folder" in self.tools:
-                    self.tools["new_skill_folder"]("auto-skill", "stub desc")
+                    _call_tool(self.tools["new_skill_folder"], "auto-skill", "stub desc")
                 if "add_task_to_skill" in self.tools:
-                    self.tools["add_task_to_skill"]("auto-skill", atom_id, 10)
+                    _call_tool(self.tools["add_task_to_skill"], "auto-skill", atom_id, 10)
         elif "SkillEditAgent" in head:
             import re
             m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
             if m and "write_file" in self.tools:
-                self.tools["write_file"](
+                _call_tool(
+                    self.tools["write_file"],
                     m.group(1),
                     "---\nname: auto-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n",
                 )
             # 根据当前分支决定调哪个 commit
             if "baby" in user_msg:
                 if "commit_baby_to_main" in self.tools:
-                    self.tools["commit_baby_to_main"]("auto-skill", "stub baby")
+                    _call_tool(self.tools["commit_baby_to_main"], "auto-skill", "stub baby")
             elif "main" in user_msg:
                 if "commit_to_staging" in self.tools:
-                    self.tools["commit_to_staging"]("auto-skill", "stub staging")
+                    _call_tool(self.tools["commit_to_staging"], "auto-skill", "stub staging")
         elif "UserEditAbsorbAgent" in head:
             if "absorb_user_edit_to_main" in self.tools:
-                self.tools["absorb_user_edit_to_main"]("auto-skill", "absorb user edit: test")
+                _call_tool(
+                    self.tools["absorb_user_edit_to_main"],
+                    "auto-skill",
+                    "absorb user edit: test",
+                )
         class _R: pass
         r = _R(); r.content = "stub"; return r
 
@@ -236,7 +250,7 @@ class TestClusterAllFailed:
         class _AlwaysFailAgno:
             def __init__(self, *, instructions, tools):
                 self.instructions = instructions
-                self.tools = {getattr(t, "__name__", ""): t for t in tools}
+                self.tools = {_tool_name(t): t for t in tools}
             def run(self, msg, **kw):
                 head = (self.instructions[0] or "")[:80]
                 if "AtomTask 拆分员" in head:
@@ -309,7 +323,7 @@ class TestIndependentSkillEditScan:
         class _MixedStub:
             def __init__(self, *, instructions, tools):
                 self.instructions = instructions
-                self.tools = {getattr(t, "__name__", ""): t for t in tools}
+                self.tools = {_tool_name(t): t for t in tools}
             def run(self, msg, **kw):
                 head = (self.instructions[0] if self.instructions else "")[:80]
                 if "AtomTask 拆分员" in head:
@@ -322,12 +336,13 @@ class TestIndependentSkillEditScan:
                 import re
                 m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", msg)
                 if m and "write_file" in self.tools:
-                    self.tools["write_file"](
+                    _call_tool(
+                        self.tools["write_file"],
                         m.group(1),
                         "---\nname: my-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n",
                     )
                 if "commit_baby_to_main" in self.tools:
-                    self.tools["commit_baby_to_main"]("my-skill", "stub commit")
+                    _call_tool(self.tools["commit_baby_to_main"], "my-skill", "stub commit")
                 class _R: pass
                 r = _R(); r.content = ""; return r
 

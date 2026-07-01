@@ -26,7 +26,7 @@ def test_watcher_starts_even_with_empty_registry(tmp_path):
     try:
         with patch("xskill.api.app.create_llm_client", return_value=MagicMock()), \
              patch("xskill.api.app.create_embed_client", return_value=MagicMock()), \
-             patch("xskill.api.app.init_context"), \
+             patch("xskill.api.app.init_skill_authoring_tool_context"), \
              patch("xskill.ecosystems.detect_known_ecosystems", return_value=[]):
             from xskill.api import create_app
             app = create_app()

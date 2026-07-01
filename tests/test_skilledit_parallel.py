@@ -32,6 +32,15 @@ from tests.test_task_agent import _AutoSplitLLM
 N_SKILLS = 5
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args)
+
+
 def _seed_baby_skill(skill_root, slug):
     """造一个 baby 分支 + 候选满阈值（weightscore=10≥10）的 skill。"""
     sd = skill_root / slug
@@ -53,7 +62,7 @@ def _make_barrier_agno(n, barrier):
     class _BarrierStub:
         def __init__(self, *, instructions, tools):
             self.instructions = instructions
-            self.tools = {getattr(t, "__name__", ""): t for t in tools}
+            self.tools = {_tool_name(t): t for t in tools}
 
         def run(self, user_msg, **kw):
             import re
@@ -68,13 +77,14 @@ def _make_barrier_agno(n, barrier):
             m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
             if m and "write_file" in self.tools:
                 # 正文写入自己的 slug 作串扰锚点
-                self.tools["write_file"](
+                _call_tool(
+                    self.tools["write_file"],
                     m.group(1),
                     f"---\nname: {slug}\ndescription: real body for {slug}\n"
                     f"metadata:\n  version: 1\n---\n# {slug}\nbody-of-{slug}\n",
                 )
             if "baby" in user_msg and "commit_baby_to_main" in self.tools:
-                self.tools["commit_baby_to_main"](slug, f"graduate {slug}")
+                _call_tool(self.tools["commit_baby_to_main"], slug, f"graduate {slug}")
             class _R:
                 pass
             r = _R()

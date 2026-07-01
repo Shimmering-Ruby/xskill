@@ -101,7 +101,7 @@ DEFAULT_GUIDANCE_BLOCK_2 = """# 正文结构纪律
 """
 
 
-SYSTEM_PROMPT_TEMPLATE = """你是 SkillEditAgent。某 skill 的 candidates buffer 累计
+_SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE = """你是 SkillEditAgent。某 skill 的 candidates buffer 累计
 weightscore ≥ 10，需要你产出/更新它的 SKILL.md。
 
 # 当前场景
@@ -226,6 +226,13 @@ held-out test 集选优；你只需先写个像样的初稿。）
   破坏 git 状态，后者是 cluster 的 buffer 由系统管理
 """
 
+SYSTEM_PROMPT_TEMPLATE = _SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE.format(
+    scenario_block="{scenario_block}",
+    branch_now="{branch_now}",
+    guidance_block=DEFAULT_GUIDANCE_BLOCK,
+    guidance_block_2=DEFAULT_GUIDANCE_BLOCK_2,
+)
+
 
 GUIDANCE_ENV = "XSKILL_SKILLEDIT_GUIDANCE_FILE"
 
@@ -265,7 +272,7 @@ def _resolve_guidance() -> tuple[str, str]:
 def build_system_prompt(scenario_block: str, branch_now: str) -> str:
     """组装 SkillEdit system prompt：管线契约段固定，写作指导段按 env 可切换。"""
     guidance, guidance2 = _resolve_guidance()
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    return _SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE.format(
         scenario_block=scenario_block,
         branch_now=branch_now,
         guidance_block=guidance,
@@ -387,7 +394,7 @@ class SkillEditAgent:
         return any(s.get("side") == "main" for s in scores)
 
     def _run(self, ready: list[dict], current_branch_name: str) -> None:
-        from xskill.agents import skill_tools as ST
+        from xskill.agents import agent_tools
         from xskill.skill.frontmatter import parse as fm_parse
 
         # 构造 scenario_block + branch_now 给 prompt 用
@@ -445,13 +452,13 @@ class SkillEditAgent:
         agent = self.agno_agent_factory(
             instructions=[sysprompt],
             tools=[
-                ST.atom_task_read,
-                ST.read_traj,
-                ST.skill_read,
-                ST.list_files,
-                ST.write_file,
-                ST.commit_baby_to_main,
-                ST.commit_to_staging,
+                agent_tools.atom_task_read,
+                agent_tools.read_traj,
+                agent_tools.skill_read,
+                agent_tools.list_files,
+                agent_tools.write_file,
+                agent_tools.commit_baby_to_main,
+                agent_tools.commit_to_staging,
             ],
         )
         # 逐轮 CoT/工具调用 → logs/agents/skill_edit_agents/skills/<skill>_<ts>.log
