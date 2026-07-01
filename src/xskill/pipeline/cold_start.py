@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 DEFAULT_REQUEST_FILENAME = "COLD_START_REQUEST"
 DEFAULT_BARRIER_FILENAME = "COLD_START_FLUSH"
 
 
-def _section(config: dict | None) -> dict:
+def _section(config: Optional[dict]) -> dict:
     sec = (config or {}).get("cold_start", {}) or {}
     return sec if isinstance(sec, dict) else {}
 
@@ -27,21 +28,21 @@ def _configured_path(sec: dict, key: str, default_base: Path, filename: str) -> 
     return Path(value).expanduser() if value else Path(default_base) / filename
 
 
-def request_path_from_config(config: dict | None, default_base: Path) -> Path:
+def request_path_from_config(config: Optional[dict], default_base: Path) -> Path:
     sec = _section(config)
     return _configured_path(
         sec, "request_path", default_base, DEFAULT_REQUEST_FILENAME,
     )
 
 
-def barrier_path_from_config(config: dict | None, default_base: Path) -> Path:
+def barrier_path_from_config(config: Optional[dict], default_base: Path) -> Path:
     sec = _section(config)
     return _configured_path(
         sec, "barrier_path", default_base, DEFAULT_BARRIER_FILENAME,
     )
 
 
-def request_cold_start_flush(config: dict | None, default_base: Path) -> Path:
+def request_cold_start_flush(config: Optional[dict], default_base: Path) -> Path:
     """请求 watcher 在当前重建批次处理完成后做一次 cold-start flush。"""
     path = request_path_from_config(config, default_base)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,13 +56,13 @@ class ColdStartController:
 
     enabled: bool = False
     explicitly_disabled: bool = False
-    request_path: Path | None = None
-    barrier_path: Path | None = None
+    request_path: Optional[Path] = None
+    barrier_path: Optional[Path] = None
 
     @classmethod
     def from_config(
         cls,
-        config: dict | None,
+        config: Optional[dict],
         default_base: Path,
         *,
         server_mode: bool = False,
