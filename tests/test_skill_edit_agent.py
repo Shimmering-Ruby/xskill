@@ -11,6 +11,15 @@ from xskill.agents.skill_edit_agent import SkillEditAgent, SYSTEM_PROMPT_TEMPLAT
 from xskill.skill.git import init_skill_repo_on_baby, run_git
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args)
+
+
 def _make_baby_skill(parent: Path, name: str, desc: str = "stub desc") -> Path:
     """初始化 baby 分支 skill。"""
     sd = parent / name
@@ -51,9 +60,9 @@ class _BabyStubAgno:
 
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = {getattr(t, "__name__", ""): t for t in tools}
+        self.tools = {_tool_name(t): t for t in tools}
 
-    def run(self, user_msg, **kw):
+    def run(self, user_msg, **_kwargs):
         type(self).invoked = True
         type(self).user_msg = user_msg
         # 抓 skill_name
@@ -65,10 +74,10 @@ class _BabyStubAgno:
         target_path = m.group(1) if m else None
         # 写 SKILL.md
         if type(self).writes_skill_md_with is not None and target_path:
-            self.tools["write_file"](target_path, type(self).writes_skill_md_with)
+            _call_tool(self.tools["write_file"], target_path, type(self).writes_skill_md_with)
         # 调 commit_baby_to_main
         if type(self).calls_commit and skill:
-            self.tools["commit_baby_to_main"](skill, "stub baby commit")
+            _call_tool(self.tools["commit_baby_to_main"], skill, "stub baby commit")
         class _R: pass
         r = _R(); r.content = "done"
         return r
@@ -76,7 +85,7 @@ class _BabyStubAgno:
 
 class _StagingStubAgno(_BabyStubAgno):
     """模拟 SkillEditAgent 在 main 分支：写 SKILL.md + 调 commit_to_staging。"""
-    def run(self, user_msg, **kw):
+    def run(self, user_msg, **_kwargs):
         type(self).invoked = True
         type(self).user_msg = user_msg
         import re
@@ -85,9 +94,9 @@ class _StagingStubAgno(_BabyStubAgno):
         m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
         target_path = m.group(1) if m else None
         if type(self).writes_skill_md_with is not None and target_path:
-            self.tools["write_file"](target_path, type(self).writes_skill_md_with)
+            _call_tool(self.tools["write_file"], target_path, type(self).writes_skill_md_with)
         if type(self).calls_commit and skill:
-            self.tools["commit_to_staging"](skill, "stub staging commit")
+            _call_tool(self.tools["commit_to_staging"], skill, "stub staging commit")
         class _R: pass
         r = _R(); r.content = "done"
         return r
@@ -102,19 +111,25 @@ def _staging_factory(*, instructions, tools):
 
 
 @pytest.fixture(autouse=True)
-def _init_v2_ctx(tmp_path):
-    """每个 case 把 _ctx_v2 指到 tmp_path/skill，让 commit_*/write_file 工具可用。"""
-    from xskill.agents import skill_tools as ST
+def _init_atom_task_tool_context(tmp_path):
+    """每个 case 初始化 AtomTask tool context，让 commit_*/write_file 工具可用。"""
+    from xskill.agents import agent_tools
     from xskill.pipeline.atom import AtomTaskStore
+    saved_context = agent_tools.agent_tool_config.snapshot()
     (tmp_path / "skill").mkdir(parents=True, exist_ok=True)
     (tmp_path / "store").mkdir(parents=True, exist_ok=True)
-    ST.init_context_v2(
+    agent_tools.init_atom_task_tool_context(
         skill_dir=tmp_path / "skill",
-        store=AtomTaskStore(root=tmp_path / "store"),
-        embed_client=None,
-        traj_root=tmp_path / "store",
+        atom_store=AtomTaskStore(root=tmp_path / "store"),
+        default_traj_root=tmp_path / "store",
+    )
+    agent_tools.init_skill_authoring_tool_context(
+        tmp_path / "skill",
+        tmp_path / "skill",
+        {"skill_opt": {"enabled": False}},
     )
     yield
+    agent_tools.agent_tool_config.restore(saved_context)
     for cls in (_BabyStubAgno, _StagingStubAgno):
         cls.invoked = False
         cls.user_msg = ""
@@ -267,8 +282,8 @@ class TestRequiresActualSkillMdWrite:
         C.save_candidates(skill_dir, data)
 
         class _ThrowingAgent:
-            def __init__(self, **kw): pass
-            def run(self, msg, **kw):
+            def __init__(self, **_kwargs): pass
+            def run(self, _message, **_kwargs):
                 raise RuntimeError("LLM 402 余额不足")
 
         agent = SkillEditAgent(

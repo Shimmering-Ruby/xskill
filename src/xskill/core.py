@@ -12,7 +12,6 @@ from typing import Optional
 
 from xskill.config import load_config, get_skill_dir
 from xskill.pipeline.registry import Registry
-from xskill.skill.skill import Skill
 from xskill.skill.repo import SkillRepo
 from xskill.pipeline.trajectory import Trajectory
 from xskill.types import SkillHit, TrajectoryHit, UxScoreResult
@@ -89,18 +88,13 @@ class XSkill:
 
     def search_skills(self, query: str, top_k: int = 5) -> list[SkillHit]:
         """跨 skill_repo 搜索 skill。"""
-        import json
-        from xskill.agents import skill_tools
-        # data_dir 在 skill 搜索路径上不读，传 skill_repo.root 占位
-        skill_tools.init_context(
-            self.skill_repo.root, self.skill_repo.root,
-            self.llm, self.embed, self.config,
+        from xskill.skill.repo import search_skill_index
+        items = search_skill_index(
+            skill_dir=self.skill_repo.root,
+            query=query,
+            embed_client=self.embed,
+            top_k=top_k,
         )
-        raw = skill_tools.search_skills(query, top_k=top_k) or "[]"
-        try:
-            items = json.loads(raw)
-        except json.JSONDecodeError:
-            return []
         out: list[SkillHit] = []
         for item in items:
             name = item.get("skill_name")

@@ -20,7 +20,7 @@ def client(tmp_path):
     srv._skill_dir.mkdir(exist_ok=True)
     try:
         with patch("xskill.api.app.create_embed_client"), \
-             patch("xskill.api.app.init_context"):
+             patch("xskill.api.app.init_skill_authoring_tool_context"):
             from xskill.api import create_app
             from starlette.testclient import TestClient
             app = create_app()

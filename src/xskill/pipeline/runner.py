@@ -24,19 +24,16 @@ v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from pathlib import Path
 
-from xskill.canary import CanaryConfig
 from xskill.pipeline.registry import (
     list_watch_dirs,
     discover_trajectories,
     get_trajs_by_status,
-    mark_meta_done,
     mark_indexed,
     mark_skill_used,
     update_traj_status,
@@ -278,37 +275,43 @@ class DirectoryWatcher:
             return
         from xskill.agents.skill_edit_agent import SkillEditAgent
         factory = self._factory()
-        # store 选哪个：edit agent 工具 (atom_task_read/read_traj) 需要
-        # store + traj_root 来工作；从已注册的第一个 wd 取（生产环境通常
-        # 只有 cc_sessions 一个有 atom 的 dir）。
-        store = None
-        traj_root = None
+        # store 选哪个：edit agent 工具 (atom_task_read/read_traj) 需要 store +
+        # traj_root 才能读到 atom 原文。单机只有一个 watch_dir（cc_sessions）。
+        # team-CS server 下有 N 个 watch_dir（每个 client 上传轨迹注册成一个 wd，
+        # label=client_id），某 skill 的 candidates 里的 atom 可能来自任意 client
+        # 的 store——只绑第一个 wd 的 store，跨 client 的 atom 必然 not found。
+        # 因此收集所有 wd 的 store：>1 个时包一层 MultiAtomTaskStore 做跨 store
+        # 路由；单个时直接用它（单机/cold_flush 行为零变化）。
+        stores = []
         for wd in list_watch_dirs(**self._db_kw()):
             try:
-                store = self._store_for(Path(wd["path"]))
-                traj_root = Path(wd["path"])
-                break
+                stores.append(self._store_for(Path(wd["path"])))
             except Exception:
                 continue
-        if store is None:
+        if not stores:
             return
-        # 初始化 v2 工具 ctx（SkillEditAgent 工具用）
-        from xskill.agents import skill_tools as ST
-        ST.init_context_v2(
-            skill_dir=self.skill_dir, store=store,
-            embed_client=self.embed_client, traj_root=traj_root,
+        if len(stores) == 1:
+            store = stores[0]
+        else:
+            from xskill.pipeline.atom import MultiAtomTaskStore
+            store = MultiAtomTaskStore(stores)
+        traj_root = Path(stores[0].root)
+        # 初始化 AtomTask 工具上下文（SkillEditAgent 的 AtomTaskRead/ReadTraj 用）
+        from xskill.agents import agent_tools
+        agent_tools.init_atom_task_tool_context(
+            skill_dir=self.skill_dir, atom_store=store,
+            default_traj_root=traj_root,
         )
-        # 同时填 v1 ctx：commit 工具内的 description 触发优化要从 _ctx 取
-        # llm_client + config（走既有 rate_limit 的 llm，不另起进程）。
-        ST.init_context(
-            self.skill_dir, self.skill_dir, self.llm,
-            self.embed_client, self.config,
+        # 同时填 skill authoring 工具上下文；commit 前的 description 优化会在
+        # 确定性 workflow 内从 config 创建自己的 LLM/embed client。
+        agent_tools.init_skill_authoring_tool_context(
+            self.skill_dir, self.skill_dir, self.config,
         )
         # ── 跨技能并行写正文 ──
         # 每个 skill 文件夹是独立 git 仓（skill/git.py 各自 git init），仓锁
         # _repo_lock_for(repo_dir) 是 per-skill 的 → 不同技能 = 不同锁 = 零冲突，
-        # 跨技能并发安全。skill_tools 的 _ctx / _ctx_v2 在循环外已用同一个 skill
-        # 根目录初始化好，且只读共享根——maybe_run 期间不再改写它；write_file /
+        # 跨技能并发安全。agent_tools 的配置单例在循环外已用同一个 skill
+        # 根目录初始化好，且只读共享根——maybe_run 期间不再改写它们；write_file /
         # commit_baby_to_main / commit_to_staging / skill_read 都按 skill_name
         # 实参解析目标子目录（target = skill_dir / slug），不依赖任何 per-skill
         # 全局态。因此把每个技能的 maybe_run() 丢进线程池并发跑是安全的。
@@ -936,7 +939,7 @@ class DirectoryWatcher:
         )
         self._stats["atoms_extracted"] += n_atoms
 
-    def _on_embed_done(self, wd_id, fname, result, **kw):
+    def _on_embed_done(self, wd_id, _filename, result, **kw):
         _wd_id, filenames = result
         for f in filenames:
             update_traj_status(wd_id, f, "indexed", **kw)
@@ -1010,7 +1013,7 @@ class DirectoryWatcher:
     # ux_score
     # ───────────────────────────────────────────────────────────
 
-    def _score_new(self, wd_id, dir_path, filenames, **kw):
+    def _score_new(self, _watch_dir_id, _dir_path, _filenames, **_kwargs):
         """v2: 不在发现新 traj 时打分（那时 atom 还没拆）。
 
         实际打分在 ``_sweep_done_trajs`` → ``_score_atoms_for_traj`` 触发。
@@ -1059,7 +1062,6 @@ class DirectoryWatcher:
         if not atoms:
             return
         ac = AtomCanary(skill_dir=skill_sub)
-        canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
         for atom in atoms:
             try:
                 result = score_atom(
@@ -1181,7 +1183,7 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         config: xskill 配置（含 llm 段）
         skill_dir: skill 根目录（其下每个子目录是一个 skill 仓库）
         store: AtomTaskStore（持有所有 atom + 索引）
-        embed_client: 向量客户端（HybridSearch 用）
+        embed_client: 向量客户端（重建 atom 向量索引用）
         agno_agent_factory: callable(*, instructions, tools) -> agno-like Agent。
                             生产环境用 ``agno_factory.make_default_factory(config)``；
                             单测注入 stub。
@@ -1190,14 +1192,16 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         dict 含 keys: action / atom_id / cluster_log
     """
     from xskill.agents.task_cluster_agent import TaskClusterAgent
-    from xskill.agents import skill_tools as ST
+    from xskill.agents import agent_tools
+
+    del embed_client  # kept for API compatibility; cluster tools no longer use it
 
     atom = store.load(atom_id)
     traj_root = store.root
 
-    ST.init_context_v2(
-        skill_dir=skill_dir, store=store,
-        embed_client=embed_client, traj_root=traj_root,
+    agent_tools.init_atom_task_tool_context(
+        skill_dir=skill_dir, atom_store=store,
+        default_traj_root=traj_root,
     )
 
     cluster = TaskClusterAgent(
@@ -1205,11 +1209,11 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         agno_agent_factory=agno_agent_factory,
         llm_cfg=config.get("llm", {}),
         tools=[
-            ST.atom_task_read, ST.atom_task_search, ST.read_traj,
-            ST.skill_read, ST.read_skill_tasks,
-            ST.new_skill_folder, ST.add_task_to_skill,
-            ST.rename_skill, ST.move_task_to,
-            ST.score_task,
+            agent_tools.atom_task_read, agent_tools.read_traj,
+            agent_tools.skill_read, agent_tools.read_skill_tasks,
+            agent_tools.new_skill_folder, agent_tools.add_task_to_skill,
+            agent_tools.rename_skill, agent_tools.move_task_to,
+            agent_tools.score_task,
         ],
     )
     cluster_content = cluster.process(atom)
@@ -1264,16 +1268,18 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
         cluster_log。
     """
     from xskill.agents.task_cluster_agent import TaskClusterAgent
-    from xskill.agents import skill_tools as ST
+    from xskill.agents import agent_tools
     from xskill.skill.candidates import find_atom_entry_in_any_skill
+
+    del embed_client  # kept for API compatibility; cluster tools no longer use it
 
     atoms = [store.load(aid) for aid in atom_ids]
     atom_by_id = {a.atom_id: a for a in atoms}
     traj_root = store.root
 
-    ST.init_context_v2(
-        skill_dir=skill_dir, store=store,
-        embed_client=embed_client, traj_root=traj_root,
+    agent_tools.init_atom_task_tool_context(
+        skill_dir=skill_dir, atom_store=store,
+        default_traj_root=traj_root,
     )
 
     cluster = TaskClusterAgent(
@@ -1281,11 +1287,11 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
         agno_agent_factory=agno_agent_factory,
         llm_cfg=config.get("llm", {}),
         tools=[
-            ST.atom_task_read, ST.atom_task_search, ST.read_traj,
-            ST.skill_read, ST.read_skill_tasks,
-            ST.new_skill_folder, ST.add_task_to_skill,
-            ST.rename_skill, ST.move_task_to,
-            ST.score_task,
+            agent_tools.atom_task_read, agent_tools.read_traj,
+            agent_tools.skill_read, agent_tools.read_skill_tasks,
+            agent_tools.new_skill_folder, agent_tools.add_task_to_skill,
+            agent_tools.rename_skill, agent_tools.move_task_to,
+            agent_tools.score_task,
         ],
     )
     cluster_content = cluster.process_batch(atoms)

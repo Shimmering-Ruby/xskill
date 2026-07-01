@@ -22,6 +22,15 @@ from xskill.agents.task_agent import (
 )
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args, **kwargs):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args, **kwargs)
+
+
 # ════════════════════════════════════════════════════════════════════
 # 共享 stub：agno 工厂（watcher 等下游测试 import 复用）
 # ════════════════════════════════════════════════════════════════════
@@ -43,8 +52,15 @@ def autosplit_submit(user_msg: str, tools: dict) -> None:
     if submit is None:
         return
     for ln in [int(n) for n in re.findall(r"\[line:(\d+)\]", user_msg)]:
-        submit(start_line=ln, intent="stub intent", summary="stub summary",
-               tags=["stub"], used_skills=[], ux_score=7)
+        _call_tool(
+            submit,
+            start_line=ln,
+            intent="stub intent",
+            summary="stub summary",
+            tags=["stub"],
+            used_skills=[],
+            ux_score=7,
+        )
 
 
 class _AutoSplitAgno:
@@ -56,7 +72,7 @@ class _AutoSplitAgno:
 
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = {getattr(t, "__name__", ""): t for t in tools}
+        self.tools = {_tool_name(t): t for t in tools}
 
     def run(self, user_msg, **kw):
         autosplit_submit(user_msg, self.tools)
@@ -72,7 +88,7 @@ def _scripted_factory(submit_calls, *, status=None):
                       "tool_names": None}
 
     def factory(*, instructions, tools):
-        toolmap = {getattr(t, "__name__", ""): t for t in tools}
+        toolmap = {_tool_name(t): t for t in tools}
         captured["instructions"] = instructions
         captured["tool_names"] = sorted(toolmap)
 
@@ -80,7 +96,9 @@ def _scripted_factory(submit_calls, *, status=None):
             def run(self, user_msg, **kw):
                 captured["user_msg"] = user_msg
                 for c in submit_calls:
-                    captured["results"].append(toolmap["submit_atom"](**c))
+                    captured["results"].append(
+                        _call_tool(toolmap["submit_atom"], **c)
+                    )
                 r = _RunResult()
                 r.status = status
                 return r
@@ -519,15 +537,19 @@ class TestLookTool:
         captured_look: dict = {}
 
         def factory(*, instructions, tools):
-            toolmap = {getattr(t, "__name__", ""): t for t in tools}
+            toolmap = {_tool_name(t): t for t in tools}
 
             class _A:
                 def run(self, user_msg, **kw):
                     # 用 look 读第 5 行（## User）附近,验证向前看包含 assistant
-                    captured_look["out"] = toolmap["look"](
-                        line=11, before=3, after=2)
-                    toolmap["submit_atom"](
-                        start_line=5, intent="i", summary="s")
+                    captured_look["out"] = _call_tool(
+                        toolmap["look"], line=11, before=3, after=2)
+                    _call_tool(
+                        toolmap["submit_atom"],
+                        start_line=5,
+                        intent="i",
+                        summary="s",
+                    )
                     return _RunResult()
 
             return _A()
@@ -548,15 +570,24 @@ class TestLookTool:
         captured_my: dict = {}
 
         def factory(*, instructions, tools):
-            toolmap = {getattr(t, "__name__", ""): t for t in tools}
+            toolmap = {_tool_name(t): t for t in tools}
 
             class _A:
                 def run(self, user_msg, **kw):
-                    toolmap["submit_atom"](start_line=5, intent="i", summary="s")
-                    toolmap["submit_atom"](
-                        start_line=17, intent="i2", summary="s2")
-                    captured_my["out"] = toolmap["my_atoms"]()
-                    captured_my["budget"] = toolmap["context_budget"]()
+                    _call_tool(
+                        toolmap["submit_atom"],
+                        start_line=5,
+                        intent="i",
+                        summary="s",
+                    )
+                    _call_tool(
+                        toolmap["submit_atom"],
+                        start_line=17,
+                        intent="i2",
+                        summary="s2",
+                    )
+                    captured_my["out"] = _call_tool(toolmap["my_atoms"])
+                    captured_my["budget"] = _call_tool(toolmap["context_budget"])
                     return _RunResult()
 
             return _A()
