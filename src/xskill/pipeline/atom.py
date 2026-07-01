@@ -228,9 +228,9 @@ class MultiAtomTaskStore:
     ``len(stores) > 1`` 时才包一层，行为零回归。
 
     只暴露 SkillEdit / cluster 工具链实际用到的读接口（``load`` /
-    ``list_by_traj`` / ``all_atoms`` / ``save`` / ``vector_search`` /
-    ``roots``）。``save`` 路由到 atom 所属 traj 已存在的那个 store，找不到
-    则落首个 store（``score_task`` 改 ux_score 时用——atom 必已存在于某 store）。
+    ``list_by_traj`` / ``all_atoms`` / ``save`` / ``roots``）。``save`` 路由到
+    atom 所属 traj 已存在的那个 store，找不到则落首个 store（``score_task``
+    改 ux_score 时用——atom 必已存在于某 store）。
     """
 
     def __init__(self, stores: list["AtomTaskStore"]):
@@ -347,14 +347,6 @@ class MultiAtomTaskStore:
             store, _path = hit
             return store.root
         return None
-
-    def vector_search(self, query: str, embed_client, top_k: int = 5) -> list[dict]:
-        """跨所有 store 检索，合并按 similarity 取 top_k。"""
-        merged: list[dict] = []
-        for s in self.stores:
-            merged.extend(s.vector_search(query, embed_client, top_k=top_k))
-        merged.sort(key=lambda h: h.get("similarity", 0.0), reverse=True)
-        return merged[:top_k]
 
 
 # ═══════════════════════════════════════════════════════════════════
