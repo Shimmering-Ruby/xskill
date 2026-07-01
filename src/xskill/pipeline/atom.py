@@ -125,6 +125,18 @@ class AtomTaskStore:
                 return AtomTask.from_json(cand.read_text(encoding="utf-8"))
         raise FileNotFoundError(f"atom not found: {atom_id}")
 
+    def path_for_atom(self, atom_id: str) -> Path | None:
+        """返回 atom JSON 路径；找不到返回 None。"""
+        if not self.root.is_dir():
+            return None
+        for d in self.root.iterdir():
+            if not d.is_dir():
+                continue
+            cand = d / "tasks" / f"{atom_id}.json"
+            if cand.is_file():
+                return cand
+        return None
+
     def list_by_traj(self, traj_id: str) -> list[AtomTask]:
         d = self._traj_dir(traj_id)
         if not d.is_dir():
@@ -210,8 +222,9 @@ class MultiAtomTaskStore:
 
     本类把多个底层 store 串起来：``load`` 依次问每个 store，唯一命中即返回；
     ``read_traj`` 用的 traj 文件路径由 ``traj_root_for(traj_id)`` 跨所有 root
-    解析。若多个 store 同时命中同一个 atom/traj，直接 fail loud，避免按 store
-    顺序静默读错。**单 store（单机 / cold_flush）路径不经过本类**——runner 仅在
+    解析。若多个 store 同时命中同一个 atom/traj，记录 warning 后返回 mtime
+    最新的内容；mtime 相同时按 store 顺序取第一个。**单 store（单机 /
+    cold_flush）路径不经过本类**——runner 仅在
     ``len(stores) > 1`` 时才包一层，行为零回归。
 
     只暴露 SkillEdit / cluster 工具链实际用到的读接口（``load`` /
@@ -236,53 +249,85 @@ class MultiAtomTaskStore:
         ``traj_root_for`` / ``roots``。"""
         return self.stores[0].root
 
-    def _stores_holding(self, atom_id: str) -> list["AtomTaskStore"]:
-        hits: list["AtomTaskStore"] = []
-        for s in self.stores:
-            try:
-                s.load(atom_id)
-                hits.append(s)
-            except FileNotFoundError:
-                continue
+    @staticmethod
+    def _choose_latest(
+        hits: list[tuple[int, "AtomTaskStore", Path]],
+        *,
+        label: str,
+    ) -> tuple["AtomTaskStore", Path] | None:
+        if not hits:
+            return None
+        if len(hits) > 1:
+            logger.warning(
+                "%s duplicated across atom stores; using newest: %s",
+                label,
+                [str(path) for _, _, path in hits],
+            )
+        _idx, store, path = max(
+            hits,
+            key=lambda h: (h[2].stat().st_mtime_ns, -h[0]),
+        )
+        return store, path
+
+    def _atom_hits(self, atom_id: str) -> list[tuple[int, "AtomTaskStore", Path]]:
+        hits: list[tuple[int, "AtomTaskStore", Path]] = []
+        for idx, s in enumerate(self.stores):
+            path = s.path_for_atom(atom_id)
+            if path is not None:
+                hits.append((idx, s, path))
         return hits
 
-    @staticmethod
-    def _ambiguous_atom(atom_id: str, stores: list["AtomTaskStore"]) -> FileNotFoundError:
-        roots = ", ".join(str(s.root) for s in stores)
-        return FileNotFoundError(
-            f"atom id is ambiguous across stores: {atom_id} ({roots})"
-        )
+    def _traj_hits(
+        self,
+        traj_id: str,
+        *,
+        require_atoms: bool = False,
+    ) -> list[tuple[int, "AtomTaskStore", Path]]:
+        hits: list[tuple[int, "AtomTaskStore", Path]] = []
+        for idx, s in enumerate(self.stores):
+            marker = s.root / f"{traj_id}.md"
+            if marker.is_file() and not require_atoms:
+                hits.append((idx, s, marker))
+                continue
+
+            atoms = s.list_by_traj(traj_id)
+            if require_atoms and not atoms:
+                continue
+
+            if marker.is_file():
+                hits.append((idx, s, marker))
+                continue
+            if atoms:
+                tasks_dir = s.root / traj_id / "tasks"
+                hits.append((idx, s, tasks_dir))
+        return hits
 
     def load(self, atom_id: str) -> AtomTask:
-        hits = self._stores_holding(atom_id)
-        if len(hits) == 1:
-            return hits[0].load(atom_id)
-        if len(hits) > 1:
-            raise self._ambiguous_atom(atom_id, hits)
+        hit = self._choose_latest(
+            self._atom_hits(atom_id),
+            label=f"atom id {atom_id}",
+        )
+        if hit is not None:
+            _store, path = hit
+            return AtomTask.from_json(path.read_text(encoding="utf-8"))
         raise FileNotFoundError(f"atom not found in any store: {atom_id}")
 
     def save(self, atom: AtomTask) -> Path:
-        holders = self._stores_holding(atom.atom_id)
-        if len(holders) > 1:
-            raise self._ambiguous_atom(atom.atom_id, holders)
-        target = holders[0] if holders else self.stores[0]
+        hit = self._choose_latest(
+            self._atom_hits(atom.atom_id),
+            label=f"atom id {atom.atom_id}",
+        )
+        target = hit[0] if hit is not None else self.stores[0]
         return target.save(atom)
 
     def list_by_traj(self, traj_id: str) -> list[AtomTask]:
-        hits: list[list[AtomTask]] = []
-        roots: list[Path] = []
-        for s in self.stores:
-            atoms = s.list_by_traj(traj_id)
-            if atoms:
-                hits.append(atoms)
-                roots.append(s.root)
-        if len(hits) == 1:
-            return hits[0]
-        if len(hits) > 1:
-            root_msg = ", ".join(str(p) for p in roots)
-            raise FileNotFoundError(
-                f"traj id is ambiguous across stores: {traj_id} ({root_msg})"
-            )
+        hit = self._choose_latest(
+            self._traj_hits(traj_id, require_atoms=True),
+            label=f"traj id {traj_id}",
+        )
+        if hit is not None:
+            store, _path = hit
+            return store.list_by_traj(traj_id)
         return []
 
     def all_atoms(self) -> Iterator[AtomTask]:
@@ -294,17 +339,13 @@ class MultiAtomTaskStore:
 
         ``read_traj`` 用它定位轨迹原文：atom 来自哪个 client 的 watch_dir，
         其 traj.md 就落在那个 root 下。"""
-        hits: list[Path] = []
-        for s in self.stores:
-            if (s.root / f"{traj_id}.md").is_file():
-                hits.append(s.root)
-        if len(hits) == 1:
-            return hits[0]
-        if len(hits) > 1:
-            roots = ", ".join(str(p) for p in hits)
-            raise FileNotFoundError(
-                f"traj id is ambiguous across stores: {traj_id} ({roots})"
-            )
+        hit = self._choose_latest(
+            self._traj_hits(traj_id),
+            label=f"traj id {traj_id}",
+        )
+        if hit is not None:
+            store, _path = hit
+            return store.root
         return None
 
     def vector_search(self, query: str, embed_client, top_k: int = 5) -> list[dict]:

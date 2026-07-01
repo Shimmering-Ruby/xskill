@@ -7,6 +7,8 @@ atom 原文；单 store 路径保持不变。
 """
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 from xskill.pipeline.atom import AtomTask, AtomTaskStore, MultiAtomTaskStore
@@ -40,6 +42,10 @@ def _two_client_stores(tmp_path: Path) -> tuple[AtomTaskStore, AtomTaskStore]:
     store_b.save(_atom("atom_traj_cc_b_0042", "traj_cc_b", summary="client B merged cells"))
     (root_b / "traj_cc_b.md").write_text("B1\nB2\nB3\nB4\n", encoding="utf-8")
     return store_a, store_b
+
+
+def _set_mtime(path: Path, ts: int) -> None:
+    os.utime(path, (ts, ts))
 
 
 class TestMultiStoreRouting:
@@ -94,24 +100,50 @@ class TestMultiStoreRouting:
         with pytest.raises(ValueError):
             MultiAtomTaskStore([])
 
-    def test_duplicate_atom_id_fails_loud(self, tmp_path):
+    def test_duplicate_atom_id_uses_newest_and_warns(self, tmp_path, caplog):
         store_a, store_b = _two_client_stores(tmp_path)
-        # 模拟两个 client 上传了同名 traj，TaskAgent 生成相同 atom_id。
-        store_a.save(_atom(
+        # 用户可能多次加入同一个服务器，重复上传同一个原子。
+        path_a = store_a.save(_atom(
             "atom_traj_same_0001", "traj_same",
             summary="client A duplicate atom",
         ))
-        store_b.save(_atom(
+        path_b = store_b.save(_atom(
             "atom_traj_same_0001", "traj_same",
             summary="client B duplicate atom",
         ))
+        _set_mtime(path_a, 1000)
+        _set_mtime(path_b, 2000)
+
         multi = MultiAtomTaskStore([store_a, store_b])
+        caplog.set_level(logging.WARNING, logger="xskill.ux_score")
 
-        import pytest
-        with pytest.raises(FileNotFoundError, match="ambiguous"):
-            multi.load("atom_traj_same_0001")
+        atom = multi.load("atom_traj_same_0001")
 
-    def test_duplicate_traj_id_fails_loud(self, tmp_path):
+        assert atom.summary == "client B duplicate atom"
+        assert "atom id atom_traj_same_0001 duplicated across atom stores" in caplog.text
+
+    def test_duplicate_atom_id_tie_uses_first_store(self, tmp_path, caplog):
+        store_a, store_b = _two_client_stores(tmp_path)
+        path_a = store_a.save(_atom(
+            "atom_traj_same_0001", "traj_same",
+            summary="client A duplicate atom",
+        ))
+        path_b = store_b.save(_atom(
+            "atom_traj_same_0001", "traj_same",
+            summary="client B duplicate atom",
+        ))
+        _set_mtime(path_a, 1000)
+        _set_mtime(path_b, 1000)
+
+        multi = MultiAtomTaskStore([store_a, store_b])
+        caplog.set_level(logging.WARNING, logger="xskill.ux_score")
+
+        atom = multi.load("atom_traj_same_0001")
+
+        assert atom.summary == "client A duplicate atom"
+        assert "atom id atom_traj_same_0001 duplicated across atom stores" in caplog.text
+
+    def test_duplicate_traj_id_uses_newest_and_warns(self, tmp_path, caplog):
         store_a, store_b = _two_client_stores(tmp_path)
         store_a.save(_atom(
             "atom_traj_same_0001", "traj_same",
@@ -123,13 +155,17 @@ class TestMultiStoreRouting:
         ))
         (store_a.root / "traj_same.md").write_text("A\n", encoding="utf-8")
         (store_b.root / "traj_same.md").write_text("B\n", encoding="utf-8")
-        multi = MultiAtomTaskStore([store_a, store_b])
+        _set_mtime(store_a.root / "traj_same.md", 1000)
+        _set_mtime(store_b.root / "traj_same.md", 2000)
 
-        import pytest
-        with pytest.raises(FileNotFoundError, match="ambiguous"):
-            multi.list_by_traj("traj_same")
-        with pytest.raises(FileNotFoundError, match="ambiguous"):
-            multi.traj_root_for("traj_same")
+        multi = MultiAtomTaskStore([store_a, store_b])
+        caplog.set_level(logging.WARNING, logger="xskill.ux_score")
+
+        atoms = multi.list_by_traj("traj_same")
+
+        assert [a.atom_id for a in atoms] == ["atom_traj_same_0002"]
+        assert multi.traj_root_for("traj_same") == store_b.root
+        assert "traj id traj_same duplicated across atom stores" in caplog.text
 
 
 class TestSkillToolsAcrossStores:
@@ -167,10 +203,12 @@ class TestSkillToolsAcrossStores:
         out = ST.read_traj("traj_cc_b", offset_start=1, offset_end=3)
         assert out == "B1\nB2\n"
 
-    def test_read_traj_reports_ambiguous_traj(self, tmp_path):
+    def test_read_traj_reads_newest_duplicate_traj(self, tmp_path, caplog):
         store_a, store_b = _two_client_stores(tmp_path)
         (store_a.root / "traj_same.md").write_text("A\n", encoding="utf-8")
         (store_b.root / "traj_same.md").write_text("B\n", encoding="utf-8")
+        _set_mtime(store_a.root / "traj_same.md", 1000)
+        _set_mtime(store_b.root / "traj_same.md", 2000)
         multi = MultiAtomTaskStore([store_a, store_b])
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
@@ -178,10 +216,11 @@ class TestSkillToolsAcrossStores:
             skill_dir=skill_dir, store=multi,
             embed_client=_FakeEmbed(), traj_root=store_a.root,
         )
+        caplog.set_level(logging.WARNING, logger="xskill.ux_score")
 
         out = ST.read_traj("traj_same", offset_start=1, offset_end=2)
-        assert out.startswith("error:")
-        assert "ambiguous" in out
+        assert out == "B\n"
+        assert "traj id traj_same duplicated across atom stores" in caplog.text
 
     def test_single_store_behavior_unchanged(self, tmp_path):
         """单 store 路径（单机/cold_flush）：直接绑 AtomTaskStore，行为不回归。"""
