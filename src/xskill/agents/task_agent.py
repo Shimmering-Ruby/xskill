@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from agno.tools import tool
+
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 
 logger = logging.getLogger("xskill.task_agent")
@@ -438,6 +440,7 @@ class TaskAgent:
         valid = set(valid_lines)
         ordered_valid = sorted(valid_lines)
 
+        @tool(name="submit_atom")
         def submit_atom(start_line: int, intent: str, summary: str,
                         tags: list | None = None,
                         used_skills: list | None = None,
@@ -479,6 +482,7 @@ class TaskAgent:
             })
             return f"ok: 已记录 atom #{len(submitted)} (start_line={sl})"
 
+        @tool(name="look")
         def look(line: int, before: int = 40, after: int = 20) -> str:
             """读轨迹某行附近的原文（含向前看,判新意图 vs 追问的主力）。
 
@@ -500,6 +504,7 @@ class TaskAgent:
                 out.append(f"{ln}: {all_lines[ln - 1].rstrip(chr(10))}")
             return "\n".join(out) or "(empty range)"
 
+        @tool(name="context_budget")
         def context_budget() -> str:
             """返回当前上下文 token 预算：已用 / 上限 / 剩余。
 
@@ -519,6 +524,7 @@ class TaskAgent:
                 "remaining_tokens": max(0, cap - used),
             }, ensure_ascii=False)
 
+        @tool(name="my_atoms")
         def my_atoms() -> str:
             """返回本轮已提交 atom 的行号区间（自查进度/覆盖）。"""
             if not submitted:
