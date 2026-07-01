@@ -12,23 +12,17 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _reset_skill_tools_ctx():
-    """每个 case 前后重置 _skill_authoring_tool_context / _atom_task_tool_context，避免其他 test 文件污染 write_file 的
-    skill_dir 判定（write_file 优先用 _atom_task_tool_context 而非 _skill_authoring_tool_context）。"""
-    from xskill.agents import skill_tools as ST
-    saved_v2 = dict(ST._atom_task_tool_context)
-    saved_v1 = dict(ST._skill_authoring_tool_context)
-    ST._atom_task_tool_context["skill_dir"] = None
-    ST._atom_task_tool_context["atom_store"] = None
-    ST._atom_task_tool_context["embed_client"] = None
-    ST._atom_task_tool_context["default_traj_root"] = None
+def _reset_agent_tool_config():
+    """每个 case 前后重置 agent tool config，避免其他 test 文件污染 write_file 的 skill_dir 判定。"""
+    from xskill.agents import agent_tools
+    saved = agent_tools.agent_tool_config.snapshot()
+    agent_tools.agent_tool_config.clear_atom_task()
     yield
-    ST._atom_task_tool_context.update(saved_v2)
-    ST._skill_authoring_tool_context.update(saved_v1)
+    agent_tools.agent_tool_config.restore(saved)
 
 
 def test_sanitize_future_created_date():
-    from xskill.agents.skill_tools import _sanitize_frontmatter_dates
+    from xskill.agents.agent_tools import _sanitize_frontmatter_dates
     future = (date.today() + timedelta(days=365)).isoformat()
     fm = {"metadata": {"created": future, "last_updated": future}}
     _sanitize_frontmatter_dates(fm)
@@ -37,14 +31,14 @@ def test_sanitize_future_created_date():
 
 
 def test_sanitize_auto_placeholder_created():
-    from xskill.agents.skill_tools import _sanitize_frontmatter_dates
+    from xskill.agents.agent_tools import _sanitize_frontmatter_dates
     fm = {"metadata": {"created": "<AUTO>", "last_updated": "<AUTO>"}}
     _sanitize_frontmatter_dates(fm)
     assert fm["metadata"]["created"] == date.today().isoformat()
 
 
 def test_sanitize_empty_created():
-    from xskill.agents.skill_tools import _sanitize_frontmatter_dates
+    from xskill.agents.agent_tools import _sanitize_frontmatter_dates
     fm = {"metadata": {}}
     _sanitize_frontmatter_dates(fm)
     assert fm["metadata"]["created"] == date.today().isoformat()
@@ -52,7 +46,7 @@ def test_sanitize_empty_created():
 
 def test_sanitize_keeps_valid_past_created():
     """历史 created（合法 ISO 且非未来）要保留，别把老 skill 的 created 改掉"""
-    from xskill.agents.skill_tools import _sanitize_frontmatter_dates
+    from xskill.agents.agent_tools import _sanitize_frontmatter_dates
     past = "2024-11-15"  # 真实过去日期
     fm = {"metadata": {"created": past}}
     _sanitize_frontmatter_dates(fm)
@@ -60,7 +54,7 @@ def test_sanitize_keeps_valid_past_created():
 
 
 def test_sanitize_last_updated_always_now():
-    from xskill.agents.skill_tools import _sanitize_frontmatter_dates
+    from xskill.agents.agent_tools import _sanitize_frontmatter_dates
     fm = {"metadata": {"created": "2024-01-01", "last_updated": "1970-01-01T00:00:00"}}
     _sanitize_frontmatter_dates(fm)
     # 检查是合法 ISO datetime，且年份是今天或之后
@@ -70,8 +64,8 @@ def test_sanitize_last_updated_always_now():
 
 def test_write_file_sanitizes_skill_md(tmp_path, monkeypatch):
     """write_file 写 SKILL.md 时自动消毒（集成层）"""
-    from xskill.agents import skill_tools
-    skill_tools._skill_authoring_tool_context["skill_dir"] = tmp_path
+    from xskill.agents import agent_tools
+    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, None, None, {})
     sk = tmp_path / "fix-x"
     sk.mkdir()
     bad = """---
@@ -84,7 +78,7 @@ metadata:
 
 # body
 """
-    skill_tools.write_file(str(sk / "SKILL.md"), bad)
+    agent_tools.write_file.entrypoint(str(sk / "SKILL.md"), bad)
     text = (sk / "SKILL.md").read_text()
     assert "2099-12-31" not in text, "未来日期必须被消毒掉"
     assert date.today().isoformat() in text
@@ -92,12 +86,12 @@ metadata:
 
 def test_write_file_leaves_nonskill_md_alone(tmp_path):
     """写非 SKILL.md 的文件不改内容"""
-    from xskill.agents import skill_tools
-    skill_tools._skill_authoring_tool_context["skill_dir"] = tmp_path
+    from xskill.agents import agent_tools
+    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, None, None, {})
     sk = tmp_path / "fix-x"
     sk.mkdir()
     content = "---\ncreated: 2099-12-31\n---\nbody"
-    skill_tools.write_file(str(sk / "references" / "notes.md"), content)
+    agent_tools.write_file.entrypoint(str(sk / "references" / "notes.md"), content)
     text = (sk / "references" / "notes.md").read_text()
     assert text == content, "非 SKILL.md 文件不应被处理"
 
@@ -113,8 +107,8 @@ def test_write_file_leaves_nonskill_md_alone(tmp_path):
 def test_v2_write_skill_md_with_source_atoms_not_blocked(tmp_path):
     """v2 SkillEditAgent 写出来的 SKILL.md 用 source_atoms 而非 source_trajs；
     必须能直接写入，不被旧 source_trajs ≥ 3 gate 拦下。"""
-    from xskill.agents import skill_tools
-    skill_tools._skill_authoring_tool_context["skill_dir"] = tmp_path
+    from xskill.agents import agent_tools
+    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, None, None, {})
     sk = tmp_path / "fix-django"
     sk.mkdir()
     content = """---
@@ -137,7 +131,7 @@ metadata:
 
    > ⚠️ 见 atom_traj_x_0001：直接 fake-apply 会污染 django_migrations 表。
 """
-    result = skill_tools.write_file(str(sk / "SKILL.md"), content)
+    result = agent_tools.write_file.entrypoint(str(sk / "SKILL.md"), content)
     assert not result.startswith("error"), f"write_file 不应被拦下: {result}"
     assert (sk / "SKILL.md").is_file()
     text = (sk / "SKILL.md").read_text(encoding="utf-8")

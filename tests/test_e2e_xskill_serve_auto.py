@@ -485,7 +485,7 @@ def _program_fake_server(fake: FakeLLMServer) -> None:
     ))
 
     # ── default fallback (chat completion) ────────────────────
-    # 落不到上面任一 responder 的请求（例如 skill_tools.search_skills
+    # 落不到上面任一 responder 的请求（例如 agent_tools.search_skills
     # 里的辅助 LLM 调用）拿一个 benign 回复，避免阻塞。
 
 

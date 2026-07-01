@@ -119,7 +119,7 @@ def build_probe_catalog(
             " skill 现场重建索引", skill_root, len(main_desc),
         )
         try:
-            from xskill.agents.skill_tools import rebuild_skill_index
+            from xskill.agents.agent_tools import rebuild_skill_index
             rebuild_skill_index(skill_dir=skill_root,
                                 embed_client=embed_client)
         except Exception as exc:  # noqa: BLE001

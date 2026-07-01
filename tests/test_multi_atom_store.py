@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from xskill.pipeline.atom import AtomTask, AtomTaskStore, MultiAtomTaskStore
-from xskill.agents import skill_tools as ST
+from xskill.agents import agent_tools
 from tests.test_atom_task_store import _FakeEmbed
 
 
@@ -180,12 +180,12 @@ class TestSkillToolsAcrossStores:
         multi = MultiAtomTaskStore([store_a, store_b])
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
-        ST.init_atom_task_tool_context(
+        agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=multi,
             embed_client=_FakeEmbed(), default_traj_root=store_a.root,
         )
         # 第二个 client 的 atom——修复前这里返回 not found
-        out = ST.atom_task_read("atom_traj_cc_b_0042")
+        out = agent_tools.atom_task_read.entrypoint("atom_traj_cc_b_0042")
         assert "atom_traj_cc_b_0042" in out
         assert "merged cells" in out
         assert not out.startswith("error")
@@ -196,11 +196,11 @@ class TestSkillToolsAcrossStores:
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
         # traj_root 绑成 client A 的 root；client B 的 traj 仍要能读到
-        ST.init_atom_task_tool_context(
+        agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=multi,
             embed_client=_FakeEmbed(), default_traj_root=store_a.root,
         )
-        out = ST.read_traj("traj_cc_b", offset_start=1, offset_end=3)
+        out = agent_tools.read_traj.entrypoint("traj_cc_b", offset_start=1, offset_end=3)
         assert out == "B1\nB2\n"
 
     def test_read_traj_reads_newest_duplicate_traj(self, tmp_path, caplog):
@@ -212,13 +212,13 @@ class TestSkillToolsAcrossStores:
         multi = MultiAtomTaskStore([store_a, store_b])
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
-        ST.init_atom_task_tool_context(
+        agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=multi,
             embed_client=_FakeEmbed(), default_traj_root=store_a.root,
         )
         caplog.set_level(logging.WARNING, logger="xskill.ux_score")
 
-        out = ST.read_traj("traj_same", offset_start=1, offset_end=2)
+        out = agent_tools.read_traj.entrypoint("traj_same", offset_start=1, offset_end=2)
         assert out == "B\n"
         assert "traj id traj_same duplicated across atom stores" in caplog.text
 
@@ -231,11 +231,11 @@ class TestSkillToolsAcrossStores:
         (root / "traj_solo.md").write_text("S1\nS2\nS3\n", encoding="utf-8")
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
-        ST.init_atom_task_tool_context(
+        agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=store,
             embed_client=_FakeEmbed(), default_traj_root=root,
         )
-        out = ST.atom_task_read("atom_traj_solo_0001")
+        out = agent_tools.atom_task_read.entrypoint("atom_traj_solo_0001")
         assert "solo summary" in out
         # read_traj 在单 store（无 traj_root_for）下走绑定 traj_root
-        assert ST.read_traj("traj_solo", offset_start=1, offset_end=3) == "S1\nS2\n"
+        assert agent_tools.read_traj.entrypoint("traj_solo", offset_start=1, offset_end=3) == "S1\nS2\n"

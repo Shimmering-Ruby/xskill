@@ -90,13 +90,13 @@ class XSkill:
     def search_skills(self, query: str, top_k: int = 5) -> list[SkillHit]:
         """跨 skill_repo 搜索 skill。"""
         import json
-        from xskill.agents import skill_tools
+        from xskill.agents import agent_tools
         # data_dir 在 skill 搜索路径上不读，传 skill_repo.root 占位
-        skill_tools.init_skill_authoring_tool_context(
+        agent_tools.init_skill_authoring_tool_context(
             self.skill_repo.root, self.skill_repo.root,
             self.llm, self.embed, self.config,
         )
-        raw = skill_tools.search_skills(query, top_k=top_k) or "[]"
+        raw = agent_tools.search_skills(query, top_k=top_k) or "[]"
         try:
             items = json.loads(raw)
         except json.JSONDecodeError:

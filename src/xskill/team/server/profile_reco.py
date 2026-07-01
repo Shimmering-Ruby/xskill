@@ -210,7 +210,7 @@ def _centroid(used_skills: frozenset[str], skill_index: dict) -> np.ndarray | No
 def _load_skill_index(skill_index_path: Path) -> dict:
     """加载 ``.skill_index.pkl``。
 
-    结构（由 ``agents/skill_tools.rebuild_skill_index`` 生成）：
+    结构（由 ``agents/agent_tools.rebuild_skill_index`` 生成）：
     ``{"skill_names": list[str], "embeddings": np.ndarray(N, D) 已 L2 归一, ...}``。
     """
     if not skill_index_path.is_file():

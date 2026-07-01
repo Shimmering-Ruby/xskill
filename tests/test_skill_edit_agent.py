@@ -113,11 +113,11 @@ def _staging_factory(*, instructions, tools):
 @pytest.fixture(autouse=True)
 def _init_atom_task_tool_context(tmp_path):
     """每个 case 初始化 AtomTask tool context，让 commit_*/write_file 工具可用。"""
-    from xskill.agents import skill_tools as ST
+    from xskill.agents import agent_tools
     from xskill.pipeline.atom import AtomTaskStore
     (tmp_path / "skill").mkdir(parents=True, exist_ok=True)
     (tmp_path / "store").mkdir(parents=True, exist_ok=True)
-    ST.init_atom_task_tool_context(
+    agent_tools.init_atom_task_tool_context(
         skill_dir=tmp_path / "skill",
         atom_store=AtomTaskStore(root=tmp_path / "store"),
         embed_client=None,

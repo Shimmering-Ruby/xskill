@@ -5,7 +5,7 @@ team server 的 5 个端点。鉴权：除 register 外都校验
 client 完全信任 server；token 只挡组织外随机接入。
 
 上下文（join_token / registry / skill_dir / traj_root / canary 参数）通过
-``init_team_context`` 注入到模块级单例——沿用 ``skill_tools`` 模块级上下文
+``init_team_context`` 注入到模块级单例——沿用 agent 工具配置的单例风格
 的既有模式，不引入 FastAPI Depends 体系。
 """
 from __future__ import annotations

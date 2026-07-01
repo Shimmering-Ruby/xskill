@@ -19,17 +19,12 @@ from xskill.skill.git import init_skill_repo_on_baby, run_git, _stage_all, _open
 
 
 @pytest.fixture(autouse=True)
-def _restore_skill_tools_ctx():
-    """本文件里有用例初始化 skill/AtomTask tool context，会污染模块级 context——
-    其它测试依赖 _skill_authoring_tool_context 未初始化。跑完恢复快照，避免跨文件状态泄漏。"""
-    from xskill.agents import skill_tools as ST
-    snap = dict(ST._skill_authoring_tool_context)
-    snap_v2 = dict(ST._atom_task_tool_context)
+def _restore_agent_tool_config():
+    """本文件里有用例初始化 agent tool config，跑完恢复快照，避免跨文件状态泄漏。"""
+    from xskill.agents import agent_tools
+    snap = agent_tools.agent_tool_config.snapshot()
     yield
-    ST._skill_authoring_tool_context.clear()
-    ST._skill_authoring_tool_context.update(snap)
-    ST._atom_task_tool_context.clear()
-    ST._atom_task_tool_context.update(snap_v2)
+    agent_tools.agent_tool_config.restore(snap)
 
 
 class ScriptedLLM:
@@ -242,7 +237,7 @@ def test_description_optimization_dir_not_staged_preexisting_repo(tmp_path):
 
 def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     """commit_baby_to_main 内部确实调了 description 优化（best 写回后再 commit）。"""
-    from xskill.agents import skill_tools as ST
+    from xskill.agents import agent_tools
     from xskill.pipeline.atom import AtomTaskStore
 
     # 生产流里 _run_description_optimization 现建 make_default_factory(真 agno)——
@@ -258,7 +253,7 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     init_skill_repo_on_baby(str(sd), name="log-analyzer",
                             description="does stuff with files")
 
-    ST.init_atom_task_tool_context(
+    agent_tools.init_atom_task_tool_context(
         skill_dir=skill_root,
         atom_store=AtomTaskStore(root=tmp_path / "store"),
         embed_client=None,
@@ -266,10 +261,10 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     )
     llm = ScriptedLLM(
         _CASES, "Use this skill to analyze and parse log files and error traces.")
-    ST.init_skill_authoring_tool_context(skill_root, skill_root, llm, _DummyEmbed(),
+    agent_tools.init_skill_authoring_tool_context(skill_root, skill_root, llm, _DummyEmbed(),
                     {"skill_opt": {"runs_per_case": 1, "max_iters": 1, "seed": 42}})
 
-    res = ST.commit_baby_to_main("log-analyzer", "v1: based on atom_x")
+    res = agent_tools.commit_baby_to_main.entrypoint("log-analyzer", "v1: based on atom_x")
     assert res.startswith("graduated"), res
     fm, _ = FM.parse((sd / "SKILL.md").read_text())
     assert "log" in fm["description"].lower()
@@ -281,7 +276,7 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
 
 def test_commit_optimization_failure_does_not_block_commit(tmp_path):
     """优化器抛错（case-gen 阶段网络炸）→ commit 仍正常完成（best-effort）。"""
-    from xskill.agents import skill_tools as ST
+    from xskill.agents import agent_tools
     from xskill.pipeline.atom import AtomTaskStore
 
     skill_root = tmp_path / "skill"
@@ -289,7 +284,7 @@ def test_commit_optimization_failure_does_not_block_commit(tmp_path):
     sd = skill_root / "boom"
     init_skill_repo_on_baby(str(sd), name="boom", description="orig desc")
 
-    ST.init_atom_task_tool_context(
+    agent_tools.init_atom_task_tool_context(
         skill_dir=skill_root,
         atom_store=AtomTaskStore(root=tmp_path / "store"),
         embed_client=None,
@@ -300,10 +295,10 @@ def test_commit_optimization_failure_does_not_block_commit(tmp_path):
         def chat(self, *a, **k):
             raise RuntimeError("network down")
 
-    ST.init_skill_authoring_tool_context(skill_root, skill_root, _BoomLLM(), _DummyEmbed(),
+    agent_tools.init_skill_authoring_tool_context(skill_root, skill_root, _BoomLLM(), _DummyEmbed(),
                     {"skill_opt": {"runs_per_case": 1, "max_iters": 1}})
 
-    res = ST.commit_baby_to_main("boom", "v1")
+    res = agent_tools.commit_baby_to_main.entrypoint("boom", "v1")
     assert res.startswith("graduated"), res
     fm, _ = FM.parse((sd / "SKILL.md").read_text())
     assert fm["description"] == "orig desc"

@@ -80,7 +80,7 @@ class SkillRepo:
         会要求 ``data_dir`` / ``llm_client`` 等本路径用不到的字段（早先版本
         传 ``None`` 进去会触发 ``Path(None)`` TypeError，rebuild 直接挂）。
         """
-        from xskill.agents.skill_tools import rebuild_skill_index
+        from xskill.agents.agent_tools import rebuild_skill_index
         from xskill.config import get_config
         from xskill.utils.llm import create_embed_client
         embed = create_embed_client(get_config())

@@ -42,7 +42,7 @@ from xskill.skill.skill import (
     delete_skill,
     export_skill,
 )
-from xskill.agents.skill_tools import (
+from xskill.agents.agent_tools import (
     init_skill_authoring_tool_context,
     search_skills,
     rebuild_skill_index,
@@ -848,7 +848,7 @@ def create_app(home_root: Path | str | None = None,
     # ------------------------------------------------------------------
     @app.on_event("startup")
     async def _startup():
-        """Initialize skill_tools context so search_skills / rebuild_skill_index work.
+        """Initialize agent tool config so search_skills / rebuild_skill_index work.
 
         无 fallback：LLM/embed 客户端构造失败一律 raise，daemon 启动失败而不是
         带 None client 带病跑（CLAUDE.md 第 1 条）。create_llm_client 内部仍可能

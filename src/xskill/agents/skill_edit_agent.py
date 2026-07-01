@@ -387,7 +387,7 @@ class SkillEditAgent:
         return any(s.get("side") == "main" for s in scores)
 
     def _run(self, ready: list[dict], current_branch_name: str) -> None:
-        from xskill.agents import agent_tools as AT
+        from xskill.agents import agent_tools
         from xskill.skill.frontmatter import parse as fm_parse
 
         # 构造 scenario_block + branch_now 给 prompt 用
@@ -445,13 +445,13 @@ class SkillEditAgent:
         agent = self.agno_agent_factory(
             instructions=[sysprompt],
             tools=[
-                AT.atom_task_read,
-                AT.read_traj,
-                AT.skill_read,
-                AT.list_files,
-                AT.write_file,
-                AT.commit_baby_to_main,
-                AT.commit_to_staging,
+                agent_tools.atom_task_read,
+                agent_tools.read_traj,
+                agent_tools.skill_read,
+                agent_tools.list_files,
+                agent_tools.write_file,
+                agent_tools.commit_baby_to_main,
+                agent_tools.commit_to_staging,
             ],
         )
         # 逐轮 CoT/工具调用 → logs/agents/skill_edit_agents/skills/<skill>_<ts>.log
