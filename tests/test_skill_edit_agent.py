@@ -453,6 +453,25 @@ class _JamMergeStubAgno(_BabyStubAgno):
         class _R: pass
         r = _R(); r.content = "done"; return r
 
+
+class _JamNoCommitStubAgno(_BabyStubAgno):
+    """模拟 agent 写了 SKILL.md 但没调用 commit_update_main。"""
+    def run(self, user_msg, **kw):
+        type(self).invoked = True
+        type(self).user_msg = user_msg
+        import re
+        skill = re.search(r"skill_name:\s*([\w-]+)", user_msg).group(1)
+        target = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg).group(1)
+        _call_tool(self.tools["write_file"], target, (
+            "---\nname: %s\ndescription: uncommitted jam draft\n"
+            "compatibility: test only; negative test only\n"
+            "metadata:\n  version: 2\n  source_atoms: [\"atom_x_0001\"]\n"
+            "---\n\n# uncommitted\n\n## 核心原则\n- body changed without commit\n"
+        ) % skill)
+        class _R: pass
+        r = _R(); r.content = "done"; return r
+
+
 def _seed_candidates(skill_dir, total_ws):
     """往 .candidates.yml 灌候选，使累计 weightscore = total_ws。"""
     data = {"candidates": [{"atom_id": "atom_x_0001", "weightscore": total_ws}]}
@@ -502,6 +521,28 @@ def test_no_jam_below_threshold_keeps_staging(tmp_path):
     assert _JamMergeStubAgno.invoked is False
     code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=str(sd))
     assert code == 0                            # staging 仍在
+
+
+def test_jam_merge_without_main_commit_keeps_candidates_and_staging(tmp_path):
+    sd = _make_main_skill(tmp_path / "skill", "jam-no-commit")
+    (sd / "SKILL.md").write_text(
+        (sd / "SKILL.md").read_text() + "\n<!-- staging draft -->\n",
+        encoding="utf-8",
+    )
+    assert commit_to_staging_branch(str(sd), "stub staging") is True
+    _seed_candidates(sd, 60)
+
+    _JamNoCommitStubAgno.invoked = False
+    agent = SkillEditAgent(
+        skill_dir=sd, store=None, agno_agent_factory=_JamNoCommitStubAgno,
+        llm_cfg={}, traj_root=tmp_path, jam_threshold=50,
+    )
+
+    assert agent.maybe_run() is False
+    assert _JamNoCommitStubAgno.invoked is True
+    assert C.load_candidates(sd)["candidates"] != []
+    code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=str(sd))
+    assert code == 0
 
 
 class _JamMergeRematerializeStubAgno(_BabyStubAgno):

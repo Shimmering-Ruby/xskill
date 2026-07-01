@@ -366,6 +366,11 @@ class SkillEditAgent:
         skill_md = self.skill_dir / "SKILL.md"
         mtime_before = skill_md.stat().st_mtime if skill_md.is_file() else 0.0
         size_before = skill_md.stat().st_size if skill_md.is_file() else 0
+        main_sha_before = ""
+        if jam:
+            code, out, _ = run_git(["rev-parse", "main"], cwd=str(self.skill_dir))
+            if code == 0:
+                main_sha_before = out.strip()
 
         try:
             self._run(ready, current_branch_name=cur, jam=jam)
@@ -407,7 +412,23 @@ class SkillEditAgent:
 
         if jam:
             from xskill.canary import discard_staging
-            discard_staging(self.skill_dir)
+
+            code, out, _ = run_git(["rev-parse", "main"], cwd=str(self.skill_dir))
+            main_sha_after = out.strip() if code == 0 else ""
+            if not main_sha_after or main_sha_after == main_sha_before:
+                logger.warning(
+                    "SkillEditAgent jam-merge did not advance main: %s — "
+                    "保留 candidates/staging 等下轮重试",
+                    self.skill_dir.name,
+                )
+                return False
+            if not discard_staging(self.skill_dir):
+                logger.warning(
+                    "SkillEditAgent jam-merge could not discard staging: %s — "
+                    "保留 candidates 等下轮重试",
+                    self.skill_dir.name,
+                )
+                return False
 
         # commit 工具的成功效应（baby→main 或 main→staging）通过当前分支变化
         # 自然反映，不需要在这里做额外检查
