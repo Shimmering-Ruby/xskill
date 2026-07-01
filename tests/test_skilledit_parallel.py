@@ -17,8 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
-
-import pytest
+from pathlib import Path
 
 from xskill.pipeline.atom import AtomTaskStore
 from xskill.pipeline.registry import register_dir
@@ -51,47 +50,60 @@ def _seed_baby_skill(skill_root, slug):
     return sd
 
 
-def _make_barrier_agno(n, barrier):
+def _make_barrier_agno(expected_workers, barrier):
     """造一个 agno stub 工厂：每个 SkillEditAgent 的 run() 先在 barrier 上
-    等齐 n 个并发线程，再写自己的 SKILL.md + commit_baby_to_main。
+    等齐 expected_workers 个并发线程，再写自己的 SKILL.md + commit_baby_to_main。
 
-    - barrier 凑齐 = 证明 n 个 maybe_run 真并发在飞（串行则死等超时）。
+    - barrier 凑齐 = 证明 expected_workers 个 maybe_run 真并发在飞（串行则死等超时）。
     - SKILL.md 正文写入自己的 slug = 串扰检测锚点：若 ctx 被别的线程改写，
       或目标解析错乱，正文里的 slug 会对不上目录名。
     """
+    del expected_workers
+
     class _BarrierStub:
         def __init__(self, *, instructions, tools):
             self.instructions = instructions
             self.tools = {_tool_name(t): t for t in tools}
 
-        def run(self, user_msg, **kw):
+        def run(self, user_message, **unused_keyword_arguments):
+            del unused_keyword_arguments
             import re
             # 从 scenario_block 抠出本 agent 负责的 skill 目录名（slug）
-            m_dir = re.search(r"目标 skill 目录:\s*(\S+)", user_msg)
-            slug = m_dir.group(1).rstrip("/").split("/")[-1] if m_dir else "?"
+            directory_match = re.search(r"目标 skill 目录:\s*(\S+)", user_message)
+            if directory_match:
+                skill_slug = Path(directory_match.group(1).rstrip("/\\")).name
+            else:
+                skill_slug = "?"
             # 等齐——证明并发
             try:
                 barrier.wait(timeout=20)
             except threading.BrokenBarrierError:
                 pass
-            m = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg)
-            if m and "write_file" in self.tools:
+            skill_file_match = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_message)
+            if skill_file_match and "write_file" in self.tools:
                 # 正文写入自己的 slug 作串扰锚点
                 _call_tool(
                     self.tools["write_file"],
-                    m.group(1),
-                    f"---\nname: {slug}\ndescription: real body for {slug}\n"
-                    f"metadata:\n  version: 1\n---\n# {slug}\nbody-of-{slug}\n",
+                    skill_file_match.group(1),
+                    f"---\nname: {skill_slug}\ndescription: real body for {skill_slug}\n"
+                    f"metadata:\n  version: 1\n---\n# {skill_slug}\nbody-of-{skill_slug}\n",
                 )
-            if "baby" in user_msg and "commit_baby_to_main" in self.tools:
-                _call_tool(self.tools["commit_baby_to_main"], slug, f"graduate {slug}")
-            class _R:
+            if "baby" in user_message and "commit_baby_to_main" in self.tools:
+                _call_tool(
+                    self.tools["commit_baby_to_main"],
+                    skill_slug,
+                    f"graduate {skill_slug}",
+                )
+            class _Response:
                 pass
-            r = _R()
-            r.content = ""
-            return r
+            response = _Response()
+            response.content = ""
+            return response
 
-    return lambda **kw: _BarrierStub(**kw)
+    def barrier_agent_factory(**factory_keyword_arguments):
+        return _BarrierStub(**factory_keyword_arguments)
+
+    return barrier_agent_factory
 
 
 def _make_watcher(tmp_path, skill_root, factory, max_concurrent):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from agno.exceptions import StopAgentRun
 
 from xskill.skill import description_opt as DO
 from xskill.skill import frontmatter as FM
@@ -63,8 +64,8 @@ class _StubProbeAgent:
                 if t.__name__ == target:
                     try:
                         t()
-                    except Exception:
-                        pass
+                    except StopAgentRun:
+                        return
                     return
 
 
@@ -113,7 +114,7 @@ def test_full_optimize_writes_back_and_archives(tmp_path):
         _CASES, "Use this skill to analyze and parse log files and error traces.")
     out = _opt(sd, llm, runs_per_case=1, max_iters=1, seed=42)
     assert out["enabled"] is True
-    fm, _ = FM.parse((sd / "SKILL.md").read_text())
+    fm, _ = FM.parse((sd / "SKILL.md").read_text(encoding="utf-8"))
     assert "log" in fm["description"].lower()
     assert fm["description"] != "does stuff with files"
 
@@ -123,7 +124,8 @@ def test_full_optimize_writes_back_and_archives(tmp_path):
     assert (exp / "summary.json").is_file()
     assert (exp / "attempts.jsonl").is_file()
     lines = [json.loads(l) for l in
-             (exp / "attempts.jsonl").read_text().splitlines() if l.strip()]
+             (exp / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+             if l.strip()]
     assert any(l.get("phase") == "test" for l in lines)
     cands = out["candidates"]
     assert all(c["test_score"] is not None for c in cands)
@@ -172,7 +174,7 @@ def test_no_competition_mode_marked_in_result_and_registry(tmp_path, caplog):
     # summary.json 同样带标记（看板/复盘读这里）
     opt = sd / ".description_optimization"
     exp = [d for d in opt.iterdir() if d.is_dir()][0]
-    summary = json.loads((exp / "summary.json").read_text())
+    summary = json.loads((exp / "summary.json").read_text(encoding="utf-8"))
     assert summary["catalog_size"] == 0
     assert summary["no_competition"] is True
 
@@ -192,7 +194,7 @@ def test_per_case_results_archived_on_disk(tmp_path):
     exp = [d for d in opt.iterdir() if d.is_dir()][0]
     case_files = sorted(exp.glob("*/*.json"))
     assert case_files, "逐 case json 必须落盘"
-    rec = json.loads(case_files[0].read_text())
+    rec = json.loads(case_files[0].read_text(encoding="utf-8"))
     for key in ("query", "should_trigger", "did_trigger", "passed",
                 "triggered_skill", "catalog", "runs"):
         assert key in rec, f"逐 case 记录缺字段 {key}"
@@ -268,7 +270,7 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
 
     res = agent_tools.commit_baby_to_main.entrypoint("log-analyzer", "v1: based on atom_x")
     assert res.startswith("graduated"), res
-    fm, _ = FM.parse((sd / "SKILL.md").read_text())
+    fm, _ = FM.parse((sd / "SKILL.md").read_text(encoding="utf-8"))
     assert "log" in fm["description"].lower()
     code, body, _ = run_git(["show", "main:SKILL.md"], cwd=str(sd))
     assert code == 0
@@ -306,5 +308,5 @@ def test_commit_optimization_failure_does_not_block_commit(tmp_path, monkeypatch
 
     res = agent_tools.commit_baby_to_main.entrypoint("boom", "v1")
     assert res.startswith("graduated"), res
-    fm, _ = FM.parse((sd / "SKILL.md").read_text())
+    fm, _ = FM.parse((sd / "SKILL.md").read_text(encoding="utf-8"))
     assert fm["description"] == "orig desc"
