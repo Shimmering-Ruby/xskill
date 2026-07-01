@@ -24,19 +24,16 @@ v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from pathlib import Path
 
-from xskill.canary import CanaryConfig
 from xskill.pipeline.registry import (
     list_watch_dirs,
     discover_trajectories,
     get_trajs_by_status,
-    mark_meta_done,
     mark_indexed,
     mark_skill_used,
     update_traj_status,
@@ -108,13 +105,10 @@ class DirectoryWatcher:
             Path(install_history_path) if install_history_path
             else XSKILL_HOME / "install_history.jsonl"
         )
-        # 冷启动批量 flush：standalone 默认接受 request/barrier 文件，team server
-        # 默认不接受；没有文件时不改变在线 SkillEdit 路径。
-        from xskill.pipeline.cold_start import ColdStartController
-        self._cold_start = ColdStartController.from_config(
-            self.config, self.home_root or XSKILL_HOME,
-            server_mode=self.server_mode,
-        )
+        # 冷启动批量 flush：rebuild 写 COLD_START 文件后，watcher 等流水线空闲再
+        # 做一次 SkillEdit 扫描；没有该文件时不改变在线增量路径。
+        from xskill.pipeline.cold_start import ColdStartSignal
+        self._cold_start_signal = ColdStartSignal(self.home_root or XSKILL_HOME)
         self.poll_interval = poll_interval
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
@@ -271,41 +265,38 @@ class DirectoryWatcher:
             self._reconcile_skill_sides()
 
     def _run_skill_edit_step(self):
-        """Step 5 的冷启动感知封装。
-
-        有 cold-start request 时 hold 增量 SkillEdit，等本次 rebuild 触发的轨迹
-        重新处理完成，再按既有候选晋升阈值做一次 SkillEdit 扫描。外部编排若
-        已确认批量导入结束，也可以直接落 barrier 文件立即触发这次扫描。
-        """
-        cs = self._cold_start
-        if cs.active:
-            if cs.barrier_reached(pipeline_idle=self._cold_start_pipeline_idle()):
-                from xskill.skill import candidates as C
+        """Step 5 的冷启动感知封装。"""
+        cold_start_signal = self._cold_start_signal
+        if cold_start_signal.exists:
+            if cold_start_signal.ready_to_flush(
+                pipeline_idle=self._cold_start_pipeline_idle(),
+            ):
+                from xskill.skill import candidates
                 logger.info(
                     "冷启动批量 flush 触发 → SkillEdit (threshold=%d)",
-                    C.ATOM_PROMOTION_THRESHOLD,
+                    candidates.ATOM_PROMOTION_THRESHOLD,
                 )
                 self._check_pending_skill_edits(
-                    threshold=C.ATOM_PROMOTION_THRESHOLD,
+                    threshold=candidates.ATOM_PROMOTION_THRESHOLD,
                 )
-                cs.consume_barrier()
-            # request 已到但流水线尚未空闲：hold，本轮不写正文。
+                cold_start_signal.consume()
+            # COLD_START 已到但流水线尚未空闲：hold，本轮不写正文。
             return
         self._check_pending_skill_edits()
 
     def _cold_start_pipeline_idle(self) -> bool:
-        """当前 watcher 没有待处理轨迹或后台任务时，cold-start request 可 flush。"""
+        """当前 watcher 没有待处理轨迹或后台任务时，cold-start 可 flush。"""
         if self._futures:
             return False
         pending_statuses = (
             "discovered", "updated", "splitting", "split_done",
             "indexed", "clustering",
         )
-        for wd in list_watch_dirs(**self._db_kw()):
-            wd_id = wd["id"]
+        for watch_dir_entry in list_watch_dirs(**self._db_kw()):
+            watch_dir_id = watch_dir_entry["id"]
             for status in pending_statuses:
                 if get_trajs_by_status(
-                    wd_id, status, limit=1, **self._db_kw(),
+                    watch_dir_id, status, limit=1, **self._db_kw(),
                 ):
                     return False
         return True
@@ -1110,7 +1101,6 @@ class DirectoryWatcher:
         if not atoms:
             return
         ac = AtomCanary(skill_dir=skill_sub)
-        canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
         for atom in atoms:
             try:
                 result = score_atom(

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import pytest
 
@@ -28,8 +27,6 @@ def _rebuild_args(**over):
         eco=None,
         traj=None,
         ignore_model_mismatch=False,
-        cold_start=False,
-        no_cold_start=True,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -138,7 +135,9 @@ def test_rebuild_refuses_on_model_mismatch(monkeypatch, capsys):
                         lambda: {"llm_model": "new-model"})
     called = {"reset": False}
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **kw: called.__setitem__("reset", True))
+                        lambda **_ignored_keyword_arguments: called.__setitem__(
+                            "reset", True,
+                        ))
 
     rc = cmd_rebuild(_rebuild_args(), None)
 
@@ -154,7 +153,7 @@ def test_rebuild_proceeds_when_models_match(monkeypatch):
     monkeypatch.setattr("xskill.runtime.config_models",
                         lambda: {"llm_model": "m"})
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **kw: 0)
+                        lambda **_ignored_keyword_arguments: 0)
 
     assert cmd_rebuild(_rebuild_args(), None) == 0
 
@@ -165,7 +164,7 @@ def test_rebuild_ignore_flag_bypasses_mismatch(monkeypatch):
     monkeypatch.setattr("xskill.runtime.config_models",
                         lambda: {"llm_model": "new"})
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **kw: 0)
+                        lambda **_ignored_keyword_arguments: 0)
 
     assert cmd_rebuild(_rebuild_args(ignore_model_mismatch=True), None) == 0
 
@@ -177,47 +176,22 @@ def test_rebuild_no_guard_when_daemon_not_running(monkeypatch):
     monkeypatch.setattr("xskill.runtime.config_models",
                         lambda: {"llm_model": "new"})
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **kw: 0)
+                        lambda **_ignored_keyword_arguments: 0)
 
     assert cmd_rebuild(_rebuild_args(), None) == 0
 
 
-def test_rebuild_requests_cold_start_by_default_in_standalone(
-    monkeypatch, tmp_path,
-):
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text("cold_start: {}\n", encoding="utf-8")
-    monkeypatch.setattr("xskill.config.CONFIG_PATH", cfg)
-    monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path)
-    monkeypatch.setattr(
-        "xskill.runtime.read_status",
-        lambda: {"running": False, "role": "standalone"},
-    )
-    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **kw: 0)
-
-    assert cmd_rebuild(_rebuild_args(no_cold_start=False), None) == 0
-
-    assert (tmp_path / "COLD_START_REQUEST").exists()
-
-
-def test_rebuild_server_requires_explicit_cold_start(monkeypatch, tmp_path):
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text("cold_start: {}\n", encoding="utf-8")
-    monkeypatch.setattr("xskill.config.CONFIG_PATH", cfg)
+def test_rebuild_writes_single_cold_start_signal(monkeypatch, tmp_path):
     monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path)
     monkeypatch.setattr(
         "xskill.runtime.read_status",
         lambda: {"running": False, "role": "server", "mode": "server"},
     )
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **kw: 0)
+                        lambda **_ignored_keyword_arguments: 0)
 
-    assert cmd_rebuild(_rebuild_args(no_cold_start=False), None) == 0
+    assert cmd_rebuild(_rebuild_args(), None) == 0
+
+    assert (tmp_path / "COLD_START").exists()
     assert not (tmp_path / "COLD_START_REQUEST").exists()
-
-    assert cmd_rebuild(
-        _rebuild_args(no_cold_start=False, cold_start=True),
-        None,
-    ) == 0
-    assert (tmp_path / "COLD_START_REQUEST").exists()
+    assert not (tmp_path / "COLD_START_FLUSH").exists()

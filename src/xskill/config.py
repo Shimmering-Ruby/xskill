@@ -158,16 +158,6 @@ watcher:
                                 # watch dir). Default 8; set 1 for the old
                                 # one-atom-per-call behavior.
 
-# ===== Cold-start batch flush barrier =====
-# standalone 默认接受 cold-start 请求，team server 默认不接受；没有 request/barrier
-# 文件时，仍走正常在线增量 SkillEdit。`xskill rebuild` 可写 request_path，watcher
-# 等重建轨迹处理完成后，按既有 ATOM_PROMOTION_THRESHOLD 做一次 SkillEdit 扫描。
-# 外部编排如果自己确认批量导入已结束，也可以直接 touch barrier_path 立即触发。
-# cold_start:
-#   enabled: true             # 省略时：standalone=true，team server=false；false=禁用文件信号
-#   request_path: ""          # rebuild 请求文件；空=<home>/COLD_START_REQUEST
-#   barrier_path: ""          # 外部立即触发文件；空=<home>/COLD_START_FLUSH
-
 # ===== Ingest (bridging native agent sessions into traj_*.md) =====
 # 各生态 session ingester（claude_code / codex / openclaw / cursor 的 JSONL
 # 桥接）入库行为。
