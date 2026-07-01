@@ -13,7 +13,6 @@ from pathlib import Path
 
 from xskill.pipeline.atom import AtomTask, AtomTaskStore, MultiAtomTaskStore
 from xskill.agents import agent_tools
-from tests.test_atom_task_store import _FakeEmbed
 
 
 def _atom(atom_id: str, traj_id: str, *, summary: str, raw: str = "RAW") -> AtomTask:
@@ -182,7 +181,7 @@ class TestSkillToolsAcrossStores:
         skill_dir.mkdir()
         agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=multi,
-            embed_client=_FakeEmbed(), default_traj_root=store_a.root,
+            default_traj_root=store_a.root,
         )
         # 第二个 client 的 atom——修复前这里返回 not found
         out = agent_tools.atom_task_read.entrypoint("atom_traj_cc_b_0042")
@@ -198,7 +197,7 @@ class TestSkillToolsAcrossStores:
         # traj_root 绑成 client A 的 root；client B 的 traj 仍要能读到
         agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=multi,
-            embed_client=_FakeEmbed(), default_traj_root=store_a.root,
+            default_traj_root=store_a.root,
         )
         out = agent_tools.read_traj.entrypoint("traj_cc_b", offset_start=1, offset_end=3)
         assert out == "B1\nB2\n"
@@ -214,7 +213,7 @@ class TestSkillToolsAcrossStores:
         skill_dir.mkdir()
         agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=multi,
-            embed_client=_FakeEmbed(), default_traj_root=store_a.root,
+            default_traj_root=store_a.root,
         )
         caplog.set_level(logging.WARNING, logger="xskill.ux_score")
 
@@ -233,7 +232,7 @@ class TestSkillToolsAcrossStores:
         skill_dir.mkdir()
         agent_tools.init_atom_task_tool_context(
             skill_dir=skill_dir, atom_store=store,
-            embed_client=_FakeEmbed(), default_traj_root=root,
+            default_traj_root=root,
         )
         out = agent_tools.atom_task_read.entrypoint("atom_traj_solo_0001")
         assert "solo summary" in out

@@ -62,7 +62,7 @@ class _BabyStubAgno:
         self.instructions = instructions
         self.tools = {_tool_name(t): t for t in tools}
 
-    def run(self, user_msg, **kw):
+    def run(self, user_msg, **_kwargs):
         type(self).invoked = True
         type(self).user_msg = user_msg
         # 抓 skill_name
@@ -85,7 +85,7 @@ class _BabyStubAgno:
 
 class _StagingStubAgno(_BabyStubAgno):
     """模拟 SkillEditAgent 在 main 分支：写 SKILL.md + 调 commit_to_staging。"""
-    def run(self, user_msg, **kw):
+    def run(self, user_msg, **_kwargs):
         type(self).invoked = True
         type(self).user_msg = user_msg
         import re
@@ -115,15 +115,21 @@ def _init_atom_task_tool_context(tmp_path):
     """每个 case 初始化 AtomTask tool context，让 commit_*/write_file 工具可用。"""
     from xskill.agents import agent_tools
     from xskill.pipeline.atom import AtomTaskStore
+    saved_context = agent_tools.agent_tool_config.snapshot()
     (tmp_path / "skill").mkdir(parents=True, exist_ok=True)
     (tmp_path / "store").mkdir(parents=True, exist_ok=True)
     agent_tools.init_atom_task_tool_context(
         skill_dir=tmp_path / "skill",
         atom_store=AtomTaskStore(root=tmp_path / "store"),
-        embed_client=None,
         default_traj_root=tmp_path / "store",
     )
+    agent_tools.init_skill_authoring_tool_context(
+        tmp_path / "skill",
+        tmp_path / "skill",
+        {"skill_opt": {"enabled": False}},
+    )
     yield
+    agent_tools.agent_tool_config.restore(saved_context)
     for cls in (_BabyStubAgno, _StagingStubAgno):
         cls.invoked = False
         cls.user_msg = ""
@@ -276,8 +282,8 @@ class TestRequiresActualSkillMdWrite:
         C.save_candidates(skill_dir, data)
 
         class _ThrowingAgent:
-            def __init__(self, **kw): pass
-            def run(self, msg, **kw):
+            def __init__(self, **_kwargs): pass
+            def run(self, _message, **_kwargs):
                 raise RuntimeError("LLM 402 余额不足")
 
         agent = SkillEditAgent(

@@ -8,7 +8,6 @@ archival 落齐、触发率入库；并验证 commit 工具内部确实调了优
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -34,7 +33,7 @@ class ScriptedLLM:
         self._cases_json = json.dumps(cases)
         self._improved = improved_desc
 
-    def chat(self, prompt: str, system: str = "") -> str:
+    def chat(self, prompt: str, _system: str = "") -> str:
         if "generating evaluation queries" in prompt:
             return self._cases_json
         if "write a new and improved description" in prompt:
@@ -244,7 +243,7 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     # 测试 monkeypatch 成 stub 探针工厂。
     monkeypatch.setattr(
         "xskill.agents.agno_factory.make_default_factory",
-        lambda config: StubProbeFactory(_log_judge),
+        lambda _config: StubProbeFactory(_log_judge),
     )
 
     skill_root = tmp_path / "skill"
@@ -256,13 +255,16 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     agent_tools.init_atom_task_tool_context(
         skill_dir=skill_root,
         atom_store=AtomTaskStore(root=tmp_path / "store"),
-        embed_client=None,
         default_traj_root=tmp_path / "store",
     )
     llm = ScriptedLLM(
         _CASES, "Use this skill to analyze and parse log files and error traces.")
-    agent_tools.init_skill_authoring_tool_context(skill_root, skill_root, llm, _DummyEmbed(),
-                    {"skill_opt": {"runs_per_case": 1, "max_iters": 1, "seed": 42}})
+    monkeypatch.setattr("xskill.utils.llm.create_llm_client", lambda _config: llm)
+    monkeypatch.setattr("xskill.utils.llm.create_embed_client", lambda _config: _DummyEmbed())
+    agent_tools.init_skill_authoring_tool_context(
+        skill_root, skill_root,
+        {"skill_opt": {"runs_per_case": 1, "max_iters": 1, "seed": 42}},
+    )
 
     res = agent_tools.commit_baby_to_main.entrypoint("log-analyzer", "v1: based on atom_x")
     assert res.startswith("graduated"), res
@@ -274,7 +276,7 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     assert "log" in fm2["description"].lower()
 
 
-def test_commit_optimization_failure_does_not_block_commit(tmp_path):
+def test_commit_optimization_failure_does_not_block_commit(tmp_path, monkeypatch):
     """优化器抛错（case-gen 阶段网络炸）→ commit 仍正常完成（best-effort）。"""
     from xskill.agents import agent_tools
     from xskill.pipeline.atom import AtomTaskStore
@@ -287,16 +289,20 @@ def test_commit_optimization_failure_does_not_block_commit(tmp_path):
     agent_tools.init_atom_task_tool_context(
         skill_dir=skill_root,
         atom_store=AtomTaskStore(root=tmp_path / "store"),
-        embed_client=None,
         default_traj_root=tmp_path / "store",
     )
 
     class _BoomLLM:
-        def chat(self, *a, **k):
+        def chat(self, *args, **kwargs):
+            del args, kwargs
             raise RuntimeError("network down")
 
-    agent_tools.init_skill_authoring_tool_context(skill_root, skill_root, _BoomLLM(), _DummyEmbed(),
-                    {"skill_opt": {"runs_per_case": 1, "max_iters": 1}})
+    monkeypatch.setattr("xskill.utils.llm.create_llm_client", lambda _config: _BoomLLM())
+    monkeypatch.setattr("xskill.utils.llm.create_embed_client", lambda _config: _DummyEmbed())
+    agent_tools.init_skill_authoring_tool_context(
+        skill_root, skill_root,
+        {"skill_opt": {"runs_per_case": 1, "max_iters": 1}},
+    )
 
     res = agent_tools.commit_baby_to_main.entrypoint("boom", "v1")
     assert res.startswith("graduated"), res

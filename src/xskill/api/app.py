@@ -19,7 +19,6 @@ except ImportError:
     pass
 
 import logging
-import os
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -31,7 +30,12 @@ from pydantic import BaseModel, Field
 from xskill import __version__
 from xskill.config import load_config, get_skill_dir
 from xskill.utils.search import search as search_trajs, search_all as search_trajs_all
-from xskill.skill.repo import list_skills, import_skill
+from xskill.skill.repo import (
+    import_skill,
+    list_skills,
+    rebuild_skill_index,
+    search_skill_index,
+)
 from xskill.skill.skill import (
     show_skill,
     skill_log,
@@ -44,8 +48,6 @@ from xskill.skill.skill import (
 )
 from xskill.agents.agent_tools import (
     init_skill_authoring_tool_context,
-    search_skills,
-    rebuild_skill_index,
 )
 from xskill.utils.llm import create_llm_client, create_embed_client
 from xskill.skill.git import ensure_repo, current_branch
@@ -405,7 +407,7 @@ async def api_export_skill(name: str):
     """Export a skill directory as a downloadable archive."""
     try:
         tmp_dir = Path(tempfile.mkdtemp())
-        exported = export_skill(_skill_dir, name, tmp_dir)
+        export_skill(_skill_dir, name, tmp_dir)
         # Tar it up for download
         import shutil
         archive_path = Path(tempfile.mkdtemp()) / f"{name}.tar.gz"
@@ -451,10 +453,13 @@ async def api_import_skill(req: ImportSkillRequest):
 async def api_search_skills(req: SkillSearchRequest):
     """Search existing skills by semantic similarity."""
     try:
-        results_json = search_skills(req.query, top_k=req.top_k)
-        import json
-        results = json.loads(results_json)
-        return results
+        embedding_client = create_embed_client(_config)
+        return search_skill_index(
+            skill_dir=_skill_dir,
+            query=req.query,
+            embed_client=embedding_client,
+            top_k=req.top_k,
+        )
     except Exception as e:
         logger.exception("skill search failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -470,14 +475,16 @@ async def api_resolve_skill(req: SkillResolveRequest):
     决定返回 main 路径还是 ``.canary/`` 物化路径。
     """
     from xskill import canary
-    import json as _json
     import time
 
     try:
-        raw = search_skills(req.query, top_k=1)
-        hits = _json.loads(raw)
-        if isinstance(hits, dict):
-            hits = hits.get("results", [])
+        embedding_client = create_embed_client(_config)
+        hits = search_skill_index(
+            skill_dir=_skill_dir,
+            query=req.query,
+            embed_client=embedding_client,
+            top_k=1,
+        )
         if not hits:
             return {"skill_name": None, "path": None, "side": "none", "sha": ""}
 
@@ -754,7 +761,8 @@ async def api_init(req: InitRequest):
 async def api_reindex():
     """Rebuild the skill vector index."""
     try:
-        rebuild_skill_index()
+        embedding_client = create_embed_client(_config)
+        rebuild_skill_index(skill_dir=_skill_dir, embed_client=embedding_client)
         return MessageResponse(message="Skill index rebuilt", ok=True)
     except Exception as e:
         logger.exception("reindex failed")
@@ -848,7 +856,7 @@ def create_app(home_root: Path | str | None = None,
     # ------------------------------------------------------------------
     @app.on_event("startup")
     async def _startup():
-        """Initialize agent tool config so search_skills / rebuild_skill_index work.
+        """Initialize agent tool config and watcher runtime dependencies.
 
         无 fallback：LLM/embed 客户端构造失败一律 raise，daemon 启动失败而不是
         带 None client 带病跑（CLAUDE.md 第 1 条）。create_llm_client 内部仍可能
@@ -866,8 +874,6 @@ def create_app(home_root: Path | str | None = None,
         init_skill_authoring_tool_context(
             skill_dir=_skill_dir,
             data_dir=_skill_dir,
-            llm_client=llm,
-            embed_client=embed,
             config=_config,
         )
         logger.info(

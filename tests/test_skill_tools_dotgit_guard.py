@@ -15,11 +15,10 @@ def skill_root(tmp_path, monkeypatch):
     root.mkdir()
     (root / "foo").mkdir()
     snap = agent_tools.agent_tool_config.snapshot()
-    agent_tools.init_skill_authoring_tool_context(root, root, None, None, {})
+    agent_tools.init_skill_authoring_tool_context(root, root, {})
     agent_tools.init_atom_task_tool_context(
         skill_dir=root,
         atom_store=None,
-        embed_client=None,
         default_traj_root=root,
     )
     yield root

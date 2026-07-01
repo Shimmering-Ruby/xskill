@@ -101,7 +101,7 @@ DEFAULT_GUIDANCE_BLOCK_2 = """# 正文结构纪律
 """
 
 
-SYSTEM_PROMPT_TEMPLATE = """你是 SkillEditAgent。某 skill 的 candidates buffer 累计
+_SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE = """你是 SkillEditAgent。某 skill 的 candidates buffer 累计
 weightscore ≥ 10，需要你产出/更新它的 SKILL.md。
 
 # 当前场景
@@ -226,6 +226,13 @@ held-out test 集选优；你只需先写个像样的初稿。）
   破坏 git 状态，后者是 cluster 的 buffer 由系统管理
 """
 
+SYSTEM_PROMPT_TEMPLATE = _SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE.format(
+    scenario_block="{scenario_block}",
+    branch_now="{branch_now}",
+    guidance_block=DEFAULT_GUIDANCE_BLOCK,
+    guidance_block_2=DEFAULT_GUIDANCE_BLOCK_2,
+)
+
 
 GUIDANCE_ENV = "XSKILL_SKILLEDIT_GUIDANCE_FILE"
 
@@ -265,7 +272,7 @@ def _resolve_guidance() -> tuple[str, str]:
 def build_system_prompt(scenario_block: str, branch_now: str) -> str:
     """组装 SkillEdit system prompt：管线契约段固定，写作指导段按 env 可切换。"""
     guidance, guidance2 = _resolve_guidance()
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    return _SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE.format(
         scenario_block=scenario_block,
         branch_now=branch_now,
         guidance_block=guidance,

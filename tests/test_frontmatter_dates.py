@@ -65,7 +65,7 @@ def test_sanitize_last_updated_always_now():
 def test_write_file_sanitizes_skill_md(tmp_path, monkeypatch):
     """write_file 写 SKILL.md 时自动消毒（集成层）"""
     from xskill.agents import agent_tools
-    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, None, None, {})
+    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, {})
     sk = tmp_path / "fix-x"
     sk.mkdir()
     bad = """---
@@ -87,7 +87,7 @@ metadata:
 def test_write_file_leaves_nonskill_md_alone(tmp_path):
     """写非 SKILL.md 的文件不改内容"""
     from xskill.agents import agent_tools
-    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, None, None, {})
+    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, {})
     sk = tmp_path / "fix-x"
     sk.mkdir()
     content = "---\ncreated: 2099-12-31\n---\nbody"
@@ -108,7 +108,7 @@ def test_v2_write_skill_md_with_source_atoms_not_blocked(tmp_path):
     """v2 SkillEditAgent 写出来的 SKILL.md 用 source_atoms 而非 source_trajs；
     必须能直接写入，不被旧 source_trajs ≥ 3 gate 拦下。"""
     from xskill.agents import agent_tools
-    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, None, None, {})
+    agent_tools.init_skill_authoring_tool_context(tmp_path, tmp_path, {})
     sk = tmp_path / "fix-django"
     sk.mkdir()
     content = """---

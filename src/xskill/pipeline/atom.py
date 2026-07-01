@@ -20,6 +20,7 @@ import json
 import logging
 import pickle
 import re
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -103,10 +104,12 @@ class AtomTaskStore:
     # ── IO ────────────────────────────────────────────────────────
 
     def save(self, atom: AtomTask) -> Path:
-        p = self._path(atom)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(atom.to_json(), encoding="utf-8")
-        return p
+        atom_path = self._path(atom)
+        atom_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = atom_path.with_name(f".{atom_path.name}.{uuid.uuid4().hex}.tmp")
+        temporary_path.write_text(atom.to_json(), encoding="utf-8")
+        temporary_path.replace(atom_path)
+        return atom_path
 
     def load(self, atom_id: str) -> AtomTask:
         """跨 traj_id 子目录查找。命中第一条即返回；找不到抛 FileNotFoundError。

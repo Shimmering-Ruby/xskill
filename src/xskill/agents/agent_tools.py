@@ -4,16 +4,17 @@ agent_tools.py — xskill agent tools and their runtime configuration
 
 This module owns the Agno tools registered on xskill agents. Runtime dependencies
 are stored in ``agent_tool_config`` so callers can initialize once and tools can
-read the current project/AtomTask dependencies through properties.
+read the current project/AtomTask dependencies through properties. LLM and
+embedding clients are intentionally not stored here; non-tool workflows create
+those from config at their own boundary.
 """
 
 from __future__ import annotations
 
-import json, os, pickle, logging
+import json, logging
 from datetime import date, datetime
 from pathlib import Path
 
-import numpy as np
 from agno.tools import tool
 
 from xskill.skill.frontmatter import (
@@ -32,59 +33,46 @@ class AgentToolConfig:
     def __init__(self):
         self._skill_dir: Path | None = None
         self._data_dir: Path | None = None
-        self._llm_client = None
-        self._embed_client = None
         self._config: dict = {}
         self._atom_skill_dir: Path | None = None
         self._atom_store = None
-        self._atom_embed_client = None
         self._default_traj_root: Path | None = None
 
     def configure_skill_authoring(
-        self, skill_dir, data_dir, llm_client, embed_client, config,
+        self, skill_dir, data_dir, config,
     ) -> None:
         self._skill_dir = Path(skill_dir)
         self._data_dir = Path(data_dir)
-        self._llm_client = llm_client
-        self._embed_client = embed_client
         self._config = config or {}
 
     def configure_atom_task(
-        self, *, skill_dir, atom_store, embed_client, default_traj_root,
+        self, *, skill_dir, atom_store, default_traj_root,
     ) -> None:
         self._atom_skill_dir = Path(skill_dir)
         self._atom_store = atom_store
-        self._atom_embed_client = embed_client
         self._default_traj_root = Path(default_traj_root)
 
     def snapshot(self) -> dict:
         return {
             "skill_dir": self._skill_dir,
             "data_dir": self._data_dir,
-            "llm_client": self._llm_client,
-            "embed_client": self._embed_client,
             "config": self._config,
             "atom_skill_dir": self._atom_skill_dir,
             "atom_store": self._atom_store,
-            "atom_embed_client": self._atom_embed_client,
             "default_traj_root": self._default_traj_root,
         }
 
     def restore(self, snapshot: dict) -> None:
         self._skill_dir = snapshot.get("skill_dir")
         self._data_dir = snapshot.get("data_dir")
-        self._llm_client = snapshot.get("llm_client")
-        self._embed_client = snapshot.get("embed_client")
         self._config = snapshot.get("config") or {}
         self._atom_skill_dir = snapshot.get("atom_skill_dir")
         self._atom_store = snapshot.get("atom_store")
-        self._atom_embed_client = snapshot.get("atom_embed_client")
         self._default_traj_root = snapshot.get("default_traj_root")
 
     def clear_atom_task(self) -> None:
         self._atom_skill_dir = None
         self._atom_store = None
-        self._atom_embed_client = None
         self._default_traj_root = None
 
     @property
@@ -94,14 +82,6 @@ class AgentToolConfig:
     @property
     def data_dir(self) -> Path | None:
         return self._data_dir
-
-    @property
-    def llm_client(self):
-        return self._llm_client
-
-    @property
-    def embed_client(self):
-        return self._embed_client
 
     @property
     def config(self) -> dict:
@@ -114,10 +94,6 @@ class AgentToolConfig:
     @property
     def atom_store(self):
         return self._atom_store
-
-    @property
-    def atom_embed_client(self):
-        return self._atom_embed_client
 
     @property
     def default_traj_root(self) -> Path | None:
@@ -135,24 +111,22 @@ def init_atom_task_tool_context(
     *,
     skill_dir,
     atom_store,
-    embed_client,
     default_traj_root,
 ):
     """Initialize tools that read AtomTask JSON and source trajectory text."""
     agent_tool_config.configure_atom_task(
         skill_dir=skill_dir,
         atom_store=atom_store,
-        embed_client=embed_client,
         default_traj_root=default_traj_root,
     )
 
 
 def init_skill_authoring_tool_context(
-    skill_dir, data_dir, llm_client, embed_client, config,
+    skill_dir, data_dir, config,
 ):
     """Initialize general skill-authoring and description optimization tools."""
     agent_tool_config.configure_skill_authoring(
-        skill_dir, data_dir, llm_client, embed_client, config,
+        skill_dir, data_dir, config,
     )
 
 
@@ -239,50 +213,6 @@ def search_similar_trajs(query: str, top_k: int = 5, filter: str = "all") -> str
     results.sort(key=lambda x: x.get("similarity", 0), reverse=True)
     results = results[:top_k]
     return json.dumps(results, ensure_ascii=False, indent=2, default=str)
-
-
-def search_skills(query: str, top_k: int = 5) -> str:
-    """
-    Search existing skills via the frontmatter-based vector index.
-
-    Returns:
-        JSON list, each item: {skill_name, similarity, description, tags, version}
-    """
-    skill_dir = agent_tool_config.skill_dir
-    index_path = skill_dir / ".skill_index.pkl"
-
-    if not index_path.exists():
-        return json.dumps({"results": [], "message": "skill index empty"})
-
-    with open(index_path, "rb") as f:
-        index_data = pickle.load(f)
-
-    embed_client = agent_tool_config.embed_client
-    embeddings = index_data["embeddings"]
-    skill_names = index_data["skill_names"]
-    query_emb = embed_client.encode(query)
-    norm = np.linalg.norm(query_emb)
-    if norm > 0:
-        query_emb = query_emb / norm
-
-    similarities = embeddings @ query_emb
-    ranked = sorted(enumerate(similarities), key=lambda x: x[1], reverse=True)
-
-    results = []
-    for idx, sim in ranked[:top_k]:
-        name = skill_names[idx]
-        skill_path = skill_dir / name
-        fm, _body, _ = _read_skill_md(skill_path)
-        meta = fm.get("metadata", {}) or {}
-        results.append({
-            "skill_name": name,
-            "similarity": round(float(sim), 4),
-            "description": (fm.get("description") or "").strip(),
-            "tags": meta.get("tags", []),
-            "version": meta.get("version", 0),
-        })
-
-    return json.dumps(results, ensure_ascii=False, indent=2)
 
 
 @tool(name="read_file")
@@ -549,7 +479,6 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
         JSON blob of the new metadata, or an error message.
     """
     skill_dir = agent_tool_config.skill_dir
-    llm = agent_tool_config.llm_client
     slug = _slugify(skill_name)
     target = skill_dir / skill_name
     if not target.exists():
@@ -578,11 +507,12 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
     _sanitize_frontmatter_dates(fm)  # 兜底：覆盖未来日期 / 不合法 created
 
     # LLM-generated 2-sentence summary (for embeddings)
-    if llm:
+    from xskill.utils.llm import create_llm_client
+    llm_client = create_llm_client(agent_tool_config.config)
+    if llm_client:
         skill_text = (fm.get("description", "") + "\n\n" + body)[:4000]
         try:
-            summary = llm.chat(SUMMARY_PROMPT.format(skill_md=skill_text)).strip()
-            # keep short
+            summary = llm_client.chat(SUMMARY_PROMPT.format(skill_md=skill_text)).strip()
             if summary:
                 meta["summary"] = summary[:400]
         except Exception as e:
@@ -615,66 +545,6 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Skill index rebuild
-# ═══════════════════════════════════════════════════════════════════
-
-def rebuild_skill_index(*, skill_dir: Path | None = None, embed_client=None):
-    """Rebuild ./skill/.skill_index.pkl from frontmatter description+summary+tags.
-
-    显式 kwarg 优先；不传则从 ``agent_tool_config`` 读（供 daemon 起来后的
-    ``api_reindex`` 路径用——daemon 启动时已调过
-    ``init_skill_authoring_tool_context``）。两路都
-    没填 → fail-loud RuntimeError，不要拿着 ``None`` 接着跑出 AttributeError。
-    """
-    if skill_dir is None:
-        skill_dir = agent_tool_config.skill_dir
-    if embed_client is None:
-        embed_client = agent_tool_config.embed_client
-    if skill_dir is None or embed_client is None:
-        raise RuntimeError(
-            "rebuild_skill_index: 需要 skill_dir 和 embed_client —— 显式传入"
-            "或先调 init_skill_authoring_tool_context 填好"
-        )
-
-    entries = []
-    for d in sorted(skill_dir.iterdir()):
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        fm, _body, _path = _read_skill_md(d)
-        if not fm:
-            continue
-        meta = fm.get("metadata", {}) or {}
-        description = (fm.get("description") or "").strip()
-        summary = (meta.get("summary") or "").strip()
-        tags = meta.get("tags", []) or []
-        text = f"{description} | tags: {', '.join(tags)} | {summary}".strip()
-        entries.append((d.name, text))
-
-    if not entries:
-        logger.info("no skills to index")
-        return
-
-    names, texts = zip(*entries)
-    embeddings = embed_client.encode_batch(list(texts))
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms[norms == 0] = 1
-    embeddings = embeddings / norms
-
-    index_data = {
-        "skill_names": list(names),
-        "texts": list(texts),
-        "embeddings": embeddings,
-        "method": "api",
-    }
-
-    index_path = skill_dir / ".skill_index.pkl"
-    with open(index_path, "wb") as f:
-        pickle.dump(index_data, f)
-
-    logger.info(f"🔄 skill index rebuilt: {len(names)} entries → {index_path}")
-
-
-# ═══════════════════════════════════════════════════════════════════
 # AtomTask-era tools (v2) — consumed by TaskClusterAgent / SkillEditAgent
 # ═══════════════════════════════════════════════════════════════════
 
@@ -692,22 +562,6 @@ def atom_task_read(atom_id: str) -> str:
         return store.load(atom_id).to_json()
     except FileNotFoundError as e:
         return f"error: {e}"
-
-
-@tool(name="atom_task_search")
-def atom_task_search(query: str, top_k: int = 5) -> str:
-    """混合检索（向量 ⊕ BM25 关键字）AtomTask；返回 JSON 命中列表。
-
-    每条结果含 ``atom_id`` 和 ``sources``（命中通道）；不做 rerank。
-    """
-    from xskill.utils.search import HybridSearch
-    store = agent_tool_config.atom_store
-    embed = agent_tool_config.atom_embed_client
-    if store is None or embed is None:
-        return "error: atom task tool context not initialized"
-    hs = HybridSearch(store, embed)
-    hits = hs.search(query, top_k=top_k)
-    return json.dumps(hits, ensure_ascii=False, indent=2)
 
 
 @tool(name="read_traj")
@@ -1010,17 +864,30 @@ def _run_description_optimization(target: Path, slug: str) -> None:
     """commit 前跑 description 触发优化（D1：硬编码进 workflow，不做 agent tool）。
 
     gating on ``config.skill_opt.enabled``；任何失败只 log，绝不阻断 commit
-    （退回 agent 写的 description 继续提交）。走 ``agent_tool_config.llm_client``——daemon
-    起来时已含 rate_limit，不另起进程/线程。
+    （退回 agent 写的 description 继续提交）。LLM/embed 客户端在这个确定性
+    workflow 内从 config 创建，不从 agent tool context 借对象。
     """
-    config = agent_tool_config.config or {}
+    from xskill.config import get_config
+    config = agent_tool_config.config or get_config()
     if not (config.get("skill_opt", {}) or {}).get("enabled", True):
         return
-    llm = agent_tool_config.llm_client
-    embed = agent_tool_config.embed_client
-    if llm is None or embed is None:
+    from xskill.utils.llm import create_embed_client, create_llm_client
+    try:
+        import httpx
+        client_init_errors = (ValueError, RuntimeError, OSError, httpx.HTTPError)
+    except ImportError:
+        client_init_errors = (ValueError, RuntimeError, OSError)
+    try:
+        llm_client = create_llm_client(config)
+        embed_client = create_embed_client(config)
+    except client_init_errors as error:
         logger.warning(
-            "skip description_opt: agent_tool_config llm_client/embed_client 未初始化（%s）", slug,
+            "skip description_opt: client init failed for %s: %s", slug, error,
+        )
+        return
+    if llm_client is None or embed_client is None:
+        logger.warning(
+            "skip description_opt: llm/embed client unavailable (%s)", slug,
         )
         return
     try:
@@ -1028,9 +895,9 @@ def _run_description_optimization(target: Path, slug: str) -> None:
         from xskill.skill.description_opt import optimize_description
         skill_root = agent_tool_config.atom_skill_dir
         optimize_description(
-            target, llm=llm, config=config,
+            target, llm=llm_client, config=config,
             agno_agent_factory=make_default_factory(config),
-            embed_client=embed, skill_root=skill_root,
+            embed_client=embed_client, skill_root=skill_root,
         )
     except Exception:
         logger.exception(

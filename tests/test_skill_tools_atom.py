@@ -3,11 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.agents import agent_tools
-from tests.test_atom_task_store import _FakeEmbed
 
 
 def _setup(tmp_path: Path) -> tuple[Path, AtomTaskStore]:
@@ -25,13 +22,12 @@ def _setup(tmp_path: Path) -> tuple[Path, AtomTaskStore]:
         context_prefix="", raw_segment="MIGRATIONS!",
     )
     store.save(atom)
-    store.rebuild_vector_index(_FakeEmbed())
     # 一条 5 行的 traj.md，给 read_traj 测试用（read_traj 按行号取片段）
     (store_root / "x.md").write_text(
         "L1\nL2\nL3\nL4\nL5\n", encoding="utf-8")
     agent_tools.init_atom_task_tool_context(
         skill_dir=skill_dir, atom_store=store,
-        embed_client=_FakeEmbed(), default_traj_root=store_root,
+        default_traj_root=store_root,
     )
     return skill_dir, store
 
@@ -47,13 +43,6 @@ class TestAtomTaskRead:
         _setup(tmp_path)
         out = agent_tools.atom_task_read.entrypoint("atom_nonexistent")
         assert out.startswith("error")
-
-
-class TestAtomTaskSearch:
-    def test_returns_hits_in_json(self, tmp_path):
-        _setup(tmp_path)
-        out = agent_tools.atom_task_search.entrypoint("makemigrations")
-        assert "atom_x_0001" in out
 
 
 class TestReadTraj:
