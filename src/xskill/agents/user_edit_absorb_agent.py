@@ -85,7 +85,7 @@ class UserEditAbsorbAgent:
         if not diff_out and not status_out:
             return False
 
-        from xskill.agents import skill_tools as ST
+        from xskill.agents import agent_tools as AT
         skill_name = self.skill_dir.name
 
         # 构造 user_msg：含 skill_name + 当前分支 + 完整 diff + 未追踪文件列表
@@ -105,7 +105,7 @@ class UserEditAbsorbAgent:
 
         agent = self.agno_agent_factory(
             instructions=[SYSTEM_PROMPT],
-            tools=[ST.absorb_user_edit_to_main],
+            tools=[AT.absorb_user_edit_to_main],
         )
         try:
             agent.run(user_msg)

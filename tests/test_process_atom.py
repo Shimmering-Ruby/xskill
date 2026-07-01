@@ -10,6 +10,15 @@ from xskill.pipeline.runner import process_atom_task
 from tests.test_atom_task_store import _FakeEmbed
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args)
+
+
 def _seed_atom(store: AtomTaskStore) -> AtomTask:
     atom = AtomTask(
         atom_id="atom_x_0001", traj_id="x",
@@ -36,10 +45,10 @@ class _ClusterCallsAddTaskStub:
         m = re.search(r"atom_id:\s*(\S+)", user_msg)
         atom_id = m.group(1) if m else None
         for fn in self.tools:
-            if getattr(fn, "__name__", "") == "new_skill_folder":
-                fn(type(self).target_skill, "stub desc")
-            if getattr(fn, "__name__", "") == "add_task_to_skill" and atom_id:
-                fn(type(self).target_skill, atom_id, type(self).target_score)
+            if _tool_name(fn) == "new_skill_folder":
+                _call_tool(fn, type(self).target_skill, "stub desc")
+            if _tool_name(fn) == "add_task_to_skill" and atom_id:
+                _call_tool(fn, type(self).target_skill, atom_id, type(self).target_score)
         class _R: pass
         r = _R(); r.content = "stub-cluster-done"; return r
 

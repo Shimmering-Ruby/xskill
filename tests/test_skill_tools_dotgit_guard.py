@@ -14,8 +14,8 @@ def skill_root(tmp_path, monkeypatch):
     root = tmp_path / "skill"
     root.mkdir()
     (root / "foo").mkdir()
-    monkeypatch.setitem(skill_tools._ctx_v2, "skill_dir", root)
-    monkeypatch.setitem(skill_tools._ctx, "skill_dir", root)
+    monkeypatch.setitem(skill_tools._atom_task_tool_context, "skill_dir", root)
+    monkeypatch.setitem(skill_tools._skill_authoring_tool_context, "skill_dir", root)
     return root
 
 

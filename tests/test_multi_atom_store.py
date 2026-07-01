@@ -180,9 +180,9 @@ class TestSkillToolsAcrossStores:
         multi = MultiAtomTaskStore([store_a, store_b])
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
-        ST.init_context_v2(
-            skill_dir=skill_dir, store=multi,
-            embed_client=_FakeEmbed(), traj_root=store_a.root,
+        ST.init_atom_task_tool_context(
+            skill_dir=skill_dir, atom_store=multi,
+            embed_client=_FakeEmbed(), default_traj_root=store_a.root,
         )
         # 第二个 client 的 atom——修复前这里返回 not found
         out = ST.atom_task_read("atom_traj_cc_b_0042")
@@ -196,9 +196,9 @@ class TestSkillToolsAcrossStores:
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
         # traj_root 绑成 client A 的 root；client B 的 traj 仍要能读到
-        ST.init_context_v2(
-            skill_dir=skill_dir, store=multi,
-            embed_client=_FakeEmbed(), traj_root=store_a.root,
+        ST.init_atom_task_tool_context(
+            skill_dir=skill_dir, atom_store=multi,
+            embed_client=_FakeEmbed(), default_traj_root=store_a.root,
         )
         out = ST.read_traj("traj_cc_b", offset_start=1, offset_end=3)
         assert out == "B1\nB2\n"
@@ -212,9 +212,9 @@ class TestSkillToolsAcrossStores:
         multi = MultiAtomTaskStore([store_a, store_b])
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
-        ST.init_context_v2(
-            skill_dir=skill_dir, store=multi,
-            embed_client=_FakeEmbed(), traj_root=store_a.root,
+        ST.init_atom_task_tool_context(
+            skill_dir=skill_dir, atom_store=multi,
+            embed_client=_FakeEmbed(), default_traj_root=store_a.root,
         )
         caplog.set_level(logging.WARNING, logger="xskill.ux_score")
 
@@ -231,9 +231,9 @@ class TestSkillToolsAcrossStores:
         (root / "traj_solo.md").write_text("S1\nS2\nS3\n", encoding="utf-8")
         skill_dir = tmp_path / "skill"
         skill_dir.mkdir()
-        ST.init_context_v2(
-            skill_dir=skill_dir, store=store,
-            embed_client=_FakeEmbed(), traj_root=root,
+        ST.init_atom_task_tool_context(
+            skill_dir=skill_dir, atom_store=store,
+            embed_client=_FakeEmbed(), default_traj_root=root,
         )
         out = ST.atom_task_read("atom_traj_solo_0001")
         assert "solo summary" in out

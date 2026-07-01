@@ -42,7 +42,11 @@ from xskill.skill.skill import (
     delete_skill,
     export_skill,
 )
-from xskill.agents.skill_tools import init_context, search_skills, rebuild_skill_index
+from xskill.agents.skill_tools import (
+    init_skill_authoring_tool_context,
+    search_skills,
+    rebuild_skill_index,
+)
 from xskill.utils.llm import create_llm_client, create_embed_client
 from xskill.skill.git import ensure_repo, current_branch
 
@@ -858,8 +862,8 @@ def create_app(home_root: Path | str | None = None,
             )
         embed = create_embed_client(_config)
         # data_dir 在 server 端点路径上不被消费（trajectory 搜索走 Registry），
-        # 传 _skill_dir 占位即可——同 core.py 的 init_context 调用。
-        init_context(
+        # 传 _skill_dir 占位即可——同 core.py 的 tool context 初始化。
+        init_skill_authoring_tool_context(
             skill_dir=_skill_dir,
             data_dir=_skill_dir,
             llm_client=llm,

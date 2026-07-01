@@ -299,23 +299,23 @@ class DirectoryWatcher:
             from xskill.pipeline.atom import MultiAtomTaskStore
             store = MultiAtomTaskStore(stores)
         traj_root = Path(stores[0].root)
-        # 初始化 v2 工具 ctx（SkillEditAgent 工具用）
+        # 初始化 AtomTask 工具上下文（SkillEditAgent 的 AtomTaskRead/ReadTraj 用）
         from xskill.agents import skill_tools as ST
-        ST.init_context_v2(
-            skill_dir=self.skill_dir, store=store,
-            embed_client=self.embed_client, traj_root=traj_root,
+        ST.init_atom_task_tool_context(
+            skill_dir=self.skill_dir, atom_store=store,
+            embed_client=self.embed_client, default_traj_root=traj_root,
         )
-        # 同时填 v1 ctx：commit 工具内的 description 触发优化要从 _ctx 取
-        # llm_client + config（走既有 rate_limit 的 llm，不另起进程）。
-        ST.init_context(
+        # 同时填 skill authoring 工具上下文：commit 工具内的 description
+        # 触发优化要拿 llm_client + config（走既有 rate_limit 的 llm，不另起进程）。
+        ST.init_skill_authoring_tool_context(
             self.skill_dir, self.skill_dir, self.llm,
             self.embed_client, self.config,
         )
         # ── 跨技能并行写正文 ──
         # 每个 skill 文件夹是独立 git 仓（skill/git.py 各自 git init），仓锁
         # _repo_lock_for(repo_dir) 是 per-skill 的 → 不同技能 = 不同锁 = 零冲突，
-        # 跨技能并发安全。skill_tools 的 _ctx / _ctx_v2 在循环外已用同一个 skill
-        # 根目录初始化好，且只读共享根——maybe_run 期间不再改写它；write_file /
+        # 跨技能并发安全。skill_tools 的两个工具上下文在循环外已用同一个 skill
+        # 根目录初始化好，且只读共享根——maybe_run 期间不再改写它们；write_file /
         # commit_baby_to_main / commit_to_staging / skill_read 都按 skill_name
         # 实参解析目标子目录（target = skill_dir / slug），不依赖任何 per-skill
         # 全局态。因此把每个技能的 maybe_run() 丢进线程池并发跑是安全的。
@@ -1197,14 +1197,15 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         dict 含 keys: action / atom_id / cluster_log
     """
     from xskill.agents.task_cluster_agent import TaskClusterAgent
+    from xskill.agents import agent_tools as AT
     from xskill.agents import skill_tools as ST
 
     atom = store.load(atom_id)
     traj_root = store.root
 
-    ST.init_context_v2(
-        skill_dir=skill_dir, store=store,
-        embed_client=embed_client, traj_root=traj_root,
+    ST.init_atom_task_tool_context(
+        skill_dir=skill_dir, atom_store=store,
+        embed_client=embed_client, default_traj_root=traj_root,
     )
 
     cluster = TaskClusterAgent(
@@ -1212,11 +1213,11 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         agno_agent_factory=agno_agent_factory,
         llm_cfg=config.get("llm", {}),
         tools=[
-            ST.atom_task_read, ST.atom_task_search, ST.read_traj,
-            ST.skill_read, ST.read_skill_tasks,
-            ST.new_skill_folder, ST.add_task_to_skill,
-            ST.rename_skill, ST.move_task_to,
-            ST.score_task,
+            AT.atom_task_read, AT.atom_task_search, AT.read_traj,
+            AT.skill_read, AT.read_skill_tasks,
+            AT.new_skill_folder, AT.add_task_to_skill,
+            AT.rename_skill, AT.move_task_to,
+            AT.score_task,
         ],
     )
     cluster_content = cluster.process(atom)
@@ -1271,6 +1272,7 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
         cluster_log。
     """
     from xskill.agents.task_cluster_agent import TaskClusterAgent
+    from xskill.agents import agent_tools as AT
     from xskill.agents import skill_tools as ST
     from xskill.skill.candidates import find_atom_entry_in_any_skill
 
@@ -1278,9 +1280,9 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
     atom_by_id = {a.atom_id: a for a in atoms}
     traj_root = store.root
 
-    ST.init_context_v2(
-        skill_dir=skill_dir, store=store,
-        embed_client=embed_client, traj_root=traj_root,
+    ST.init_atom_task_tool_context(
+        skill_dir=skill_dir, atom_store=store,
+        embed_client=embed_client, default_traj_root=traj_root,
     )
 
     cluster = TaskClusterAgent(
@@ -1288,11 +1290,11 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
         agno_agent_factory=agno_agent_factory,
         llm_cfg=config.get("llm", {}),
         tools=[
-            ST.atom_task_read, ST.atom_task_search, ST.read_traj,
-            ST.skill_read, ST.read_skill_tasks,
-            ST.new_skill_folder, ST.add_task_to_skill,
-            ST.rename_skill, ST.move_task_to,
-            ST.score_task,
+            AT.atom_task_read, AT.atom_task_search, AT.read_traj,
+            AT.skill_read, AT.read_skill_tasks,
+            AT.new_skill_folder, AT.add_task_to_skill,
+            AT.rename_skill, AT.move_task_to,
+            AT.score_task,
         ],
     )
     cluster_content = cluster.process_batch(atoms)

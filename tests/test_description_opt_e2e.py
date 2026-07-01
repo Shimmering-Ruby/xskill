@@ -20,16 +20,16 @@ from xskill.skill.git import init_skill_repo_on_baby, run_git, _stage_all, _open
 
 @pytest.fixture(autouse=True)
 def _restore_skill_tools_ctx():
-    """本文件里有用例调 init_context/init_context_v2，会污染模块级 _ctx——
-    其它测试依赖 _ctx 未初始化。跑完恢复快照，避免跨文件状态泄漏。"""
+    """本文件里有用例初始化 skill/AtomTask tool context，会污染模块级 context——
+    其它测试依赖 _skill_authoring_tool_context 未初始化。跑完恢复快照，避免跨文件状态泄漏。"""
     from xskill.agents import skill_tools as ST
-    snap = dict(ST._ctx)
-    snap_v2 = dict(ST._ctx_v2)
+    snap = dict(ST._skill_authoring_tool_context)
+    snap_v2 = dict(ST._atom_task_tool_context)
     yield
-    ST._ctx.clear()
-    ST._ctx.update(snap)
-    ST._ctx_v2.clear()
-    ST._ctx_v2.update(snap_v2)
+    ST._skill_authoring_tool_context.clear()
+    ST._skill_authoring_tool_context.update(snap)
+    ST._atom_task_tool_context.clear()
+    ST._atom_task_tool_context.update(snap_v2)
 
 
 class ScriptedLLM:
@@ -258,12 +258,15 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     init_skill_repo_on_baby(str(sd), name="log-analyzer",
                             description="does stuff with files")
 
-    ST.init_context_v2(skill_dir=skill_root,
-                       store=AtomTaskStore(root=tmp_path / "store"),
-                       embed_client=None, traj_root=tmp_path / "store")
+    ST.init_atom_task_tool_context(
+        skill_dir=skill_root,
+        atom_store=AtomTaskStore(root=tmp_path / "store"),
+        embed_client=None,
+        default_traj_root=tmp_path / "store",
+    )
     llm = ScriptedLLM(
         _CASES, "Use this skill to analyze and parse log files and error traces.")
-    ST.init_context(skill_root, skill_root, llm, _DummyEmbed(),
+    ST.init_skill_authoring_tool_context(skill_root, skill_root, llm, _DummyEmbed(),
                     {"skill_opt": {"runs_per_case": 1, "max_iters": 1, "seed": 42}})
 
     res = ST.commit_baby_to_main("log-analyzer", "v1: based on atom_x")
@@ -286,15 +289,18 @@ def test_commit_optimization_failure_does_not_block_commit(tmp_path):
     sd = skill_root / "boom"
     init_skill_repo_on_baby(str(sd), name="boom", description="orig desc")
 
-    ST.init_context_v2(skill_dir=skill_root,
-                       store=AtomTaskStore(root=tmp_path / "store"),
-                       embed_client=None, traj_root=tmp_path / "store")
+    ST.init_atom_task_tool_context(
+        skill_dir=skill_root,
+        atom_store=AtomTaskStore(root=tmp_path / "store"),
+        embed_client=None,
+        default_traj_root=tmp_path / "store",
+    )
 
     class _BoomLLM:
         def chat(self, *a, **k):
             raise RuntimeError("network down")
 
-    ST.init_context(skill_root, skill_root, _BoomLLM(), _DummyEmbed(),
+    ST.init_skill_authoring_tool_context(skill_root, skill_root, _BoomLLM(), _DummyEmbed(),
                     {"skill_opt": {"runs_per_case": 1, "max_iters": 1}})
 
     res = ST.commit_baby_to_main("boom", "v1")

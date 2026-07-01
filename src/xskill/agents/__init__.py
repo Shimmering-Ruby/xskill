@@ -7,7 +7,8 @@
 - ``skill_edit_agent``      从攒够的候选合成 / 更新 SKILL.md
 - ``user_edit_absorb_agent``  吸收用户手改为 ground truth
 - ``agno_factory``          创建 agno.Agent 的共享工厂（模型路由 / SSL）
-- ``skill_tools``           暴露给 agent 的工具函数
+- ``agent_tools``           暴露给 agent 的 Agno 工具包装
+- ``skill_tools``           agent 工具背后的实现函数
 
 消费方按需 ``from xskill.agents.<module> import <symbol>`` 显式取用——
 本 ``__init__`` 不做 eager 再导出，避免引入包级 import 副作用与环依赖。

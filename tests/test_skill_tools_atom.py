@@ -29,9 +29,9 @@ def _setup(tmp_path: Path) -> tuple[Path, AtomTaskStore]:
     # 一条 5 行的 traj.md，给 read_traj 测试用（read_traj 按行号取片段）
     (store_root / "x.md").write_text(
         "L1\nL2\nL3\nL4\nL5\n", encoding="utf-8")
-    ST.init_context_v2(
-        skill_dir=skill_dir, store=store,
-        embed_client=_FakeEmbed(), traj_root=store_root,
+    ST.init_atom_task_tool_context(
+        skill_dir=skill_dir, atom_store=store,
+        embed_client=_FakeEmbed(), default_traj_root=store_root,
     )
     return skill_dir, store
 

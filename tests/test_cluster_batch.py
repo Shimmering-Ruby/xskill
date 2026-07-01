@@ -34,6 +34,15 @@ from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # stub agno factory：统计 ClusterAgent 调用次数 + 记录每批送进的 atom
 # ─────────────────────────────────────────────────────────────────────
@@ -52,7 +61,7 @@ class _BatchCountingStub:
 
     def __init__(self, *, instructions, tools):
         self.instructions = instructions
-        self.tools = {getattr(t, "__name__", ""): t for t in tools}
+        self.tools = {_tool_name(t): t for t in tools}
 
     def run(self, user_msg, **kw):
         head = (self.instructions[0] if self.instructions else "")[:80]
@@ -64,11 +73,11 @@ class _BatchCountingStub:
             type(self).cluster_calls += 1
             atom_ids = re.findall(r"atom_id:\s*(\S+)", user_msg)
             if "new_skill_folder" in self.tools:
-                self.tools["new_skill_folder"](type(self).target_skill, "stub desc")
+                _call_tool(self.tools["new_skill_folder"], type(self).target_skill, "stub desc")
             for aid in atom_ids:
                 type(self).sent_atoms.append(aid)
                 if "add_task_to_skill" in self.tools:
-                    self.tools["add_task_to_skill"](type(self).target_skill, aid, 3)
+                    _call_tool(self.tools["add_task_to_skill"], type(self).target_skill, aid, 3)
             return _R("clustered")
         # SkillEditAgent / 其它：不动手（不写 SKILL.md、不 commit → candidates 不清空）
         return _R("stub")

@@ -1,8 +1,10 @@
 """
-skill_tools.py — Tools exposed to the Skill curation Agent
-══════════════════════════════════════════════════════════════
-Agno-compatible tool functions. All skill files follow the v2 schema
-(SKILL.md with YAML frontmatter); no more separate .abstract file.
+skill_tools.py — implementations behind xskill agent tools
+════════════════════════════════════════════════════════════
+
+Agent-visible Agno wrappers live in ``xskill.agents.agent_tools``. This module
+keeps the implementation functions and shared context used by those wrappers and
+by non-agent entry points such as API routes and CLI helpers.
 """
 
 from __future__ import annotations
@@ -22,8 +24,13 @@ from xskill.skill.frontmatter import (
 
 logger = logging.getLogger("xskill.skill_tools")
 
-# Global context — initialized by process.py / server.py / cli.py
-_ctx = {
+# Context for general skill-authoring tools.
+#
+# Stores the shared project-level dependencies used by legacy trajectory search,
+# skill search/reindex, file helpers, commit helpers, and description optimization.
+# It is initialized by serve/CLI startup code and reused by tool functions that do
+# not operate on a specific AtomTask store.
+_skill_authoring_tool_context = {
     "skill_dir": None,     # Path: ./skill
     "data_dir": None,      # Path: ./data
     "llm_client": None,    # LLMClient
@@ -31,30 +38,44 @@ _ctx = {
     "config": {},
 }
 
-# v2 context for AtomTask-era tools (TaskClusterAgent / SkillEditAgent use these).
-# Kept separate from _ctx so legacy callers (旧 SkillAgent) don't accidentally
-# read stale fields during Task 3/4 transition.
-_ctx_v2 = {
+# Context for AtomTask tools.
+#
+# Stores the AtomTaskStore/MultiAtomTaskStore and trajectory root used by
+# TaskClusterAgent and SkillEditAgent tools such as atom_task_read/read_traj.
+# Kept separate from _skill_authoring_tool_context because these tools need a
+# concrete atom store, while general skill-authoring tools only need project-level
+# dependencies.
+_atom_task_tool_context = {
     "skill_dir": None,     # Path: <skill root>
-    "store": None,         # AtomTaskStore
+    "atom_store": None,    # AtomTaskStore or MultiAtomTaskStore
     "embed_client": None,  # EmbedClient
-    "traj_root": None,     # Path: <traj root> e.g. ~/.xskill/cc_sessions
+    "default_traj_root": None,  # Fallback watch_dir root containing <traj_id>.md
 }
 
 
-def init_context_v2(*, skill_dir, store, embed_client, traj_root):
-    _ctx_v2["skill_dir"] = Path(skill_dir)
-    _ctx_v2["store"] = store
-    _ctx_v2["embed_client"] = embed_client
-    _ctx_v2["traj_root"] = Path(traj_root)
+def init_atom_task_tool_context(
+    *,
+    skill_dir,
+    atom_store,
+    embed_client,
+    default_traj_root,
+):
+    """Initialize tools that read AtomTask JSON and source trajectory text."""
+    _atom_task_tool_context["skill_dir"] = Path(skill_dir)
+    _atom_task_tool_context["atom_store"] = atom_store
+    _atom_task_tool_context["embed_client"] = embed_client
+    _atom_task_tool_context["default_traj_root"] = Path(default_traj_root)
 
 
-def init_context(skill_dir, data_dir, llm_client, embed_client, config):
-    _ctx["skill_dir"] = Path(skill_dir)
-    _ctx["data_dir"] = Path(data_dir)
-    _ctx["llm_client"] = llm_client
-    _ctx["embed_client"] = embed_client
-    _ctx["config"] = config
+def init_skill_authoring_tool_context(
+    skill_dir, data_dir, llm_client, embed_client, config,
+):
+    """Initialize general skill-authoring and description optimization tools."""
+    _skill_authoring_tool_context["skill_dir"] = Path(skill_dir)
+    _skill_authoring_tool_context["data_dir"] = Path(data_dir)
+    _skill_authoring_tool_context["llm_client"] = llm_client
+    _skill_authoring_tool_context["embed_client"] = embed_client
+    _skill_authoring_tool_context["config"] = config
 
 
 def _slugify(name: str) -> str:
@@ -116,8 +137,8 @@ def search_similar_trajs(query: str, top_k: int = 5, filter: str = "all") -> str
         JSON string: list of {traj_id, similarity, meta (summary), md_path, dataset}
     """
     from xskill.utils.search import search as do_search
-    data_dir = _ctx["data_dir"]
-    config = _ctx["config"]
+    data_dir = _skill_authoring_tool_context["data_dir"]
+    config = _skill_authoring_tool_context["config"]
 
     results = []
     for d in sorted(data_dir.iterdir()):
@@ -148,7 +169,7 @@ def search_skills(query: str, top_k: int = 5) -> str:
     Returns:
         JSON list, each item: {skill_name, similarity, description, tags, version}
     """
-    skill_dir = _ctx["skill_dir"]
+    skill_dir = _skill_authoring_tool_context["skill_dir"]
     index_path = skill_dir / ".skill_index.pkl"
 
     if not index_path.exists():
@@ -157,7 +178,7 @@ def search_skills(query: str, top_k: int = 5) -> str:
     with open(index_path, "rb") as f:
         index_data = pickle.load(f)
 
-    embed_client = _ctx["embed_client"]
+    embed_client = _skill_authoring_tool_context["embed_client"]
     embeddings = index_data["embeddings"]
     skill_names = index_data["skill_names"]
     query_emb = embed_client.encode(query)
@@ -188,7 +209,7 @@ def search_skills(query: str, top_k: int = 5) -> str:
 def read_file(path: str) -> str:
     """Read an arbitrary file under the project root."""
     p = Path(path)
-    root = _ctx["skill_dir"].parent
+    root = _skill_authoring_tool_context["skill_dir"].parent
     try:
         p.resolve().relative_to(root.resolve())
     except ValueError:
@@ -249,7 +270,7 @@ def create_skill(skill_name: str) -> str:
     Returns:
         Status message; the agent should overwrite SKILL.md via write_file.
     """
-    skill_dir = _ctx["skill_dir"]
+    skill_dir = _skill_authoring_tool_context["skill_dir"]
     slug = _slugify(skill_name)
     target = skill_dir / slug
 
@@ -297,7 +318,7 @@ def add_candidate(skill_name: str, pattern: str, pattern_type: str,
     """
     from xskill.skill import candidates as C
 
-    skill_dir = _ctx["skill_dir"]
+    skill_dir = _skill_authoring_tool_context["skill_dir"]
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if not target.exists():
@@ -342,7 +363,7 @@ def list_candidates(skill_name: str) -> str:
     """
     from xskill.skill import candidates as C
 
-    skill_dir = _ctx["skill_dir"]
+    skill_dir = _skill_authoring_tool_context["skill_dir"]
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if not target.exists():
@@ -375,10 +396,10 @@ def write_file(path: str, content: str) -> str:
     不需要 SKILL.md 写入端再卡一道。
     """
     p = Path(path)
-    if _ctx_v2["skill_dir"] is not None:
-        skill_dir = _ctx_v2["skill_dir"]
+    if _atom_task_tool_context["skill_dir"] is not None:
+        skill_dir = _atom_task_tool_context["skill_dir"]
     else:
-        skill_dir = _ctx["skill_dir"]
+        skill_dir = _skill_authoring_tool_context["skill_dir"]
 
     try:
         resolved = p.resolve()
@@ -442,8 +463,8 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
     Returns:
         JSON blob of the new metadata, or an error message.
     """
-    skill_dir = _ctx["skill_dir"]
-    llm = _ctx["llm_client"]
+    skill_dir = _skill_authoring_tool_context["skill_dir"]
+    llm = _skill_authoring_tool_context["llm_client"]
     slug = _slugify(skill_name)
     target = skill_dir / skill_name
     if not target.exists():
@@ -515,18 +536,19 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
 def rebuild_skill_index(*, skill_dir: Path | None = None, embed_client=None):
     """Rebuild ./skill/.skill_index.pkl from frontmatter description+summary+tags.
 
-    显式 kwarg 优先；不传则从模块级 ``_ctx`` 读（供 daemon 起来后的
-    ``api_reindex`` 路径用——daemon 启动时已调过 ``init_context``）。两路都
+    显式 kwarg 优先；不传则从模块级 ``_skill_authoring_tool_context`` 读（供 daemon 起来后的
+    ``api_reindex`` 路径用——daemon 启动时已调过
+    ``init_skill_authoring_tool_context``）。两路都
     没填 → fail-loud RuntimeError，不要拿着 ``None`` 接着跑出 AttributeError。
     """
     if skill_dir is None:
-        skill_dir = _ctx["skill_dir"]
+        skill_dir = _skill_authoring_tool_context["skill_dir"]
     if embed_client is None:
-        embed_client = _ctx["embed_client"]
+        embed_client = _skill_authoring_tool_context["embed_client"]
     if skill_dir is None or embed_client is None:
         raise RuntimeError(
             "rebuild_skill_index: 需要 skill_dir 和 embed_client —— 显式传入"
-            "或先调 init_context 把 _ctx 填好"
+            "或先调 init_skill_authoring_tool_context 填好"
         )
 
     entries = []
@@ -577,9 +599,9 @@ def atom_task_read(atom_id: str) -> str:
     用于 cluster / edit agent 在决定归类前查看 atom 的 intent / summary /
     raw_segment / used_skills。
     """
-    store = _ctx_v2["store"]
+    store = _atom_task_tool_context["atom_store"]
     if store is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     try:
         return store.load(atom_id).to_json()
     except FileNotFoundError as e:
@@ -592,10 +614,10 @@ def atom_task_search(query: str, top_k: int = 5) -> str:
     每条结果含 ``atom_id`` 和 ``sources``（命中通道）；不做 rerank。
     """
     from xskill.utils.search import HybridSearch
-    store = _ctx_v2["store"]
-    embed = _ctx_v2["embed_client"]
+    store = _atom_task_tool_context["atom_store"]
+    embed = _atom_task_tool_context["embed_client"]
     if store is None or embed is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     hs = HybridSearch(store, embed)
     hits = hs.search(query, top_k=top_k)
     return json.dumps(hits, ensure_ascii=False, indent=2)
@@ -609,13 +631,13 @@ def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
     校验区间合法（``offset_end > offset_start`` 且区间在文件行数内），
     违反直接返回 error。
     """
-    traj_root = _ctx_v2["traj_root"]
+    traj_root = _atom_task_tool_context["default_traj_root"]
     if traj_root is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     # team-CS 多 store：traj.md 落在 atom 所属 client 的 watch_dir 下，不一定是
     # 绑定的 traj_root。store 若支持 traj_root_for（MultiAtomTaskStore），按
     # traj_id 跨所有 root 解析；解析不到再退回绑定 traj_root（单 store 行为不变）。
-    store = _ctx_v2["store"]
+    store = _atom_task_tool_context["atom_store"]
     resolver = getattr(store, "traj_root_for", None)
     if callable(resolver):
         try:
@@ -651,9 +673,9 @@ def new_skill_folder(skill_name: str, description: str) -> str:
     - 后续 SkillEditAgent 触发时拿到 candidates 来填正文，调
       ``commit_baby_to_main`` graduate 到 main
     """
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     desc = (description or "").strip()
     if not desc:
         return ("error: description 必填——简述这个 skill 服务于什么类型的 atom "
@@ -670,9 +692,9 @@ def new_skill_folder(skill_name: str, description: str) -> str:
 
 def skill_read(skill_name: str) -> str:
     """读 skill 的 SKILL.md；没有则返回 placeholder 提示。"""
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     slug = _slugify(skill_name)
     p = skill_dir / slug / "SKILL.md"
     if not p.is_file():
@@ -687,9 +709,9 @@ def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
     atom 的 weightscore + buffer 总分 / 10，让 agent 看到"还差多少到阈值"。
     """
     from xskill.skill import candidates as C
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if not target.is_dir():
@@ -711,9 +733,9 @@ def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
 
 def score_task(atom_id: str, score: int) -> str:
     """覆盖 AtomTask 的 ux_score（手动修正 / 灰度链路使用）。"""
-    store = _ctx_v2["store"]
+    store = _atom_task_tool_context["atom_store"]
     if store is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     try:
         sc = int(score)
     except (TypeError, ValueError):
@@ -739,9 +761,9 @@ def add_task(
     生产路径走 TaskAgent；这个工具是给需要补轨的 agent / 脚本兜底。
     """
     from xskill.pipeline.atom import AtomTask
-    store = _ctx_v2["store"]
+    store = _atom_task_tool_context["atom_store"]
     if store is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     atom = AtomTask(
         atom_id=atom_id, traj_id=traj_id,
         offset_start=int(offset_start), offset_end=int(offset_end),
@@ -762,7 +784,7 @@ def list_files(path: str) -> str:
     更新）。路径必须在 skill_dir 范围内；越界返回 error。
     """
     p = Path(path)
-    skill_root = _ctx_v2["skill_dir"] if _ctx_v2["skill_dir"] is not None else _ctx["skill_dir"]
+    skill_root = _atom_task_tool_context["skill_dir"] if _atom_task_tool_context["skill_dir"] is not None else _skill_authoring_tool_context["skill_dir"]
     if skill_root is None:
         return "error: skill_dir context not initialized"
     try:
@@ -787,23 +809,23 @@ def _run_description_optimization(target: Path, slug: str) -> None:
     """commit 前跑 description 触发优化（D1：硬编码进 workflow，不做 agent tool）。
 
     gating on ``config.skill_opt.enabled``；任何失败只 log，绝不阻断 commit
-    （退回 agent 写的 description 继续提交）。走 ``_ctx["llm_client"]``——daemon
+    （退回 agent 写的 description 继续提交）。走 ``_skill_authoring_tool_context["llm_client"]``——daemon
     起来时已含 rate_limit，不另起进程/线程。
     """
-    config = _ctx.get("config") or {}
+    config = _skill_authoring_tool_context.get("config") or {}
     if not (config.get("skill_opt", {}) or {}).get("enabled", True):
         return
-    llm = _ctx.get("llm_client")
-    embed = _ctx.get("embed_client")
+    llm = _skill_authoring_tool_context.get("llm_client")
+    embed = _skill_authoring_tool_context.get("embed_client")
     if llm is None or embed is None:
         logger.warning(
-            "skip description_opt: _ctx llm_client/embed_client 未初始化（%s）", slug,
+            "skip description_opt: _skill_authoring_tool_context llm_client/embed_client 未初始化（%s）", slug,
         )
         return
     try:
         from xskill.agents.agno_factory import make_default_factory
         from xskill.skill.description_opt import optimize_description
-        skill_root = _ctx_v2["skill_dir"]
+        skill_root = _atom_task_tool_context["skill_dir"]
         optimize_description(
             target, llm=llm, config=config,
             agno_agent_factory=make_default_factory(config),
@@ -831,9 +853,9 @@ def commit_baby_to_main(skill_name: str, message: str) -> str:
         失败："error: ..."
     """
     from xskill.skill.git import commit_baby_to_main_branch
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if not target.is_dir():
@@ -869,9 +891,9 @@ def commit_to_staging(skill_name: str, message: str) -> str:
         失败："error: ..."
     """
     from xskill.skill.git import commit_to_staging_branch
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if not target.is_dir():
@@ -902,9 +924,9 @@ def absorb_user_edit_to_main(skill_name: str, message: str) -> str:
     from xskill.skill.git import (
         run_git, current_branch, commit_changes,
     )
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if not target.is_dir() or not (target / ".git").is_dir():
@@ -971,9 +993,9 @@ def rename_skill(old_name: str, new_name: str) -> str:
     实现：mv 目录 + 更新 SKILL.md.name + 改 body 标题 + commit on baby。
     """
     from xskill.skill.git import current_branch, run_git
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     old_slug = _slugify(old_name)
     new_slug = _slugify(new_name)
     if old_slug == new_slug:
@@ -1013,9 +1035,9 @@ def read_skill_tasks(skill_name: str) -> str:
     把当前 atom 也归过去。返回 yaml-like 文本，每条 atom 一行含 weightscore。
     """
     from xskill.skill import candidates as C
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     slug = _slugify(skill_name)
     target = skill_dir / slug
     if not target.is_dir():
@@ -1045,9 +1067,9 @@ def move_task_to(skill_from: str, skill_to: str, atom_id: str) -> str:
     源 buffer 为空时不删空骨架（保留 baby skill，cluster 后续可能再填）。
     """
     from xskill.skill import candidates as C
-    skill_dir = _ctx_v2["skill_dir"]
+    skill_dir = _atom_task_tool_context["skill_dir"]
     if skill_dir is None:
-        return "error: v2 context not initialized"
+        return "error: atom task tool context not initialized"
     from_slug = _slugify(skill_from)
     to_slug = _slugify(skill_to)
     if from_slug == to_slug:

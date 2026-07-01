@@ -13,18 +13,18 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_skill_tools_ctx():
-    """每个 case 前后重置 _ctx / _ctx_v2，避免其他 test 文件污染 write_file 的
-    skill_dir 判定（write_file 优先用 _ctx_v2 而非 _ctx）。"""
+    """每个 case 前后重置 _skill_authoring_tool_context / _atom_task_tool_context，避免其他 test 文件污染 write_file 的
+    skill_dir 判定（write_file 优先用 _atom_task_tool_context 而非 _skill_authoring_tool_context）。"""
     from xskill.agents import skill_tools as ST
-    saved_v2 = dict(ST._ctx_v2)
-    saved_v1 = dict(ST._ctx)
-    ST._ctx_v2["skill_dir"] = None
-    ST._ctx_v2["store"] = None
-    ST._ctx_v2["embed_client"] = None
-    ST._ctx_v2["traj_root"] = None
+    saved_v2 = dict(ST._atom_task_tool_context)
+    saved_v1 = dict(ST._skill_authoring_tool_context)
+    ST._atom_task_tool_context["skill_dir"] = None
+    ST._atom_task_tool_context["atom_store"] = None
+    ST._atom_task_tool_context["embed_client"] = None
+    ST._atom_task_tool_context["default_traj_root"] = None
     yield
-    ST._ctx_v2.update(saved_v2)
-    ST._ctx.update(saved_v1)
+    ST._atom_task_tool_context.update(saved_v2)
+    ST._skill_authoring_tool_context.update(saved_v1)
 
 
 def test_sanitize_future_created_date():
@@ -71,7 +71,7 @@ def test_sanitize_last_updated_always_now():
 def test_write_file_sanitizes_skill_md(tmp_path, monkeypatch):
     """write_file 写 SKILL.md 时自动消毒（集成层）"""
     from xskill.agents import skill_tools
-    skill_tools._ctx["skill_dir"] = tmp_path
+    skill_tools._skill_authoring_tool_context["skill_dir"] = tmp_path
     sk = tmp_path / "fix-x"
     sk.mkdir()
     bad = """---
@@ -93,7 +93,7 @@ metadata:
 def test_write_file_leaves_nonskill_md_alone(tmp_path):
     """写非 SKILL.md 的文件不改内容"""
     from xskill.agents import skill_tools
-    skill_tools._ctx["skill_dir"] = tmp_path
+    skill_tools._skill_authoring_tool_context["skill_dir"] = tmp_path
     sk = tmp_path / "fix-x"
     sk.mkdir()
     content = "---\ncreated: 2099-12-31\n---\nbody"
@@ -114,7 +114,7 @@ def test_v2_write_skill_md_with_source_atoms_not_blocked(tmp_path):
     """v2 SkillEditAgent 写出来的 SKILL.md 用 source_atoms 而非 source_trajs；
     必须能直接写入，不被旧 source_trajs ≥ 3 gate 拦下。"""
     from xskill.agents import skill_tools
-    skill_tools._ctx["skill_dir"] = tmp_path
+    skill_tools._skill_authoring_tool_context["skill_dir"] = tmp_path
     sk = tmp_path / "fix-django"
     sk.mkdir()
     content = """---

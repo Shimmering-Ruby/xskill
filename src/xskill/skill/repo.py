@@ -76,7 +76,7 @@ class SkillRepo:
     def rebuild_index(self) -> None:
         """重建 .skill_index.pkl（向量检索用）。
 
-        显式给 ``rebuild_skill_index`` 传参，**不**走 ``init_context``——后者
+        显式给 ``rebuild_skill_index`` 传参，**不**走工具上下文初始化——后者
         会要求 ``data_dir`` / ``llm_client`` 等本路径用不到的字段（早先版本
         传 ``None`` 进去会触发 ``Path(None)`` TypeError，rebuild 直接挂）。
         """

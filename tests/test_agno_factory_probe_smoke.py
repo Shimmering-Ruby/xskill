@@ -1,6 +1,6 @@
 """agno 工厂 × 触发探针 集成冒烟（真 agno Agent，零网络）。
 
-daemon 注入链路是：serve 启动 ``init_context``(llm/embed) → commit 钩子
+daemon 注入链路是：serve 启动 ``init_skill_authoring_tool_context``(llm/embed) → commit 钩子
 ``_run_description_optimization`` 现建 ``make_default_factory(config)`` →
 ``optimize_description`` → ``probe_trigger`` 真跑代理。此前所有单测用
 ``_FakeAgent`` 替身——没有任何测试证明 **真 agno Agent** 能：
