@@ -105,6 +105,10 @@ class DirectoryWatcher:
             Path(install_history_path) if install_history_path
             else XSKILL_HOME / "install_history.jsonl"
         )
+        # 冷启动批量 flush：rebuild 写 COLD_START 文件后，watcher 等流水线空闲再
+        # 做一次 SkillEdit 扫描；没有该文件时不改变在线增量路径。
+        from xskill.pipeline.cold_start import ColdStartSignal
+        self._cold_start_signal = ColdStartSignal(self.home_root or XSKILL_HOME)
         self.poll_interval = poll_interval
         self.max_concurrent = max_concurrent
         self.max_retries = max_retries
@@ -233,7 +237,7 @@ class DirectoryWatcher:
         # 已满阈值的 skill 仍能在每轮 scan 中被检出 + 触发 SkillEdit。
         # 不放在 _scan_dir 内是因为 skill_dir 不是 watch_dir，跟 wd 循环
         # 无关——每个 watcher 只有一个全局 skill_dir。
-        self._check_pending_skill_edits()
+        self._run_skill_edit_step()
 
         # ── Step 6: 灰度判定独立轮询 ──
         # 对每个 staging 分支存在的 skill 跑 AtomCanary.check_and_decide：
@@ -260,8 +264,48 @@ class DirectoryWatcher:
         if not self.server_mode:
             self._reconcile_skill_sides()
 
-    def _check_pending_skill_edits(self):
+    def _run_skill_edit_step(self):
+        """Step 5 的冷启动感知封装。"""
+        cold_start_signal = self._cold_start_signal
+        if cold_start_signal.exists:
+            if cold_start_signal.ready_to_flush(
+                pipeline_idle=self._cold_start_pipeline_idle(),
+            ):
+                from xskill.skill import candidates
+                logger.info(
+                    "冷启动批量 flush 触发 → SkillEdit (threshold=%d)",
+                    candidates.ATOM_PROMOTION_THRESHOLD,
+                )
+                self._check_pending_skill_edits(
+                    threshold=candidates.ATOM_PROMOTION_THRESHOLD,
+                )
+                cold_start_signal.consume()
+            # COLD_START 已到但流水线尚未空闲：hold，本轮不写正文。
+            return
+        self._check_pending_skill_edits()
+
+    def _cold_start_pipeline_idle(self) -> bool:
+        """当前 watcher 没有待处理轨迹或后台任务时，cold-start 可 flush。"""
+        if self._futures:
+            return False
+        pending_statuses = (
+            "discovered", "updated", "splitting", "split_done",
+            "indexed", "clustering",
+        )
+        for watch_dir_entry in list_watch_dirs(**self._db_kw()):
+            watch_dir_id = watch_dir_entry["id"]
+            for status in pending_statuses:
+                if get_trajs_by_status(
+                    watch_dir_id, status, limit=1, **self._db_kw(),
+                ):
+                    return False
+        return True
+
+    def _check_pending_skill_edits(self, threshold=None):
         """遍历每个 skill 目录调 SkillEditAgent.maybe_run()。
+
+        ``threshold``：None 时各 skill 用默认 ATOM_PROMOTION_THRESHOLD；cold
+        start 显式传同一个常量，避免在配置里散落另一套数值。
 
         独立于 process_atom_task：不依赖任何 atom 处理成功；只看 candidates.yml
         当前累计 weightscore 是否够阈值。即便某次 cluster 抛异常导致 buffer
@@ -334,6 +378,7 @@ class DirectoryWatcher:
                 agno_agent_factory=factory,
                 llm_cfg=self.config.get("llm", {}),
                 traj_root=traj_root,
+                **({} if threshold is None else {"threshold": threshold}),
             )
             try:
                 return d, bool(editor.maybe_run())
@@ -768,9 +813,13 @@ class DirectoryWatcher:
                     self._futures[fut] = {
                         "wd_id": wd_id, "stage": "cluster", "atom_ids": batch,
                     }
+                    cluster_in_flight = True
 
             # ── done 标记：轨迹的 atom 全部落地 → done（+ 触发 ux 打分）──
-            self._sweep_done_trajs(wd_id, dir_path, **kw)
+            # Windows 对正在被 cluster future 原子替换的 atom JSON 会报
+            # PermissionError；等 future 被 harvest 后下一轮再 sweep。
+            if not cluster_in_flight:
+                self._sweep_done_trajs(wd_id, dir_path, **kw)
 
         # ── ux_score（对有 xskill header 的新轨迹）──
         if self.llm and self.skill_dir and new:

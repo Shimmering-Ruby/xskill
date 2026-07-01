@@ -341,7 +341,7 @@ def cmd_read(args, xskill) -> int:
     return 0
 
 
-def cmd_rebuild(args, xskill) -> int:
+def cmd_rebuild(args, _xskill) -> int:
     """`xskill rebuild [--force]` —— 用现有原始轨迹重跑蒸馏。
 
     默认：删除已拆 atom + index.pkl、轨迹状态翻回 discovered，让运行中的 watcher
@@ -360,11 +360,11 @@ def cmd_rebuild(args, xskill) -> int:
     status = read_status()
     if status.get("running") and not args.ignore_model_mismatch:
         daemon_model = status.get("llm_model")
-        cfg_model = config_models().get("llm_model")
-        if daemon_model != cfg_model:
+        config_model = config_models().get("llm_model")
+        if daemon_model != config_model:
             print(
                 f"✗ 运行中的 daemon 在用模型 {daemon_model!r}，但 config.yaml "
-                f"现在是 {cfg_model!r}。",
+                f"现在是 {config_model!r}。",
                 file=sys.stderr,
             )
             print(
@@ -379,11 +379,20 @@ def cmd_rebuild(args, xskill) -> int:
     if args.force:
         from xskill.config import get_skill_dir
         from xskill.skill.repo import SkillRepo
-        n_skills = SkillRepo(get_skill_dir()).wipe_all_skills()
-        print(f"--force: 清空 skill 仓（删 {n_skills} 个 skill）")
+        skill_count = SkillRepo(get_skill_dir()).wipe_all_skills()
+        print(f"--force: 清空 skill 仓（删 {skill_count} 个 skill）")
 
-    n = reset_trajectories(eco=args.eco, traj_id=args.traj)
-    print(f"rebuild: 重置 {n} 条轨迹（已删 atom + index.pkl，将从头重拆）")
+    trajectory_count = reset_trajectories(eco=args.eco, traj_id=args.traj)
+    print(f"rebuild: 重置 {trajectory_count} 条轨迹（已删 atom + index.pkl，将从头重拆）")
+
+    from xskill.config import XSKILL_HOME
+    from xskill.pipeline.cold_start import ColdStartSignal
+    cold_start_signal = ColdStartSignal(XSKILL_HOME)
+    signal_path = cold_start_signal.create()
+    print(
+        "cold-start: 已写入内部信号文件，watcher 会在本次 rebuild 处理完成后 flush "
+        f"({signal_path})"
+    )
 
     if read_status().get("running"):
         print("watcher 运行中 —— 30s 内将自动重跑这些轨迹。")
