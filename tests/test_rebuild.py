@@ -138,7 +138,7 @@ def test_reset_requeues_not_fit_and_clears_interest_fields(tmp_path, db_path):
 
 
 def test_reset_clears_skill_usage_canary_and_ux_fields(tmp_path, db_path):
-    _directory_path, watch_dir_id = _seed_done_traj(tmp_path, db_path)
+    _, watch_dir_id = _seed_done_traj(tmp_path, db_path)
     connection = get_connection(db_path)
     connection.execute(
         "UPDATE trajectories SET skill_generated=?, skill_used=?, "
