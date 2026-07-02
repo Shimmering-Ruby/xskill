@@ -434,9 +434,7 @@ class TestUxScoreAtomLevel:
             home_root=tmp_path,
         )
         # mock score_atom 返回固定分数
-        with patch("xskill.pipeline.runner.score_atom",
-                   return_value={"score": 8, "reasons": "ok"}) if False else \
-             patch("xskill.pipeline.atom.score_atom",
+        with patch("xskill.pipeline.atom.score_atom",
                    return_value={"score": 8, "reasons": "ok"}) as mock_score:
             # 多轮推进到 done
             for _ in range(20):
