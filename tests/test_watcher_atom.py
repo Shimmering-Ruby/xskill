@@ -1,6 +1,7 @@
 """watcher v2 流水线：discovered → splitting → split_done → indexed → clustering → done"""
 from __future__ import annotations
 
+from concurrent.futures import Future
 import time
 
 from xskill.pipeline.atom import AtomTaskStore
@@ -145,6 +146,45 @@ class TestZombieCleanup:
             get_trajs_by_status(wd_id, "discovered", db_path=db) == []
             or len(watcher._futures) > 0
         )
+
+    def test_splitting_zombie_ignores_cluster_future_without_filename(self, tmp_path):
+        database_path = tmp_path / "test.db"
+        watch_directory = tmp_path / "wd"
+        watch_directory.mkdir()
+        skill_directory = tmp_path / "skill"
+        skill_directory.mkdir()
+        (watch_directory / "traj_x.md").write_text(_TRAJ_MD, encoding="utf-8")
+
+        watch_dir_id = register_dir(watch_directory, db_path=database_path)
+        discover_trajectories(watch_dir_id, watch_directory, db_path=database_path)
+        update_traj_status(
+            watch_dir_id, "traj_x.md", "splitting", db_path=database_path,
+        )
+
+        watcher = DirectoryWatcher(
+            llm=None,
+            embed_client=None,
+            config={},
+            skill_dir=skill_directory,
+            poll_interval=0.0,
+            max_concurrent=2,
+            db_path=database_path,
+            home_root=tmp_path,
+        )
+        cluster_future = Future()
+        watcher._futures[cluster_future] = {
+            "wd_id": watch_dir_id,
+            "stage": "cluster",
+            "atom_ids": ["atom_traj_x_0001"],
+        }
+
+        watcher._scan_once()
+
+        assert "traj_x.md" in get_trajs_by_status(
+            watch_dir_id, "discovered", db_path=database_path,
+        )
+        assert watcher._futures[cluster_future]["stage"] == "cluster"
+        watcher._pool.shutdown(wait=False)
 
     def test_clustering_zombie_rolls_back_to_indexed(self, tmp_path):
         db = tmp_path / "test.db"
