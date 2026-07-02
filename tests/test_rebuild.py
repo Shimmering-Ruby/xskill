@@ -11,12 +11,14 @@ import pytest
 
 from xskill.cli import cmd_rebuild
 from xskill.pipeline.registry import (
+    get_connection,
     register_dir,
     discover_trajectories,
     update_traj_status,
     update_traj_offset,
     get_trajs_by_status,
     reset_trajectories,
+    mark_not_fit,
 )
 from xskill.skill.repo import SkillRepo
 
@@ -104,6 +106,33 @@ def test_reset_deletes_stale_index_pkl(tmp_path, db_path):
     reset_trajectories(eco="ngagent", db_path=db_path)
 
     assert not idx.exists(), "reset 应删陈旧 index.pkl"
+
+
+def test_reset_requeues_not_fit_and_clears_interest_fields(tmp_path, db_path):
+    directory_path, watch_dir_id = _seed_done_traj(tmp_path, db_path)
+    mark_not_fit(
+        watch_dir_id,
+        "traj_ng_x.md",
+        "not infra",
+        "fingerprint-old",
+        db_path=db_path,
+    )
+
+    reset_count = reset_trajectories(eco="ngagent", db_path=db_path)
+
+    assert reset_count == 1
+    assert "traj_ng_x.md" in get_trajs_by_status(
+        watch_dir_id, "discovered", db_path=db_path)
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT process_action, error_msg, interest_fingerprint "
+        "FROM trajectories WHERE filename='traj_ng_x.md'"
+    ).fetchone()
+    conn.close()
+    assert row["process_action"] is None
+    assert row["error_msg"] is None
+    assert row["interest_fingerprint"] is None
+    assert directory_path.is_dir()
 
 
 def test_wipe_all_skills_removes_skill_dirs_keeps_references(tmp_path):

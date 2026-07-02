@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from xskill.config import interests_config
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 
 logger = logging.getLogger("xskill.task_agent")
@@ -60,6 +61,14 @@ def _sidecar_model(traj_path: Path) -> str:
         return str(json.loads(jp.read_text(encoding="utf-8")).get("model") or "")
     except (OSError, json.JSONDecodeError):
         return ""
+
+
+class TrajectoryNotFit(RuntimeError):
+    """Raised when TaskAgent marks a trajectory unrelated to configured interests."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
 
 
 SYSTEM_PROMPT = """你是 AtomTask 拆分员。给你一条 agent 与用户的对话轨迹（markdown）的
@@ -150,6 +159,17 @@ ux_score 严格分档表
 2. 拿不准某个回合是"新意图"还是"上一意图的追问/撤销"时,用 ``look`` 读那行附近
    的 assistant 原文再判。
 3. 对每个新 atom 调一次 submit_atom（提交即校验,error 就改了重提）。完成后结束。
+"""
+
+
+INTEREST_FILTER_SECTION_TEMPLATE = """\
+
+兴趣过滤（重要）
+================
+本次运行配置了兴趣列表：
+{interests_block}
+
+先根据用户提问地图判断是否明显无关；判断前最多调用 3 次 ``look`` 查看上下文，明显无关就调用 ``mark_not_fit(reason)``，否则继续正常拆分。
 """
 
 
@@ -293,6 +313,8 @@ class TaskAgent:
     # look 白名单根：默认取 store.root（轨迹文件所在目录）。
     traj_root: Path | None = None
     skill_dir: Path | None = None
+    # 顶层 config.interests 规范化后传入；空列表禁用兴趣过滤。
+    interests: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.traj_root is None:
@@ -301,6 +323,16 @@ class TaskAgent:
             self.traj_root = Path(self.traj_root)
         if self.skill_dir is not None:
             self.skill_dir = Path(self.skill_dir)
+        self.interests = interests_config({"interests": self.interests or []})
+
+    @property
+    def _system_prompt(self) -> str:
+        if not self.interests:
+            return SYSTEM_PROMPT
+        interests_block = "\n".join(f"- {interest}" for interest in self.interests)
+        return SYSTEM_PROMPT + INTEREST_FILTER_SECTION_TEMPLATE.format(
+            interests_block=interests_block
+        )
 
     # ── public API ────────────────────────────────────────────────
 
@@ -435,6 +467,7 @@ class TaskAgent:
         拆多条 traj 不串）。``agent.run()`` 后查 run_response.status,error 即抛。
         """
         submitted: list[dict] = []
+        not_fit_reasons: list[str] = []
         user_msg = self._build_user_msg(
             traj_id=traj_id, traj_path=traj_path, source_model=source_model,
             resume_line=resume_line, prior_atoms=prior_atoms,
@@ -448,9 +481,10 @@ class TaskAgent:
             total_lines=total_lines,
             all_lines=all_lines,
             user_msg=user_msg,
+            not_fit_reasons=not_fit_reasons if self.interests else None,
         )
         agent = self.agno_agent_factory(
-            instructions=[SYSTEM_PROMPT],
+            instructions=[self._system_prompt],
             tools=tools,
         )
         # 把这次拆分的逐轮 CoT/工具调用流式写进 logs/agents/task_agents/<traj_id>.log
@@ -460,6 +494,8 @@ class TaskAgent:
         with trace_to(sink):
             run_response = agent.run(user_msg)
         self._check_run_status(traj_id, run_response)
+        if not_fit_reasons and not submitted:
+            raise TrajectoryNotFit(not_fit_reasons[-1])
         return submitted
 
     @staticmethod

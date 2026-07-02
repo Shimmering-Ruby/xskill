@@ -732,6 +732,7 @@ def make_task_agent_tools(
     total_lines: int,
     all_lines: list[str],
     user_msg: str,
+    not_fit_reasons: list[str] | None = None,
 ):
     """Create TaskAgent run-scoped tools bound to one trajectory."""
     valid = set(valid_lines)
@@ -752,6 +753,11 @@ def make_task_agent_tools(
             used_skills: agent 实际触发的 skill 名列表,没有传 []。
             ux_score: 1~10 整数。
         """
+        if not_fit_reasons:
+            return (
+                "error: 已调用 mark_not_fit，不能再调用 submit_atom；"
+                "如果轨迹相关，请不要调用 mark_not_fit"
+            )
         try:
             sl = int(start_line)
         except (TypeError, ValueError):
@@ -778,6 +784,26 @@ def make_task_agent_tools(
             and 1 <= ux_score <= 10 else None,
         })
         return f"ok: 已记录 atom #{len(submitted)} (start_line={sl})"
+
+    @tool(name="mark_not_fit")
+    def mark_not_fit(reason: str) -> str:
+        """标记整条轨迹不符合配置的 interests，并结束拆分。
+
+        Args:
+            reason: 简短说明为什么整条轨迹与 interests 无关。
+        """
+        if not_fit_reasons is None:
+            return "error: 当前未启用 interests 过滤"
+        if submitted:
+            return (
+                "error: 已经提交过 submit_atom，不能再调用 mark_not_fit；"
+                "部分相关的轨迹应继续正常拆分"
+            )
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            normalized_reason = "trajectory does not match configured interests"
+        not_fit_reasons.append(normalized_reason)
+        return f"ok: not_fit 已记录 ({normalized_reason})"
 
     @tool(name="look")
     def look(line: int, before: int = 40, after: int = 20) -> str:
@@ -828,7 +854,10 @@ def make_task_agent_tools(
             spans.append(f"[{st},{end})")
         return " ".join(spans)
 
-    return [look, submit_atom, context_budget, my_atoms]
+    tools = [look, submit_atom, context_budget, my_atoms]
+    if not_fit_reasons is not None:
+        tools.append(mark_not_fit)
+    return tools
 
 
 @tool(name="list_files")

@@ -7,6 +7,8 @@ config.py — 全局路径与配置加载
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -43,6 +45,8 @@ CONFIG_TEMPLATE = """\
 
 # ===== Skill repository =====
 skill_dir: ~/.xskill/skill            # the single global skill repo
+interests: []                         # optional top-level interest filter;
+                                      # non-empty list enables TaskAgent filtering
 
 # ===== LLM (generation / scoring / chat) =====
 # Any OpenAI-compatible chat-completions endpoint works (DeepSeek, OpenAI,
@@ -242,6 +246,52 @@ def load_config(path: Optional[Path] = None) -> dict:
     if not _config.get("embedding", {}).get("api_key"):
         raise KeyError(f"embedding.api_key missing in {cfg_path}")
     return _config
+
+
+def interests_config(config_data: Optional[dict] = None) -> list[str]:
+    """Return normalized top-level interests.
+
+    Missing or empty interests disable filtering. Values must be a list of
+    strings; each string is stripped and blank entries are removed.
+    """
+    source_config = config_data or {}
+    raw_interests = source_config.get("interests") or []
+    if not isinstance(raw_interests, list):
+        raise ValueError(
+            f"interests 必须是字符串列表，got {type(raw_interests).__name__}"
+        )
+    normalized_interests: list[str] = []
+    for interest_index, interest_value in enumerate(raw_interests):
+        if not isinstance(interest_value, str):
+            raise ValueError(
+                "interests"
+                f"[{interest_index}] 必须是字符串，got {type(interest_value).__name__}"
+            )
+        normalized_interest = interest_value.strip()
+        if normalized_interest:
+            normalized_interests.append(normalized_interest)
+    return normalized_interests
+
+
+def interests_fingerprint(interests: list[str]) -> str:
+    """Return an order-sensitive fingerprint for normalized interests."""
+    normalized_interests = interests_config({"interests": interests})
+    serialized_interests = json.dumps(
+        normalized_interests, ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(serialized_interests.encode("utf-8")).hexdigest()
+
+
+def read_interests_config(path: Optional[Path] = None) -> list[str]:
+    """Read only top-level interests from config.yaml without client validation."""
+    config_path = Path(path) if path else CONFIG_PATH
+    if not config_path.exists():
+        return []
+    with open(config_path, encoding="utf-8") as config_file:
+        config_data = yaml.safe_load(config_file) or {}
+    if not isinstance(config_data, dict):
+        raise ValueError("config.yaml 顶层必须是 mapping")
+    return interests_config(config_data)
 
 
 def get_config() -> dict:
