@@ -326,6 +326,31 @@ def record_canary_decision(*, skill: str, action: str, main_avg: float,
         conn.close()
 
 
+def clear_rebuild_derived_state(
+    *, registry_path: Optional[Path] = None,
+) -> dict[str, int]:
+    """Clear global derived dashboard state for ``xskill rebuild --force``.
+
+    ``llm_usage`` is deliberately retained: it is cost accounting for already
+    paid calls, not skill state derived from the current repository contents.
+    """
+    connection = get_connection(registry_path)
+    deleted_counts: dict[str, int] = {}
+    try:
+        cursor = connection.execute("DELETE FROM recommendation_log")
+        deleted_counts["recommendation_log"] = cursor.rowcount
+        cursor = connection.execute("DELETE FROM atom_adoption")
+        deleted_counts["atom_adoption"] = cursor.rowcount
+        cursor = connection.execute("DELETE FROM canary_decision")
+        deleted_counts["canary_decision"] = cursor.rowcount
+        cursor = connection.execute("DELETE FROM skill_trigger_eval")
+        deleted_counts["skill_trigger_eval"] = cursor.rowcount
+        connection.commit()
+        return deleted_counts
+    finally:
+        connection.close()
+
+
 def usage_summary(db_path: Optional[Path] = None) -> dict:
     """跨重启的持久汇总:累计 token/$、今日 $、按 step / model 分解。"""
     conn = get_connection(db_path)
@@ -1019,7 +1044,8 @@ def reset_trajectories(
     同时删该目录的 ``index.pkl``（atom 的向量索引）——否则 atom 已删而索引仍留
     陈旧 embedding，cluster 阶段向量检索会命中已不存在的 atom。
 
-    DB ``status`` 翻回 ``discovered`` 让 watcher 下轮重新排 split。
+    DB ``status`` 翻回 ``discovered`` 让 watcher 下轮重新排 split；轨迹级
+    skill / canary / UX 派生字段一并清空，避免 rebuild 后看板继续挂旧 skill。
 
     Args:
         eco: 只重置该生态（``watch_dirs.ecosystem``）的轨迹；None=全部。
@@ -1030,43 +1056,48 @@ def reset_trajectories(
     """
     conn = get_connection(db_path)
     try:
-        sql = (
+        query_text = (
             "SELECT t.id, t.filename, w.path FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id WHERE 1=1"
         )
-        params: list = []
+        query_parameters: list = []
         if eco:
-            sql += " AND w.ecosystem = ?"
-            params.append(eco)
+            query_text += " AND w.ecosystem = ?"
+            query_parameters.append(eco)
         if traj_id:
-            sql += " AND (t.filename = ? OR t.filename = ?)"
-            params += [traj_id, f"{traj_id}.md"]
-        rows = conn.execute(sql, params).fetchall()
+            query_text += " AND (t.filename = ? OR t.filename = ?)"
+            query_parameters += [traj_id, f"{traj_id}.md"]
+        trajectory_rows = conn.execute(query_text, query_parameters).fetchall()
 
-        dirs_seen: set[str] = set()
-        for r in rows:
+        directories_seen: set[str] = set()
+        for trajectory_row in trajectory_rows:
             conn.execute(
                 "UPDATE trajectories SET status='discovered', process_action=NULL, "
                 "error_msg=NULL, interest_fingerprint=NULL, last_offset=0, "
                 "last_atom_id=NULL, tasks_extracted=0, "
                 "has_meta=0, has_embedding=0, indexed_at=NULL, "
+                "skill_generated=NULL, skill_used=NULL, canary_side=NULL, "
+                "ux_score=NULL, "
                 "updated_at=datetime('now') WHERE id=?",
-                (r["id"],),
+                (trajectory_row["id"],),
             )
-            stem = (r["filename"][:-3] if r["filename"].endswith(".md")
-                    else r["filename"])
-            tasks_dir = Path(r["path"]) / stem / "tasks"
-            if tasks_dir.is_dir():
-                for af in tasks_dir.glob("atom_*.json"):
-                    af.unlink()
-            dirs_seen.add(r["path"])
+            trajectory_stem = (
+                trajectory_row["filename"][:-3]
+                if trajectory_row["filename"].endswith(".md")
+                else trajectory_row["filename"]
+            )
+            tasks_directory = Path(trajectory_row["path"]) / trajectory_stem / "tasks"
+            if tasks_directory.is_dir():
+                for atom_file in tasks_directory.glob("atom_*.json"):
+                    atom_file.unlink()
+            directories_seen.add(trajectory_row["path"])
         conn.commit()
         # 清各目录的陈旧向量索引（AtomTaskStore.INDEX_FILE = "index.pkl"）。
-        for d in dirs_seen:
-            idx = Path(d) / "index.pkl"
-            if idx.is_file():
-                idx.unlink()
-        return len(rows)
+        for directory_path in directories_seen:
+            index_path = Path(directory_path) / "index.pkl"
+            if index_path.is_file():
+                index_path.unlink()
+        return len(trajectory_rows)
     finally:
         conn.close()
 

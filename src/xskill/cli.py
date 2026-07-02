@@ -346,13 +346,14 @@ def cmd_rebuild(args, _xskill) -> int:
 
     默认：删除已拆 atom + index.pkl、轨迹状态翻回 discovered，让运行中的 watcher
     从头重拆重聚（删 atom 是真正触发重拆的动作——splitter 续接点取自 atom 文件，
-    不读 DB offset）。``--force``：额外先清空 skill 仓（删除重建）。
+    不读 DB offset）。``--force``：额外先清空 skill 仓、看板派生埋点和安装历史。
 
     换模型护栏：rebuild 的重跑是交给**正在运行的 daemon**，而 daemon 的模型是
     启动时缓存的（改 config 不重启不生效）。若 daemon 在跑且其模型 ≠ 当前 config
     模型 → 默认拒绝并提示先重启 serve，否则会静默用旧模型重生成（`--ignore-
     model-mismatch` 可强行用当前运行的模型重跑）。
     """
+    from xskill.config import XSKILL_HOME
     from xskill.pipeline.registry import reset_trajectories
     from xskill.runtime import config_models, read_status
 
@@ -378,14 +379,28 @@ def cmd_rebuild(args, _xskill) -> int:
 
     if args.force:
         from xskill.config import get_skill_dir
+        from xskill.pipeline.registry import clear_rebuild_derived_state
         from xskill.skill.repo import SkillRepo
         skill_count = SkillRepo(get_skill_dir()).wipe_all_skills()
         print(f"--force: 清空 skill 仓（删 {skill_count} 个 skill）")
+        deleted_counts = clear_rebuild_derived_state()
+        print(
+            "--force: 清空看板派生数据（"
+            f"recommendation_log={deleted_counts['recommendation_log']}, "
+            f"atom_adoption={deleted_counts['atom_adoption']}, "
+            f"canary_decision={deleted_counts['canary_decision']}, "
+            f"skill_trigger_eval={deleted_counts['skill_trigger_eval']}）"
+        )
+        install_history_path = XSKILL_HOME / "install_history.jsonl"
+        if install_history_path.is_file():
+            install_history_path.unlink()
+            print("--force: 删除安装历史 install_history.jsonl")
+        else:
+            print("--force: 安装历史为空")
 
     trajectory_count = reset_trajectories(eco=args.eco, traj_id=args.traj)
     print(f"rebuild: 重置 {trajectory_count} 条轨迹（已删 atom + index.pkl，将从头重拆）")
 
-    from xskill.config import XSKILL_HOME
     from xskill.pipeline.cold_start import ColdStartSignal
     cold_start_signal = ColdStartSignal(XSKILL_HOME)
     signal_path = cold_start_signal.create()
