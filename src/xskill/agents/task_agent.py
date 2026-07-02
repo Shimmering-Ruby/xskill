@@ -169,11 +169,7 @@ INTEREST_FILTER_SECTION_TEMPLATE = """\
 本次运行配置了兴趣列表：
 {interests_block}
 
-在拆分前先判断**整条轨迹**是否与这些兴趣相关。判断标准：
-- 只要轨迹中有一部分能为这些兴趣之一提供可复用经验，就继续正常 submit_atom。
-- 如果整条轨迹都无关，调用 ``mark_not_fit(reason)``，说明原因，然后结束。
-- 调用 ``mark_not_fit`` 后不要再调用 ``submit_atom``。
-- 已经调用过 ``submit_atom`` 后，不允许再调用 ``mark_not_fit``。
+先根据用户提问地图判断是否明显无关；判断前最多调用 3 次 ``look`` 查看上下文，明显无关就调用 ``mark_not_fit(reason)``，否则继续正常拆分。
 """
 
 
