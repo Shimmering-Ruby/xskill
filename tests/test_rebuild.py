@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from unittest.mock import Mock
 
 import pytest
 
@@ -19,6 +20,7 @@ from xskill.pipeline.registry import (
     get_trajs_by_status,
     reset_trajectories,
     mark_not_fit,
+    clear_rebuild_derived_state,
 )
 from xskill.skill.repo import SkillRepo
 
@@ -135,23 +137,134 @@ def test_reset_requeues_not_fit_and_clears_interest_fields(tmp_path, db_path):
     assert directory_path.is_dir()
 
 
+def test_reset_clears_skill_usage_canary_and_ux_fields(tmp_path, db_path):
+    _, watch_dir_id = _seed_done_traj(tmp_path, db_path)
+    connection = get_connection(db_path)
+    connection.execute(
+        "UPDATE trajectories SET skill_generated=?, skill_used=?, "
+        "canary_side=?, ux_score=? WHERE filename=?",
+        ("legacy-skill", "legacy-skill", "staging", 9.0, "traj_ng_x.md"),
+    )
+    connection.commit()
+    connection.close()
+
+    reset_trajectories(eco="ngagent", db_path=db_path)
+
+    connection = get_connection(db_path)
+    trajectory_row = connection.execute(
+        "SELECT skill_generated, skill_used, canary_side, ux_score "
+        "FROM trajectories WHERE filename='traj_ng_x.md'"
+    ).fetchone()
+    connection.close()
+    assert trajectory_row["skill_generated"] is None
+    assert trajectory_row["skill_used"] is None
+    assert trajectory_row["canary_side"] is None
+    assert trajectory_row["ux_score"] is None
+
+
+def test_clear_rebuild_derived_state_keeps_llm_usage(tmp_path):
+    registry_path = tmp_path / "registry.db"
+    connection = get_connection(registry_path)
+    connection.execute(
+        "INSERT INTO recommendation_log(client_id, skill, side, bucket) "
+        "VALUES('client-one', 'skill-one', 'main', 'recommended')"
+    )
+    connection.execute(
+        "INSERT INTO atom_adoption(atom_id, skill, weightscore, was_new) "
+        "VALUES('atom-one', 'skill-one', 5, 1)"
+    )
+    connection.execute(
+        "INSERT INTO canary_decision(skill, action, main_avg, staging_avg, "
+        "main_samples, staging_samples, age_days) "
+        "VALUES('skill-one', 'promoted', 8.0, 9.0, 6, 6, 1.0)"
+    )
+    connection.execute(
+        "INSERT INTO skill_trigger_eval(skill, exp_id, train_score, "
+        "test_score, n_cases, catalog_size) "
+        "VALUES('skill-one', 'experiment-one', 0.7, 0.6, 10, 4)"
+    )
+    connection.execute(
+        "INSERT INTO llm_usage(step, model, prompt, completion, total, cost_usd, "
+        "price_source) VALUES('split', 'model-one', 1, 2, 3, 0.01, 'config')"
+    )
+    connection.commit()
+    connection.close()
+
+    deleted_counts = clear_rebuild_derived_state(registry_path=registry_path)
+
+    assert deleted_counts == {
+        "recommendation_log": 1,
+        "atom_adoption": 1,
+        "canary_decision": 1,
+        "skill_trigger_eval": 1,
+    }
+    connection = get_connection(registry_path)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM recommendation_log").fetchone()[0] == 0
+    assert connection.execute(
+        "SELECT COUNT(*) FROM atom_adoption").fetchone()[0] == 0
+    assert connection.execute(
+        "SELECT COUNT(*) FROM canary_decision").fetchone()[0] == 0
+    assert connection.execute(
+        "SELECT COUNT(*) FROM skill_trigger_eval").fetchone()[0] == 0
+    assert connection.execute("SELECT COUNT(*) FROM llm_usage").fetchone()[0] == 1
+    connection.close()
+
+
 def test_wipe_all_skills_removes_skill_dirs_keeps_references(tmp_path):
-    root = tmp_path / "skill"
-    root.mkdir()
-    foo = root / "foo"
-    foo.mkdir()
-    (foo / "SKILL.md").write_text("---\nname: foo\ndescription: d\n---\n", encoding="utf-8")
-    bar = root / "bar"
-    (bar / ".git").mkdir(parents=True)  # baby 态：只有 .git 还没 SKILL.md
-    refs = root / "references"
-    refs.mkdir()
-    (refs / "x.md").write_text("keep me", encoding="utf-8")
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    first_skill_path = skill_root / "foo"
+    first_skill_path.mkdir()
+    (first_skill_path / "SKILL.md").write_text(
+        "---\nname: foo\ndescription: d\n---\n",
+        encoding="utf-8",
+    )
+    second_skill_path = skill_root / "bar"
+    (second_skill_path / ".git").mkdir(parents=True)  # baby 态：只有 .git 还没 SKILL.md
+    references_directory = skill_root / "references"
+    references_directory.mkdir()
+    (references_directory / "x.md").write_text("keep me", encoding="utf-8")
+    (skill_root / ".skill_index.pkl").write_bytes(b"stale-skill-index")
 
-    n = SkillRepo(root).wipe_all_skills()
+    removed_count = SkillRepo(skill_root).wipe_all_skills()
 
-    assert n == 2
-    assert not foo.exists() and not bar.exists()
-    assert refs.exists(), "references 不应被删"
+    assert removed_count == 2
+    assert not first_skill_path.exists() and not second_skill_path.exists()
+    assert references_directory.exists(), "references 不应被删"
+    assert not (skill_root / ".skill_index.pkl").exists()
+
+
+def test_rebuild_force_clears_derived_state_and_install_history(
+    monkeypatch, tmp_path,
+):
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    install_history_path = tmp_path / "install_history.jsonl"
+    install_history_path.write_text("{}\n", encoding="utf-8")
+    cleanup_mock = Mock(
+        return_value={
+            "recommendation_log": 1,
+            "atom_adoption": 2,
+            "canary_decision": 3,
+            "skill_trigger_eval": 4,
+        }
+    )
+    reset_mock = Mock(return_value=0)
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path)
+    monkeypatch.setattr("xskill.config.get_skill_dir", Mock(return_value=skill_root))
+    monkeypatch.setattr("xskill.runtime.read_status", Mock(return_value={"running": False}))
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.clear_rebuild_derived_state",
+        cleanup_mock,
+    )
+    monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories", reset_mock)
+
+    assert cmd_rebuild(_rebuild_args(force=True), None) == 0
+
+    cleanup_mock.assert_called_once_with()
+    reset_mock.assert_called_once_with(eco=None, traj_id=None)
+    assert not install_history_path.exists()
 
 
 # ── 换模型护栏（0.6.1a2）──────────────────────────────────────────
