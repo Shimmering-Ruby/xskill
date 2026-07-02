@@ -769,8 +769,10 @@ class DirectoryWatcher:
         #  indexed，下一轮天然重新进池。遗留 clustering 在下方无条件回退 indexed。）
         for fname in get_trajs_by_status(wd_id, "splitting", **kw):
             if not any(
-                i["fname"] == fname and i["wd_id"] == wd_id and i["stage"] == "split"
-                for i in self._futures.values()
+                future_info.get("stage") == "split"
+                and future_info.get("wd_id") == wd_id
+                and future_info.get("fname") == fname
+                for future_info in self._futures.values()
             ):
                 update_traj_status(wd_id, fname, "discovered", **kw)
 
