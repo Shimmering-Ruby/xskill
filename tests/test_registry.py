@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import pickle
 from pathlib import Path
 
 import pytest
@@ -25,6 +24,8 @@ from xskill.pipeline.registry import (
     find_traj_file,
     update_traj_status,
     get_trajs_by_status,
+    mark_not_fit,
+    reset_not_fit_for_interest_change,
 )
 
 
@@ -188,6 +189,33 @@ class TestContinuationDetection:
         assert "traj_0001.md" in get_trajs_by_status(wid, "splitting", db_path=db_path)
         assert get_trajs_by_status(wid, "updated", db_path=db_path) == []
 
+    def test_not_fit_filtered_mtime_change_stays_filtered(self, traj_dir, db_path):
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+        mark_not_fit(wid, "traj_0001.md", "not infra", "fingerprint-old",
+                     db_path=db_path)
+        trajectory_path = traj_dir / "traj_0001.md"
+        trajectory_path.write_text("# traj 1\n## User\nchanged\n", encoding="utf-8")
+        self._bump_mtime(trajectory_path)
+
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+
+        assert "traj_0001.md" in get_trajs_by_status(wid, "filtered", db_path=db_path)
+        assert "traj_0001.md" not in get_trajs_by_status(wid, "updated", db_path=db_path)
+
+    def test_regular_filtered_mtime_change_flips_updated(self, traj_dir, db_path):
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+        update_traj_status(wid, "traj_0001.md", "filtered",
+                           error_msg="invalid source", db_path=db_path)
+        trajectory_path = traj_dir / "traj_0001.md"
+        trajectory_path.write_text("# traj 1\n## User\nchanged\n", encoding="utf-8")
+        self._bump_mtime(trajectory_path)
+
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+
+        assert "traj_0001.md" in get_trajs_by_status(wid, "updated", db_path=db_path)
+
     def test_mark_meta_and_indexed(self, traj_dir, db_path):
         wid = register_dir(traj_dir, db_path=db_path)
         discover_trajectories(wid, traj_dir, db_path=db_path)
@@ -214,6 +242,62 @@ class TestContinuationDetection:
         conn.close()
         assert row["skill_used"] == "fix_django"
         assert row["canary_side"] == "staging"
+
+
+class TestInterestChangeReset:
+    def test_resets_only_stale_not_fit_rows(self, traj_dir, db_path):
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+        (traj_dir / "traj_0003.md").write_text("# traj 3\n", encoding="utf-8")
+        (traj_dir / "traj_0004.md").write_text("# traj 4\n", encoding="utf-8")
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+        mark_not_fit(wid, "traj_0001.md", "not infra", "old", db_path=db_path)
+        mark_not_fit(wid, "traj_0002.md", "not infra", "new", db_path=db_path)
+        update_traj_status(wid, "traj_0003.md", "filtered",
+                           error_msg="ordinary", db_path=db_path)
+        update_traj_status(wid, "traj_0004.md", "done", db_path=db_path)
+
+        reset_count = reset_not_fit_for_interest_change(
+            old_interest_fingerprint="old",
+            new_interest_fingerprint="new",
+            db_path=db_path,
+        )
+
+        assert reset_count == 1
+        assert "traj_0001.md" in get_trajs_by_status(wid, "discovered", db_path=db_path)
+        assert "traj_0002.md" in get_trajs_by_status(wid, "filtered", db_path=db_path)
+        assert "traj_0003.md" in get_trajs_by_status(wid, "filtered", db_path=db_path)
+        assert "traj_0004.md" in get_trajs_by_status(wid, "done", db_path=db_path)
+
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT process_action, interest_fingerprint, error_msg "
+            "FROM trajectories WHERE filename='traj_0001.md'"
+        ).fetchone()
+        conn.close()
+        assert row["process_action"] is None
+        assert row["interest_fingerprint"] is None
+        assert row["error_msg"] is None
+
+    def test_reset_deletes_stale_atoms_and_index(self, traj_dir, db_path):
+        wid = register_dir(traj_dir, db_path=db_path)
+        discover_trajectories(wid, traj_dir, db_path=db_path)
+        mark_not_fit(wid, "traj_0001.md", "not infra", "old", db_path=db_path)
+        tasks_directory = traj_dir / "traj_0001" / "tasks"
+        tasks_directory.mkdir(parents=True)
+        (tasks_directory / "atom_traj_0001_0001.json").write_text(
+            "{}", encoding="utf-8")
+        index_path = traj_dir / "index.pkl"
+        index_path.write_bytes(b"stale")
+
+        reset_not_fit_for_interest_change(
+            old_interest_fingerprint="old",
+            new_interest_fingerprint="new",
+            db_path=db_path,
+        )
+
+        assert not list(tasks_directory.glob("atom_*.json"))
+        assert not index_path.exists()
 
 
 # ---- Cross-dataset search support ----
