@@ -521,7 +521,7 @@ def _seed_candidates(skill_dir, total_ws):
 def test_jam_merge_fires_above_threshold_and_discards_staging(tmp_path):
     sd = _make_main_skill(tmp_path / "skill", "jam-skill")
     # 写点东西并开 staging（灰度中）
-    (sd / "SKILL.md").write_text((sd / "SKILL.md").read_text() + "\n<!-- staging draft -->\n", encoding="utf-8")
+    (sd / "SKILL.md").write_text((sd / "SKILL.md").read_text(encoding="utf-8") + "\n<!-- staging draft -->\n", encoding="utf-8")
     assert commit_to_staging_branch(str(sd), "stub staging candidate") is True
     assert (sd.parent / ".canary" / "jam-skill" / "SKILL.md").is_file()
     # 候选攒到 60 ≥ jam_threshold(50)
@@ -550,7 +550,7 @@ def test_jam_merge_fires_above_threshold_and_discards_staging(tmp_path):
 
 def test_no_jam_below_threshold_keeps_staging(tmp_path):
     sd = _make_main_skill(tmp_path / "skill", "calm-skill")
-    (sd / "SKILL.md").write_text((sd / "SKILL.md").read_text() + "\n<!-- s -->\n", encoding="utf-8")
+    (sd / "SKILL.md").write_text((sd / "SKILL.md").read_text(encoding="utf-8") + "\n<!-- s -->\n", encoding="utf-8")
     assert commit_to_staging_branch(str(sd), "stub staging") is True
     _seed_candidates(sd, 40)  # < 50
     _JamMergeStubAgno.invoked = False
@@ -567,7 +567,7 @@ def test_no_jam_below_threshold_keeps_staging(tmp_path):
 def test_jam_merge_without_main_commit_keeps_candidates_and_staging(tmp_path):
     sd = _make_main_skill(tmp_path / "skill", "jam-no-commit")
     (sd / "SKILL.md").write_text(
-        (sd / "SKILL.md").read_text() + "\n<!-- staging draft -->\n",
+        (sd / "SKILL.md").read_text(encoding="utf-8") + "\n<!-- staging draft -->\n",
         encoding="utf-8",
     )
     assert commit_to_staging_branch(str(sd), "stub staging") is True
@@ -630,7 +630,7 @@ def test_jam_merge_rematerializes_missing_staging_body(tmp_path):
 
     sd = _make_main_skill(tmp_path / "skill", "rematerialize-skill")
     # 写 staging 分支（包含可识别内容）
-    staging_content = (sd / "SKILL.md").read_text() + "\n<!-- unique staging marker -->\n"
+    staging_content = (sd / "SKILL.md").read_text(encoding="utf-8") + "\n<!-- unique staging marker -->\n"
     (sd / "SKILL.md").write_text(staging_content, encoding="utf-8")
     assert commit_to_staging_branch(str(sd), "stub staging candidate") is True
     # 确认 .canary 已物化
