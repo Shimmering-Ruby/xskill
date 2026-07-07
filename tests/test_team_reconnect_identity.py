@@ -241,8 +241,9 @@ def test_cli_connect_with_address_reads_existing_state(tmp_path, monkeypatch):
     )
 
     parser = build_parser()
+    # --foreground：直接跑（被 mock 的）守护循环，验证握手 body，不走后台任务托管
     args = parser.parse_args(["connect", "1.2.3.4:8000", "--token", "new-tok",
-                              "--label", "alice"])
+                              "--label", "alice", "--foreground"])
     rc = cmd_connect(args)
     assert rc == 0
     # body 必须把历史 client_id 当 claimed_client_id 带过去
@@ -275,7 +276,8 @@ def test_cli_connect_with_address_no_state_sends_null_claimed_id(
     )
 
     parser = build_parser()
-    args = parser.parse_args(["connect", "1.2.3.4:8000", "--token", "tok"])
+    args = parser.parse_args(["connect", "1.2.3.4:8000", "--token", "tok",
+                              "--foreground"])
     rc = cmd_connect(args)
     assert rc == 0
     assert fake.last_body["claimed_client_id"] is None

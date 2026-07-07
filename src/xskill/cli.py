@@ -172,81 +172,124 @@ def cmd_registry_list_client() -> int:
 
 
 def cmd_connect(args) -> int:
-    """team 瘦客户端：连上 server，跑采集/同步/对齐守护循环。
+    """team 瘦客户端：连上 server。
 
     ``xskill connect <host:port> --token <t>``  首次握手 + 落盘连接信息
     ``xskill connect``                          复用已存连接
+    ``xskill connect ... --foreground``          前台阻塞跑守护循环
+
+    默认（非 --foreground）：完成握手 / 校验连接信息后，把常驻循环交给操作系统的
+    守护设施（Windows「计划任务」；Linux·macOS 的 systemd·launchd 后续支持）在
+    后台拉起，命令随即返回——用户不必一直开着终端。``--foreground`` 才是真正阻塞的
+    轮询循环，也是后台任务实际 execute 的形态（见 team.client.service）。
     """
-    import socket as _socket
-    from xskill.config import (
-        get_team_client_state_path, XSKILL_HOME,
-        get_team_client_cursor_path, get_team_client_history_path,
-    )
-    from xskill.team.client.state import (
-        ClientState, load_client_state, save_client_state,
-    )
-    from xskill.team.client.daemon import TeamClient, register_with_server
+    from xskill.config import get_team_client_state_path
+    from xskill.team.client.state import load_client_state
 
     state_path = get_team_client_state_path()
 
     if args.address:
-        if not args.token:
-            print("error: 首次 connect 必须带 --token（server 启动时打印的 join token）",
-                  file=sys.stderr)
-            return 2
-        server_url = args.address
-        if not server_url.startswith("http"):
-            server_url = f"http://{server_url}"
-        # 带参 connect 也尽量保身份不漂移：本地 state 文件若存在就读出
-        # 已有 client_id，作为 ``claimed_client_id`` 一起发给 server——
-        # server 按 (claimed/fingerprint/new) 三级判定续用。state 不在 →
-        # existing_client_id=None，让 server 按指纹回查或新发。
-        existing_client_id: str | None = None
-        if state_path.is_file():
-            try:
-                existing_client_id = load_client_state(state_path).client_id
-            except Exception:
-                # state 文件损坏不阻断重连——按"无本地身份"处理，让 server
-                # 走指纹回查或新发。损坏的 state 接下来会被新的 save 覆盖。
-                existing_client_id = None
-        import httpx
-        # 默认 trust_env=False：team server 是已知、可直连的内网主机，绕开公司
-        # 代理（SWG）才是正确语义——经代理常因代理出口连不上 server 而 504。
-        # --use-proxy 时恢复读取系统/环境代理（含 Windows 注册表代理）。
-        http = httpx.Client(base_url=server_url, timeout=30.0,
-                            trust_env=args.use_proxy)
-        try:
-            client_id = register_with_server(
-                http, token=args.token,
-                label=args.label or _socket.gethostname(),
-                hostname=_socket.gethostname(),
-                existing_client_id=existing_client_id,
-                user_name=args.name,
-            )
-        except Exception as e:
-            print(f"error: 注册失败: {e}", file=sys.stderr)
-            return 1
-        state = ClientState(server_url=server_url, client_id=client_id,
-                            join_token=args.token)
-        save_client_state(state, state_path)
-        print(f"connected: client_id={client_id}  server={server_url}")
+        state = _connect_handshake(args, state_path)
+        if state is None:
+            return 1 if args.token else 2
     else:
         try:
             state = load_client_state(state_path)
         except FileNotFoundError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
-        import httpx
-        # 同上：复用连接的后台同步也走直连，否则"注册过了同步全 504"。
-        http = httpx.Client(base_url=state.server_url, timeout=30.0,
-                            trust_env=args.use_proxy)
-        print(f"reconnecting: client_id={state.client_id}  server={state.server_url}")
 
-    # skill working copies 复用标准 skill_dir（~/.xskill/skill/）——瘦客户端
-    # 没有 config.yaml，直接用默认路径，不走 get_skill_dir()（那会 load_config）。
-    # 游标 / 去抖 / 安装历史按 server 分目录（方案 A）——换 server 不再被上一个
-    # server 的"已上传"游标静默压制对新 server 的上传。skill 工作副本仍复用共享
-    # 的 skill_dir（cleanup 已按 manifest 摘除旧 server 的残留 skill）。
+    from xskill.team.client.service import ServiceError, get_backend
+    backend = get_backend()
+
+    # 前台模式，或本平台还没有原生常驻后端（Linux/macOS 暂时）：直接阻塞跑守护
+    # 循环（= 历史行为；后台任务 execute 的也是这条路径）。这样非 Windows 用户的
+    # `xskill connect` 行为不变，仍可用自己的 init 系统托管 --foreground。
+    if args.foreground or not backend.supported:
+        print(f"reconnecting: client_id={state.client_id}  server={state.server_url}")
+        _run_team_client_forever(state, use_proxy=args.use_proxy)
+        return 0
+
+    # 默认（有原生后端的平台，如 Windows）：交给操作系统守护设施后台拉起。
+    try:
+        st = backend.install_and_start()
+    except ServiceError as e:
+        print(f"error: 后台常驻启动失败：{e}", file=sys.stderr)
+        print("  可先用 `xskill connect --foreground` 在前台验证连接是否正常。",
+              file=sys.stderr)
+        return 1
+    print(f"background task started: {st.get('task_name') or st.get('backend')}"
+          f"  (pid={st.get('pid')})")
+    print("  用 `xskill status` 查看，`xskill stop` 停止。")
+    return 0
+
+
+def _connect_handshake(args, state_path):
+    """带 address 的首次/重连握手：register → 落盘 state。返回 ClientState 或 None。"""
+    import socket as _socket
+    from xskill.team.client.state import (
+        ClientState, load_client_state, save_client_state,
+    )
+    from xskill.team.client.daemon import register_with_server
+
+    if not args.token:
+        print("error: 首次 connect 必须带 --token（server 启动时打印的 join token）",
+              file=sys.stderr)
+        return None
+    server_url = args.address
+    if not server_url.startswith("http"):
+        server_url = f"http://{server_url}"
+    # 带参 connect 也尽量保身份不漂移：本地 state 文件若存在就读出已有 client_id，
+    # 作为 ``claimed_client_id`` 一起发给 server——server 按 (claimed/fingerprint/
+    # new) 三级判定续用。state 不在 → existing_client_id=None，让 server 按指纹回查。
+    existing_client_id: str | None = None
+    if state_path.is_file():
+        try:
+            existing_client_id = load_client_state(state_path).client_id
+        except Exception:
+            # state 文件损坏不阻断重连——按"无本地身份"处理，让 server 走指纹回查
+            # 或新发。损坏的 state 接下来会被新的 save 覆盖。
+            existing_client_id = None
+    import httpx
+    # 默认 trust_env=False：team server 是已知、可直连的内网主机，绕开公司代理
+    # （SWG）才是正确语义——经代理常因代理出口连不上 server 而 504。--use-proxy 时
+    # 恢复读取系统/环境代理（含 Windows 注册表代理）。
+    http = httpx.Client(base_url=server_url, timeout=30.0,
+                        trust_env=args.use_proxy)
+    try:
+        client_id = register_with_server(
+            http, token=args.token,
+            label=args.label or _socket.gethostname(),
+            hostname=_socket.gethostname(),
+            existing_client_id=existing_client_id,
+            user_name=args.name or None,
+        )
+    except Exception as e:
+        print(f"error: 注册失败: {e}", file=sys.stderr)
+        return None
+    state = ClientState(server_url=server_url, client_id=client_id,
+                        join_token=args.token)
+    save_client_state(state, state_path)
+    name_hint = f"  (--name={args.name})" if args.name else ""
+    print(f"connected: client_id={client_id}  server={server_url}{name_hint}")
+    return state
+
+
+def _run_team_client_forever(state, *, use_proxy: bool) -> None:
+    """构造 TeamClient 并阻塞跑守护循环。"""
+    import httpx
+    from xskill.config import (
+        XSKILL_HOME, get_team_client_cursor_path, get_team_client_history_path,
+    )
+    from xskill.team.client.daemon import TeamClient
+
+    # 同握手：后台同步也默认直连，否则"注册过了同步全 504"。
+    http = httpx.Client(base_url=state.server_url, timeout=30.0,
+                        trust_env=use_proxy)
+    # skill working copies 复用标准 skill_dir（~/.xskill/skill/）——瘦客户端没有
+    # config.yaml，直接用默认路径，不走 get_skill_dir()（那会 load_config）。游标 /
+    # 去抖 / 安装历史按 server 分目录（方案 A）——换 server 不再被上一个 server 的
+    # "已上传"游标静默压制对新 server 的上传。
     client = TeamClient(
         state=state, http=http,
         skill_dir=XSKILL_HOME / "skill",
@@ -254,6 +297,70 @@ def cmd_connect(args) -> int:
         history_path=get_team_client_history_path(state.server_url),
     )
     client.run_forever()   # 阻塞
+
+
+def _print_connect_status(st: dict, as_json: bool) -> None:
+    """渲染 `xskill status` 输出。"""
+    import json as _json
+    if as_json:
+        printable = {k: v for k, v in st.items() if k != "schtasks_query"}
+        print(_json.dumps(printable, ensure_ascii=False, indent=2))
+        return
+    running = st.get("running")
+    mark = "● running" if running else ("○ stopped" if st.get("installed")
+                                        else "— not installed")
+    print(f"connect daemon: {mark}")
+    if st.get("task_name"):
+        print(f"  task     : {st['task_name']} ({st.get('backend')})")
+    if st.get("pid"):
+        print(f"  pid      : {st['pid']}")
+    if st.get("server_url"):
+        print(f"  server   : {st['server_url']}")
+    if st.get("client_id"):
+        print(f"  client_id: {st['client_id']}")
+
+
+def cmd_start(args) -> int:
+    """安装并启动 connect 常驻任务（未 connect 过则提示先 connect）。"""
+    from xskill.config import get_team_client_state_path
+    from xskill.team.client.service import ServiceError, get_backend
+    if not get_team_client_state_path().is_file():
+        print("error: 尚未连接过 server。先跑一次：\n"
+              "  xskill connect <host:port> --token <token>",
+              file=sys.stderr)
+        return 2
+    try:
+        st = get_backend().install_and_start()
+    except ServiceError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print_connect_status(st, as_json=getattr(args, "json", False))
+    return 0
+
+
+def cmd_stop(args) -> int:
+    """停止并撤销 connect 常驻任务。"""
+    from xskill.team.client.service import ServiceError, get_backend
+    try:
+        st = get_backend().stop()
+    except ServiceError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if st.get("warning"):
+        print(f"warning: {st['warning']}", file=sys.stderr)
+    print("stopped.")
+    return 0
+
+
+def cmd_status(args) -> int:
+    """汇报 connect 常驻任务状态。"""
+    from xskill.team.client.service import ServiceError, get_backend
+    try:
+        st = get_backend().status()
+    except ServiceError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    _print_connect_status(st, as_json=getattr(args, "json", False))
     return 0
 
 
@@ -486,14 +593,33 @@ def build_parser() -> argparse.ArgumentParser:
                         help="join token（server 启动 `xskill serve --server` 时打印）")
     p_conn.add_argument("--label", default="",
                         help="本 client 的可读标签（默认主机名）")
-    p_conn.add_argument("--name", default=None,
-                        help="稳定用户身份（userid）。带此参数时跨设备/重连关联同一画像；"
-                             "省略则匿名（回退 hashid，受 server allow_anonymous_user 闸门）")
     p_conn.add_argument(
         "--use-proxy", action="store_true",
         help="经系统/环境代理连 server（默认直连，绕开公司 SWG 代理）。"
              "仅当本机唯一出网路径是代理、且代理能到 server 时才需要。",
     )
+    p_conn.add_argument(
+        "--name", default=None, metavar="EMPLOYEE_ID",
+        help="工号 / 用户 ID（推荐必填）。server 用它派生确定性 client_id——"
+             "同一工号在不同设备或重装后身份保持一致，推荐算法也能跨设备积累。"
+             "server 若设置了 allow_anonymous: false，则不带 --name 会被拒绝（403）。",
+    )
+    p_conn.add_argument(
+        "--foreground", action="store_true",
+        help="前台阻塞运行守护循环（默认交给操作系统守护设施后台常驻）。"
+             "常驻任务内部 execute 的就是这个形态；调试时也可手动用。",
+    )
+
+    p_start = sub.add_parser(
+        "start", help="把 connect 装成后台常驻（开机自启 + 崩溃自愈）",
+    )
+    p_start.add_argument("--json", action="store_true", help="机读 JSON 输出")
+
+    p_stop = sub.add_parser("stop", help="停止并撤销 connect 常驻任务")
+    p_stop.add_argument("--json", action="store_true", help="机读 JSON 输出")
+
+    p_status = sub.add_parser("status", help="查看 connect 常驻任务状态")
+    p_status.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
     p_stats = sub.add_parser(
         "stats", help="Show token usage & estimated cost (Issue #43)",
@@ -583,6 +709,14 @@ def main() -> int:
     # connect 是瘦客户端：不读 config.yaml / 不需要 llm.api_key / 不构造 XSkill 门面
     if args.command == "connect":
         return cmd_connect(args)
+
+    # start/stop/status 管理 connect 常驻任务——同样是瘦客户端侧，不碰 config.yaml。
+    if args.command == "start":
+        return cmd_start(args)
+    if args.command == "stop":
+        return cmd_stop(args)
+    if args.command == "status":
+        return cmd_status(args)
 
     # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
     if args.command == "stats":

@@ -123,37 +123,27 @@ xskill connect <host:port> --token <token>     # 在每个同事的机器上运�
 - **A/B 驱动的进化**——一处改动先在每个人身上度量,再决定要不要扩散。人越多,进化越快越准。
 - **专家可以手动教**——本地改一条技能,会作为 `user-staging/<client_id>` 拉进 server,喂给下一轮进化。
 
-#### 🪄 懒人安装 —— 把下面这段贴给你的 AI 助手
+#### 常驻运行(推荐)
 
-已经在用 Claude Code / Codex / Cursor 之类的编码 agent?把下面整段(填好服务器地址和 token)直接发给它,它会帮你装好并配置成开机常驻,不用手动敲命令。
+`xskill connect` 默认**直连** server、绕开公司代理(华为 SWG 之类)——内网同事无需再手动设 `NO_PROXY`。只有当本机唯一出网路径就是代理、且代理能到达 server 时,才加 `--use-proxy` 显式走代理。
 
-```text
-请帮我安装并常驻运行 xskill —— 一个把编码 agent 操作轨迹蒸馏成可复用 skill、并在团队内共享的工具。
+**Windows**:`connect` 会自动把自己装成「计划任务」在后台常驻(登录自启、崩溃自愈、不限运行时长),命令随即返回,不用一直开着终端:
 
-环境要求 Python 3.9+,先执行 `python --version` 确认;低于 3.9 或没装,就停下让我先装 Python。
+```bash
+xskill connect <服务器地址:端口> --token <TOKEN>   # 首次:握手 + 自动拉起后台常驻
+xskill status                                       # 看常驻状态(pid / server / client_id)
+xskill stop                                          # 停止并撤销常驻任务
+xskill start                                          # 重新拉起(需先 connect 过一次)
+```
 
-1) 安装(版本优先 a5,没有则自动退 a4;先用默认/内部源,失败再走官方 PyPI):
-   pip install "xskill>=0.6.0a4,<0.6.0a6"
-   若上一条报错(源里找不到包/版本),改用官方源重试同一条:
-   pip install --index-url https://pypi.org/simple/ "xskill>=0.6.0a4,<0.6.0a6"
-   (pip 命令不存在就换成 py -m pip 或 python3 -m pip;装完执行 `pip show xskill` 把版本贴给我)
+> `xskill start` 前必须至少 `connect` 过一次(带 token 完成握手),否则会提示你先 connect。换服务器或换 token 时,重跑一次带 token 的 `connect` 即可。
 
-2) 首次连接团队服务器(只需带一次 token,会把连接信息写进 ~/.xskill/team_client.json):
-   xskill connect <服务器地址:端口> --token <TOKEN>
-   看到一行 `connected: client_id=...` 即成功;随后停掉它(Ctrl+C),后续交给常驻任务。
+**macOS / Linux**:原生常驻(launchd / systemd --user)仍在路上;当前用你自己的 init 系统托管前台形态 `xskill connect --foreground` 即可:
 
-3) 配置成「开机自动启动 + 崩溃自动重启 + 不限运行时长」。常驻跑的是不带 token 的
-   `xskill connect`(复用已存连接)。按我的操作系统选一种:
-   - Windows:用「计划任务」AtLogOn 触发、ExecutionTimeLimit 0、失败每分钟重启,执行 xskill。
-   - macOS:用 launchd 的 LaunchAgent(KeepAlive=true,RunAtLoad=true)。
-   - Linux:用 systemd --user 服务(Restart=always,WantedBy=default.target)。
-
-4) 验证:常驻任务/服务处于 Running;再等约 10 分钟,确认 ~/.xskill/clients/ 下出现以
-   服务器地址命名的目录、且 cursor.json 在更新(轨迹有约 10 分钟去抖窗口,刚连上不会立刻上传)。
-
-说明:xskill connect 是常驻轮询进程,服务器若重启它会自动重连,无需我干预;只有换服务器地址
-或换了 token 时,才需要重跑一次第 2 步带 token 的命令。全部完成后,把已安装版本号、client_id、
-常驻任务状态告诉我。
+```bash
+xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/Linux 下会前台阻塞)
+# 之后用 launchd(KeepAlive=true)/ systemd --user(Restart=always)托管:
+#   xskill connect --foreground
 ```
 
 > 把 `<服务器地址:端口>` 和 `<TOKEN>` 换成团队管理员给你的值(server 端 `xskill serve --server` 启动时会打印 token)。**切勿把真实 token 写进任何公开仓库或聊天记录。**

@@ -39,7 +39,7 @@ def register_with_server(
     里已有 client_id，传过来；server 按 (user_name, claimed_client_id,
     fingerprint, new uuid) 四级优先级判定（详见 ClientRegistry.register）。
 
-    ``user_name`` 即 ``--name <userid>``：非空时 server 派生确定性 client_id
+    ``user_name`` 即 ``--name <工号/userid>``：非空时 server 派生确定性 client_id
     （跨设备同 name 共享画像），优先于 claimed/fingerprint。
     """
     body = {
