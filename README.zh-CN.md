@@ -20,6 +20,7 @@
 
 ## 动态
 
+- **2026-07-07** — `v0.6.2a2`：修复 Windows Group Policy 环境下 `schtasks` 拒绝访问的问题，自动降级到开机启动文件夹，`connect` 无需管理员权限即可后台常驻。
 - **2026-07-07** — `v0.6.2`：用户画像 + skill 推荐引擎（`--name` 稳定身份、多兴趣聚类、80/20 质量+相关性混合推荐、staging 优先达量灰度）；三方 skillhub 纳入检索池；ux 得分 RESTful 查询；Windows 计划任务后台常驻。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.2)。
 - **2026-05-29** — Trae IDE / Trae Agent 适配：读取 workspaceStorage 会话、Skill 安装至 `~/.trae-cn/skills` / `~/.trae/skills`。
 - **2026-05-23** — 正式开源，发布 `v0.5.0`：团队模式（client-server）、隐私脱敏、Python 3.9 支持、无需 `git`依赖。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。

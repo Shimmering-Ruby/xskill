@@ -184,6 +184,7 @@ xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/L
 
 ## 📰 动态
 
+- **2026-07-07** —— `v0.6.2a2`：修复 Windows Group Policy 环境下 `schtasks` 拒绝访问的问题，自动降级到开机启动文件夹方案，`connect` 无需管理员权限即可后台常驻。
 - **2026-07-07** —— `v0.6.2`:用户画像 + skill 推荐引擎(`--name` 稳定身份、多兴趣聚类、80/20 质量+相关性混合推荐、staging 优先达量灰度);三方 skillhub 纳入检索池;ux 得分 RESTful 查询(按版本聚合 + atom 关联);Windows 计划任务后台常驻(`xskill start/stop/status`)。
 - **2026-05-29** —— 新增 Trae IDE / Trae Agent 适配。
 - **2026-05-23** —— `v0.5.0`:团队模式(client-server)、轨迹脱敏、Python 3.9、运行时不再需要 `git` 二进制。

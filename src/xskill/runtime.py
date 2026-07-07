@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import atexit
+import csv
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 from typing import Optional
 
@@ -66,6 +69,8 @@ def _clear() -> None:
 def _alive(pid: Optional[int]) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if sys.platform == "win32":
+        return _alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -73,6 +78,21 @@ def _alive(pid: Optional[int]) -> bool:
     except PermissionError:
         return True   # 存在但非本用户 → 仍算活
     return True
+
+
+def _alive_windows(pid: int) -> bool:
+    """Return whether pid exists on Windows without relying on os.kill(pid, 0)."""
+    try:
+        res = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    for row in csv.reader(res.stdout.splitlines()):
+        if len(row) >= 2 and row[1].strip() == str(pid):
+            return True
+    return False
 
 
 def role() -> str:
