@@ -123,6 +123,20 @@ xskill connect <host:port> --token <token>     # on each teammate's machine
 - **A/B-driven evolution** — a change is measured per person before it spreads. More people → faster, sharper evolution.
 - **Experts can teach manually** — edit a Skill locally and it is pulled in as `user-staging/<client_id>` to feed the next round.
 
+#### Run it persistently
+
+`xskill connect` connects **directly** by default, bypassing corporate proxies (e.g. Huawei SWG) — teammates on an internal network no longer need to set `NO_PROXY` by hand. Add `--use-proxy` only when the machine's sole route out is a proxy that can actually reach the server.
+
+On **Windows**, `connect` automatically installs itself as a Task Scheduler task (starts at logon, restarts on crash, no runtime limit) and returns immediately — no terminal to keep open:
+
+```bash
+xskill connect <host:port> --token <TOKEN>   # first time: handshake + auto-start background task
+xskill status                                 # show daemon state (pid / server / client_id)
+xskill stop / xskill start                    # stop / re-start (must have connected once)
+```
+
+On **macOS / Linux**, native persistence (launchd / systemd --user) is still on the way; for now run the foreground form `xskill connect --foreground` under your own init system.
+
 * * *
 
 ## 🔌 Works with your agents

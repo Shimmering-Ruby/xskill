@@ -461,6 +461,17 @@ def get_team_client_state_path() -> Path:
     return XSKILL_HOME / "team_client.json"
 
 
+def get_connect_daemon_state_path() -> Path:
+    """``xskill connect`` 常驻进程的运行态（pid / server_url / task 名）。
+
+    与 ``team_client.json``（连接**身份**，跨重启不变）分开：本文件记的是
+    “现在有没有一个后台 connect 进程在跑、它的 pid/宿主任务是谁”，供
+    ``xskill start/stop/status`` 管理。进程退出/机器重启后 pid 可能失效，
+    读取方须自行校验存活（见 team.client.service）。
+    """
+    return XSKILL_HOME / "connect_daemon.json"
+
+
 def _server_scope_id(server_url: str) -> str:
     """把 server_url 映射成文件系统安全、且按 server 唯一的作用域 id。
 

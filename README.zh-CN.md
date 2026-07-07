@@ -81,6 +81,20 @@ xskill connect <host:port> --token <token>
 - **灰度测试驱动的进化** 一个 Skill 的改动会先在每个人身上分别衡量，赢了再扩散，人越多进化越准越快。
 - **专家指导的手动进化** 专家本地直接修改 skill，会被学习进服务器远程 `user-staging/<client_id>` 分支，作为下一步进化参考。
 
+### 常驻运行
+
+`xskill connect` 默认**直连** server、绕开公司代理（华为 SWG 之类），内网同事无需手动设 `NO_PROXY`；只有当本机唯一出网路径就是代理时才加 `--use-proxy`。
+
+Windows 下 `connect` 会自动把自己装成「计划任务」后台常驻（登录自启、崩溃自愈、不限时长），并提供生命周期命令：
+
+```bash
+xskill connect <host:port> --token <token>   # 首次:握手 + 自动拉起后台常驻
+xskill status                                  # 查看常驻状态
+xskill stop / xskill start                     # 停止 / 重新拉起(需先 connect 过)
+```
+
+macOS / Linux 的原生常驻（launchd / systemd --user）仍在路上，当前用自己的 init 系统托管 `xskill connect --foreground` 即可。
+
 ## 架构图
 
 <p align="center">
