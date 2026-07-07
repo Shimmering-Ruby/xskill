@@ -207,7 +207,8 @@ def cmd_connect(args) -> int:
     # `xskill connect` 行为不变，仍可用自己的 init 系统托管 --foreground。
     if args.foreground or not backend.supported:
         print(f"reconnecting: client_id={state.client_id}  server={state.server_url}")
-        _run_team_client_forever(state, use_proxy=args.use_proxy)
+        _run_team_client_forever(state, use_proxy=args.use_proxy,
+                                 auto_update=not args.no_auto_update)
         return 0
 
     # 默认（有原生后端的平台，如 Windows）：交给操作系统守护设施后台拉起。
@@ -275,7 +276,8 @@ def _connect_handshake(args, state_path):
     return state
 
 
-def _run_team_client_forever(state, *, use_proxy: bool) -> None:
+def _run_team_client_forever(state, *, use_proxy: bool,
+                             auto_update: bool = True) -> None:
     """构造 TeamClient 并阻塞跑守护循环。"""
     import httpx
     from xskill.config import (
@@ -283,18 +285,14 @@ def _run_team_client_forever(state, *, use_proxy: bool) -> None:
     )
     from xskill.team.client.daemon import TeamClient
 
-    # 同握手：后台同步也默认直连，否则"注册过了同步全 504"。
     http = httpx.Client(base_url=state.server_url, timeout=30.0,
                         trust_env=use_proxy)
-    # skill working copies 复用标准 skill_dir（~/.xskill/skill/）——瘦客户端没有
-    # config.yaml，直接用默认路径，不走 get_skill_dir()（那会 load_config）。游标 /
-    # 去抖 / 安装历史按 server 分目录（方案 A）——换 server 不再被上一个 server 的
-    # "已上传"游标静默压制对新 server 的上传。
     client = TeamClient(
         state=state, http=http,
         skill_dir=XSKILL_HOME / "skill",
         cursor_path=get_team_client_cursor_path(state.server_url),
         history_path=get_team_client_history_path(state.server_url),
+        auto_update=auto_update,
     )
     client.run_forever()   # 阻塞
 
@@ -336,6 +334,44 @@ def cmd_start(args) -> int:
         return 1
     _print_connect_status(st, as_json=getattr(args, "json", False))
     return 0
+
+
+def cmd_update(args) -> int:
+    """立即检查 PyPI 是否有新版 xskill，有则升级并重启。"""
+    from xskill.team.client.updater import (
+        _current_version, _latest_pypi_version, _restart,
+    )
+    current = _current_version("xskill")
+    if not current:
+        print("error: 无法读取当前版本", file=sys.stderr)
+        return 1
+    print(f"当前版本: {current}")
+    print("正在查询 PyPI...")
+    latest = _latest_pypi_version("xskill")
+    if not latest:
+        print("error: 查询 PyPI 失败，请检查网络", file=sys.stderr)
+        return 1
+    try:
+        from packaging.version import Version
+        if Version(latest) <= Version(current):
+            print(f"已是最新版本 ({current})")
+            return 0
+    except Exception:
+        pass
+    print(f"发现新版本: {latest}，开始升级...")
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade",
+         f"xskill=={latest}", "-i", "https://pypi.org/simple/"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"error: 升级失败:\n{result.stderr.strip() or result.stdout.strip()}",
+              file=sys.stderr)
+        return 1
+    print(f"升级到 {latest} 成功，正在重启...")
+    _restart()
+    return 0  # 不会到达这里
 
 
 def cmd_stop(args) -> int:
@@ -609,6 +645,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="前台阻塞运行守护循环（默认交给操作系统守护设施后台常驻）。"
              "常驻任务内部 execute 的就是这个形态；调试时也可手动用。",
     )
+    p_conn.add_argument(
+        "--no-auto-update", action="store_true", dest="no_auto_update",
+        help="禁用自动更新检查（默认每小时查一次 PyPI，有新版则升级重启）。",
+    )
 
     p_start = sub.add_parser(
         "start", help="把 connect 装成后台常驻（开机自启 + 崩溃自愈）",
@@ -619,6 +659,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_stop.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
     p_status = sub.add_parser("status", help="查看 connect 常驻任务状态")
+
+    sub.add_parser("update", help="立即检查 PyPI 新版并升级（有新版则重启）")
     p_status.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
     p_stats = sub.add_parser(
@@ -717,6 +759,8 @@ def main() -> int:
         return cmd_stop(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "update":
+        return cmd_update(args)
 
     # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
     if args.command == "stats":
