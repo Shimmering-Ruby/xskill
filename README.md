@@ -177,7 +177,6 @@ xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/L
 ## 🗺 路线图
 
 - 更多 agent 适配——Goose、OpenHands、Aider
-- 更成熟的用户画像与推荐
 - 原生 MCP server 接口(把技能作为工具暴露)
 - 浏览技能库、查看 canary 数据的 Web UI
 - 技能市场——导入/导出可移植的技能包
@@ -185,6 +184,7 @@ xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/L
 
 ## 📰 动态
 
+- **2026-07-07** —— `v0.6.2`:用户画像 + skill 推荐引擎(`--name` 稳定身份、多兴趣聚类、80/20 质量+相关性混合推荐、staging 优先达量灰度);三方 skillhub 纳入检索池;ux 得分 RESTful 查询(按版本聚合 + atom 关联);Windows 计划任务后台常驻(`xskill start/stop/status`)。
 - **2026-05-29** —— 新增 Trae IDE / Trae Agent 适配。
 - **2026-05-23** —— `v0.5.0`:团队模式(client-server)、轨迹脱敏、Python 3.9、运行时不再需要 `git` 二进制。
 - **2026-05-20** —— MIT 开源;上线 PyPI:`pip install xskill`。

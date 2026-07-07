@@ -166,7 +166,6 @@ On **macOS / Linux**, native persistence (launchd / systemd --user) is still on 
 ## 🗺 Roadmap
 
 - More agent adapters — Goose, OpenHands, Aider
-- Mature user profiling and recommendation
 - Native MCP server interface (Skills exposed as tools)
 - Web UI for browsing the library and viewing canary stats
 - Skill marketplace — import / export portable bundles
@@ -174,6 +173,7 @@ On **macOS / Linux**, native persistence (launchd / systemd --user) is still on 
 
 ## 📰 News
 
+- **2026-07-07** — `v0.6.2`: User profiling + skill recommend engine (`--name` stable identity, multi-interest clustering, 80/20 quality+relevance hybrid recommendation, staging-priority canary); third-party SkillHub in retrieval pool; UX score RESTful query (version aggregation + atom association); Windows scheduled-task daemon (`xskill start/stop/status`).
 - **2026-05-29** — Trae IDE / Trae Agent adapter.
 - **2026-05-23** — `v0.5.0`: team mode (client-server), trajectory redaction, Python 3.9, no `git` binary needed at runtime.
 - **2026-05-20** — MIT open source; on PyPI: `pip install xskill`.

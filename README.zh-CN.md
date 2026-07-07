@@ -20,10 +20,11 @@
 
 ## 动态
 
+- **2026-07-07** — `v0.6.2`：用户画像 + skill 推荐引擎（`--name` 稳定身份、多兴趣聚类、80/20 质量+相关性混合推荐、staging 优先达量灰度）；三方 skillhub 纳入检索池；ux 得分 RESTful 查询；Windows 计划任务后台常驻。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.2)。
+- **2026-05-29** — Trae IDE / Trae Agent 适配：读取 workspaceStorage 会话、Skill 安装至 `~/.trae-cn/skills` / `~/.trae/skills`。
 - **2026-05-23** — 正式开源，发布 `v0.5.0`：团队模式（client-server）、隐私脱敏、Python 3.9 支持、无需 `git`依赖。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.5.0)。
 - **2026-05-20** — MIT 开源，PyPI 上架：`pip install xskill`。
 - **2026-05-12** — Claude Code、Codex、OpenCode 支持；OpenClaw、Cursor对接。
-- **2026-05-29** — Trae IDE / Trae Agent 适配：读取 workspaceStorage 会话、Skill 安装至 `~/.trae-cn/skills` / `~/.trae/skills`。
 
 ## 解决什么问题
 
@@ -131,7 +132,6 @@ macOS / Linux 的原生常驻（launchd / systemd --user）仍在路上，当前
 ## Roadmap
 
 - 更多 agent adapter：Goose、OpenHands、Aider
-- 更为成熟的用户画像和推荐算法
 - 原生 MCP server 接口（把 Skill 暴露成 tool）
 - Web UI：浏览 Skill 库、看灰度数据
 - Skill marketplace：导入 / 导出可移植 bundle
