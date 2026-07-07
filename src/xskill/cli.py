@@ -262,6 +262,7 @@ def _connect_handshake(args, state_path):
             label=args.label or _socket.gethostname(),
             hostname=_socket.gethostname(),
             existing_client_id=existing_client_id,
+            user_name=args.name or None,
         )
     except Exception as e:
         print(f"error: 注册失败: {e}", file=sys.stderr)
@@ -269,7 +270,8 @@ def _connect_handshake(args, state_path):
     state = ClientState(server_url=server_url, client_id=client_id,
                         join_token=args.token)
     save_client_state(state, state_path)
-    print(f"connected: client_id={client_id}  server={server_url}")
+    name_hint = f"  (--name={args.name})" if args.name else ""
+    print(f"connected: client_id={client_id}  server={server_url}{name_hint}")
     return state
 
 
@@ -595,6 +597,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--use-proxy", action="store_true",
         help="经系统/环境代理连 server（默认直连，绕开公司 SWG 代理）。"
              "仅当本机唯一出网路径是代理、且代理能到 server 时才需要。",
+    )
+    p_conn.add_argument(
+        "--name", default=None, metavar="EMPLOYEE_ID",
+        help="工号 / 用户 ID（推荐必填）。server 用它派生确定性 client_id——"
+             "同一工号在不同设备或重装后身份保持一致，推荐算法也能跨设备积累。"
+             "server 若设置了 allow_anonymous: false，则不带 --name 会被拒绝（403）。",
     )
     p_conn.add_argument(
         "--foreground", action="store_true",
