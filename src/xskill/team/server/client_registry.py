@@ -9,18 +9,71 @@ pick_side）② 上传轨迹的落盘分桶（clients/<client_id>/sessions/）�
 """
 from __future__ import annotations
 
+import hashlib
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+
+def _normalize_user_name(name: str) -> str:
+    """规范化 user_name：去首尾空白、内部连续空白压一、转小写。
+
+    规范化保证 ``--name Alice`` / ``--name alice`` / ``--name "  alice  "`` 派生
+    出同一 client_id（跨设备/跨会话稳定身份）。空串抛 ValueError（fail-loud）。
+    """
+    if not isinstance(name, str):
+        raise ValueError(
+            f"user_name 必须是字符串，got {type(name).__name__}"
+        )
+    norm = re.sub(r"\s+", " ", name).strip().lower()
+    if not norm:
+        raise ValueError("user_name 不能为空")
+    return norm
+
+
+def client_id_from_name(name: str) -> str:
+    """从 user_name 派生确定性 client_id：``sha256("name:" + norm)[:16]``。
+
+    同 name（规范化后相同）→ 同 id；不发新 uuid。这是跨设备稳定身份的根基。
+    """
+    norm = _normalize_user_name(name)
+    return hashlib.sha256(("name:" + norm).encode("utf-8")).hexdigest()[:16]
+
+
+_SAFE_DIR_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def safe_dir_name(user_name: str | None, client_id: str) -> str:
+    """文件系统目录名：优先用 user_name 明文（安全转义），匿名用 client_id。
+
+    - 有 user_name：转义为 ``[A-Za-z0-9._-]`` 集合（其余替换 ``_``）；
+      转义后为空或含 ``..`` / 以 ``-`` 开头（git branch 非法）→ 抛 ValueError。
+      支持 ``m00947023`` / ``02020222`` / 简单用户名（字母数字直接通过）。
+    - 无 user_name（匿名）：返回 client_id（hex，天然安全）。
+
+    这只决定**文件系统路径**（clients/<dir>/sessions）；canary 分桶 key、
+    user-staging 分支名仍用 client_id（不可变哈希，不受 name 特殊字符影响）。
+    """
+    if not user_name:
+        return client_id
+    escaped = _SAFE_DIR_RE.sub("_", user_name.strip())
+    if not escaped or escaped == "." or escaped == ".." or escaped.startswith("-"):
+        raise ValueError(
+            f"user_name {user_name!r} 转义后 {escaped!r} 不是安全目录名"
+        )
+    return escaped
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS clients (
-    client_id  TEXT PRIMARY KEY,
-    label      TEXT DEFAULT '',
-    hostname   TEXT DEFAULT '',
-    joined_at  TEXT NOT NULL,
-    last_seen  TEXT NOT NULL
+    client_id   TEXT PRIMARY KEY,
+    label       TEXT DEFAULT '',
+    hostname    TEXT DEFAULT '',
+    user_name   TEXT DEFAULT '',
+    joined_at   TEXT NOT NULL,
+    last_seen   TEXT NOT NULL
 );
 """
 
@@ -46,6 +99,11 @@ class ClientRegistry:
         conn = self._conn()
         try:
             conn.executescript(_SCHEMA)
+            # 幂等迁移：CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，
+            # 老 db 缺 user_name 列时显式 ALTER 补上。
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(clients)")}
+            if "user_name" not in cols:
+                conn.execute("ALTER TABLE clients ADD COLUMN user_name TEXT DEFAULT ''")
             conn.commit()
         finally:
             conn.close()
@@ -55,31 +113,61 @@ class ClientRegistry:
         label: str = "",
         hostname: str = "",
         claimed_client_id: str | None = None,
+        user_name: str | None = None,
     ) -> str:
         """注册或续用 client_id。
 
-        三级优先级（显式判定，非 fallback）：
-          ① client 自报 ``claimed_client_id`` 且 server DB 里还认得 → 续用，
+        身份解析优先级（显式判定，非 fallback）：
+          ① ``user_name`` 非空 → 派生确定性 id（``client_id_from_name``），跨设备
+             同 name 续用同一身份、touch last_seen。``--name`` 是权威身份键，
+             **不**走 claimed/指纹路径。
+          ② client 自报 ``claimed_client_id`` 且 server DB 里还认得 → 续用，
              touch last_seen。覆盖 ``xskill connect <addr> --token`` 带参重连
              场景：本地 ``team_client.json`` 已存 client_id，不该换。
-          ② client 没自报 / 自报的 server 不认得，但 (hostname, label) 指纹
+          ③ client 没自报 / 自报的 server 不认得，但 (hostname, label) 指纹
              能查到唯一历史身份 → 续用。覆盖 state 文件丢失（重装、清家目录）
              但 server DB 还在的场景，让灰度/归属链路自愈。
-          ③ 以上都不行 → 发新 uuid 入库。
+          ④ 以上都不行 → 发新 uuid 入库（匿名 hashid，既有逻辑）。
 
         指纹查找仅在 hostname 或 label 至少一个非空时启用，防止匿名 client
         互相误匹配。
         """
-        # 优先级 ① — claimed_client_id 命中
+        # 优先级 ① — user_name 派生确定性 id（--name 权威身份）
+        if user_name:
+            norm = _normalize_user_name(user_name)
+            client_id = client_id_from_name(user_name)
+            now = _now()
+            conn = self._conn()
+            try:
+                existing = conn.execute(
+                    "SELECT 1 FROM clients WHERE client_id=?", (client_id,)
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE clients SET last_seen=?, hostname=?, user_name=?"
+                        " WHERE client_id=?",
+                        (_now(), hostname or "", norm, client_id),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO clients (client_id, label, hostname, user_name,"
+                        " joined_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
+                        (client_id, label or norm, hostname or "", norm, now, now),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            return client_id
+        # 优先级 ② — claimed_client_id 命中
         if claimed_client_id and self.exists(claimed_client_id):
             self.touch(claimed_client_id)
             return claimed_client_id
-        # 优先级 ② — (hostname, label) 指纹回查
+        # 优先级 ③ — (hostname, label) 指纹回查
         existing = self._find_by_fingerprint(hostname=hostname, label=label)
         if existing:
             self.touch(existing)
             return existing
-        # 优先级 ③ — 发新 uuid
+        # 优先级 ④ — 发新 uuid
         client_id = uuid.uuid4().hex
         now = _now()
         conn = self._conn()
@@ -114,6 +202,25 @@ class ClientRegistry:
                 " WHERE hostname=? AND label=?"
                 " ORDER BY last_seen DESC LIMIT 1",
                 (hostname, label),
+            ).fetchone()
+            return row["client_id"] if row else None
+        finally:
+            conn.close()
+
+    def find_by_user_name(self, user_name: str) -> str | None:
+        """按明文 user_name 反查 client_id（"按名找人"）。
+
+        输入经 ``_normalize_user_name`` 规范化后精确匹配 ``user_name`` 列
+        （注册时存的就是规范化形式，与 ``client_id_from_name`` 同口径）。
+        命中多条 → 返回 last_seen 最新者；未命中 → None。空名抛 ValueError。
+        """
+        norm = _normalize_user_name(user_name)
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT client_id FROM clients WHERE user_name=?"
+                " ORDER BY last_seen DESC LIMIT 1",
+                (norm,),
             ).fetchone()
             return row["client_id"] if row else None
         finally:
@@ -160,3 +267,13 @@ class ClientRegistry:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    def dir_name_for(self, client_id: str) -> str:
+        """该 client 的文件系统目录名：有 user_name → 转义明文；匿名 → client_id。
+
+        供 upload 落盘 / engine _client_store_root 用。client 不存在 → 抛 ValueError。
+        """
+        row = self.get(client_id)
+        if row is None:
+            raise ValueError(f"unknown client_id: {client_id}")
+        return safe_dir_name(row.get("user_name") or None, client_id)

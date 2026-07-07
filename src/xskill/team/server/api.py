@@ -41,6 +41,7 @@ class _Ctx:
     probability: float = 0.2
     ranked_slots: int = 80
     total_slots: int = 100
+    allow_anonymous_user: bool = True
     register_dir: Callable[[Path, str], None] | None = None
 
 
@@ -57,6 +58,7 @@ def init_team_context(
     ranked_slots: int,
     total_slots: int,
     register_dir: Callable[[Path, str], None],
+    allow_anonymous_user: bool = True,
 ) -> None:
     """create_app(team_server=True) 在 startup 时调用一次。"""
     _ctx.join_token = join_token
@@ -66,6 +68,7 @@ def init_team_context(
     _ctx.probability = probability
     _ctx.ranked_slots = ranked_slots
     _ctx.total_slots = total_slots
+    _ctx.allow_anonymous_user = allow_anonymous_user
     _ctx.register_dir = register_dir
 
 
@@ -87,12 +90,19 @@ async def team_register(req: RegisterRequest) -> RegisterResponse:
         raise HTTPException(status_code=503, detail="team context not initialized")
     if req.token != _ctx.join_token:
         raise HTTPException(status_code=401, detail="invalid join token")
+    user_name = (req.user_name or "").strip() or None
+    if not user_name and not _ctx.allow_anonymous_user:
+        raise HTTPException(
+            status_code=403, detail="anonymous users not allowed"
+        )
     client_id = _ctx.client_registry.register(
         label=req.client_label,
         hostname=req.hostname,
         claimed_client_id=req.claimed_client_id,
+        user_name=user_name,
     )
-    logger.info("team client registered: %s (label=%s)", client_id, req.client_label)
+    logger.info("team client registered: %s (label=%s, name=%s)",
+                client_id, req.client_label, user_name or "<anonymous>")
     return RegisterResponse(client_id=client_id)
 
 
@@ -103,12 +113,16 @@ async def team_upload(
     x_xskill_client: str | None = Header(default=None),
 ) -> UploadResponse:
     client_id = _auth(x_xskill_token, x_xskill_client)
-    sessions_dir = _ctx.traj_root / "clients" / client_id / "sessions"
+    # 目录名优先用 user_name 明文（可读），匿名用 client_id；canary/git 分支仍用 client_id
+    from xskill.team.server.client_registry import safe_dir_name
+    _row = _ctx.client_registry.get(client_id)
+    _dir_name = safe_dir_name((_row or {}).get("user_name") or None, client_id)
+    sessions_dir = _ctx.traj_root / "clients" / _dir_name / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    # 该 client 桶首次出现 → 注册成 watch_dir，label=client_id 让 watcher
-    # 在 CS 归因时能反查 client。register_dir 幂等。
+    # 该 client 桶首次出现 → 注册成 watch_dir，label=dir_name 让 watcher
+    # 在 CS 归因时能反查 client（dir_name = user_name 明文或 client_id）。
     if _ctx.register_dir is not None:
-        _ctx.register_dir(sessions_dir, client_id)
+        _ctx.register_dir(sessions_dir, _dir_name)
 
     accepted: list[str] = []
     rejected: list[UploadRejection] = []
@@ -161,6 +175,10 @@ async def team_ingest_db(
 
     from xskill.config import get_uploads_dir
     from xskill.pipeline.db_ingest import read_db_files
+    from xskill.team.server.client_registry import safe_dir_name
+
+    _row = _ctx.client_registry.get(client_id)
+    _dir_name = safe_dir_name((_row or {}).get("user_name") or None, client_id)
 
     # 落盘：uploads/<eco>/<client_id>/<安全文件名>
     safe_name = Path(file.filename or "upload.db").name
@@ -169,11 +187,11 @@ async def team_ingest_db(
     dest = dest_dir / safe_name
     dest.write_bytes(await file.read())
 
-    # 桥接到该 client 的 sessions 桶，label=client_id（与 team_upload 一致）
-    sessions_dir = _ctx.traj_root / "clients" / client_id / "sessions"
+    # 桥接到该 client 的 sessions 桶，label=dir_name（与 team_upload 一致）
+    sessions_dir = _ctx.traj_root / "clients" / _dir_name / "sessions"
     try:
         summary = read_db_files(
-            dest, eco=eco, target_dir=sessions_dir, register_label=client_id,
+            dest, eco=eco, target_dir=sessions_dir, register_label=_dir_name,
         )
     except (FileNotFoundError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -190,6 +208,20 @@ async def team_sync(
     x_xskill_client: str | None = Header(default=None),
 ):
     client_id = _auth(x_xskill_token, x_xskill_client)
+    # §5 sync 前刷新该 client 的用户画像（atom 集变化时重算，未变则指纹命中跳过）。
+    # 画像由 build_manifest → _pick_recommended → engine.get_skill_for_client 消费。
+    eng = None
+    try:
+        from xskill.team.server.skill_manifest import get_recommend_engine
+        eng = get_recommend_engine()
+    except Exception:  # pylint: disable=broad-exception-caught
+        eng = None
+    if eng is not None:
+        try:
+            from xskill.recommend.client_interest import ClientInterest
+            eng.update_user_interest(ClientInterest(client_id))
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("profile refresh for %s skipped", client_id, exc_info=True)
     resp = build_manifest(
         client_id=client_id,
         skill_dir=_ctx.skill_dir,

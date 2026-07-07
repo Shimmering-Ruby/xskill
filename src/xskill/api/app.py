@@ -762,11 +762,39 @@ async def api_reindex():
     """Rebuild the skill vector index."""
     try:
         embedding_client = create_embed_client(_config)
-        rebuild_skill_index(skill_dir=_skill_dir, embed_client=embedding_client)
+        rebuild_skill_index(
+            skill_dir=_skill_dir, embed_client=embedding_client,
+            atom_store_roots=_team_atom_roots(),
+        )
+        # 失效推荐引擎的 skill 索引 / skillhub 缓存，否则引擎仍服务旧 embedding
+        try:
+            from xskill.team.server.skill_manifest import get_recommend_engine
+            eng = get_recommend_engine()
+            if eng is not None:
+                eng.invalidate_cache()
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("engine cache invalidation skipped", exc_info=True)
         return MessageResponse(message="Skill index rebuilt", ok=True)
     except Exception as e:
         logger.exception("reindex failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _team_atom_roots() -> list[Path] | None:
+    """收集 team server 各 client 的 atom store 根（traj_root/clients/<c>/sessions）。
+
+    非 team / 无 client 时返回 None（atom_feats 不计算，standalone 场景）。
+    """
+    try:
+        from xskill.config import get_team_trajectories_dir
+        traj_root = get_team_trajectories_dir()
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    clients = traj_root / "clients"
+    if not clients.is_dir():
+        return None
+    roots = [c / "sessions" for c in clients.iterdir() if (c / "sessions").is_dir()]
+    return roots or None
 
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1215,7 @@ def create_app(home_root: Path | str | None = None,
                 from xskill.team.server.api import init_team_context
                 from xskill.team.server.state import ensure_join_token
                 from xskill.config import (
+                    allow_anonymous_user as _allow_anonymous,
                     get_team_clients_db_path, get_team_server_state_path,
                     get_team_trajectories_dir,
                 )
@@ -1203,6 +1232,20 @@ def create_app(home_root: Path | str | None = None,
                     # team_client 生态标签：watcher 的 CS 归因靠 wd.label 反查 client
                     _register_dir(path, label=label, ecosystem="team_client")
 
+                # §5 构造 SkillRecommendEngine 并注入 manifest（staging 优先达量 + 画像推荐）
+                from xskill.config import XSKILL_HOME as _xhome
+                from xskill.recommend.engine import SkillRecommendEngine
+                from xskill.team.server.skill_manifest import set_recommend_engine
+                _team_embed = create_embed_client(_config)
+                _engine = SkillRecommendEngine(
+                    config=_config, skill_dir=_skill_dir, traj_root=traj_root,
+                    embed_client=_team_embed,
+                    profile_db=_xhome / "team_profile.db",
+                    canary_config=canary_cfg,
+                    client_registry=client_registry,
+                )
+                set_recommend_engine(_engine)
+
                 init_team_context(
                     join_token=join_token,
                     client_registry=client_registry,
@@ -1212,6 +1255,7 @@ def create_app(home_root: Path | str | None = None,
                     ranked_slots=int(team_cfg.get("ranked_slots", 80)),
                     total_slots=int(team_cfg.get("skill_slots", 100)),
                     register_dir=_team_register_dir,
+                    allow_anonymous_user=_allow_anonymous(_config),
                 )
                 logger.info("team server context ready (traj_root=%s)", traj_root)
             except Exception:
