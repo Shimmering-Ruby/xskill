@@ -1,0 +1,60 @@
+skill_dir: ~/.xskill/skill
+
+llm:
+  base_url: https://api.deepseek.com   # 任何兼容 OpenAI chat-completions 的端点均可
+                                        # 例：DeepSeek / OpenAI / 阿里百炼 / 本地 Ollama
+  model: deepseek-v4-flash              # 换成你的模型名
+  api_key: PUT_YOUR_LLM_API_KEY_HERE
+  max_tokens: 16384
+  max_context: 131071                   # 模型上下文窗口大小（token），按实际填写
+  rate_limit:
+    rpm: 240                            # 每分钟最大请求数，按你的账号配额填
+    burst: 100                          # 突发上限
+
+embedding:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1  # 任何 OpenAI 兼容 embedding 端点
+                                                                 # DeepSeek 没有 embedding 接口，
+                                                                 # 推荐：阿里百炼 / OpenAI / Ollama
+  model: text-embedding-v4              # 换成你的 embedding 模型名
+  api_key: PUT_YOUR_EMBEDDING_API_KEY_HERE
+  dim: 1024                             # embedding 维度，填 0 则首次调用时自动探测
+
+canary:
+  enabled: true
+  probability: 0.2       # 每次命中 skill 时，有 20% 概率走候选版本（staging）而非正式版（main）
+                         # 用于 A/B 测试，值越大新版本上量越快，但正式版流量越少
+  min_samples: 5         # 【单桶模式】每侧至少积累 5 条 UX 评分才做决策，防止样本太少误判
+  max_days_hold: 14      # staging 候选版本最长存活 14 天，超时自动丢弃
+  rotate_interval: 300   # 【standalone 模式专用】每隔 300 秒轮换一次灰度时间窗口
+                         # 确保 A/B 两侧流量在时间上交替，排除时段偏差导致的评分偏差
+                         # team server 模式下此字段无效
+  scope_top_n: 2         # 【模型分组模式】只让用量 TOP-2 的模型参与灰度路由和评分
+                         # 用量靠后及未知模型的流量直接走 main，不参与 A/B
+  total_samples: 20      # 【模型分组模式】每侧累积 20 条 UX 评分后做加权决策
+                         # 比 min_samples 更严格，适用于按模型分组后每组流量较少的情况
+
+watcher:
+  poll_interval: 30      # 每隔 30 秒扫描一次所有 watch_dir，检测新轨迹
+                         # 调小加快入库，但会增加 LLM 调用频率
+  max_concurrent: 4      # 每轮扫描最多同时跑 4 个 LLM 调用
+                         # 自建 vLLM 无并发限制时可调到 20~30
+
+dashboard:
+  enabled: true
+  public: true           # true = 放行公网访问看板；内网部署建议改 false
+  password: ""           # 非空则看板要求 HTTP Basic 登录
+  default_model: ""      # 历史轨迹没记模型名时，看板按此字段归类展示
+
+# ===== Team server mode (仅 `xskill serve --server` 读取) =====
+# 客户端（xskill connect）是瘦进程，不读这份 config。
+# 客户端 connect 时须带 --name <工号>，server 用工号派生确定性 client_id，
+# 同一工号在不同设备或重装后身份保持一致。
+team:
+  server:
+    traj_root: ~/.xskill/team_trajectories
+                         # 客户端上传的轨迹落盘目录，server 从这里读取并蒸馏
+    skill_slots: 100     # 每次同步给客户端的技能槽位总数（ranked + 推荐）
+    ranked_slots: 80     # 其中按 UX 评分排名占 80 个槽位
+                         # 剩余 20 个（100-80）留给向量推荐引擎
+    allow_anonymous: false  # 强制要求客户端 connect 时带 --name <工号>
+                            # 设 true 则兼容不带工号的旧客户端（默认）
