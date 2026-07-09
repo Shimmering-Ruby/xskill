@@ -281,7 +281,7 @@ function renderDual(daily) {
     if (!arr.length) return '';
     const path = arr.map((p, i) => `${i ? 'L' : 'M'}${xOf(p.date).toFixed(1)} ${yOf(p.avg_ux).toFixed(1)}`).join(' ');
     return `<path d="${path}" fill="none" stroke="${color}" stroke-width="2"${dash ? ' stroke-dasharray="5 4"' : ''}/>`
-      + arr.map(p => `<circle cx="${xOf(p.date).toFixed(1)}" cy="${yOf(p.avg_ux).toFixed(1)}" r="3.5" fill="${color}" stroke="#fff" stroke-width="1.5"><title>${esc(p.date)} ${esc(p.side)} ${p.avg_ux} · ${p.n} 份</title></circle>`).join('');
+      + arr.map(p => `<circle class="trend-pt cursor-pointer" data-day="${esc(p.date)}" data-side="${esc(p.side)}" cx="${xOf(p.date).toFixed(1)}" cy="${yOf(p.avg_ux).toFixed(1)}" r="4.5" fill="${color}" stroke="#fff" stroke-width="1.5"><title>${esc(p.date)} ${esc(p.side)} ${p.avg_ux} · ${p.n} 份 · 点击看当日原子</title></circle>`).join('');
   };
   const grid = [2, 4, 6, 8, 10].map(v =>
     `<line x1="${L}" y1="${yOf(v)}" x2="${W - R}" y2="${yOf(v)}" stroke="#f1f5f9"/>`
@@ -295,7 +295,36 @@ function renderDual(daily) {
     </div>
     <svg viewBox="0 0 ${W} ${H}" class="w-full mt-1" style="max-height:220px">${grid}
       <line x1="${L}" y1="${H - B + 4}" x2="${W - R}" y2="${H - B + 4}" stroke="#e2e8f0"/>${xlabels}
-      ${line(series('main'), '#2563eb', false)}${line(series('staging'), '#10b981', true)}</svg>`;
+      ${line(series('main'), '#2563eb', false)}${line(series('staging'), '#10b981', true)}</svg>
+    <div id="trend-drill"></div>`;
+}
+
+// C4：趋势点下钻——取该 skill 的逐条打分（/ux/atoms），按日期+side 过滤展示
+async function drillTrendDay(skill, day, side) {
+  const box = document.getElementById('trend-drill');
+  if (!box) return;
+  box.innerHTML = '<div class="text-slate-400 text-[11px] mt-2">加载当日原子…</div>';
+  let data;
+  try {
+    data = await j('api/v1/dashboard/skill/' + encodeURIComponent(skill)
+      + '/ux/atoms?days=365' + (side ? '&side=' + encodeURIComponent(side) : ''));
+  } catch (e) {
+    box.innerHTML = `<div class="text-rose-600 text-[11px] mt-2">下钻失败：${esc(e.message)}</div>`;
+    return;
+  }
+  const rows_ = (data.scores || []).filter(r => (r.scored_at || '').slice(0, 10) === day);
+  if (!rows_.length) {
+    box.innerHTML = `<div class="text-slate-400 text-[11px] mt-2">${esc(day)} · ${esc(side)}：无逐条记录</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="mt-2 rounded-xl ring-1 ring-slate-100 divide-y divide-slate-50">
+    <div class="px-3 py-1.5 text-[11px] text-slate-400">${esc(day)} · ${esc(side)} · ${rows_.length} 份打分</div>
+    ${rows_.map(r => `<div class="px-3 py-2 flex items-center gap-2 text-xs">
+      <span class="atom-jump font-mono text-teal-700 cursor-pointer" data-atom="${esc(r.atom_id || r.traj_id || '')}">${esc(r.atom_id || r.traj_id || '?')}</span>
+      <span class="text-slate-400 flex-1 truncate">${esc((r.atom && r.atom.intent) || r.reasons || '')}</span>
+      <span class="px-2 py-0.5 rounded-md bg-teal-50 text-teal-700 text-[11px] font-semibold tabular-nums shrink-0">${r.score}</span>
+    </div>`).join('')}
+  </div>`;
 }
 
 // 血缘：贡献来源（用户占比条 + 模型 chips）与贡献原子列表
@@ -543,10 +572,48 @@ async function openTraj(trajId, atomId) {
         <div class="absolute left-6 right-6 top-[17px] h-0.5 bg-slate-200"></div>
         ${steps}
       </div></div>` : '<div class="text-slate-400 text-xs mt-3">该轨迹还没有拆出原子</div>'}
+    ${relationGraph(trajId, list)}
     <div id="atom-detail" class="mt-4"></div>
   </div>`;
   if (atomId) openAtom(trajId, atomId).catch(console.error);
   else if (list.length) openAtom(trajId, list[0].atom_id).catch(console.error);
+}
+
+// D5：traj—atom—skill 二部关系图（分层布局；贡献边加粗标 weightscore）
+function relationGraph(trajId, atoms) {
+  if (!atoms.length) return '';
+  const skills = [];
+  atoms.forEach(a => (a.destinations || []).forEach(d => {
+    if (!skills.includes(d.skill)) skills.push(d.skill);
+  }));
+  const rowH = 52, H = Math.max(atoms.length, skills.length || 1) * rowH + 24;
+  const ay = i => 24 + i * rowH + (Math.max(0, skills.length - atoms.length) * rowH) / 2;
+  const sy = i => 24 + i * rowH + (Math.max(0, atoms.length - skills.length) * rowH) / 2;
+  const midY = 12 + (H - 24) / 2;
+  const edges = atoms.map((a, i) =>
+    `<path d="M96 ${midY} C 140 ${midY} 140 ${ay(i)} 168 ${ay(i)}" fill="none" stroke="#e2e8f0" stroke-width="1.5"/>`).join('')
+    + atoms.flatMap((a, i) => (a.destinations || []).map(d => {
+      const si = skills.indexOf(d.skill);
+      return `<path d="M186 ${ay(i)} C 250 ${ay(i)} 250 ${sy(si)} 300 ${sy(si)}" fill="none" stroke="#0d9488" stroke-width="2.5"/>
+        <text x="243" y="${(ay(i) + sy(si)) / 2 - 6}" font-size="9.5" fill="#94a3b8" text-anchor="middle">${d.weightscore != null ? 'ws ' + esc(d.weightscore) : ''}</text>`;
+    })).join('');
+  const atomNodes = atoms.map((a, i) =>
+    `<g class="atom-jump cursor-pointer" data-atom="${esc(a.atom_id)}">
+      <circle cx="177" cy="${ay(i)}" r="${(a.destinations || []).length ? 11 : 9}" fill="${(a.destinations || []).length ? '#0d9488' : '#e2e8f0'}"/>
+      <text x="177" y="${ay(i) + 3.5}" font-size="10" font-family="ui-monospace,monospace" text-anchor="middle" fill="${(a.destinations || []).length ? '#fff' : '#475569'}">${esc(a.atom_id.slice(-2))}</text>
+    </g>`).join('');
+  const skillNodes = skills.map((sk, i) =>
+    `<g class="skill-jump cursor-pointer" data-skill="${esc(sk)}">
+      <rect x="300" y="${sy(i) - 15}" width="150" height="30" rx="9" fill="#f0fdfa" stroke="#99f6e4"/>
+      <text x="375" y="${sy(i) + 4}" font-size="10.5" text-anchor="middle" fill="#0f766e" font-weight="600">${esc(sk.length > 22 ? sk.slice(0, 21) + '…' : sk)}</text>
+    </g>`).join('');
+  return `<h3 class="font-semibold text-sm mt-6">关系图 <span class="font-normal text-[11px] text-slate-400 ml-2">traj — atom — skill · 贡献边标 weightscore · 点节点跳转</span></h3>
+    ${skills.length ? '' : '<div class="text-[11px] text-slate-400 mt-1">该轨迹的原子尚未进入任何 skill（无贡献边）</div>'}
+    <svg viewBox="0 0 470 ${H}" class="mt-2" style="max-width:470px">
+      <rect x="10" y="${midY - 16}" width="86" height="32" rx="9" fill="#134e4a"/>
+      <text x="53" y="${midY + 4}" font-size="10" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace">${esc(trajId.length > 12 ? trajId.slice(0, 11) + '…' : trajId)}</text>
+      ${edges}${atomNodes}${skillNodes}
+    </svg>`;
 }
 
 async function openAtom(trajId, atomId) {
@@ -717,6 +784,14 @@ window.addEventListener('hashchange', route);
 
 // ── 全局点击委托 ────────────────────────────────────────────────
 document.addEventListener('click', async e => {
+  const tp = e.target.closest('.trend-pt');
+  if (tp && _curSkill) { drillTrendDay(_curSkill, tp.dataset.day, tp.dataset.side).catch(console.error); return; }
+  const ajump = e.target.closest('.atom-jump');
+  if (ajump && ajump.dataset.atom && ajump.dataset.atom.startsWith('atom_')) {
+    const abody = ajump.dataset.atom.slice(5); const aidx = abody.lastIndexOf('_');
+    if (aidx > 0) { location.hash = '#traj/' + abody.slice(0, aidx) + '/' + ajump.dataset.atom; }
+    return;
+  }
   const row = e.target.closest('[data-skill-row]');
   if (row) { location.hash = 'skill/' + encodeURIComponent(row.dataset.skillRow); return; }
   const sj = e.target.closest('.skill-jump');

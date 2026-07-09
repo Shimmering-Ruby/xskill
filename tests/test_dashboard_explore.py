@@ -298,3 +298,19 @@ def test_router_new_endpoints_smoke(tmp_path):
     assert c.get("/api/v1/dashboard/skill/s-a/ux/daily").status_code == 200
     assert c.get("/api/v1/dashboard/traj/nope").status_code == 404
     assert c.get("/api/v1/dashboard/skill/nope/graph").status_code == 404
+
+
+def test_readonly_instance_sensitive_endpoints_not_mounted(tmp_path):
+    """公网只读实例内容白名单（§1.3 / 验收 F3）：expose_sensitive=False 时
+    轨迹/原子/用户端点物理 404，聚合端点正常。"""
+    db = tmp_path / "registry.db"
+    _seed_traj(tmp_path, db)
+    app = FastAPI()
+    app.include_router(build_dashboard_router(db_path=db,
+                                              expose_sensitive=False))
+    c = TestClient(app)
+    for ep in ["traj/traj_t1", "traj/traj_t1/atoms",
+               "traj/traj_t1/atom/atom_traj_t1_0001", "users/status", "users"]:
+        assert c.get(f"/api/v1/dashboard/{ep}").status_code == 404, ep
+    assert c.get("/api/v1/dashboard/overview").status_code == 200
+    assert c.get("/api/v1/dashboard/pipeline").status_code == 200

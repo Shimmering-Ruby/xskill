@@ -33,7 +33,12 @@ def _skill_dir_for(db_path: Optional[Path]) -> Path:
 
 def build_dashboard_router(db_path: Optional[Path] = None, *,
                            default_harness: Optional[str] = None,
-                           default_model: Optional[str] = None) -> APIRouter:
+                           default_model: Optional[str] = None,
+                           expose_sensitive: bool = True) -> APIRouter:
+    """``expose_sensitive=False`` = 公网只读实例内容白名单（§1.3）：轨迹原文、
+    原子详情、用户连接状态、skill 文件预览这些内容级端点**物理不注册**（404），
+    只保留聚合数字类端点。这是给独立只读部署（dashboard_standalone）用的闸，
+    不是中间件式拦截——路由根本不存在。serve 内置挂载保持默认 True。"""
     # 看板归类口径：缺 source_harness/source_model 的历史轨迹归到哪个桶。
     # 显式传入优先（serve 挂载从 dashboard_config 传）；否则直接读 config.yaml 的
     # dashboard 段（独立只读实例走这条，不需要 api_key）。留空均退 'unknown'。
@@ -93,11 +98,12 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
     def canary() -> dict:
         return {"sides": metrics.canary_sides()}
 
-    @router.get("/api/v1/dashboard/users")
-    def users() -> dict:
-        """团队用户(client)列表 + 总数（纯 registry 分析式）。"""
-        u = metrics.users()
-        return {"total": len(u), "users": u}
+    if expose_sensitive:
+        @router.get("/api/v1/dashboard/users")
+        def users() -> dict:
+            """团队用户(client)列表 + 总数（纯 registry 分析式）。"""
+            u = metrics.users()
+            return {"total": len(u), "users": u}
 
     @router.get("/api/v1/dashboard/tags")
     def tags() -> dict:
@@ -146,44 +152,14 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         from xskill.dashboard.explore import skill_ux_daily
         return {"skill": name, "daily": skill_ux_daily(skill_dir, name)}
 
-    # ── 轨迹/原子详情（图②）与总览进度/连接状态（图⑥⑧）──────────────
-
-    @router.get("/api/v1/dashboard/traj/{traj_id}")
-    def traj_detail(traj_id: str) -> dict:
-        from xskill.dashboard.explore import TrajExplorer
-        try:
-            return TrajExplorer(db_path, skill_dir).traj_detail(traj_id)
-        except KeyError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-    @router.get("/api/v1/dashboard/traj/{traj_id}/atoms")
-    def traj_atoms(traj_id: str) -> dict:
-        from xskill.dashboard.explore import TrajExplorer
-        try:
-            return {"traj_id": traj_id,
-                    "atoms": TrajExplorer(db_path, skill_dir).traj_atoms(traj_id)}
-        except KeyError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-
-    @router.get("/api/v1/dashboard/traj/{traj_id}/atom/{atom_id}")
-    def atom_detail(traj_id: str, atom_id: str) -> dict:
-        from xskill.dashboard.explore import TrajExplorer
-        try:
-            return TrajExplorer(db_path, skill_dir).atom_detail(traj_id, atom_id)
-        except (KeyError, FileNotFoundError) as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+    if expose_sensitive:
+        _register_explorer_endpoints(router, db_path, skill_dir)
 
     @router.get("/api/v1/dashboard/pipeline")
     def pipeline() -> dict:
         """蒸馏管线进度：状态计数 + 冷启动信号 + 候选孵化进度（图⑥）。"""
         from xskill.dashboard.explore import pipeline_progress
         return pipeline_progress(db_path, skill_dir)
-
-    @router.get("/api/v1/dashboard/users/status")
-    def users_status_ep() -> dict:
-        """用户连接状态看板（图⑧，P1 读侧；版本列 P2 点亮）。"""
-        from xskill.dashboard.explore import users_status
-        return users_status(db_path)
 
     @router.get("/api/v1/dashboard/skill/{name}/tree")
     def skill_tree(name: str) -> dict:
@@ -486,3 +462,40 @@ def _skillhub_path(hub, name: str) -> Path:
     if root is None:
         raise HTTPException(status_code=404, detail=f"skill not found: {name!r}")
     return root
+
+
+def _register_explorer_endpoints(router: APIRouter, db_path: Optional[Path],
+                                 skill_dir: Path) -> None:
+    """内容级敏感端点（轨迹原文/原子详情/用户连接状态）。只读公网实例
+    （expose_sensitive=False）不注册——物理 404，见 build_dashboard_router。"""
+
+    @router.get("/api/v1/dashboard/traj/{traj_id}")
+    def traj_detail(traj_id: str) -> dict:
+        from xskill.dashboard.explore import TrajExplorer
+        try:
+            return TrajExplorer(db_path, skill_dir).traj_detail(traj_id)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/traj/{traj_id}/atoms")
+    def traj_atoms(traj_id: str) -> dict:
+        from xskill.dashboard.explore import TrajExplorer
+        try:
+            return {"traj_id": traj_id,
+                    "atoms": TrajExplorer(db_path, skill_dir).traj_atoms(traj_id)}
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/traj/{traj_id}/atom/{atom_id}")
+    def atom_detail(traj_id: str, atom_id: str) -> dict:
+        from xskill.dashboard.explore import TrajExplorer
+        try:
+            return TrajExplorer(db_path, skill_dir).atom_detail(traj_id, atom_id)
+        except (KeyError, FileNotFoundError) as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/users/status")
+    def users_status_ep() -> dict:
+        """用户连接状态看板（图⑧，P1 读侧；版本列 P2 点亮）。"""
+        from xskill.dashboard.explore import users_status
+        return users_status(db_path)

@@ -87,6 +87,8 @@ class TrajExplorer:
             d.pop("raw_segment", None)
             d.pop("context_prefix", None)
             d["chain"] = "orphan" if a.atom_id in orphan_ids else "linked"
+            # 去向随列表返回，供 traj—atom—skill 关系图一次取数（图②右侧）
+            d["destinations"] = self._atom_destinations(a.atom_id)
             out.append(d)
         return out
 
