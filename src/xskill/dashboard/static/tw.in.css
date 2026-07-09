@@ -1,0 +1,4 @@
+/* Tailwind 构建入口（仅构建期使用）。见同目录 BUILD.md。 */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

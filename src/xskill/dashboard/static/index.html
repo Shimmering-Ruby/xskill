@@ -2,168 +2,228 @@
 <html lang="zh"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>xskill 控制台</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta20/dist/css/tabler.min.css">
+<!-- Tailwind 编译产物内联（构建方式见 BUILD.md；后端只服务 / 与 /app.js，无静态目录挂载，故不用 <link> 外部文件） -->
+<style id="twcss">*,:after,:before{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgba(59,130,246,.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }::backdrop{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgba(59,130,246,.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }
+/*! tailwindcss v3.4.19 | MIT License | https://tailwindcss.com*/*,:after,:before{box-sizing:border-box;border:0 solid #e5e7eb}:after,:before{--tw-content:""}:host,html{line-height:1.5;-webkit-text-size-adjust:100%;-moz-tab-size:4;-o-tab-size:4;tab-size:4;font-family:ui-sans-serif,system-ui,sans-serif,Apple Color Emoji,Segoe UI Emoji,Segoe UI Symbol,Noto Color Emoji;font-feature-settings:normal;font-variation-settings:normal;-webkit-tap-highlight-color:transparent}body{margin:0;line-height:inherit}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,pre,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,Courier New,monospace;font-feature-settings:normal;font-variation-settings:normal;font-size:1em}small{font-size:80%}sub,sup{font-size:75%;line-height:0;position:relative;vertical-align:baseline}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}button,input,optgroup,select,textarea{font-family:inherit;font-feature-settings:inherit;font-variation-settings:inherit;font-size:100%;font-weight:inherit;line-height:inherit;letter-spacing:inherit;color:inherit;margin:0;padding:0}button,select{text-transform:none}button,input:where([type=button]),input:where([type=reset]),input:where([type=submit]){-webkit-appearance:button;background-color:transparent;background-image:none}:-moz-focusring{outline:auto}:-moz-ui-invalid{box-shadow:none}progress{vertical-align:baseline}::-webkit-inner-spin-button,::-webkit-outer-spin-button{height:auto}[type=search]{-webkit-appearance:textfield;outline-offset:-2px}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-file-upload-button{-webkit-appearance:button;font:inherit}summary{display:list-item}blockquote,dd,dl,figure,h1,h2,h3,h4,h5,h6,hr,p,pre{margin:0}fieldset{margin:0}fieldset,legend{padding:0}menu,ol,ul{list-style:none;margin:0;padding:0}dialog{padding:0}textarea{resize:vertical}input::-moz-placeholder,textarea::-moz-placeholder{opacity:1;color:#9ca3af}input::placeholder,textarea::placeholder{opacity:1;color:#9ca3af}[role=button],button{cursor:pointer}:disabled{cursor:default}audio,canvas,embed,iframe,img,object,svg,video{display:block;vertical-align:middle}img,video{max-width:100%;height:auto}[hidden]:where(:not([hidden=until-found])){display:none}.absolute{position:absolute}.relative{position:relative}.sticky{position:sticky}.left-6{left:1.5rem}.right-6{right:1.5rem}.top-0{top:0}.top-\[17px\]{top:17px}.z-10{z-index:10}.col-span-12{grid-column:span 12/span 12}.-mx-2{margin-left:-.5rem;margin-right:-.5rem}.mx-1{margin-left:.25rem;margin-right:.25rem}.mb-1{margin-bottom:.25rem}.mb-1\.5{margin-bottom:.375rem}.mb-2{margin-bottom:.5rem}.mb-4{margin-bottom:1rem}.ml-1{margin-left:.25rem}.ml-2{margin-left:.5rem}.mr-2{margin-right:.5rem}.mt-0\.5{margin-top:.125rem}.mt-1{margin-top:.25rem}.mt-1\.5{margin-top:.375rem}.mt-2{margin-top:.5rem}.mt-2\.5{margin-top:.625rem}.mt-3{margin-top:.75rem}.mt-4{margin-top:1rem}.mt-5{margin-top:1.25rem}.mt-6{margin-top:1.5rem}.mt-auto{margin-top:auto}.line-clamp-2{overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}.block{display:block}.inline-block{display:inline-block}.flex{display:flex}.inline-flex{display:inline-flex}.table{display:table}.grid{display:grid}.h-0\.5{height:.125rem}.h-1\.5{height:.375rem}.h-12{height:3rem}.h-2{height:.5rem}.h-2\.5{height:.625rem}.h-5{height:1.25rem}.h-6{height:1.5rem}.h-8{height:2rem}.h-9{height:2.25rem}.h-full{height:100%}.h-screen{height:100vh}.max-h-36{max-height:9rem}.max-h-44{max-height:11rem}.max-h-72{max-height:18rem}.max-h-80{max-height:20rem}.min-h-screen{min-height:100vh}.w-1\.5{width:.375rem}.w-10{width:2.5rem}.w-16{width:4rem}.w-2{width:.5rem}.w-2\.5{width:.625rem}.w-20{width:5rem}.w-24{width:6rem}.w-36{width:9rem}.w-4{width:1rem}.w-5{width:1.25rem}.w-52{width:13rem}.w-6{width:1.5rem}.w-8{width:2rem}.w-9{width:2.25rem}.w-full{width:100%}.min-w-0{min-width:0}.min-w-\[60px\]{min-width:60px}.min-w-\[92px\]{min-width:92px}.min-w-max{min-width:-moz-max-content;min-width:max-content}.max-w-\[200px\]{max-width:200px}.max-w-\[280px\]{max-width:280px}.max-w-\[480px\]{max-width:480px}.flex-1{flex:1 1 0%}.shrink-0{flex-shrink:0}.transform{transform:translate(var(--tw-translate-x),var(--tw-translate-y)) rotate(var(--tw-rotate)) skewX(var(--tw-skew-x)) skewY(var(--tw-skew-y)) scaleX(var(--tw-scale-x)) scaleY(var(--tw-scale-y))}@keyframes pulse{50%{opacity:.5}}.animate-pulse{animation:pulse 2s cubic-bezier(.4,0,.6,1) infinite}.cursor-not-allowed{cursor:not-allowed}.cursor-pointer{cursor:pointer}.grid-cols-1{grid-template-columns:repeat(1,minmax(0,1fr))}.grid-cols-12{grid-template-columns:repeat(12,minmax(0,1fr))}.grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.flex-col{flex-direction:column}.flex-wrap{flex-wrap:wrap}.items-start{align-items:flex-start}.items-center{align-items:center}.items-baseline{align-items:baseline}.items-stretch{align-items:stretch}.justify-end{justify-content:flex-end}.justify-center{justify-content:center}.justify-between{justify-content:space-between}.gap-1{gap:.25rem}.gap-1\.5{gap:.375rem}.gap-2{gap:.5rem}.gap-2\.5{gap:.625rem}.gap-3{gap:.75rem}.gap-4{gap:1rem}.gap-5{gap:1.25rem}.space-y-0\.5>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(.125rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(.125rem*var(--tw-space-y-reverse))}.space-y-2\.5>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(.625rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(.625rem*var(--tw-space-y-reverse))}.space-y-3>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(.75rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(.75rem*var(--tw-space-y-reverse))}.space-y-4>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(1rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(1rem*var(--tw-space-y-reverse))}.divide-y>:not([hidden])~:not([hidden]){--tw-divide-y-reverse:0;border-top-width:calc(1px*(1 - var(--tw-divide-y-reverse)));border-bottom-width:calc(1px*var(--tw-divide-y-reverse))}.divide-slate-100>:not([hidden])~:not([hidden]){--tw-divide-opacity:1;border-color:rgb(241 245 249/var(--tw-divide-opacity,1))}.divide-slate-50>:not([hidden])~:not([hidden]){--tw-divide-opacity:1;border-color:rgb(248 250 252/var(--tw-divide-opacity,1))}.self-center{align-self:center}.overflow-auto{overflow:auto}.overflow-hidden{overflow:hidden}.overflow-x-auto{overflow-x:auto}.overflow-y-auto{overflow-y:auto}.truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.whitespace-pre-wrap{white-space:pre-wrap}.break-all{word-break:break-all}.rounded{border-radius:.25rem}.rounded-2xl{border-radius:1rem}.rounded-full{border-radius:9999px}.rounded-lg{border-radius:.5rem}.rounded-md{border-radius:.375rem}.rounded-xl{border-radius:.75rem}.border-b{border-bottom-width:1px}.border-r{border-right-width:1px}.border-t{border-top-width:1px}.border-slate-100{--tw-border-opacity:1;border-color:rgb(241 245 249/var(--tw-border-opacity,1))}.border-slate-200{--tw-border-opacity:1;border-color:rgb(226 232 240/var(--tw-border-opacity,1))}.bg-amber-100{--tw-bg-opacity:1;background-color:rgb(254 243 199/var(--tw-bg-opacity,1))}.bg-amber-400{--tw-bg-opacity:1;background-color:rgb(251 191 36/var(--tw-bg-opacity,1))}.bg-amber-50{--tw-bg-opacity:1;background-color:rgb(255 251 235/var(--tw-bg-opacity,1))}.bg-amber-50\/60{background-color:rgba(255,251,235,.6)}.bg-amber-50\/70{background-color:rgba(255,251,235,.7)}.bg-blue-600{--tw-bg-opacity:1;background-color:rgb(37 99 235/var(--tw-bg-opacity,1))}.bg-emerald-100{--tw-bg-opacity:1;background-color:rgb(209 250 229/var(--tw-bg-opacity,1))}.bg-emerald-50{--tw-bg-opacity:1;background-color:rgb(236 253 245/var(--tw-bg-opacity,1))}.bg-emerald-500{--tw-bg-opacity:1;background-color:rgb(16 185 129/var(--tw-bg-opacity,1))}.bg-indigo-100{--tw-bg-opacity:1;background-color:rgb(224 231 255/var(--tw-bg-opacity,1))}.bg-rose-100{--tw-bg-opacity:1;background-color:rgb(255 228 230/var(--tw-bg-opacity,1))}.bg-rose-50{--tw-bg-opacity:1;background-color:rgb(255 241 242/var(--tw-bg-opacity,1))}.bg-rose-50\/50{background-color:rgba(255,241,242,.5)}.bg-rose-500{--tw-bg-opacity:1;background-color:rgb(244 63 94/var(--tw-bg-opacity,1))}.bg-sky-100{--tw-bg-opacity:1;background-color:rgb(224 242 254/var(--tw-bg-opacity,1))}.bg-sky-50{--tw-bg-opacity:1;background-color:rgb(240 249 255/var(--tw-bg-opacity,1))}.bg-slate-100{--tw-bg-opacity:1;background-color:rgb(241 245 249/var(--tw-bg-opacity,1))}.bg-slate-200{--tw-bg-opacity:1;background-color:rgb(226 232 240/var(--tw-bg-opacity,1))}.bg-slate-300{--tw-bg-opacity:1;background-color:rgb(203 213 225/var(--tw-bg-opacity,1))}.bg-slate-50{--tw-bg-opacity:1;background-color:rgb(248 250 252/var(--tw-bg-opacity,1))}.bg-slate-900{--tw-bg-opacity:1;background-color:rgb(15 23 42/var(--tw-bg-opacity,1))}.bg-teal-50{--tw-bg-opacity:1;background-color:rgb(240 253 250/var(--tw-bg-opacity,1))}.bg-teal-50\/40{background-color:rgba(240,253,250,.4)}.bg-teal-50\/50{background-color:rgba(240,253,250,.5)}.bg-teal-500{--tw-bg-opacity:1;background-color:rgb(20 184 166/var(--tw-bg-opacity,1))}.bg-teal-600{--tw-bg-opacity:1;background-color:rgb(13 148 136/var(--tw-bg-opacity,1))}.bg-violet-100{--tw-bg-opacity:1;background-color:rgb(237 233 254/var(--tw-bg-opacity,1))}.bg-white{--tw-bg-opacity:1;background-color:rgb(255 255 255/var(--tw-bg-opacity,1))}.bg-gradient-to-br{background-image:linear-gradient(to bottom right,var(--tw-gradient-stops))}.from-teal-500{--tw-gradient-from:#14b8a6 var(--tw-gradient-from-position);--tw-gradient-to:rgba(20,184,166,0) var(--tw-gradient-to-position);--tw-gradient-stops:var(--tw-gradient-from),var(--tw-gradient-to)}.to-cyan-700{--tw-gradient-to:#0e7490 var(--tw-gradient-to-position)}.p-3{padding:.75rem}.p-4{padding:1rem}.p-5{padding:1.25rem}.p-6{padding:1.5rem}.p-7{padding:1.75rem}.px-1\.5{padding-left:.375rem;padding-right:.375rem}.px-2{padding-left:.5rem;padding-right:.5rem}.px-2\.5{padding-left:.625rem;padding-right:.625rem}.px-3{padding-left:.75rem;padding-right:.75rem}.px-3\.5{padding-left:.875rem;padding-right:.875rem}.px-4{padding-left:1rem;padding-right:1rem}.px-5{padding-left:1.25rem;padding-right:1.25rem}.py-0\.5{padding-top:.125rem;padding-bottom:.125rem}.py-1{padding-top:.25rem;padding-bottom:.25rem}.py-2{padding-top:.5rem;padding-bottom:.5rem}.py-2\.5{padding-top:.625rem;padding-bottom:.625rem}.py-3{padding-top:.75rem;padding-bottom:.75rem}.py-4{padding-top:1rem;padding-bottom:1rem}.pb-2{padding-bottom:.5rem}.pb-4{padding-bottom:1rem}.pl-4{padding-left:1rem}.pl-6{padding-left:1.5rem}.pt-3{padding-top:.75rem}.pt-5{padding-top:1.25rem}.text-left{text-align:left}.text-center{text-align:center}.text-right{text-align:right}.font-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,Courier New,monospace}.text-\[10\.5px\]{font-size:10.5px}.text-\[10px\]{font-size:10px}.text-\[11\.5px\]{font-size:11.5px}.text-\[11px\]{font-size:11px}.text-\[12\.5px\]{font-size:12.5px}.text-\[13px\]{font-size:13px}.text-\[15px\]{font-size:15px}.text-\[26px\]{font-size:26px}.text-\[9px\]{font-size:9px}.text-base{font-size:1rem;line-height:1.5rem}.text-lg{font-size:1.125rem;line-height:1.75rem}.text-sm{font-size:.875rem;line-height:1.25rem}.text-xl{font-size:1.25rem;line-height:1.75rem}.text-xs{font-size:.75rem;line-height:1rem}.font-bold{font-weight:700}.font-medium{font-weight:500}.font-normal{font-weight:400}.font-semibold{font-weight:600}.tabular-nums{--tw-numeric-spacing:tabular-nums;font-variant-numeric:var(--tw-ordinal) var(--tw-slashed-zero) var(--tw-numeric-figure) var(--tw-numeric-spacing) var(--tw-numeric-fraction)}.leading-4{line-height:1rem}.leading-\[2\.4\]{line-height:2.4}.leading-normal{line-height:1.5}.leading-relaxed{line-height:1.625}.tracking-tight{letter-spacing:-.025em}.text-amber-600{--tw-text-opacity:1;color:rgb(217 119 6/var(--tw-text-opacity,1))}.text-amber-700{--tw-text-opacity:1;color:rgb(180 83 9/var(--tw-text-opacity,1))}.text-emerald-600{--tw-text-opacity:1;color:rgb(5 150 105/var(--tw-text-opacity,1))}.text-emerald-700{--tw-text-opacity:1;color:rgb(4 120 87/var(--tw-text-opacity,1))}.text-emerald-800{--tw-text-opacity:1;color:rgb(6 95 70/var(--tw-text-opacity,1))}.text-indigo-700{--tw-text-opacity:1;color:rgb(67 56 202/var(--tw-text-opacity,1))}.text-rose-400{--tw-text-opacity:1;color:rgb(251 113 133/var(--tw-text-opacity,1))}.text-rose-600{--tw-text-opacity:1;color:rgb(225 29 72/var(--tw-text-opacity,1))}.text-rose-700{--tw-text-opacity:1;color:rgb(190 18 60/var(--tw-text-opacity,1))}.text-rose-800{--tw-text-opacity:1;color:rgb(159 18 57/var(--tw-text-opacity,1))}.text-sky-700{--tw-text-opacity:1;color:rgb(3 105 161/var(--tw-text-opacity,1))}.text-slate-300{--tw-text-opacity:1;color:rgb(203 213 225/var(--tw-text-opacity,1))}.text-slate-400{--tw-text-opacity:1;color:rgb(148 163 184/var(--tw-text-opacity,1))}.text-slate-500{--tw-text-opacity:1;color:rgb(100 116 139/var(--tw-text-opacity,1))}.text-slate-600{--tw-text-opacity:1;color:rgb(71 85 105/var(--tw-text-opacity,1))}.text-slate-700{--tw-text-opacity:1;color:rgb(51 65 85/var(--tw-text-opacity,1))}.text-slate-800{--tw-text-opacity:1;color:rgb(30 41 59/var(--tw-text-opacity,1))}.text-slate-900{--tw-text-opacity:1;color:rgb(15 23 42/var(--tw-text-opacity,1))}.text-teal-600{--tw-text-opacity:1;color:rgb(13 148 136/var(--tw-text-opacity,1))}.text-teal-700{--tw-text-opacity:1;color:rgb(15 118 110/var(--tw-text-opacity,1))}.text-teal-800{--tw-text-opacity:1;color:rgb(17 94 89/var(--tw-text-opacity,1))}.text-violet-600{--tw-text-opacity:1;color:rgb(124 58 237/var(--tw-text-opacity,1))}.text-violet-700{--tw-text-opacity:1;color:rgb(109 40 217/var(--tw-text-opacity,1))}.text-white{--tw-text-opacity:1;color:rgb(255 255 255/var(--tw-text-opacity,1))}.underline{text-decoration-line:underline}.decoration-teal-200{text-decoration-color:#99f6e4}.underline-offset-2{text-underline-offset:2px}.opacity-60{opacity:.6}.outline-none{outline:2px solid transparent;outline-offset:2px}.ring-1{--tw-ring-offset-shadow:var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);--tw-ring-shadow:var(--tw-ring-inset) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color)}.ring-1,.ring-2{box-shadow:var(--tw-ring-offset-shadow),var(--tw-ring-shadow),var(--tw-shadow,0 0 #0000)}.ring-2{--tw-ring-offset-shadow:var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);--tw-ring-shadow:var(--tw-ring-inset) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color)}.ring-4{--tw-ring-offset-shadow:var(--tw-ring-inset) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color);--tw-ring-shadow:var(--tw-ring-inset) 0 0 0 calc(4px + var(--tw-ring-offset-width)) var(--tw-ring-color);box-shadow:var(--tw-ring-offset-shadow),var(--tw-ring-shadow),var(--tw-shadow,0 0 #0000)}.ring-amber-100{--tw-ring-opacity:1;--tw-ring-color:rgb(254 243 199/var(--tw-ring-opacity,1))}.ring-amber-200{--tw-ring-opacity:1;--tw-ring-color:rgb(253 230 138/var(--tw-ring-opacity,1))}.ring-emerald-200{--tw-ring-opacity:1;--tw-ring-color:rgb(167 243 208/var(--tw-ring-opacity,1))}.ring-rose-200{--tw-ring-opacity:1;--tw-ring-color:rgb(254 205 211/var(--tw-ring-opacity,1))}.ring-sky-200{--tw-ring-opacity:1;--tw-ring-color:rgb(186 230 253/var(--tw-ring-opacity,1))}.ring-slate-100{--tw-ring-opacity:1;--tw-ring-color:rgb(241 245 249/var(--tw-ring-opacity,1))}.ring-slate-200{--tw-ring-opacity:1;--tw-ring-color:rgb(226 232 240/var(--tw-ring-opacity,1))}.ring-slate-300{--tw-ring-opacity:1;--tw-ring-color:rgb(203 213 225/var(--tw-ring-opacity,1))}.ring-teal-100{--tw-ring-opacity:1;--tw-ring-color:rgb(204 251 241/var(--tw-ring-opacity,1))}.ring-teal-200{--tw-ring-opacity:1;--tw-ring-color:rgb(153 246 228/var(--tw-ring-opacity,1))}.filter{filter:var(--tw-blur) var(--tw-brightness) var(--tw-contrast) var(--tw-grayscale) var(--tw-hue-rotate) var(--tw-invert) var(--tw-saturate) var(--tw-sepia) var(--tw-drop-shadow)}.hover\:bg-slate-50:hover{--tw-bg-opacity:1;background-color:rgb(248 250 252/var(--tw-bg-opacity,1))}.hover\:bg-teal-700:hover{--tw-bg-opacity:1;background-color:rgb(15 118 110/var(--tw-bg-opacity,1))}.focus\:ring-teal-500:focus{--tw-ring-opacity:1;--tw-ring-color:rgb(20 184 166/var(--tw-ring-opacity,1))}@media (min-width:768px){.md\:col-span-4{grid-column:span 4/span 4}.md\:col-span-5{grid-column:span 5/span 5}.md\:col-span-7{grid-column:span 7/span 7}.md\:col-span-8{grid-column:span 8/span 8}.md\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.md\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.md\:grid-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}}@media (min-width:1024px){.lg\:col-span-5{grid-column:span 5/span 5}.lg\:col-span-7{grid-column:span 7/span 7}}@media (min-width:1280px){.xl\:col-span-5{grid-column:span 5/span 5}.xl\:col-span-7{grid-column:span 7/span 7}.xl\:grid-cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}}</style>
 <style>
-  :root{--tblr-primary:#1C7A8C;--tblr-primary-rgb:28,122,140;}
-  body{background:radial-gradient(900px 300px at 90% -120px,#FFE79A55,transparent 60%),#F6F1E7;color:#3a2d20}
-  .navbar-vertical{background:linear-gradient(180deg,#1C7A8C,#155f6e)!important}
-  .card{border:1px solid #E6D3AC;background:#FFFDF7;border-radius:14px}
-  .card-sm .h1,.kpi{color:#1C7A8C}
-  .subheader{color:#9a7c4e}.page-pretitle{color:#9a7c4e!important}
-  .nav-link.active{background:rgba(255,255,255,.14)!important;border-radius:8px}
-  header.navbar{background:#FFFDF7!important;border-bottom:1px solid #E6D3AC}
-  header .form-control{background:#FFF8EA;border-color:#E6D3AC}
-  .hero-accent{height:5px;border-radius:14px 14px 0 0;background:linear-gradient(90deg,#2A9DB0,#FFCB3D,#E2725B)}
-  .mini{font-size:12px;color:#9a7c4e}.sec-page{display:none}.sec-page.on{display:block}
-  .hint{cursor:help;color:#1C7A8C;font-size:11px;opacity:.85}.hint:hover{opacity:1}
-  #users-body tr[data-uid]{cursor:pointer}
-  .tagchip{transition:opacity .12s}.tagchip.dim{opacity:.18}.tagchip.hot{outline:2px solid #1C7A8C;outline-offset:1px}
+  body{font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
+  .sec-page{display:none}.sec-page.on{display:block}
+  .hint{cursor:help}
+  .tagchip{transition:opacity .12s}.tagchip.dim{opacity:.18}.tagchip.hot{outline:2px solid #0d9488;outline-offset:1px}
 </style></head>
-<body>
-<div class="page">
-  <aside class="navbar navbar-vertical navbar-expand-lg" data-bs-theme="dark"><div class="container-fluid">
-    <div class="navbar-brand px-0 fs-2 fw-bold text-white">🐚 xskill <span class="badge bg-yellow text-dark ms-1" style="font-size:10px">控制台</span></div>
-    <div class="collapse navbar-collapse"><ul class="navbar-nav pt-2" id="nav">
-      <li class="nav-item"><a class="nav-link text-white" data-pg="overview" href="#">📊 总览</a></li>
-      <li class="nav-item"><a class="nav-link text-white-50" data-pg="cost" href="#">💰 成本 & 用量</a></li>
-      <li class="nav-item"><a class="nav-link text-white-50" data-pg="profile" href="#">🏄 用户 & 画像</a></li>
-      <li class="nav-item"><a class="nav-link text-white-50" data-pg="skills" href="#">🐚 技能库</a></li>
-      <li class="nav-item"><a class="nav-link text-white-50" data-pg="canary" href="#">🧪 灰度 Canary</a></li>
-      <li class="nav-item"><a class="nav-link text-white-50" data-pg="eco" href="#">🏝 生态目录</a></li>
-    </ul></div>
-  </div></aside>
+<body class="bg-slate-100 text-slate-900 text-[13px] leading-normal">
+<div class="flex min-h-screen">
 
-  <div class="page-wrapper">
-    <header class="navbar navbar-expand-md d-print-none"><div class="container-xl">
-      <div class="col"><div class="input-icon"><span class="input-icon-addon">🔍</span>
-        <input type="text" class="form-control" placeholder="搜索…"></div></div>
-      <div class="navbar-nav flex-row ms-3"><span class="badge bg-teal-lt me-2 my-auto" data-m="role">—</span>
-        <span class="text-secondary small my-auto">🖥 本机实时</span></div>
-    </div></header>
+  <!-- 侧栏 -->
+  <aside class="w-52 shrink-0 bg-white border-r border-slate-200 flex flex-col sticky top-0 h-screen">
+    <div class="px-5 pt-5 pb-4 flex items-center gap-2.5">
+      <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-teal-500 to-cyan-700 flex items-center justify-center text-white font-bold text-base">x</div>
+      <div><div class="font-bold text-[15px] leading-4 text-slate-900">xskill</div><div class="text-[10.5px] text-slate-400 mt-0.5">控制台</div></div>
+    </div>
+    <nav class="px-3 space-y-0.5 mt-1 text-[13px]" id="nav">
+      <a href="#overview" data-pg="overview" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="5.4" height="5.4" rx="1.5"/><rect x="9.1" y="1.5" width="5.4" height="5.4" rx="1.5"/><rect x="1.5" y="9.1" width="5.4" height="5.4" rx="1.5"/><rect x="9.1" y="9.1" width="5.4" height="5.4" rx="1.5"/></svg>总览</a>
+      <a href="#skills" data-pg="skills" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7l-5.5 3-5.5-3v-7l5.5-3z"/><path d="M2.5 4.5L8 7.5l5.5-3M8 7.5v7"/></svg>技能库</a>
+      <a href="#traj" data-pg="traj" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h9M2 8h12M2 12h7"/><circle cx="13.5" cy="4" r="1.4" fill="currentColor" stroke="none"/></svg>轨迹 &amp; 原子</a>
+      <a href="#users" data-pg="users" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5.5" cy="5" r="2.4"/><circle cx="11.5" cy="6" r="1.9"/><path d="M1.5 13.5c0-2.4 1.8-4 4-4s4 1.6 4 4M10 13.5c0-1.9 1.3-3.2 3-3.2s3 1.3 3 3.2" transform="scale(0.92)"/></svg>用户 &amp; 画像</a>
+      <a href="#canary" data-pg="canary" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 1.5h4M7 1.5v4.2L3 12a2 2 0 001.8 3h6.4A2 2 0 0013 12L9 5.7V1.5"/><path d="M4.5 10.5h7"/></svg>灰度 Canary</a>
+      <span class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-300 cursor-not-allowed" title="P2 规划中，暂未开放"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5.2" r="2.7"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/></svg>我的</span>
+      <span class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-300 cursor-not-allowed" title="P2 规划中，暂未开放"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 2v3.6c0 3.6-2.3 6-5.5 7.4-3.2-1.4-5.5-3.8-5.5-7.4V3.5l5.5-2z"/></svg>管理</span>
+      <span class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-300 cursor-not-allowed" title="P3 规划中，暂未开放"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2M3.8 3.8l1.5 1.5M10.7 10.7l1.5 1.5M12.2 3.8l-1.5 1.5M5.3 10.7l-1.5 1.5"/></svg>设置</span>
+    </nav>
+    <div class="mt-auto px-4 py-4 border-t border-slate-100 text-[10.5px] text-slate-400">只读控制台 · 本机实时</div>
+  </aside>
 
-    <div class="page-header"><div class="container-xl"><div class="row align-items-center">
-      <div class="col"><div class="page-pretitle">xskill 控制台 🏖</div><h2 class="page-title" id="pgname">总览</h2></div>
-    </div></div></div>
+  <!-- 主区 -->
+  <main class="flex-1 p-7 min-w-0">
+    <div class="flex items-baseline justify-between mb-4">
+      <h1 class="text-xl font-bold tracking-tight" id="pgname">总览</h1>
+      <span class="text-[11px] text-slate-400">指标口径见 docs/dashboard-metrics.md（卡片 ⓘ 同源）</span>
+    </div>
 
-    <div class="page-body"><div class="container-xl">
-
-    <!-- 总览 -->
+    <!-- ══ 总览 ══ -->
     <div class="sec-page on" id="pg-overview">
-      <div class="row row-deck row-cards">
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">轨迹总数 🌊 <span class="hint" data-bs-toggle="tooltip" title="已入库的对话轨迹文件总数（每条来自一次 coding agent 会话）。">ⓘ</span></div><div class="h1 mb-0" data-m="overview.trajs">—</div></div></div></div>
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">原子总数 ⚛ <span class="hint" data-bs-toggle="tooltip" title="从所有轨迹按用户意图切出的 AtomTask 总数——可被独立检索、提炼成 skill 的最小单元。">ⓘ</span></div><div class="h1 mb-0" data-m="overview.atoms">—</div></div></div></div>
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">今日成本 💰 <span class="hint" data-bs-toggle="tooltip" title="今天 xskill 处理轨迹（拆分/聚类/打分等）调用 LLM 的累计成本（USD）。">ⓘ</span></div><div class="h1 mb-0" data-m="cost.today">—</div></div></div></div>
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="hero-accent"></div><div class="card-body"><div class="subheader">平均 ux 🏄 <span class="hint" data-bs-toggle="tooltip" title="所有轨迹的平均用户体验分（1–10，质量驱动评分）。越高代表 agent 更常一步到位。">ⓘ</span></div><div class="h1 mb-0" data-m="overview.avg_ux">—</div></div></div></div>
-      </div>
-
-      <div class="row row-cards mt-1"><div class="col-12"><div class="card"><div class="card-header"><h3 class="card-title">📐 关键指标</h3></div>
-        <div class="card-body"><div class="row g-3 text-center">
-          <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="overview.avg_atoms_per_traj">—</div><div class="mini">单轨迹均原子 <span class="hint" data-bs-toggle="tooltip" title="原子总数 ÷ 轨迹总数。一条轨迹平均切出几个完整用户意图。">ⓘ</span></div></div>
-          <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="overview.success_rate">—</div><div class="mini">处理成功率 <span class="hint" data-bs-toggle="tooltip" title="处理到 done 的轨迹占比 = done 轨迹数 ÷ 轨迹总数。">ⓘ</span></div></div>
-          <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="overview.retry_rate">—</div><div class="mini">重试率 <span class="hint" data-bs-toggle="tooltip" title="处理过程中发生过重试的轨迹占比。偏高提示流水线某阶段不稳定。">ⓘ</span></div></div>
-          <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="rates.trigger">—</div><div class="mini">推荐触发率 <span class="hint" data-bs-toggle="tooltip" title="被推荐给用户的 skill 中、随后被实际采用的占比（skill 粗粒度近似）。">ⓘ</span></div></div>
-          <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="rates.adoption">—</div><div class="mini">原子采纳率 <span class="hint" data-bs-toggle="tooltip" title="拆出的原子中、被聚合进某个 skill 的比例 = 采纳原子数 ÷ 原子总数。">ⓘ</span></div></div>
-          <div class="col-6 col-md-3"><div class="kpi h2 mb-0" data-m="rates.promotion">—</div><div class="mini">canary 晋升率 <span class="hint" data-bs-toggle="tooltip" title="灰度候选裁决中晋升为正式版的比例 = 晋升数 ÷ 已裁决数（晋升+拒绝+超时丢弃）。">ⓘ</span></div></div>
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
+        <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
+          <div class="text-[11px] text-slate-400 font-medium">轨迹 <span class="hint" title="registry 中已入库的轨迹行数。">ⓘ</span></div>
+          <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.trajs">—</div>
         </div>
-        </div></div></div></div>
+        <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
+          <div class="text-[11px] text-slate-400 font-medium">原子 <span class="hint" title="所有轨迹拆出的 AtomTask 总数。">ⓘ</span></div>
+          <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.atoms">—</div>
+          <div class="mt-0.5 text-[11px] text-slate-500">单轨迹均 <span class="tabular-nums" data-m="overview.avg_atoms_per_traj">—</span> <span class="hint" title="原子总数 ÷ 轨迹总数。">ⓘ</span></div>
+        </div>
+        <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
+          <div class="text-[11px] text-slate-400 font-medium">平均 ux <span class="hint" title="所有轨迹的平均用户体验分（1–10）。">ⓘ</span></div>
+          <div class="mt-1 flex items-baseline gap-1"><span class="text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.avg_ux">—</span><span class="text-xs text-slate-400">/10</span></div>
+          <div class="mt-0.5 text-[11px] text-slate-500" data-m="overview.ux_n"></div>
+        </div>
+        <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
+          <div class="text-[11px] text-slate-400 font-medium">处理成功率 <span class="hint" title="处理到 done 的轨迹占比。终态口径：done ÷ (done+error+filtered)，在途轨迹不进分母。">ⓘ</span></div>
+          <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.success_rate">—</div>
+          <div class="mt-0.5 text-[11px] text-slate-500" data-m="overview.filtered"></div>
+        </div>
+        <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
+          <div class="text-[11px] text-slate-400 font-medium">重试率 <span class="hint" title="处理中发生过重试的轨迹占比。">ⓘ</span></div>
+          <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.retry_rate">—</div>
+        </div>
+      </div>
 
-      <div class="row row-cards mt-1">
-        <div class="col-lg-6"><div class="card"><div class="card-header"><h3 class="card-title">🔬 按生态对比</h3></div>
-          <div class="table-responsive"><table class="table card-table table-vcenter">
-            <thead><tr><th>生态</th><th class="text-end">轨迹</th><th class="text-end">原子</th><th class="text-end">均原子</th></tr></thead>
-            <tbody id="eco-body"><tr><td colspan="5" class="text-secondary">加载中…</td></tr></tbody></table></div></div></div>
-        <div class="col-lg-6"><div class="card"><div class="card-header"><h3 class="card-title">🔬 按用户模型对比</h3></div>
-          <div class="table-responsive"><table class="table card-table table-vcenter">
-            <thead><tr><th>模型</th><th class="text-end">轨迹</th><th class="text-end">原子</th><th class="text-end">均原子</th></tr></thead>
-            <tbody id="model-body"><tr><td colspan="5" class="text-secondary">加载中…</td></tr></tbody></table></div></div></div>
+      <div class="grid grid-cols-12 gap-4 mt-4">
+        <div class="col-span-12 xl:col-span-7 bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+          <h2 class="font-semibold text-sm">蒸馏管线 <span class="font-normal text-[11px] text-slate-400 ml-2">轨迹状态实时计数</span></h2>
+          <div id="pipe-stages" class="mt-4 flex items-stretch gap-2 overflow-x-auto"><span class="text-slate-400">加载中…</span></div>
+          <div id="pipe-cold"></div>
+          <div id="pipe-cands" class="mt-4"></div>
+        </div>
+        <div class="col-span-12 xl:col-span-5 space-y-4">
+          <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+            <h2 class="font-semibold text-sm">关键比率</h2>
+            <div class="mt-3 grid grid-cols-3 gap-3 text-center">
+              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.trigger">—</div><div class="text-[11px] text-slate-400 mt-0.5">推荐触发率 <span class="hint" title="被推荐给用户的 skill 中、随后被实际采用的占比。">ⓘ</span></div></div>
+              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.adoption">—</div><div class="text-[11px] text-slate-400 mt-0.5">原子采纳率 <span class="hint" title="拆出的原子中被聚合进某个 skill 的比例。">ⓘ</span></div></div>
+              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.promotion">—</div><div class="text-[11px] text-slate-400 mt-0.5">canary 晋升率 <span class="hint" title="灰度候选裁决中晋升为正式版的比例 = 晋升 ÷ 已裁决（晋升+拒绝+超时丢弃）。">ⓘ</span></div></div>
+            </div>
+          </div>
+          <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+            <h2 class="font-semibold text-sm">生态分布 <span class="font-normal text-[11px] text-slate-400 ml-1">按轨迹来源</span></h2>
+            <div id="eco-bars" class="mt-3 space-y-2.5"><span class="text-slate-400">加载中…</span></div>
+          </div>
+          <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+            <h2 class="font-semibold text-sm">用户模型分布</h2>
+            <div id="model-bars" class="mt-3 space-y-2.5"><span class="text-slate-400">加载中…</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
+        <div class="flex items-baseline justify-between">
+          <h2 class="font-semibold text-sm">成本 &amp; 用量 <span class="font-normal text-[11px] text-slate-400 ml-2">流水线 LLM/embedding 调用</span></h2>
+          <div class="flex gap-5 text-[11px] text-slate-500">
+            <span>今日 <b class="text-slate-800 tabular-nums" data-m="cost.today">—</b></span>
+            <span>累计 <b class="text-slate-800 tabular-nums" data-m="cost.total">—</b></span>
+            <span>tokens <b class="text-slate-800 tabular-nums" data-m="cost.tokens">—</b></span>
+            <span>calls <b class="text-slate-800 tabular-nums" data-m="cost.calls">—</b></span>
+          </div>
+        </div>
+        <div id="price-warn"></div>
+        <div class="grid grid-cols-12 gap-4 mt-3">
+          <div class="col-span-12 md:col-span-7 overflow-x-auto">
+            <table class="w-full text-[12.5px]">
+              <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100"><th class="text-left font-medium py-2">模型</th><th class="text-right font-medium">tokens</th><th class="text-right font-medium">calls</th><th class="text-right font-medium">成本</th></tr></thead>
+              <tbody id="cost-model-body" class="divide-y divide-slate-50"><tr><td colspan="4" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
+          </div>
+          <div class="col-span-12 md:col-span-5 overflow-x-auto">
+            <table class="w-full text-[12.5px]">
+              <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100"><th class="text-left font-medium py-2">步骤</th><th class="text-right font-medium">tokens</th><th class="text-right font-medium">成本</th></tr></thead>
+              <tbody id="cost-step-body" class="divide-y divide-slate-50"><tr><td colspan="3" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- 成本 & 用量 -->
-    <div class="sec-page" id="pg-cost">
-      <div class="row row-deck row-cards">
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="card-body"><div class="subheader">今日</div><div class="h1 mb-0" data-m="cost.today2">—</div></div></div></div>
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="card-body"><div class="subheader">累计</div><div class="h1 mb-0" data-m="cost.total">—</div></div></div></div>
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="card-body"><div class="subheader">tokens</div><div class="h1 mb-0" data-m="cost.tokens">—</div></div></div></div>
-        <div class="col-6 col-lg"><div class="card card-sm"><div class="card-body"><div class="subheader">calls</div><div class="h1 mb-0" data-m="cost.calls">—</div></div></div></div>
-      </div>
-      <div class="row row-cards mt-1">
-        <div class="col-lg-7"><div class="card"><div class="card-header"><h3 class="card-title">💰 按模型</h3></div>
-          <div class="table-responsive"><table class="table card-table table-vcenter">
-            <thead><tr><th>模型</th><th class="text-end">tokens</th><th class="text-end">calls</th><th class="text-end">成本</th></tr></thead>
-            <tbody id="cost-model-body"><tr><td colspan="4" class="text-secondary">加载中…</td></tr></tbody></table></div>
-          <div class="card-body py-2" id="price-warn"></div></div></div>
-        <div class="col-lg-5"><div class="card"><div class="card-header"><h3 class="card-title">按步骤</h3></div>
-          <div class="table-responsive"><table class="table card-table table-vcenter">
-            <thead><tr><th>步骤</th><th class="text-end">tokens</th><th class="text-end">成本</th></tr></thead>
-            <tbody id="cost-step-body"><tr><td colspan="3" class="text-secondary">加载中…</td></tr></tbody></table></div></div></div>
-      </div>
-    </div>
-
-    <!-- 用户 & 画像 -->
-    <div class="sec-page" id="pg-profile">
-      <div class="row row-cards">
-        <div class="col-lg-6"><div class="card"><div class="card-header"><h3 class="card-title">🧑‍💻 用户 coding agent 占比 <span class="hint" data-bs-toggle="tooltip" title="按轨迹来源统计每个 coding agent（harness，如 claude_code / codex / opencode）的占比。">ⓘ</span></h3></div>
-          <div class="table-responsive"><table class="table card-table table-vcenter">
-            <thead><tr><th>coding agent</th><th class="text-end">轨迹</th><th class="text-end">占比</th></tr></thead>
-            <tbody id="profile-harness-body"><tr><td colspan="3" class="text-secondary">加载中…</td></tr></tbody></table></div></div></div>
-        <div class="col-lg-6"><div class="card"><div class="card-header"><h3 class="card-title">🏄 用户模型占比 <span class="hint" data-bs-toggle="tooltip" title="按轨迹来源统计每个用户 agent 模型（如 claude-opus / deepseek-v4）的占比。">ⓘ</span></h3></div>
-          <div class="table-responsive"><table class="table card-table table-vcenter">
-            <thead><tr><th>模型</th><th class="text-end">轨迹</th><th class="text-end">占比</th></tr></thead>
-            <tbody id="profile-model-body"><tr><td colspan="3" class="text-secondary">加载中…</td></tr></tbody></table></div></div></div>
-      </div>
-      <div class="card mt-3"><div class="card-header">
-        <h3 class="card-title">👥 团队用户</h3>
-        <span class="card-subtitle ms-auto text-secondary" data-m="users.summary">—</span></div>
-        <div class="table-responsive"><table class="table card-table table-vcenter">
-          <thead><tr><th>用户 (client)</th><th class="text-end">轨迹</th><th class="text-end">原子</th><th>最近活跃</th></tr></thead>
-          <tbody id="users-body"><tr><td colspan="4" class="text-secondary">加载中…</td></tr></tbody></table></div></div>
-
-      <div class="card mt-3"><div class="card-header">
-        <h3 class="card-title">🏷 标签云 / 关键词</h3>
-        <span class="card-subtitle ms-auto text-secondary">来自原子 tags 聚合，字号 ∝ 出现次数</span></div>
-        <div class="card-body" id="tagcloud" style="line-height:2.2">
-          <span class="text-secondary">加载中…</span></div></div>
-    </div>
-
-    <!-- 技能库 -->
+    <!-- ══ 技能库 ══ -->
     <div class="sec-page" id="pg-skills">
-      <div class="card mb-3"><div class="card-header">
-        <h3 class="card-title">🐚 技能库</h3>
-        <span class="card-subtitle ms-auto text-secondary" data-m="skills.summary">—</span></div>
-        <div class="table-responsive"><table class="table card-table table-vcenter">
-          <thead><tr><th>技能</th><th>状态 <span class="hint" data-bs-toggle="tooltip" title="baby=cluster 刚建的草稿；main=已正式产出；staging=灰度候选并存。">ⓘ</span></th><th>描述</th><th class="text-end">版本</th><th class="text-end">候选 <span class="hint" data-bs-toggle="tooltip" title=".candidates.yml 里待攒分的 atom 数。">ⓘ</span></th></tr></thead>
-          <tbody id="skills-body"><tr><td colspan="6" class="text-secondary">加载中…</td></tr></tbody></table></div></div>
-
-      <div class="card"><div class="card-header"><h3 class="card-title">🐚 单 skill 触发率</h3>
-        <span class="card-subtitle ms-auto text-secondary">推荐→被采用</span></div>
-        <div class="table-responsive"><table class="table card-table table-vcenter">
-          <thead><tr><th>技能</th><th class="text-end">被推荐(去重用户)</th><th class="text-end">被采用</th><th class="text-end">触发率</th></tr></thead>
-          <tbody id="trigger-body"><tr><td colspan="4" class="text-secondary">加载中…</td></tr></tbody></table></div>
-        <div class="card-body py-2"><span class="mini">触发率 = 被采用 / 被推荐(去重用户)，封顶 100%。低触发率 = 推荐错配或描述不准，该优化。</span></div></div>
-    </div>
-
-    <!-- 灰度 -->
-    <div class="sec-page" id="pg-canary">
-      <div class="row row-deck row-cards">
-        <div class="col-lg"><div class="card card-sm"><div class="card-body"><div class="subheader">canary 晋升率</div><div class="h1 mb-0" data-m="rates.promotion2">—</div><div class="mini" data-m="promotion.detail">—</div></div></div></div>
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+        <div class="flex items-baseline justify-between">
+          <h2 class="font-semibold text-sm">技能库</h2>
+          <span class="text-[11px] text-slate-400" data-m="skills.summary">—</span>
+        </div>
+        <div class="overflow-x-auto">
+        <table class="w-full mt-2 text-[12.5px]">
+          <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
+            <th class="text-left font-medium py-2">技能</th><th class="text-left font-medium">状态 <span class="hint" title="baby=cluster 刚建的草稿；main=已正式产出；staging=灰度候选并存。">ⓘ</span></th>
+            <th class="text-left font-medium">描述</th><th class="text-right font-medium">版本</th>
+            <th class="text-right font-medium">候选 <span class="hint" title=".candidates.yml 里待攒分的 atom 数。">ⓘ</span></th></tr></thead>
+          <tbody id="skills-body" class="divide-y divide-slate-50"><tr><td colspan="5" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
+        </div>
       </div>
-      <div class="card mt-1"><div class="card-header"><h3 class="card-title">🧪 灰度分桶分布（使用打分记录）</h3></div>
-        <div class="table-responsive"><table class="table card-table table-vcenter">
-          <thead><tr><th>分桶</th><th class="text-end">使用</th><th class="text-end">平均 ux</th></tr></thead>
-          <tbody id="canary-body"><tr><td colspan="3" class="text-secondary">加载中…</td></tr></tbody></table></div></div>
+
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
+        <div class="flex items-baseline justify-between">
+          <h2 class="font-semibold text-sm">单 skill 触发率 <span class="font-normal text-[11px] text-slate-400 ml-2">去重 (client, skill) 推荐对 → 之后被采用</span></h2>
+        </div>
+        <div class="overflow-x-auto">
+        <table class="w-full mt-2 text-[12.5px]">
+          <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
+            <th class="text-left font-medium py-2">技能</th><th class="text-right font-medium">曝光对</th><th class="text-right font-medium">采用对</th><th class="text-right font-medium">触发率</th></tr></thead>
+          <tbody id="trigger-body" class="divide-y divide-slate-50"><tr><td colspan="4" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
+        </div>
+      </div>
+
+      <div id="skill-detail" class="mt-4"></div>
     </div>
 
-    <!-- 生态目录 -->
-    <div class="sec-page" id="pg-eco">
-      <div class="card"><div class="card-header"><h3 class="card-title">🏝 生态目录</h3></div>
-        <div class="table-responsive"><table class="table card-table table-vcenter">
-          <thead><tr><th>生态</th><th class="text-end">轨迹</th><th class="text-end">已索引</th><th>路径</th></tr></thead>
-          <tbody id="dirs-body"><tr><td colspan="4" class="text-secondary">加载中…</td></tr></tbody></table></div></div>
+    <!-- ══ 轨迹 & 原子 ══ -->
+    <div class="sec-page" id="pg-traj">
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+        <h2 class="font-semibold text-sm">打开轨迹</h2>
+        <div class="mt-3 flex gap-2.5">
+          <input id="traj-input" class="flex-1 bg-white ring-1 ring-slate-200 rounded-xl px-3.5 py-2 outline-none focus:ring-teal-500 font-mono text-xs" placeholder="输入 traj_id（文件名去 .md 后缀）——暂无全轨迹列表端点，也可从技能血缘的贡献原子跳转进入">
+          <button id="traj-open" class="px-5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-medium">打开</button>
+        </div>
+      </div>
+
+      <div id="traj-detail" class="mt-4"></div>
+
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
+        <h2 class="font-semibold text-sm">生态目录 <span class="font-normal text-[11px] text-slate-400 ml-2">已注册的轨迹来源目录</span></h2>
+        <div class="overflow-x-auto">
+        <table class="w-full mt-2 text-[12.5px]">
+          <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
+            <th class="text-left font-medium py-2">生态</th><th class="text-right font-medium">轨迹</th><th class="text-right font-medium">已索引</th><th class="text-left font-medium pl-6">路径</th></tr></thead>
+          <tbody id="dirs-body" class="divide-y divide-slate-50"><tr><td colspan="4" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
+        </div>
+      </div>
     </div>
 
-    </div></div>
-  </div>
+    <!-- ══ 用户 & 画像 ══ -->
+    <div class="sec-page" id="pg-users">
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+        <div class="flex items-baseline justify-between">
+          <h2 class="font-semibold text-sm">用户连接状态</h2>
+          <span class="flex items-center gap-1.5 text-[11px] text-slate-500"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><span data-m="users.online">—</span></span>
+        </div>
+        <div id="users-reason"></div>
+        <div class="overflow-x-auto">
+        <table class="w-full mt-2 text-[12.5px]">
+          <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
+            <th class="text-left font-medium py-2">用户</th><th class="text-left font-medium">状态</th>
+            <th class="text-left font-medium">上次活跃</th><th class="text-right font-medium">轨迹 · 原子</th>
+            <th class="text-left font-medium pl-6">harness</th><th class="text-left font-medium">主力模型</th></tr></thead>
+          <tbody id="ustatus-body" class="divide-y divide-slate-50"><tr><td colspan="6" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
+        <div class="flex items-baseline justify-between">
+          <h2 class="font-semibold text-sm">标签云 / 关键词</h2>
+          <span class="text-[11px] text-slate-400">来自原子 tags 聚合，字号 ∝ 出现次数 · 悬浮/点击用户行高亮其标签</span>
+        </div>
+        <div class="mt-3 leading-[2.4]" id="tagcloud"><span class="text-slate-400">加载中…</span></div>
+      </div>
+    </div>
+
+    <!-- ══ 灰度 Canary ══ -->
+    <div class="sec-page" id="pg-canary">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
+          <div class="text-[11px] text-slate-400 font-medium">canary 晋升率 <span class="hint" title="灰度候选裁决中晋升为正式版的比例 = 晋升 ÷ 已裁决（晋升+拒绝+超时丢弃）。">ⓘ</span></div>
+          <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="rates.promotion2">—</div>
+          <div class="mt-0.5 text-[11px] text-slate-500" data-m="promotion.detail">—</div>
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
+        <h2 class="font-semibold text-sm">灰度分桶分布 <span class="font-normal text-[11px] text-slate-400 ml-2">使用打分记录按 side 聚合，与灰度裁决同源</span></h2>
+        <div class="overflow-x-auto">
+        <table class="w-full mt-2 text-[12.5px]">
+          <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
+            <th class="text-left font-medium py-2">分桶</th><th class="text-right font-medium">使用</th><th class="text-right font-medium">平均 ux</th></tr></thead>
+          <tbody id="canary-body" class="divide-y divide-slate-50"><tr><td colspan="3" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
+        </div>
+      </div>
+    </div>
+
+  </main>
 </div>
 <script src="app.js" defer></script>
 </body></html>
