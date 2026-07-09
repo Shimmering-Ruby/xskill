@@ -25,7 +25,8 @@ def test_overview_endpoint(tmp_path):
     r = _client(tmp_path).get("/api/v1/dashboard/overview")
     assert r.status_code == 200
     body = r.json()
-    assert body["trajs"] == 1 and body["atoms"] == 6 and body["skill_yield"] == 100.0
+    assert body["trajs"] == 1 and body["atoms"] == 6
+    assert "skill_yield" not in body  # 死指标已下线（审计 P2-8）
 
 
 def test_by_domain_endpoint(tmp_path):

@@ -44,9 +44,10 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         default_model = default_model or attr["model"]
 
     router = APIRouter()
-    metrics = DashboardMetrics(db_path=db_path, unknown_harness=default_harness,
-                               unknown_model=default_model)
     skill_dir = _skill_dir_for(db_path)
+    metrics = DashboardMetrics(db_path=db_path, skill_dir=skill_dir,
+                               unknown_harness=default_harness,
+                               unknown_model=default_model)
 
     @router.get("/", response_class=HTMLResponse)
     def index() -> str:

@@ -26,9 +26,6 @@ async function loadOverview() {
   put('overview.atoms', o.atoms);
   put('overview.avg_ux', ux(o.avg_ux));
   put('overview.avg_atoms_per_traj', o.avg_atoms_per_traj);
-  // skill_yield 恒 0% 实为"未通过 trajectory.skill_generated 跟踪"（skill 走
-  // candidates/git 落地）→ 0 时显示 — 而非误导性的 0%。
-  put('overview.skill_yield', o.skill_yield ? o.skill_yield + '%' : '—');
   put('overview.success_rate', o.success_rate + '%');
   put('overview.retry_rate', o.retry_rate + '%');
   const h = o.price_health, el = document.getElementById('price-warn');
@@ -55,7 +52,7 @@ async function loadRates() {
 async function loadDomain() {
   const d = await j('api/v1/dashboard/by-domain');
   const mk = (arr, key) => arr.map(r =>
-    `<tr><td>${esc(r[key])}</td><td class="text-end">${r.trajs}</td><td class="text-end">${r.avg_atoms}</td><td class="text-end">${r.skills}</td><td class="text-end">${ux(r.avg_ux)}</td></tr>`).join('');
+    `<tr><td>${esc(r[key])}</td><td class="text-end">${r.trajs}</td><td class="text-end">${r.atoms}</td><td class="text-end">${r.avg_atoms}</td></tr>`).join('');
   rows('eco-body', mk(d.by_ecosystem, 'ecosystem'));
   rows('model-body', mk(d.by_model, 'model'));
 }
@@ -134,7 +131,7 @@ document.addEventListener('click', e => {
 async function loadCanary() {
   const c = await j('api/v1/dashboard/canary');
   rows('canary-body', (c.sides || []).map(s =>
-    `<tr><td>${esc(s.side)}</td><td class="text-end">${s.trajs}</td><td class="text-end">${ux(s.avg_ux)}</td></tr>`).join(''));
+    `<tr><td>${esc(s.side)}</td><td class="text-end">${s.uses}</td><td class="text-end">${ux(s.avg_ux)}</td></tr>`).join(''));
 }
 
 const STATE_BADGE = { main: 'bg-green-lt', staging: 'bg-yellow-lt', baby: 'bg-azure-lt', unknown: 'bg-secondary-lt' };
@@ -148,8 +145,7 @@ async function loadSkills() {
     + `<td><span class="badge ${STATE_BADGE[s.state] || 'bg-secondary-lt'}">${esc(s.state)}</span></td>`
     + `<td class="text-secondary" style="max-width:520px">${esc(s.description) || '—'}</td>`
     + `<td class="text-end">v${esc(s.version)}</td>`
-    + `<td class="text-end">${s.candidates || 0}</td>`
-    + `<td class="text-end">${s.use_count || 0}</td></tr>`).join(''));
+    + `<td class="text-end">${s.candidates || 0}</td></tr>`).join(''));
 }
 
 // ── 单 skill 详情 drill-in（子项目 D2）─────────────────────────────
@@ -202,8 +198,8 @@ async function loadSkillDetail(name) {
   ]);
   const vrows = (d.versions || []).map(v =>
     `<tr><td><code>${esc((v.sha || '').slice(0, 8))}</code></td><td class="text-end">${v.triggers}</td>`
-    + `<td class="text-end">${ux(v.avg_ux)}</td><td class="text-end">${v.avg_tool_calls}</td>`
-    + `<td class="text-end">${tok(v.avg_tokens)}</td></tr>`).join('')
+    + `<td class="text-end">${ux(v.avg_ux)}</td><td class="text-end">${v.atoms}</td>`
+    + `<td class="text-secondary">${esc((v.first_ts || '').slice(0, 10))}</td></tr>`).join('')
     || '<tr><td colspan="5" class="text-secondary">还没有版本触发数据</td></tr>';
   const userRows = (d.by_user || []).map(u =>
     `<tr><td>${esc(u.user)}</td><td class="text-end">${u.triggers}</td><td class="text-end">${ux(u.avg_ux)}</td></tr>`).join('');
@@ -218,8 +214,8 @@ async function loadSkillDetail(name) {
       <div>总触发 <strong>${d.total_triggers}</strong> 次</div></div>
     <div class="row mt-2">
       <div class="col-md-7">
-        <div class="subheader">版本统计（每版本触发 / UX / 平均工具调用 / 平均 token）</div>
-        <table class="table table-sm"><thead><tr><th>版本</th><th class="text-end">触发</th><th class="text-end">UX</th><th class="text-end">工具/atom</th><th class="text-end">token/atom</th></tr></thead><tbody>${vrows}</tbody></table>
+        <div class="subheader">版本统计（每版本触发 / UX / 去重原子 / 首次使用）</div>
+        <table class="table table-sm"><thead><tr><th>版本</th><th class="text-end">触发</th><th class="text-end">UX</th><th class="text-end">原子</th><th>首用</th></tr></thead><tbody>${vrows}</tbody></table>
         <div class="subheader mt-2">跨版本 UX 进化趋势</div>${sparkline(trend)}
         <div class="subheader mt-3">按用户</div>
         <table class="table table-sm"><tbody>${userRows || '<tr><td class="text-secondary">无</td></tr>'}</tbody></table>

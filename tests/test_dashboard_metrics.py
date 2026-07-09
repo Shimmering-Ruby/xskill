@@ -120,18 +120,21 @@ def test_overview_ratios(tmp_path):
     o = DashboardMetrics(db_path=db).overview()
     assert o["trajs"] == 4 and o["atoms"] == 15
     assert o["avg_atoms_per_traj"] == 3.75          # 15/4
-    assert o["success_rate"] == 75.0                # 3 done / 4
-    assert o["skill_yield"] == 50.0                 # 2 有 skill / 4
+    # 终态口径（审计 P2-10）：3 done + 1 splitting(在途,不进分母) → 100%
+    assert o["success_rate"] == 100.0
     assert o["retry_rate"] == 25.0                  # 1 retried / 4
-    assert round(o["avg_ux"], 2) == 7.5             # (8+7+7.5)/3
+    # trajectories.ux_score 是死列（审计 P1-5）：无使用记录 → None 不显示假数
+    assert o["avg_ux"] is None and o["ux_n"] == 0
+    assert "skill_yield" not in o                   # 指标已下线（审计 P2-8）
 
 
 def test_overview_empty_db_no_zerodiv(tmp_path):
     db = tmp_path / "e.db"
     get_connection(db).close()
     o = DashboardMetrics(db_path=db).overview()
-    assert o == {"trajs": 0, "atoms": 0, "avg_atoms_per_traj": 0.0, "success_rate": 0.0,
-                 "skill_yield": 0.0, "retry_rate": 0.0, "avg_ux": 0.0}
+    assert o == {"trajs": 0, "atoms": 0, "avg_atoms_per_traj": 0.0,
+                 "success_rate": 0.0, "filtered": 0, "retry_rate": 0.0,
+                 "avg_ux": None, "ux_n": 0}
 
 
 def test_by_ecosystem(tmp_path):
@@ -139,7 +142,7 @@ def test_by_ecosystem(tmp_path):
     _seed(db)
     rows = {r["ecosystem"]: r for r in DashboardMetrics(db_path=db).by_ecosystem()}
     assert rows["claude_code"]["trajs"] == 3 and rows["claude_code"]["atoms"] == 12
-    assert rows["claude_code"]["skills"] == 1
+    assert "skills" not in rows["claude_code"]   # skill_generated 死列已下线
     assert rows["opencode"]["trajs"] == 1
 
 
@@ -208,4 +211,4 @@ def test_by_model(tmp_path):
     _seed(db)
     rows = {r["model"]: r for r in DashboardMetrics(db_path=db).by_model()}
     assert rows["deepseek-v4-flash"]["trajs"] == 3
-    assert rows["deepseek-v4-pro"]["skills"] == 1
+    assert "skills" not in rows["deepseek-v4-pro"]  # 死列已下线

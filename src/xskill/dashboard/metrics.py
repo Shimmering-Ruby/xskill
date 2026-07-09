@@ -1,7 +1,9 @@
-"""DashboardMetrics — 衍生质量指标(纯读 registry,无 FastAPI 依赖,可单测)。
+"""DashboardMetrics — 衍生质量指标(纯读 registry + skill 目录,无 FastAPI 依赖,可单测)。
 
-只算"现在数据就能算"的指标;需埋点的(推荐触发率/原子采纳率精确值/canary 晋升率)
-不在此层,见 docs/superpowers/specs/2026-06-01-dashboard-design.md §5 backlog。
+指标口径的唯一事实源见 docs/dashboard-metrics.md（2026-07 审计）。核心约定：
+**"使用"的事实源是各 skill 的 ``.ux_scores.jsonl``**（单机与 CS 两条打分链路都
+幂等写它），不是 ``trajectories.skill_used`` 单值列（CS 模式从不写入、单机多
+skill 漏计——审计 P0-1）。
 """
 from __future__ import annotations
 
@@ -13,6 +15,53 @@ from xskill.pipeline.registry import get_connection
 
 def _pct(num: float, den: float) -> float:
     return round(num / den * 100, 1) if den else 0.0
+
+
+def _traj_of_atom(atom_id: str) -> str:
+    """``atom_<traj_id>_NNNN`` → ``<traj_id>``；不合式返回 ""。"""
+    if not atom_id or not atom_id.startswith("atom_"):
+        return ""
+    body = atom_id[5:]
+    idx = body.rfind("_")
+    return body[:idx] if idx > 0 else ""
+
+
+def _iso(ts: str) -> str:
+    """把 sqlite ``datetime('now')``（'YYYY-MM-DD HH:MM:SS'，UTC）与
+    ``.ux_scores.jsonl`` 的 ISO 时间戳归一到可比较的 'YYYY-MM-DDTHH:MM:SS'。"""
+    return (ts or "").replace(" ", "T")[:19]
+
+
+def load_usage_records(skill_dir: Optional[Path]) -> list[dict]:
+    """全部自有 skill 的使用打分记录（``<skill>/.ux_scores.jsonl`` 统一视图）。
+
+    每条 ``{skill, side, sha, score, scored_at, atom_id, traj_id, user_model}``。
+    atom 级记录（AtomCanary.append）与历史 traj 级记录（append_ux_score）
+    统一到该视图；一条记录 = 一次真实使用打分（写入侧幂等去重）。
+    """
+    from xskill.canary import load_ux_scores
+    if not skill_dir:
+        return []
+    root = Path(skill_dir)
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        for rec in load_ux_scores(d):
+            atom_id = rec.get("atom_id") or ""
+            out.append({
+                "skill": rec.get("skill_name") or d.name,
+                "side": rec.get("side") or "main",
+                "sha": rec.get("commit_sha") or "unknown",
+                "score": rec.get("score"),
+                "scored_at": rec.get("scored_at") or "",
+                "atom_id": atom_id,
+                "traj_id": rec.get("traj_id") or _traj_of_atom(atom_id),
+                "user_model": rec.get("user_model") or "",
+            })
+    return out
 
 
 def _resolve_local_root(path: str, db_dir: Path) -> Path:
@@ -91,7 +140,7 @@ def skills_catalog(skill_dir: Path) -> list[dict]:
             state = "baby"
         else:
             state = "unknown"
-        desc, version, use_count = "", 0, 0
+        desc, version = "", 0
         smd = d / "SKILL.md"
         if smd.is_file():
             try:
@@ -99,7 +148,6 @@ def skills_catalog(skill_dir: Path) -> list[dict]:
                 desc = (fm.get("description") or "").strip().replace("\n", " ")
                 meta = fm.get("metadata", {}) or {}
                 version = meta.get("version", 0)
-                use_count = meta.get("use_count", 0)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
         n_cand = 0
@@ -114,7 +162,7 @@ def skills_catalog(skill_dir: Path) -> list[dict]:
         out.append({
             "name": d.name, "state": state,
             "description": desc[:300], "version": version,
-            "use_count": use_count, "candidates": n_cand,
+            "candidates": n_cand,
         })
     # main/staging（已正式产出）排前,其次 baby,再按名字
     order = {"main": 0, "staging": 0, "baby": 1, "unknown": 2}
@@ -124,13 +172,37 @@ def skills_catalog(skill_dir: Path) -> list[dict]:
 
 class DashboardMetrics:
     def __init__(self, db_path: Optional[Path] = None, *,
+                 skill_dir: Optional[Path] = None,
                  unknown_harness: str = "unknown",
                  unknown_model: str = "unknown"):
         self._db = db_path
+        # 使用/UX 类指标的事实源目录（<skill_dir>/<name>/.ux_scores.jsonl）。
+        self._skill_dir = skill_dir
         # 历史轨迹缺 source_harness / source_model 时的归类桶（看板展示口径）。
         # 默认 'unknown'；看板路由按 config.dashboard.default_harness/_model 传入覆盖。
         self._unknown_harness = unknown_harness
         self._unknown_model = unknown_model
+
+    def _usage(self) -> list[dict]:
+        return load_usage_records(self._skill_dir)
+
+    def _traj_client_map(self) -> dict[str, str]:
+        """traj_id → 用户键。team_client 目录用 label（=user_name/client_id），
+        其余目录归 '(local)'。"""
+        conn = get_connection(self._db)
+        try:
+            rows = conn.execute(
+                "SELECT t.filename fn, w.label label, w.ecosystem eco"
+                " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
+            ).fetchall()
+        finally:
+            conn.close()
+        out: dict[str, str] = {}
+        for r in rows:
+            fn = r["fn"] or ""
+            stem = fn[:-3] if fn.endswith(".md") else fn
+            out[stem] = r["label"] or "(local)"
+        return out
 
     def overview(self) -> dict:
         conn = get_connection(self._db)
@@ -138,21 +210,28 @@ class DashboardMetrics:
             r = conn.execute(
                 "SELECT COUNT(*) trajs, COALESCE(SUM(tasks_extracted),0) atoms,"
                 " SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) done,"
-                " SUM(CASE WHEN skill_generated IS NOT NULL AND skill_generated!='' THEN 1 ELSE 0 END) skilled,"
-                " SUM(CASE WHEN retry_count>0 THEN 1 ELSE 0 END) retried,"
-                " AVG(ux_score) avg_ux FROM trajectories"
+                " SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) err,"
+                " SUM(CASE WHEN status='filtered' THEN 1 ELSE 0 END) filtered,"
+                " SUM(CASE WHEN retry_count>0 THEN 1 ELSE 0 END) retried"
+                " FROM trajectories"
             ).fetchone()
         finally:
             conn.close()
         n = r["trajs"] or 0
+        # 处理成功率按终态口径：done/(done+error+filtered)，在途轨迹不进分母
+        # （否则新批入库时比率被瞬间稀释——审计 P2-10）。
+        done, err, filtered = r["done"] or 0, r["err"] or 0, r["filtered"] or 0
+        # 平均 ux 来自使用打分事实源（trajectories.ux_score 是死列——审计 P1-5）。
+        scores = [u["score"] for u in self._usage() if u["score"] is not None]
         return {
             "trajs": n,
             "atoms": r["atoms"] or 0,
             "avg_atoms_per_traj": round((r["atoms"] or 0) / n, 2) if n else 0.0,
-            "success_rate": _pct(r["done"] or 0, n),
-            "skill_yield": _pct(r["skilled"] or 0, n),
+            "success_rate": _pct(done, done + err + filtered),
+            "filtered": filtered,
             "retry_rate": _pct(r["retried"] or 0, n),
-            "avg_ux": round(r["avg_ux"], 2) if r["avg_ux"] is not None else 0.0,
+            "avg_ux": round(sum(scores) / len(scores), 2) if scores else None,
+            "ux_n": len(scores),
         }
 
     def by_ecosystem(self) -> list[dict]:
@@ -173,13 +252,13 @@ class DashboardMetrics:
         )
         conn = get_connection(self._db)
         try:
+            # HAVING 排除 0 轨迹幻影行（空 team_client 目录经 LEFT JOIN 出成
+            # unknown 行——审计 P3-13）。
             rows = conn.execute(
                 f"SELECT {eco_expr} ecosystem, COUNT(t.id) trajs,"
-                " COALESCE(SUM(t.tasks_extracted),0) atoms,"
-                " SUM(CASE WHEN t.skill_generated IS NOT NULL AND t.skill_generated!='' THEN 1 ELSE 0 END) skills,"
-                " AVG(t.ux_score) avg_ux"
+                " COALESCE(SUM(t.tasks_extracted),0) atoms"
                 " FROM watch_dirs wd LEFT JOIN trajectories t ON t.watch_dir_id=wd.id"
-                f" GROUP BY {eco_expr} ORDER BY trajs DESC",
+                f" GROUP BY {eco_expr} HAVING COUNT(t.id)>0 ORDER BY trajs DESC",
                 {"hlabel": self._unknown_harness},
             ).fetchall()
         finally:
@@ -191,9 +270,7 @@ class DashboardMetrics:
         try:
             rows = conn.execute(
                 "SELECT COALESCE(source_model,:mlabel) model, COUNT(*) trajs,"
-                " COALESCE(SUM(tasks_extracted),0) atoms,"
-                " SUM(CASE WHEN skill_generated IS NOT NULL AND skill_generated!='' THEN 1 ELSE 0 END) skills,"
-                " AVG(ux_score) avg_ux FROM trajectories"
+                " COALESCE(SUM(tasks_extracted),0) atoms FROM trajectories"
                 " GROUP BY COALESCE(source_model,:mlabel) ORDER BY trajs DESC",
                 {"mlabel": self._unknown_model},
             ).fetchall()
@@ -208,10 +285,12 @@ class DashboardMetrics:
         """
         conn = get_connection(self._db)
         try:
+            # last_active 用 discovered_at（用户轨迹产生时间），不用 updated_at
+            # （那是流水线自己的写时间，rebuild 会把它全刷新——审计 P3-13）。
             rows = conn.execute(
                 "SELECT wd.label client_id, COUNT(t.id) trajs,"
                 " COALESCE(SUM(t.tasks_extracted),0) atoms,"
-                " MAX(t.updated_at) last_active"
+                " MAX(t.discovered_at) last_active"
                 " FROM watch_dirs wd LEFT JOIN trajectories t ON t.watch_dir_id=wd.id"
                 " WHERE wd.ecosystem='team_client' AND wd.label IS NOT NULL"
                 " AND wd.label!='' GROUP BY wd.label ORDER BY trajs DESC"
@@ -266,19 +345,23 @@ class DashboardMetrics:
                 for t, n in counter.most_common(top_n)]
 
     def canary_sides(self) -> list[dict]:
-        """灰度分桶分布:轨迹按 canary_side(staging/main) 计数 + 平均 ux(纯 registry)。"""
-        conn = get_connection(self._db)
-        try:
-            rows = conn.execute(
-                "SELECT COALESCE(canary_side,'main') side, COUNT(*) trajs,"
-                " AVG(ux_score) avg_ux FROM trajectories"
-                " GROUP BY COALESCE(canary_side,'main') ORDER BY trajs DESC"
-            ).fetchall()
-        finally:
-            conn.close()
-        return [{"side": r["side"], "trajs": r["trajs"],
-                 "avg_ux": round(r["avg_ux"], 2) if r["avg_ux"] is not None else 0.0}
-                for r in rows]
+        """灰度分桶分布：使用打分记录按 side 聚合（与 check_and_decide 裁决同源）。
+
+        旧口径 ``COALESCE(trajectories.canary_side,'main')`` 把从未触发 skill 的
+        轨迹全算进 main 桶，数字与灰度流量无关（审计 P1-4）——已废弃。
+        """
+        agg: dict[str, list] = {}
+        for u in self._usage():
+            s = agg.setdefault(u["side"], [0, 0.0, 0])
+            s[0] += 1
+            if u["score"] is not None:
+                s[1] += u["score"]
+                s[2] += 1
+        out = [{"side": side, "uses": n,
+                "avg_ux": round(ssum / sn, 2) if sn else None}
+               for side, (n, ssum, sn) in agg.items()]
+        out.sort(key=lambda d: -d["uses"])
+        return out
 
     def adoption_rate(self) -> dict:
         """原子采纳率 = 采纳原子(atom_adoption 去重) / 总原子(tasks_extracted 求和)。"""
@@ -290,7 +373,10 @@ class DashboardMetrics:
                 "SELECT COALESCE(SUM(tasks_extracted),0) FROM trajectories").fetchone()[0]
         finally:
             conn.close()
-        return {"adopted": adopted, "total": total, "rate": _pct(adopted, total)}
+        # 分子是历史累计事件、分母是当前存量，reset/unregister 已同步清理分子；
+        # 仍封顶 100% 防残余时间窗错位读成 >100%（审计 P1-7）。
+        return {"adopted": adopted, "total": total,
+                "rate": min(_pct(adopted, total), 100.0)}
 
     def promotion_rate(self) -> dict:
         """canary 晋升率 = 晋升数 / 已裁决数(晋升+拒绝+超时丢弃)。"""
@@ -305,31 +391,48 @@ class DashboardMetrics:
         return {"promoted": promoted, "decided": decided, "rate": _pct(promoted, decided)}
 
     def trigger_rate(self) -> dict:
-        """推荐触发率 = 被推荐的 skill 里被采用的占比;另给单 skill 明细。
+        """推荐触发率——事件级配对口径（审计 P0-2 重定义）。
 
-        近似:单 skill 触发率 = 该 skill 被采用次数 / 被推荐次数(封顶 100%);
-        总触发率 = 被采用过的被推荐 skill 数 / 被推荐 skill 总数。
+        曝光 = 去重 ``(client, skill)`` 推荐对（取首次推荐时间）；
+        采用 = 该 client 在曝光时间**之后**的使用打分记录命中该 skill
+        （事实源 ``.ux_scores.jsonl``，client 经 traj→watch_dir 归因）。
+        单 skill 触发率 = 采用的曝光对 / 该 skill 曝光对，天然 ≤100%；
+        总触发率 = 全部采用对 / 全部曝光对。
         """
         conn = get_connection(self._db)
         try:
-            # 分母去重:同一 (用户, skill) 只算一次,防反复同步把分母滚大、触发率假性变小
-            recs = dict(conn.execute(
-                "SELECT skill, COUNT(DISTINCT client_id) n FROM recommendation_log"
-                " GROUP BY skill").fetchall())
-            used = dict(conn.execute(
-                "SELECT skill_used, COUNT(*) n FROM trajectories"
-                " WHERE skill_used IS NOT NULL AND skill_used!='' GROUP BY skill_used").fetchall())
+            exposures = conn.execute(
+                "SELECT client_id, skill, MIN(ts) ts FROM recommendation_log"
+                " WHERE client_id IS NOT NULL AND client_id!=''"
+                " GROUP BY client_id, skill").fetchall()
         finally:
             conn.close()
-        by_skill = []
-        adopted_skills = 0
-        for skill, rec in sorted(recs.items(), key=lambda kv: -kv[1]):
-            u = used.get(skill, 0)
-            if u > 0:
-                adopted_skills += 1
-            by_skill.append({"skill": skill, "recommended": rec, "used": u,
-                             "rate": round(min(u / rec * 100, 100.0), 1) if rec else 0.0})
-        return {"overall": _pct(adopted_skills, len(recs)), "by_skill": by_skill}
+        traj_client = self._traj_client_map()
+        # (client, skill) → 最早使用时间
+        first_use: dict[tuple[str, str], str] = {}
+        for u in self._usage():
+            client = traj_client.get(u["traj_id"])
+            if not client or client == "(local)":
+                continue
+            key = (client, u["skill"])
+            ts = _iso(u["scored_at"])
+            if key not in first_use or (ts and ts < first_use[key]):
+                first_use[key] = ts
+        by_skill_agg: dict[str, list[int]] = {}
+        adopted_pairs = 0
+        for r in exposures:
+            skill = r["skill"]
+            agg = by_skill_agg.setdefault(skill, [0, 0])  # [曝光对, 采用对]
+            agg[0] += 1
+            use_ts = first_use.get((r["client_id"], skill))
+            if use_ts and use_ts >= _iso(r["ts"]):
+                agg[1] += 1
+                adopted_pairs += 1
+        by_skill = [{"skill": s, "recommended": a[0], "used": a[1],
+                     "rate": _pct(a[1], a[0])}
+                    for s, a in sorted(by_skill_agg.items(), key=lambda kv: -kv[1][0])]
+        total_pairs = sum(a[0] for a in by_skill_agg.values())
+        return {"overall": _pct(adopted_pairs, total_pairs), "by_skill": by_skill}
 
     @staticmethod
     def _row(r, key: str) -> dict:
@@ -339,136 +442,68 @@ class DashboardMetrics:
             "trajs": t,
             "atoms": r["atoms"] or 0,
             "avg_atoms": round((r["atoms"] or 0) / t, 2) if t else 0.0,
-            "skills": r["skills"] or 0,
-            "avg_ux": round(r["avg_ux"], 2) if r["avg_ux"] is not None else 0.0,
         }
 
-    # ── 0.6.1a1 看板：单 skill 详情 / 版本统计 / 时序 ────────────────
+    # ── 单 skill 详情 drill-in：全部读 .ux_scores.jsonl 事实源（审计 P0-1）──
 
-    def _skill_traj_rows(self, name: str) -> list[dict]:
-        """某 skill 被触发过的所有轨迹（含 sha / ux / 用户 / 文件路径）。
-
-        skill 版本(sha)**不从 DB 列读**，而是查询时从每条 traj 的 .md 头
-        ``<!-- xskill:skill=X side=Y sha=Z -->`` 分析式解析——与工具调用/ token
-        同属"按轨迹文本现算"，免迁移、不动打分写路径。
-        """
-        from xskill.pipeline.trajectory import parse_traj_header
-        conn = get_connection(self._db)
-        try:
-            rows = conn.execute(
-                "SELECT t.ux_score ux, t.filename fn,"
-                " w.label cid, t.updated_at ts, w.path wpath"
-                " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
-                " WHERE t.skill_used=? ", (name,),
-            ).fetchall()
-        finally:
-            conn.close()
-        out = []
-        for r in rows:
-            d = dict(r)
-            md = Path(d["wpath"]) / d["fn"]
-            sha = ""
-            if md.is_file():
-                try:
-                    header = parse_traj_header(md.read_text(encoding="utf-8")) or {}
-                    sha = header.get("sha", "") or ""
-                except OSError:
-                    sha = ""
-            d["sha"] = sha or "unknown"
-            out.append(d)
-        return out
-
-    @staticmethod
-    def _atom_aggregate(rows: list[dict]) -> tuple[int, int, int]:
-        """对一组轨迹的所有 atom 累计 (工具调用数, 估算 token, atom 数)。
-
-        从 ``<wpath>/<traj_id>/tasks/atom_*.json`` 读 ``raw_segment`` 做分析式
-        计算（不靠埋点，见 utils.traj_analysis）。atom 文件缺失则跳过。
-        """
-        import json
-        from xskill.utils.traj_analysis import count_tool_calls, estimate_tokens
-        tool_calls = tokens = n_atoms = 0
-        for r in rows:
-            fn = r["fn"]
-            stem = fn[:-3] if fn.endswith(".md") else fn
-            tasks = Path(r["wpath"]) / stem / "tasks"
-            if not tasks.is_dir():
-                continue
-            for af in tasks.glob("atom_*.json"):
-                try:
-                    seg = json.loads(af.read_text(encoding="utf-8")).get("raw_segment", "")
-                except (OSError, ValueError):
-                    continue
-                tool_calls += count_tool_calls(seg)
-                tokens += estimate_tokens(seg)
-                n_atoms += 1
-        return tool_calls, tokens, n_atoms
+    def _skill_usage(self, name: str) -> list[dict]:
+        return [u for u in self._usage() if u["skill"] == name]
 
     def skill_version_stats(self, name: str) -> list[dict]:
-        """按版本(sha)分组：每版本触发次数 + 平均 UX + 平均工具调用 + 平均 token。
+        """按版本(commit_sha)分组：触发次数 + 平均 UX + 去重原子数 + 首末使用时间。
 
-        token / 工具调用是对该版本命中轨迹的 atom 做分析式聚合（不埋点）。
+        按**首次使用时间**排序（旧实现按 sha 字典序，趋势图顺序无意义——审计 P1-6）。
         """
-        rows = self._skill_traj_rows(name)
         by_sha: dict[str, list[dict]] = {}
-        for r in rows:
-            by_sha.setdefault(r["sha"] or "unknown", []).append(r)
+        for u in self._skill_usage(name):
+            by_sha.setdefault(u["sha"], []).append(u)
         out = []
         for sha, items in by_sha.items():
-            tc, tok, na = self._atom_aggregate(items)
-            uxs = [i["ux"] for i in items if i["ux"] is not None]
+            scores = [i["score"] for i in items if i["score"] is not None]
+            ts_list = sorted(_iso(i["scored_at"]) for i in items if i["scored_at"])
             out.append({
                 "sha": sha,
                 "triggers": len(items),
-                "avg_ux": round(sum(uxs) / len(uxs), 2) if uxs else None,
-                "atoms": na,
-                "avg_tool_calls": round(tc / na, 2) if na else 0.0,
-                "avg_tokens": round(tok / na, 2) if na else 0.0,
+                "avg_ux": round(sum(scores) / len(scores), 2) if scores else None,
+                "atoms": len({i["atom_id"] or i["traj_id"] for i in items}),
+                "first_ts": ts_list[0] if ts_list else "",
+                "last_ts": ts_list[-1] if ts_list else "",
             })
-        out.sort(key=lambda d: (d["sha"] == "unknown", d["sha"]))
+        out.sort(key=lambda d: (d["first_ts"] == "", d["first_ts"]))
         return out
 
     def skill_by_user(self, name: str) -> list[dict]:
-        """某 skill 按用户分组的触发次数 + 平均 UX（D11 按用户切片）。
-
-        用户身份取 watch_dir.label（team server 上即 client_id）——现算 JOIN，
-        不在轨迹表落冗余 client_id 列，保持"分析而非埋点"一致、免迁移。
-        """
-        conn = get_connection(self._db)
-        try:
-            rows = conn.execute(
-                "SELECT COALESCE(w.label,'(local)') user, COUNT(*) triggers,"
-                " AVG(t.ux_score) avg_ux"
-                " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
-                " WHERE t.skill_used=? GROUP BY w.label ORDER BY triggers DESC",
-                (name,),
-            ).fetchall()
-            return [{"user": r["user"], "triggers": r["triggers"],
-                     "avg_ux": round(r["avg_ux"], 2) if r["avg_ux"] is not None else None}
-                    for r in rows]
-        finally:
-            conn.close()
+        """某 skill 按用户分组的触发次数 + 平均 UX（traj→watch_dir 归因）。"""
+        traj_client = self._traj_client_map()
+        agg: dict[str, list] = {}
+        for u in self._skill_usage(name):
+            user = traj_client.get(u["traj_id"], "(local)")
+            s = agg.setdefault(user, [0, 0.0, 0])
+            s[0] += 1
+            if u["score"] is not None:
+                s[1] += u["score"]
+                s[2] += 1
+        out = [{"user": user, "triggers": n,
+                "avg_ux": round(ssum / sn, 2) if sn else None}
+               for user, (n, ssum, sn) in agg.items()]
+        out.sort(key=lambda d: -d["triggers"])
+        return out
 
     def skill_timeseries(self, name: str, sha: Optional[str] = None) -> list[dict]:
-        """时序点：``sha`` 给定 → 该版本内各轨迹按时间的 UX 瞬时序列；
-        ``sha`` 为 None → 跨版本聚合点（每版本一个 UX 均值，看进化趋势）。
+        """时序点：``sha`` 给定 → 该版本内按时间的 UX 逐点序列；
+        ``sha`` 为 None → 跨版本聚合点（每版本一个 UX 均值，按首次使用时间序）。
         """
         if sha is None:
             return [{"x": v["sha"], "ux": v["avg_ux"], "triggers": v["triggers"]}
                     for v in self.skill_version_stats(name)]
-        # 版本内瞬时序列：取该版本命中的轨迹，按时间排，UX 逐点（sha 来自 .md 头）
-        pts = [{"x": r["ts"], "ux": r["ux"]}
-               for r in self._skill_traj_rows(name)
-               if r["sha"] == sha and r["ux"] is not None]
-        pts.sort(key=lambda p: p["x"] or "")
+        pts = [{"x": _iso(u["scored_at"]), "ux": u["score"]}
+               for u in self._skill_usage(name)
+               if u["sha"] == sha and u["score"] is not None]
+        pts.sort(key=lambda p: p["x"])
         return pts
 
     def skill_detail(self, name: str) -> dict:
-        """单 skill 详情聚合：真实总触发次数 + 版本统计 + 按用户。
-
-        总触发次数从 trajectories 实算（替代 SKILL.md frontmatter 里的陈旧
-        use_count，D7）。
-        """
+        """单 skill 详情聚合：真实总触发次数 + 版本统计 + 按用户 + 趋势。"""
         versions = self.skill_version_stats(name)
         total = sum(v["triggers"] for v in versions)
         return {

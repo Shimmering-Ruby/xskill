@@ -11,9 +11,7 @@ from fastapi.testclient import TestClient
 
 from xskill.dashboard.metrics import DashboardMetrics
 from xskill.dashboard.router import build_dashboard_router
-from xskill.pipeline.registry import (
-    register_dir, discover_trajectories, mark_skill_used, get_connection,
-)
+from xskill.pipeline.registry import register_dir, discover_trajectories
 
 
 def _git(args, cwd):
@@ -22,36 +20,32 @@ def _git(args, cwd):
 
 
 def _seed_db(tmp_path, db):
+    """使用事实源是 <skill_dir>/fix-foo/.ux_scores.jsonl（审计 P0-1）；
+    registry 只提供 traj→用户 归因（watch_dir label）。skill_dir 约定为
+    db 同级 ``skill/``（与 router 的 _skill_dir_for 一致）。"""
     d = tmp_path / "ng_sessions"
     d.mkdir()
-    # sha 由 .md 头解析（不再落 DB 列）——头写入版本 sha
-    (d / "traj_ng_a.md").write_text(
-        "<!-- xskill:skill=fix-foo side=main sha=aaaa1111 -->\n# a\n## Tool Call: Bash\n",
-        encoding="utf-8")
-    (d / "traj_ng_b.md").write_text(
-        "<!-- xskill:skill=fix-foo side=staging sha=bbbb2222 -->\n# b\n",
-        encoding="utf-8")
+    (d / "traj_ng_a.md").write_text("# a\n", encoding="utf-8")
+    (d / "traj_ng_b.md").write_text("# b\n", encoding="utf-8")
     wid = register_dir(d, label="alice", ecosystem="ngagent", db_path=db)
     discover_trajectories(wid, d, db_path=db)
-    mark_skill_used(wid, "traj_ng_a.md", "fix-foo", "main", db_path=db)
-    mark_skill_used(wid, "traj_ng_b.md", "fix-foo", "staging", db_path=db)
-    conn = get_connection(db)
-    conn.execute("UPDATE trajectories SET ux_score=8 WHERE filename='traj_ng_a.md'")
-    conn.execute("UPDATE trajectories SET ux_score=6 WHERE filename='traj_ng_b.md'")
-    conn.commit()
-    conn.close()
-    # version aaaa 命中的 traj_a 有 2 个工具调用的 atom
-    tasks = d / "traj_ng_a" / "tasks"
-    tasks.mkdir(parents=True)
-    (tasks / "atom_traj_ng_a_0001.json").write_text(
-        json.dumps({"raw_segment": "## Tool Call: Bash\n## Tool Call: Read\n"}),
-        encoding="utf-8")
+    sk = tmp_path / "skill" / "fix-foo"
+    sk.mkdir(parents=True, exist_ok=True)
+    with (sk / ".ux_scores.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "atom_id": "atom_traj_ng_a_0001", "skill_name": "fix-foo",
+            "side": "main", "commit_sha": "aaaa1111", "score": 8.0,
+            "reasons": "", "scored_at": "2026-07-01T10:00:00+00:00"}) + "\n")
+        f.write(json.dumps({
+            "atom_id": "atom_traj_ng_b_0001", "skill_name": "fix-foo",
+            "side": "staging", "commit_sha": "bbbb2222", "score": 6.0,
+            "reasons": "", "scored_at": "2026-07-02T10:00:00+00:00"}) + "\n")
     return d, wid
 
 
 def _seed_skill_repo(skill_dir):
     sk = skill_dir / "fix-foo"
-    sk.mkdir(parents=True)
+    sk.mkdir(parents=True, exist_ok=True)  # _seed_db 可能已放入 .ux_scores.jsonl
     _git(["init", "-q"], sk)
     _git(["config", "user.email", "t@t"], sk)
     _git(["config", "user.name", "t"], sk)
@@ -68,21 +62,23 @@ def _seed_skill_repo(skill_dir):
 def test_skill_version_stats_groups_by_sha(tmp_path):
     db = tmp_path / "registry.db"
     _seed_db(tmp_path, db)
-    m = DashboardMetrics(db_path=db)
+    m = DashboardMetrics(db_path=db, skill_dir=tmp_path / "skill")
     vs = {v["sha"]: v for v in m.skill_version_stats("fix-foo")}
 
     assert set(vs) == {"aaaa1111", "bbbb2222"}
     assert vs["aaaa1111"]["triggers"] == 1
     assert vs["aaaa1111"]["avg_ux"] == 8.0
     assert vs["bbbb2222"]["avg_ux"] == 6.0
-    # version aaaa 的 atom 有 2 个工具调用
-    assert vs["aaaa1111"]["avg_tool_calls"] == 2.0
+    # 按首次使用时间排序（审计 P1-6）
+    order = [v["sha"] for v in m.skill_version_stats("fix-foo")]
+    assert order == ["aaaa1111", "bbbb2222"]
 
 
 def test_skill_detail_total_triggers_from_trajectories(tmp_path):
     db = tmp_path / "registry.db"
     _seed_db(tmp_path, db)
-    d = DashboardMetrics(db_path=db).skill_detail("fix-foo")
+    d = DashboardMetrics(db_path=db,
+                         skill_dir=tmp_path / "skill").skill_detail("fix-foo")
     assert d["total_triggers"] == 2
     assert len(d["versions"]) == 2
 
@@ -90,7 +86,8 @@ def test_skill_detail_total_triggers_from_trajectories(tmp_path):
 def test_skill_by_user_attribution(tmp_path):
     db = tmp_path / "registry.db"
     _seed_db(tmp_path, db)
-    users = DashboardMetrics(db_path=db).skill_by_user("fix-foo")
+    users = DashboardMetrics(
+        db_path=db, skill_dir=tmp_path / "skill").skill_by_user("fix-foo")
     assert users[0]["user"] == "alice"
     assert users[0]["triggers"] == 2
 

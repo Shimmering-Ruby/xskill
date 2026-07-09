@@ -192,6 +192,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE trajectories ADD COLUMN {col} {typedef}")
 
     # ── watch_dirs ──
+    # ── recommendation_log ──（审计 P0-2：曝光去重根治注水）
+    # 加 sha 列 + (client_id,skill,side,sha) 唯一索引；建索引前一次性清历史重复行
+    # （每次 sync 每 slot 插一条的注水数据），只保留每组最早一条（保住首次曝光时间）。
+    cur = conn.execute("PRAGMA table_info(recommendation_log)")
+    reco_cols = {row[1] for row in cur.fetchall()}
+    if "sha" not in reco_cols:
+        conn.execute("ALTER TABLE recommendation_log ADD COLUMN sha TEXT DEFAULT ''")
+    has_dedup_idx = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_reco_dedup'"
+    ).fetchone()
+    if not has_dedup_idx:
+        conn.execute(
+            "DELETE FROM recommendation_log WHERE id NOT IN ("
+            " SELECT MIN(id) FROM recommendation_log"
+            " GROUP BY client_id, skill, side, COALESCE(sha,''))"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_reco_dedup ON"
+            " recommendation_log(client_id, skill, side, sha)"
+        )
+
     cur = conn.execute("PRAGMA table_info(watch_dirs)")
     wd_cols = {row[1] for row in cur.fetchall()}
     if "ecosystem" not in wd_cols:
@@ -244,13 +265,18 @@ def record_usage(*, step: str, model: str, prompt: int, completion: int,
 # ---------------------------------------------------------------------------
 
 def record_recommendation(*, client_id: str, skill: str, side: str, bucket: str,
-                          db_path: Optional[Path] = None) -> None:
-    """记一次"把 skill 推荐给某用户"。供算推荐触发率(被推荐→被采用)。"""
+                          sha: str = "", db_path: Optional[Path] = None) -> None:
+    """记一次"把 skill(某版本)推荐给某用户"——曝光事件。
+
+    OR IGNORE 命中唯一索引 (client_id,skill,side,sha)：同一曝光对只记首次，
+    反复 sync 不再膨胀触发率分母（审计 P0-2）。
+    """
     conn = get_connection(db_path)
     try:
         conn.execute(
-            "INSERT INTO recommendation_log(client_id,skill,side,bucket) VALUES(?,?,?,?)",
-            (client_id, skill, side, bucket),
+            "INSERT OR IGNORE INTO recommendation_log(client_id,skill,side,bucket,sha)"
+            " VALUES(?,?,?,?,?)",
+            (client_id, skill, side, bucket, sha or ""),
         )
         conn.commit()
     finally:
@@ -359,8 +385,11 @@ def usage_summary(db_path: Optional[Path] = None) -> dict:
             "SELECT COALESCE(SUM(total),0) t, COALESCE(SUM(cost_usd),0) c, COUNT(*) n"
             " FROM llm_usage"
         ).fetchone()
+        # 本地日界（ts 存的是 UTC；'localtime','start of day','utc' = 本地零点的
+        # UTC 表示）。旧口径 date('now') 是 UTC 日界，UTC+8 每天 08:00 前错位 8h。
         today = conn.execute(
-            "SELECT COALESCE(SUM(cost_usd),0) FROM llm_usage WHERE ts >= date('now')"
+            "SELECT COALESCE(SUM(cost_usd),0) FROM llm_usage"
+            " WHERE ts >= datetime('now','localtime','start of day','utc')"
         ).fetchone()[0]
         estimated = conn.execute(
             "SELECT COUNT(*) FROM llm_usage WHERE price_source != 'config'"
@@ -497,10 +526,25 @@ def register_dir(
 
 
 def unregister_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> bool:
-    """移除目录及其轨迹记录。返回 True 表示找到并删除。"""
+    """移除目录及其轨迹记录。返回 True 表示找到并删除。
+
+    级联删轨迹的同时清对应 ``atom_adoption`` 行——否则采纳率分子留历史累计、
+    分母被删小，比率虚高（审计 P1-7）。
+    """
     dir_path = str(Path(dir_path).resolve())
     conn = get_connection(db_path)
     try:
+        stems = [
+            (r["filename"][:-3] if r["filename"].endswith(".md") else r["filename"])
+            for r in conn.execute(
+                "SELECT t.filename FROM trajectories t"
+                " JOIN watch_dirs w ON t.watch_dir_id=w.id WHERE w.path=?",
+                (dir_path,),
+            ).fetchall()
+        ]
+        for stem in stems:
+            conn.execute("DELETE FROM atom_adoption WHERE atom_id GLOB ?",
+                         (f"atom_{stem}_*",))
         cur = conn.execute("DELETE FROM watch_dirs WHERE path=?", (dir_path,))
         conn.commit()
         return cur.rowcount > 0
@@ -1090,6 +1134,10 @@ def reset_trajectories(
             if tasks_directory.is_dir():
                 for atom_file in tasks_directory.glob("atom_*.json"):
                     atom_file.unlink()
+            # atom 文件已删、tasks_extracted 已归零——采纳事件一并清，
+            # 否则采纳率分子留历史累计、分母归零后比率虚高（审计 P1-7）。
+            conn.execute("DELETE FROM atom_adoption WHERE atom_id GLOB ?",
+                         (f"atom_{trajectory_stem}_*",))
             directories_seen.add(trajectory_row["path"])
         conn.commit()
         # 清各目录的陈旧向量索引（AtomTaskStore.INDEX_FILE = "index.pkl"）。

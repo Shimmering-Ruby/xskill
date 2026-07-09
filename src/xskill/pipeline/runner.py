@@ -1062,10 +1062,20 @@ class DirectoryWatcher:
             )
             return
         update_traj_status(wd_id, fname, TrajectoryStatus.SPLIT_DONE.value, **kw)
+        # tasks_extracted 用全量口径：TaskAgent 对追加轨迹只返回本次续拆的
+        # **新增** atom 数，直接落库会把累计值覆盖成增量（审计 P0-3）。
+        # 全量 = 该轨迹 atom 文件的当前总数。
+        matched = [w for w in list_watch_dirs(**kw) if w["id"] == wd_id]
+        if not matched:
+            raise RuntimeError(
+                f"watch_dir id={wd_id} vanished during split of {fname}")
+        stem = fname[:-3] if fname.endswith(".md") else fname
+        total_atoms = len(
+            self._store_for(Path(matched[0]["path"])).list_by_traj(stem))
         update_traj_offset(
             wd_id, fname,
             last_offset=last_off, last_atom_id=last_id,
-            tasks_extracted=n_atoms, **kw,
+            tasks_extracted=total_atoms, **kw,
         )
         self._stats["atoms_extracted"] += n_atoms
 

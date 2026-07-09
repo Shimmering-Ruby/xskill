@@ -55,27 +55,40 @@ def test_adoption_rate_empty_no_zerodiv(tmp_path):
 
 
 # ── 推荐触发率：反复同步不虚低(DISTINCT client) + used 封顶 ─────────
-def test_trigger_rate_dedupes_client_and_caps(tmp_path):
+def test_trigger_rate_exposure_dedup_and_pairing(tmp_path):
+    """事件级配对口径（审计 P0-2）：曝光按 (client,skill,side,sha) 去重；
+    采用 = 曝光后该 client 的 .ux_scores.jsonl 使用记录命中该 skill。"""
+    import json
     db = tmp_path / "r.db"
     conn = _conn(db)
-    conn.execute("INSERT INTO watch_dirs(path,label) VALUES('/w','w')")
-    # s1 被用 5 次；s2 没被用过
-    for i in range(5):
-        conn.execute("INSERT INTO trajectories(watch_dir_id,filename,skill_used) VALUES(1,?, 's1')",
-                     (f"u{i}",))
+    conn.execute(
+        "INSERT INTO watch_dirs(id,path,label,ecosystem)"
+        " VALUES(1,'/w','c1','team_client')")
+    conn.execute(
+        "INSERT INTO trajectories(watch_dir_id,filename) VALUES(1,'traj_u.md')")
     conn.commit(); conn.close()
-    # s1 推给 c1 三次(反复同步)+c2 一次 → 去重后 distinct client = 2
+    # s1 推给 c1 三次(反复同步——OR IGNORE 去重)+c2 一次；s2 推给 c1
     for _ in range(3):
-        record_recommendation(client_id="c1", skill="s1", side="main", bucket="recommended", db_path=db)
-    record_recommendation(client_id="c2", skill="s1", side="main", bucket="recommended", db_path=db)
-    record_recommendation(client_id="c1", skill="s2", side="main", bucket="recommended", db_path=db)
-    r = DashboardMetrics(db_path=db).trigger_rate()
+        record_recommendation(client_id="c1", skill="s1", side="main",
+                              bucket="recommended", sha="v1", db_path=db)
+    record_recommendation(client_id="c2", skill="s1", side="main",
+                          bucket="recommended", sha="v1", db_path=db)
+    record_recommendation(client_id="c1", skill="s2", side="main",
+                          bucket="recommended", sha="v1", db_path=db)
+    # c1 在曝光后用了 s1（写使用事实源）；c2 与 s2 没有使用记录
+    sd = tmp_path / "skill"
+    (sd / "s1").mkdir(parents=True)
+    (sd / "s1" / ".ux_scores.jsonl").write_text(json.dumps({
+        "atom_id": "atom_traj_u_0001", "skill_name": "s1", "side": "main",
+        "commit_sha": "v1", "score": 8.0, "reasons": "",
+        "scored_at": "2099-01-01T00:00:00+00:00"}) + "\n", encoding="utf-8")
+    r = DashboardMetrics(db_path=db, skill_dir=sd).trigger_rate()
     by = {x["skill"]: x for x in r["by_skill"]}
-    assert by["s1"]["recommended"] == 2          # 去重：c1+c2，不是 4
-    assert by["s1"]["used"] == 5
-    assert by["s1"]["rate"] == 100.0             # 5/2 封顶 100%
-    assert by["s2"]["recommended"] == 1 and by["s2"]["used"] == 0 and by["s2"]["rate"] == 0.0
-    assert r["overall"] == 50.0                  # 2 个被推荐 skill,1 个被用过 → 50%
+    assert by["s1"]["recommended"] == 2          # c1 反复 sync 只算一次曝光
+    assert by["s1"]["used"] == 1                 # 只有 c1 配对成功
+    assert by["s1"]["rate"] == 50.0              # 天然 ≤100%，无封顶补丁
+    assert by["s2"]["recommended"] == 1 and by["s2"]["used"] == 0
+    assert r["overall"] == round(1 / 3 * 100, 1)  # 3 个曝光对，1 个采用
 
 
 def test_trigger_rate_empty(tmp_path):

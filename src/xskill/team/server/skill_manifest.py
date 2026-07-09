@@ -138,7 +138,8 @@ def build_manifest(
         for s in slots:
             if s.bucket == "recommended":
                 record_recommendation(client_id=client_id, skill=s.skill_name,
-                                      side=s.side or "main", bucket=s.bucket)
+                                      side=s.side or "main", bucket=s.bucket,
+                                      sha=s.sha or "")
     except Exception:  # pylint: disable=broad-exception-caught
         _logger.debug("recommendation telemetry skipped", exc_info=True)
     return SyncResponse(slots=slots, server_time=time.time())
