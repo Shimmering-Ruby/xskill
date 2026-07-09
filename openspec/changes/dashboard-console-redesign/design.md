@@ -73,10 +73,10 @@ categorical 蓝/青）；竖虚线 = 版本切换点（标 v3/v4/v5）。交互�
 （当日 main/staging 均分 + 贡献原子数），点击数据点下钻当日 atom 列表（复用 `/ux/atoms`）。
 新 API `GET /skill/{name}/ux/daily`。
 
-**血缘构成 + 贡献原子表**：
-- 构成：两组水平条形（按用户 / 按来源模型），单一 sequential 蓝——这是 magnitude 不是
-  identity，不上多色。
-- 贡献原子表：原子 id / 意图 / 用户 / 模型 / weightscore / 进入版本；点行跳 atom 详情页。
+**贡献来源 + 贡献原子表**（v2 调整：弃"两组柱状图"，改列表内嵌占比条，更直观）：
+- 贡献来源：按用户的头像列表 + 内嵌占比条 + 计数；来源模型收为计数 chip 行——都是
+  magnitude，单色（teal），不上多色。
+- 贡献原子表：意图 / 用户 / 模型 / weightscore 徽章 / 进入版本；点行跳 atom 详情页。
 - 断链（原子文件已清理）显式标"源已清理"，不静默省略（no-fallback）。
 - 新 API `GET /skill/{name}/lineage`（聚合 `.candidates.yml` + `atom_adoption` + traj 归因）。
 
@@ -121,9 +121,9 @@ atom 详情；点击 ▲ 跳 skill 分析页。
 - **推给我的**：表格，槽位 chip 标注 manifest 注入类型（pinned·自己 / pinned·admin /
   ranked / recommended）+ 我触发过的次数 + pin/取消 pin 操作。admin pin 的条目普通用户
   不可自行取消（显式置灰说明）。
-- **我的贡献去向**：四级漏斗（我贡献的轨迹 → 切出原子 → 进入 skill → 被 N 人使用），
-  ordinal 蓝 ramp（≥step250），每级点击钻取明细；下方"我贡献的 skill × 使用者 × 评价
-  （ux 分）"表。
+- **我的贡献去向**（v2 调整：弃漏斗图，改四级步进指标 38→171→9→6，箭头连接、每级
+  点击钻取——漏斗形状在这里是伪装饰，数字+箭头更直观）；下方"我贡献的 skill ×
+  使用者头像 × 评价（ux 分徽章）"列表。
 - **世界消息**：团队动态 feed（"m00323121 使用了 bob 蒸馏的 nginx-subpath-proxy，打了
   9.1 分"/"alice 对 3gpp-spec-lookup 提交了修改（push-edit 分支）"/灰度裁决/全局 pin）。
   只放 skill 名与动作，不放轨迹内容。
@@ -149,18 +149,21 @@ atom 详情；点击 ▲ 跳 skill 分析页。
 同源）+ 点击跳对应分析页（从"陈列"变"分析入口"）。加近 30 日轨迹/原子/成本三条趋势
 折线与按生态/模型分组柱状。
 
-### 2.7 可视化规范（全站统一）
+### 2.7 可视化与视觉规范（全站统一，v2）
 
-- **色板**：dataviz 参考色板（已通过 CVD/对比度验证：categorical 8 槽按固定顺序取用、
-  sequential 单蓝 ramp、status 四色只用于状态永不当 series 用）。vendor 进 static/，
-  以 CSS 变量落地，同套变量出深色模式。
-- **图型选择原则**：magnitude→条形（单蓝）；趋势→折线（≤2 series）；识别→categorical
-  且 ≤5；状态→status 色+图标+文字（永不只靠颜色）；构成→水平条形+百分比。**单轴**，
-  不做双 y 轴。
-- **交互默认**：折线带 crosshair+tooltip；条形/散点/节点 per-mark hover；一切图形节点
-  可点击跳详情——"分析工具"的钻取原则：任何聚合数字都能追到明细。
-- **实现**：折线/条形用 vendor 的 uPlot（~45KB 单文件）；DAG/时间线/二部图/散点/聚类
-  graph 手写 SVG（数据量都在百级以下）。零构建、无 CDN。
+- **设计体系**：Tailwind（D3）。中性色 slate 系（bg slate-50 / 卡片白 + ring-slate-200 /
+  正文 slate-800 / 辅助 slate-400），品牌 accent teal（导航选中、主按钮、占比条、贡献边），
+  语义色 emerald=晋升/好评、rose=回滚/停推、amber=灰度观察/走低、violet=admin 动作、
+  sky=recommended。卡片 rounded-2xl + ring，数值 tabular-nums。
+- **克制用图**：只有"趋势"和"空间结构"才用图——折线（得分趋势）、散点（画像投影）、
+  DAG（进化）、关系图（血缘/聚类）；其余一律用带占比条/徽章/头像的**列表和表格**表达
+  （比柱状图更直观：血缘来源、tag 构成、命中率、贡献去向都是这一类）。**单轴**，不做
+  双 y 轴，不为装饰造图。
+- **状态永不只靠颜色**：徽章 = 色 + 文字（"晋升"“回滚”“建议停推"）。
+- **交互默认**：折线 crosshair+tooltip；散点/节点 hover 预览卡；一切图形节点可点击跳
+  详情——"分析工具"的钻取原则：任何聚合数字都能追到明细。
+- **实现**：折线用 vendor 的 uPlot（~45KB 单文件）；DAG/时间线/二部图/散点/聚类 graph
+  手写 SVG（数据量都在百级以下）。样式为编译产物 CSS，运行时零依赖、无 CDN。
 
 ## 3. 需求 → 设计映射（点评压缩版）
 
@@ -191,9 +194,11 @@ P2 的 `client_id` 归因是 P3 社交的地基，顺序不可换。
 **D2 身份复用不另造**：dashboard 登录 = `connect --name` 的 user_name，admin 名单进
 config（`dashboard.admins`）。不引入独立的 dashboard 账号表。
 
-**D3 前端保持零构建 + 全 vendor**：不上 React/构建链；图表 vendor uPlot，图（graph）类
-全部手写 SVG。内网无 CDN 是硬约束。示意图 `mockups/panels.html` 即按此约束制作
-（纯 HTML+SVG，无任何外部依赖），可直接演化为实现骨架。
+**D3 前端用 Tailwind CSS（PR review 拍板），运行时仍零依赖**：样式体系上 Tailwind——
+开发期用其构建工具把用到的类编译成一份静态 CSS，vendor 进 `static/`（运行时无 Node、
+无 CDN，不违内网约束）。不上 React/构建链之外的运行时框架；图表 vendor uPlot，
+graph 类手写 SVG。示意图 `mockups/panels.html` 即按 Tailwind 制作（`mockups/tailwind.js`
+为本地化的 Play 脚本，仅示意图用），其结构与类名可直接演化为实现骨架。
 
 **D4 写操作只在 serve 内置形态**：独立只读实例（公网 demo）物理上不挂写路由（不是靠
 中间件挡，是根本不 include），杜绝配置失误。
