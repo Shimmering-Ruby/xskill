@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>xskill dashboard 0号提案 · 页面示意</title>
+<style>
+:root{
+  --surface-1:#fcfcfb; --page:#f9f9f7;
+  --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --s4:#008300;
+  --s5:#4a3aa7; --s6:#e34948; --s7:#e87ba4; --s8:#eb6834;
+  --seq250:#86b6ef; --seq350:#5598e7; --seq450:#2a78d6; --seq600:#184f95;
+  --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --good-text:#006300;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--page);color:var(--ink);font-size:13px;line-height:1.45}
+.page-mock{width:1280px;margin:28px auto;display:flex;border:1px solid var(--ring);border-radius:10px;overflow:hidden;background:var(--surface-1);box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.side{width:180px;background:#12414b;color:#e8f1f2;padding:14px 0;flex:none;display:flex;flex-direction:column}
+.side .brand{font-weight:700;font-size:15px;padding:4px 16px 14px;color:#fff}
+.side a{display:block;padding:7px 16px;color:#b8d3d8;text-decoration:none;font-size:12.5px}
+.side a.on{background:rgba(255,255,255,.14);color:#fff;border-left:3px solid #7fd0dd;padding-left:13px}
+.side .role{margin-top:auto;padding:10px 16px;font-size:11px;color:#8fb3ba;border-top:1px solid rgba(255,255,255,.12)}
+.main{flex:1;padding:18px 22px;min-width:0}
+.crumb{color:var(--muted);font-size:11.5px;margin-bottom:4px}
+h1{font-size:19px;margin-bottom:2px}
+h2{font-size:13.5px;margin-bottom:8px}
+.sub{color:var(--ink-2);font-size:12px;margin-bottom:14px}
+.row{display:flex;gap:14px;margin-bottom:14px}
+.card{background:var(--surface-1);border:1px solid var(--ring);border-radius:8px;padding:12px 14px;min-width:0}
+.card .cap{font-size:11px;color:var(--muted);margin-bottom:2px}
+.card h2 .hint{font-weight:400;font-size:11px;color:var(--muted)}
+.grow{flex:1}
+.kpi{font-size:26px;font-weight:650}
+.kpi small{font-size:11px;font-weight:400;color:var(--ink-2);margin-left:4px}
+.delta-up{color:var(--good-text);font-size:11px}
+.delta-dn{color:var(--critical);font-size:11px}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{text-align:left;color:var(--muted);font-weight:500;padding:5px 8px;border-bottom:1px solid var(--grid);font-size:11px}
+td{padding:6px 8px;border-bottom:1px solid var(--grid);font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+.chip{display:inline-block;padding:1px 8px;border-radius:999px;font-size:10.5px;border:1px solid var(--ring);color:var(--ink-2);background:#f3f2ee;margin-right:4px}
+.chip.src-own{background:#e7f0fb;border-color:#c4dbf5;color:#1c5cab}
+.chip.src-hub{background:#fdf3e0;border-color:#f3ddb0;color:#8a5c00}
+.chip.src-admin{background:#efeaf9;border-color:#d9d0f0;color:#4a3aa7}
+.status{font-size:11px;font-weight:600}
+.status .ic{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:baseline}
+.st-good{color:var(--good-text)} .st-good .ic{background:var(--good)}
+.st-crit{color:var(--critical)} .st-crit .ic{background:var(--critical)}
+.st-warn{color:#7a5600} .st-warn .ic{background:var(--warn)}
+.st-ser{color:#9a3d1c} .st-ser .ic{background:var(--serious)}
+.meter{height:8px;border-radius:4px;background:#efeeea;position:relative;min-width:70px}
+.meter i{position:absolute;left:0;top:0;bottom:0;border-radius:4px;background:var(--seq450)}
+.legend{display:flex;gap:14px;font-size:11px;color:var(--ink-2);margin-top:6px;flex-wrap:wrap}
+.legend b{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.axis-note{font-size:10.5px;color:var(--muted);margin-top:4px}
+svg text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;font-size:12px}
+.toolbar .seg{border:1px solid var(--ring);border-radius:6px;overflow:hidden;display:flex}
+.toolbar .seg span{padding:4px 10px;color:var(--ink-2)}
+.toolbar .seg span.on{background:#e7f0fb;color:#1c5cab;font-weight:600}
+.toolbar input{border:1px solid var(--ring);border-radius:6px;padding:5px 10px;width:280px;font-size:12px;background:#fff}
+.btn{border:1px solid var(--ring);background:#fff;border-radius:6px;padding:4px 12px;font-size:12px;color:var(--ink-2);cursor:pointer}
+.btn.pri{background:var(--seq450);border-color:var(--seq450);color:#fff;font-weight:600}
+.btn.pin-on{background:#e7f0fb;border-color:#c4dbf5;color:#1c5cab;font-weight:600}
+.note{font-size:11px;color:var(--muted);background:#f5f4f0;border:1px dashed var(--grid);border-radius:6px;padding:6px 10px;margin-top:10px}
+.section-label{width:1280px;margin:34px auto 8px;font-size:13px;color:var(--ink-2)}
+.section-label b{font-size:15px;color:var(--ink);margin-right:8px}
+.toast{position:absolute;right:18px;bottom:18px;width:290px;background:#fff;border:1px solid var(--ring);border-left:4px solid var(--seq450);border-radius:8px;padding:10px 12px;box-shadow:0 4px 14px rgba(0,0,0,.12);font-size:12px}
+.toast .t-title{font-weight:650;margin-bottom:2px}
+.toast .t-act{color:var(--seq600);font-size:11.5px;margin-top:6px}
+.rel{position:relative}
+.searchhit{border:1px solid var(--ring);border-radius:8px;padding:9px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px}
+.searchhit .nm{font-weight:600;min-width:180px}
+.searchhit .ds{color:var(--ink-2);flex:1;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.feed li{list-style:none;padding:7px 0;border-bottom:1px solid var(--grid);font-size:12px}
+.feed li:last-child{border-bottom:none}
+.feed .who{font-weight:600}
+.feed time{color:var(--muted);font-size:10.5px;float:right}
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<div class="section-label" id="lbl-skill"><b>① Skill 分析页</b>进化 DAG（tree+node，点节点看 diff）＋ 得分趋势折线（版本切换竖线）＋ 血缘构成 ＋ 贡献原子钻取</div>
+<div class="page-mock" id="pg-skill">
+  <aside class="side">
+    <div class="brand">xskill 控制台</div>
+    <a>总览</a><a class="on">技能库</a><a>轨迹 &amp; 原子</a><a>用户 &amp; 画像</a><a>灰度 Canary</a><a>我的</a><a>管理</a>
+    <div class="role">alice · 普通用户</div>
+  </aside>
+  <div class="main">
+    <div class="crumb">技能库 / 3gpp-spec-lookup</div>
+    <h1>3gpp-spec-lookup</h1>
+    <p class="sub">检索 3GPP 规范条款并生成引用摘要 · main <code>a41c9f2</code> · staging <code>7be03d1</code>（灰度中）</p>
+
+    <div class="row">
+      <div class="card" style="width:170px"><div class="cap">平均 ux（近30日）</div><div class="kpi">8.2<small>/10</small></div><div class="delta-up">↑ 0.6 vs 上一版本</div></div>
+      <div class="card" style="width:170px"><div class="cap">被推荐 → 被触发</div><div class="kpi">41<small>/ 127 次</small></div><div class="delta-up">命中率 32%</div></div>
+      <div class="card" style="width:170px"><div class="cap">贡献原子</div><div class="kpi">23<small>个 · 5 用户</small></div></div>
+      <div class="card" style="width:170px"><div class="cap">版本数</div><div class="kpi">14<small>main 9 · staging 5</small></div></div>
+      <div class="card grow"><div class="cap">当前灰度</div>
+        <div style="margin-top:4px"><span class="status st-warn"><i class="ic"></i>staging 观察中</span></div>
+        <div style="font-size:11.5px;color:var(--ink-2);margin-top:4px">staging 8.6 vs main 8.2 · 样本 12/20 · 预计 2 天后裁决</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="card" style="width:400px">
+        <h2>进化路径 <span class="hint">— 节点=commit，点击看该版本与 diff</span></h2>
+        <svg width="368" height="308" viewBox="0 0 368 308">
+          <text x="46" y="14" font-size="10" fill="#898781" text-anchor="middle">main</text>
+          <text x="130" y="14" font-size="10" fill="#898781" text-anchor="middle">staging</text>
+          <line x1="46" y1="22" x2="46" y2="292" stroke="#e1e0d9" stroke-width="2"/>
+          <!-- merges / branches -->
+          <path d="M46 262 C 88 262 88 236 130 236" fill="none" stroke="#c3c2b7" stroke-width="1.5"/>
+          <path d="M130 210 C 88 210 88 186 46 186" fill="none" stroke="#0ca30c" stroke-width="1.5"/>
+          <path d="M46 160 C 88 160 88 134 130 134" fill="none" stroke="#c3c2b7" stroke-width="1.5"/>
+          <path d="M130 108 C 88 108 88 108 130 108" fill="none" stroke="#c3c2b7" stroke-width="0"/>
+          <path d="M46 82 C 88 82 88 56 130 56" fill="none" stroke="#c3c2b7" stroke-width="1.5"/>
+          <line x1="130" y1="236" x2="130" y2="210" stroke="#c3c2b7" stroke-width="2"/>
+          <line x1="130" y1="134" x2="130" y2="108" stroke="#c3c2b7" stroke-width="2"/>
+          <line x1="130" y1="108" x2="130" y2="56" stroke="#c3c2b7" stroke-width="0"/>
+          <line x1="130" y1="56" x2="130" y2="30" stroke="#c3c2b7" stroke-width="2" stroke-dasharray="3 3"/>
+          <!-- main nodes -->
+          <g font-size="10.5">
+            <circle cx="46" cy="286" r="6" fill="#c3c2b7"/><text x="62" y="290" fill="#52514e">v1 初版 · ux 6.1</text>
+            <circle cx="46" cy="262" r="6" fill="#c3c2b7"/><text x="62" y="266" fill="#52514e">v2 补引用格式 · ux 6.8</text>
+            <circle cx="46" cy="186" r="7" fill="#0ca30c"/><text x="62" y="190" fill="#006300">v3 ← staging 晋升 · ux 7.4</text>
+            <circle cx="46" cy="160" r="6" fill="#c3c2b7"/><text x="62" y="164" fill="#52514e">v4 修链接失效 · ux 7.3</text>
+            <circle cx="46" cy="82" r="7" fill="#0ca30c"/><text x="62" y="86" fill="#006300">v5 ← staging 晋升 · ux 8.2</text>
+            <circle cx="46" cy="46" r="7" fill="none" stroke="#2a78d6" stroke-width="2"/><text x="62" y="50" fill="#1c5cab" font-weight="600">main HEAD a41c9f2</text>
+            <!-- staging nodes -->
+            <circle cx="130" cy="236" r="6" fill="#c3c2b7"/><text x="146" y="240" fill="#52514e">条款号解析重写</text>
+            <circle cx="130" cy="210" r="6" fill="#0ca30c"/><text x="146" y="214" fill="#006300">晋升 8.1&gt;7.0</text>
+            <circle cx="130" cy="134" r="6" fill="#d03b3b"/><text x="146" y="138" fill="#d03b3b">回滚 5.9&lt;7.3 表格解析劣化</text>
+            <circle cx="130" cy="56" r="6" fill="#c3c2b7"/><text x="146" y="60" fill="#52514e">alice push-edit 用户修改</text>
+            <circle cx="130" cy="30" r="7" fill="#fab219"/><text x="146" y="34" fill="#7a5600" font-weight="600">staging HEAD 7be03d1 观察中</text>
+          </g>
+        </svg>
+        <div class="legend">
+          <span><b style="background:#0ca30c"></b>晋升</span>
+          <span><b style="background:#d03b3b"></b>回滚</span>
+          <span><b style="background:#fab219"></b>灰度观察中</span>
+          <span><b style="background:#c3c2b7"></b>普通提交</span>
+        </div>
+      </div>
+
+      <div class="card grow">
+        <h2>得分趋势 <span class="hint">— 竖虚线=版本切换；hover 看当日贡献原子；点击下钻</span></h2>
+        <svg width="600" height="230" viewBox="0 0 600 230">
+          <g stroke="#e1e0d9" stroke-width="1">
+            <line x1="44" y1="30" x2="580" y2="30"/><line x1="44" y1="70" x2="580" y2="70"/>
+            <line x1="44" y1="110" x2="580" y2="110"/><line x1="44" y1="150" x2="580" y2="150"/>
+          </g>
+          <line x1="44" y1="190" x2="580" y2="190" stroke="#c3c2b7" stroke-width="1"/>
+          <g font-size="10" fill="#898781" text-anchor="end">
+            <text x="38" y="34">10</text><text x="38" y="74">8</text><text x="38" y="114">6</text><text x="38" y="154">4</text><text x="38" y="194">2</text>
+          </g>
+          <!-- version switch markers -->
+          <line x1="150" y1="26" x2="150" y2="190" stroke="#c3c2b7" stroke-dasharray="3 3"/>
+          <text x="150" y="205" font-size="9.5" fill="#898781" text-anchor="middle">v3</text>
+          <line x1="300" y1="26" x2="300" y2="190" stroke="#c3c2b7" stroke-dasharray="3 3"/>
+          <text x="300" y="205" font-size="9.5" fill="#898781" text-anchor="middle">v4</text>
+          <line x1="440" y1="26" x2="440" y2="190" stroke="#c3c2b7" stroke-dasharray="3 3"/>
+          <text x="440" y="205" font-size="9.5" fill="#898781" text-anchor="middle">v5</text>
+          <!-- main line -->
+          <polyline fill="none" stroke="#2a78d6" stroke-width="2"
+            points="60,128 90,120 120,124 150,104 180,98 210,102 240,94 270,98 300,92 330,96 360,88 390,92 420,86 440,74 470,70 500,66 530,70 560,64"/>
+          <!-- staging line -->
+          <polyline fill="none" stroke="#1baf7a" stroke-width="2" stroke-dasharray="5 3"
+            points="440,84 470,72 500,62 530,58 560,54"/>
+          <circle cx="560" cy="64" r="4" fill="#2a78d6"/>
+          <circle cx="560" cy="54" r="4" fill="#1baf7a"/>
+          <text x="566" y="50" font-size="10.5" fill="#0f7a52" font-weight="600" text-anchor="end" dx="-8" dy="-8">staging 8.6</text>
+          <text x="500" y="90" font-size="10.5" fill="#1c5cab" font-weight="600">main 8.2</text>
+          <!-- hover tooltip 示意 -->
+          <g>
+            <line x1="470" y1="26" x2="470" y2="190" stroke="#52514e" stroke-width="1" opacity=".55"/>
+            <rect x="330" y="30" width="132" height="58" rx="6" fill="#fff" stroke="rgba(11,11,11,.14)"/>
+            <text x="340" y="46" font-size="10" fill="#0b0b0b" font-weight="600">6月28日</text>
+            <text x="340" y="60" font-size="10" fill="#52514e">main 8.1 · 3 原子</text>
+            <text x="340" y="74" font-size="10" fill="#52514e">staging 8.4 · 2 原子 →下钻</text>
+          </g>
+          <text x="44" y="16" font-size="10" fill="#898781">ux 分（1–10，日均）</text>
+        </svg>
+        <div class="legend"><span><b style="background:#2a78d6"></b>main</span><span><b style="background:#1baf7a"></b>staging（虚线）</span></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="card" style="width:400px">
+        <h2>血缘构成 <span class="hint">— 23 个贡献原子的来源</span></h2>
+        <div class="cap" style="margin-top:6px">按用户</div>
+        <svg width="360" height="96" viewBox="0 0 360 96">
+          <g font-size="10.5">
+            <text x="58" y="16" text-anchor="end" fill="#52514e">alice</text><rect x="64" y="7" width="128" height="11" rx="3" fill="#2a78d6"/><text x="198" y="16" fill="#0b0b0b">9</text>
+            <text x="58" y="34" text-anchor="end" fill="#52514e">bob</text><rect x="64" y="25" width="100" height="11" rx="3" fill="#2a78d6"/><text x="170" y="34" fill="#0b0b0b">7</text>
+            <text x="58" y="52" text-anchor="end" fill="#52514e">m0032</text><rect x="64" y="43" width="57" height="11" rx="3" fill="#2a78d6"/><text x="127" y="52" fill="#0b0b0b">4</text>
+            <text x="58" y="70" text-anchor="end" fill="#52514e">carol</text><rect x="64" y="61" width="29" height="11" rx="3" fill="#2a78d6"/><text x="99" y="70" fill="#0b0b0b">2</text>
+            <text x="58" y="88" text-anchor="end" fill="#52514e">dave</text><rect x="64" y="79" width="15" height="11" rx="3" fill="#2a78d6"/><text x="85" y="88" fill="#0b0b0b">1</text>
+          </g>
+        </svg>
+        <div class="cap" style="margin-top:8px">按来源模型</div>
+        <svg width="360" height="60" viewBox="0 0 360 60">
+          <g font-size="10.5">
+            <text x="58" y="16" text-anchor="end" fill="#52514e">dsv4</text><rect x="64" y="7" width="150" height="11" rx="3" fill="#2a78d6"/><text x="220" y="16" fill="#0b0b0b">11</text>
+            <text x="58" y="34" text-anchor="end" fill="#52514e">sonnet-5</text><rect x="64" y="25" width="110" height="11" rx="3" fill="#2a78d6"/><text x="180" y="34" fill="#0b0b0b">8</text>
+            <text x="58" y="52" text-anchor="end" fill="#52514e">k2</text><rect x="64" y="43" width="55" height="11" rx="3" fill="#2a78d6"/><text x="125" y="52" fill="#0b0b0b">4</text>
+          </g>
+        </svg>
+      </div>
+      <div class="card grow">
+        <h2>贡献原子 <span class="hint">— 点行进原子详情；weightscore=进入该 skill 时的贡献分</span></h2>
+        <table>
+          <tr><th>原子</th><th>意图</th><th>用户</th><th>模型</th><th>weightscore</th><th>进入版本</th></tr>
+          <tr><td><code>atom_…890d_0003</code></td><td>查 38.331 RRC 重配置条款</td><td>alice</td><td>dsv4</td><td>4.2</td><td>v5</td></tr>
+          <tr><td><code>atom_…12fe_0001</code></td><td>对比 R17/R18 切换流程差异</td><td>bob</td><td>sonnet-5</td><td>3.8</td><td>v5</td></tr>
+          <tr><td><code>atom_…88a1_0007</code></td><td>生成条款引用清单</td><td>alice</td><td>dsv4</td><td>3.1</td><td>v3</td></tr>
+          <tr><td><code>atom_…41c0_0002</code></td><td>检索 NR 测量事件 A3 定义</td><td>m0032</td><td>k2</td><td>2.6</td><td>v3</td></tr>
+        </table>
+        <div class="note">断链显式标注：若原子文件已被清理，此表该行显示"源已清理"，不静默省略（no-fallback）。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="section-label" id="lbl-traj"><b>② 轨迹 &amp; 原子详情页</b>原子时间线（链表序，点击展开）＋ traj—atom—skill 关系图 ＋ 原文切片定位</div>
+<div class="page-mock" id="pg-traj">
+  <aside class="side">
+    <div class="brand">xskill 控制台</div>
+    <a>总览</a><a>技能库</a><a class="on">轨迹 &amp; 原子</a><a>用户 &amp; 画像</a><a>灰度 Canary</a><a>我的</a><a>管理</a>
+    <div class="role">alice · 普通用户</div>
+  </aside>
+  <div class="main">
+    <div class="crumb">轨迹 &amp; 原子 / traj_cc_dsv4_890da9d9</div>
+    <h1>traj_cc_dsv4_890da9d9</h1>
+    <p class="sub">claude-code · dsv4 · alice · 2026-07-02 · 状态 processed · 切出 5 原子 · 平均 ux 7.9</p>
+
+    <div class="card" style="margin-bottom:14px">
+      <h2>原子时间线 <span class="hint">— 按链表序（pre/post_atom_id）；点击节点展开详情</span></h2>
+      <svg width="1010" height="120" viewBox="0 0 1010 120">
+        <line x1="30" y1="46" x2="980" y2="46" stroke="#c3c2b7" stroke-width="2"/>
+        <g font-size="10.5">
+          <circle cx="80" cy="46" r="9" fill="#86b6ef"/><text x="80" y="26" text-anchor="middle" fill="#52514e">0001</text>
+          <text x="80" y="70" text-anchor="middle" fill="#0b0b0b">部署 xquiz 到 1717</text><text x="80" y="84" text-anchor="middle" fill="#898781">ux 8.5</text>
+          <circle cx="290" cy="46" r="9" fill="#5598e7"/><text x="290" y="26" text-anchor="middle" fill="#52514e">0002</text>
+          <text x="290" y="70" text-anchor="middle" fill="#0b0b0b">修 nginx 反代 404</text><text x="290" y="84" text-anchor="middle" fill="#898781">ux 7.2</text>
+          <circle cx="500" cy="46" r="11" fill="#2a78d6" stroke="#184f95" stroke-width="2"/><text x="500" y="26" text-anchor="middle" fill="#1c5cab" font-weight="600">0003 ●选中</text>
+          <text x="500" y="70" text-anchor="middle" fill="#0b0b0b">查 38.331 RRC 条款</text><text x="500" y="84" text-anchor="middle" fill="#898781">ux 9.0 · 用了 3gpp-spec-lookup</text>
+          <circle cx="710" cy="46" r="9" fill="#5598e7"/><text x="710" y="26" text-anchor="middle" fill="#52514e">0004</text>
+          <text x="710" y="70" text-anchor="middle" fill="#0b0b0b">写单测覆盖重试</text><text x="710" y="84" text-anchor="middle" fill="#898781">ux 7.6</text>
+          <circle cx="900" cy="46" r="9" fill="#86b6ef"/><text x="900" y="26" text-anchor="middle" fill="#52514e">0005</text>
+          <text x="900" y="70" text-anchor="middle" fill="#0b0b0b">发版 push PyPI</text><text x="900" y="84" text-anchor="middle" fill="#898781">ux 8.1</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="row">
+      <div class="card grow">
+        <h2>atom_…890d_0003 详情</h2>
+        <table>
+          <tr><td style="color:var(--muted);width:90px">intent</td><td>查 38.331 RRC 重配置条款并引用到设计文档</td></tr>
+          <tr><td style="color:var(--muted)">summary</td><td>agent 用 3gpp-spec-lookup 检索条款，摘取 5.3.5.3 生成引用段落</td></tr>
+          <tr><td style="color:var(--muted)">tags</td><td><span class="chip">3gpp</span><span class="chip">spec-lookup</span><span class="chip">文档引用</span></td></tr>
+          <tr><td style="color:var(--muted)">used_skills</td><td><span class="chip src-own">3gpp-spec-lookup</span></td></tr>
+          <tr><td style="color:var(--muted)">去向</td><td>进入 <b>3gpp-spec-lookup</b> v5（weightscore 4.2）→ 点击跳 skill 血缘</td></tr>
+          <tr><td style="color:var(--muted)">offset</td><td>12,400 – 18,220</td></tr>
+        </table>
+        <div class="cap" style="margin-top:10px">原文切片（按 offset 定位，只读）</div>
+        <div style="background:#f5f4f0;border:1px solid var(--grid);border-radius:6px;padding:8px 10px;font-family:ui-monospace,monospace;font-size:11px;color:#52514e;margin-top:4px">
+          user: 帮我查一下 38.331 里 RRC reconfiguration 的条款号…<br>
+          assistant: 使用 3gpp-spec-lookup 检索… 条款 5.3.5.3 规定 …（截取 5.8k 字符）
+        </div>
+      </div>
+      <div class="card" style="width:400px">
+        <h2>关系图 <span class="hint">— traj—atom—skill 二部图，点击任意节点跳转</span></h2>
+        <svg width="360" height="250" viewBox="0 0 360 250">
+          <g stroke="#c3c2b7" stroke-width="1.2">
+            <line x1="70" y1="125" x2="170" y2="35"/><line x1="70" y1="125" x2="170" y2="80"/>
+            <line x1="70" y1="125" x2="170" y2="125"/><line x1="70" y1="125" x2="170" y2="170"/>
+            <line x1="70" y1="125" x2="170" y2="215"/>
+          </g>
+          <line x1="170" y1="125" x2="290" y2="80" stroke="#2a78d6" stroke-width="2"/>
+          <line x1="170" y1="215" x2="290" y2="170" stroke="#2a78d6" stroke-width="2"/>
+          <rect x="34" y="112" width="72" height="26" rx="6" fill="#12414b"/>
+          <text x="70" y="129" font-size="10" fill="#fff" text-anchor="middle">traj_…9d9</text>
+          <g font-size="10">
+            <circle cx="170" cy="35" r="8" fill="#86b6ef"/><text x="170" y="21" text-anchor="middle" fill="#52514e">0001</text>
+            <circle cx="170" cy="80" r="8" fill="#86b6ef"/><text x="170" y="66" text-anchor="middle" fill="#52514e">0002</text>
+            <circle cx="170" cy="125" r="9" fill="#2a78d6"/><text x="170" y="111" text-anchor="middle" fill="#1c5cab" font-weight="600">0003</text>
+            <circle cx="170" cy="170" r="8" fill="#86b6ef"/><text x="170" y="156" text-anchor="middle" fill="#52514e">0004</text>
+            <circle cx="170" cy="215" r="8" fill="#86b6ef"/><text x="170" y="236" text-anchor="middle" fill="#52514e">0005</text>
+          </g>
+          <g font-size="10.5">
+            <rect x="250" y="66" width="104" height="26" rx="6" fill="#fff" stroke="#2a78d6" stroke-width="1.5"/>
+            <text x="302" y="83" text-anchor="middle" fill="#1c5cab">3gpp-spec-lookup</text>
+            <rect x="250" y="156" width="104" height="26" rx="6" fill="#fff" stroke="#2a78d6" stroke-width="1.5"/>
+            <text x="302" y="173" text-anchor="middle" fill="#1c5cab">pytest-retry-fix</text>
+          </g>
+          <text x="302" y="110" font-size="9.5" fill="#898781" text-anchor="middle">贡献 weightscore 4.2</text>
+        </svg>
+        <div class="legend"><span><b style="background:#12414b"></b>轨迹</span><span><b style="background:#86b6ef"></b>原子</span><span><b style="background:#fff;border:1.5px solid #2a78d6"></b>skill（有贡献边）</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="section-label" id="lbl-user"><b>③ 用户画像页</b>tag 占比（条形+占比%）＋ 画像散点（PCA 2D：原子点/聚类中心/skill）＋ 推荐×触发表（低价值 skill 标红）</div>
+<div class="page-mock" id="pg-user">
+  <aside class="side">
+    <div class="brand">xskill 控制台</div>
+    <a>总览</a><a>技能库</a><a>轨迹 &amp; 原子</a><a class="on">用户 &amp; 画像</a><a>灰度 Canary</a><a>我的</a><a>管理</a>
+    <div class="role">admin · 管理员</div>
+  </aside>
+  <div class="main">
+    <div class="crumb">用户 &amp; 画像 / alice</div>
+    <h1>alice</h1>
+    <p class="sub">轨迹 46 · 原子 212 · 用过 skill 17 个 · 主力模型 dsv4（62%）· 画像 4 个兴趣中心</p>
+
+    <div class="row">
+      <div class="card grow">
+        <h2>画像散点 <span class="hint">— 原子摘要向量 PCA 投影；hover 预览原子，点击跳详情</span></h2>
+        <svg width="560" height="300" viewBox="0 0 560 300">
+          <rect x="40" y="16" width="500" height="252" fill="none" stroke="#e1e0d9"/>
+          <!-- cluster 1 3gpp -->
+          <g fill="#2a78d6" opacity=".75">
+            <circle cx="120" cy="70" r="4"/><circle cx="140" cy="92" r="4"/><circle cx="106" cy="106" r="4"/>
+            <circle cx="152" cy="66" r="4"/><circle cx="130" cy="120" r="4"/><circle cx="166" cy="98" r="4"/>
+            <circle cx="98" cy="84" r="4"/><circle cx="148" cy="118" r="4"/>
+          </g>
+          <path d="M132 84 l9 9 -9 9 -9 -9 z" fill="#184f95"/>
+          <text x="132" y="60" font-size="10.5" fill="#1c5cab" font-weight="600" text-anchor="middle">3gpp 检索</text>
+          <!-- cluster 2 部署 -->
+          <g fill="#1baf7a" opacity=".75">
+            <circle cx="356" cy="80" r="4"/><circle cx="380" cy="96" r="4"/><circle cx="340" cy="104" r="4"/>
+            <circle cx="396" cy="72" r="4"/><circle cx="368" cy="120" r="4"/><circle cx="404" cy="108" r="4"/>
+          </g>
+          <path d="M374 92 l9 9 -9 9 -9 -9 z" fill="#0f7a52"/>
+          <text x="374" y="62" font-size="10.5" fill="#0f7a52" font-weight="600" text-anchor="middle">部署运维</text>
+          <!-- cluster 3 测试 -->
+          <g fill="#eda100" opacity=".8">
+            <circle cx="200" cy="204" r="4"/><circle cx="224" cy="220" r="4"/><circle cx="186" cy="226" r="4"/>
+            <circle cx="238" cy="198" r="4"/><circle cx="212" cy="240" r="4"/>
+          </g>
+          <path d="M212 214 l9 9 -9 9 -9 -9 z" fill="#8a5c00"/>
+          <text x="212" y="188" font-size="10.5" fill="#8a5c00" font-weight="600" text-anchor="middle">测试修复</text>
+          <!-- cluster 4 发版 -->
+          <g fill="#4a3aa7" opacity=".75">
+            <circle cx="450" cy="200" r="4"/><circle cx="470" cy="216" r="4"/><circle cx="438" cy="226" r="4"/><circle cx="482" cy="196" r="4"/>
+          </g>
+          <path d="M462 208 l9 9 -9 9 -9 -9 z" fill="#37298a"/>
+          <text x="462" y="184" font-size="10.5" fill="#4a3aa7" font-weight="600" text-anchor="middle">发版流程</text>
+          <!-- skills -->
+          <path d="M168 84 l7 12 -14 0 z" fill="#0b0b0b"/><text x="182" y="90" font-size="10">3gpp-spec-lookup</text>
+          <path d="M408 88 l7 12 -14 0 z" fill="#0b0b0b"/><text x="422" y="94" font-size="10">nginx-subpath-proxy</text>
+          <path d="M246 214 l7 12 -14 0 z" fill="#0b0b0b"/><text x="260" y="220" font-size="10">pytest-retry-fix</text>
+          <!-- hover tooltip -->
+          <rect x="300" y="130" width="176" height="44" rx="6" fill="#fff" stroke="rgba(11,11,11,.14)"/>
+          <text x="310" y="146" font-size="10" font-weight="600" fill="#0b0b0b">atom_…12fe_0004</text>
+          <text x="310" y="160" font-size="10" fill="#52514e">"docker 里修 e2e 入库屏障" · ux 7.8</text>
+        </svg>
+        <div class="legend">
+          <span><b style="background:#2a78d6;border-radius:50%"></b>原子（按簇着色）</span>
+          <span>◆ 兴趣中心（kmeans ≤5）</span>
+          <span>▲ skill 向量</span>
+        </div>
+      </div>
+      <div class="card" style="width:330px">
+        <h2>tag 构成 <span class="hint">— 212 原子的 top tags</span></h2>
+        <svg width="292" height="200" viewBox="0 0 292 200">
+          <g font-size="10.5">
+            <text x="88" y="18" text-anchor="end" fill="#52514e">3gpp</text><rect x="94" y="9" width="120" height="11" rx="3" fill="#2a78d6"/><text x="220" y="18">28%</text>
+            <text x="88" y="42" text-anchor="end" fill="#52514e">部署</text><rect x="94" y="33" width="94" height="11" rx="3" fill="#2a78d6"/><text x="194" y="42">22%</text>
+            <text x="88" y="66" text-anchor="end" fill="#52514e">nginx</text><rect x="94" y="57" width="60" height="11" rx="3" fill="#2a78d6"/><text x="160" y="66">14%</text>
+            <text x="88" y="90" text-anchor="end" fill="#52514e">单测</text><rect x="94" y="81" width="51" height="11" rx="3" fill="#2a78d6"/><text x="151" y="90">12%</text>
+            <text x="88" y="114" text-anchor="end" fill="#52514e">发版</text><rect x="94" y="105" width="38" height="11" rx="3" fill="#2a78d6"/><text x="138" y="114">9%</text>
+            <text x="88" y="138" text-anchor="end" fill="#52514e">docker</text><rect x="94" y="129" width="30" height="11" rx="3" fill="#2a78d6"/><text x="130" y="138">7%</text>
+            <text x="88" y="162" text-anchor="end" fill="#52514e">git</text><rect x="94" y="153" width="21" height="11" rx="3" fill="#2a78d6"/><text x="121" y="162">5%</text>
+            <text x="88" y="186" text-anchor="end" fill="#52514e">其他</text><rect x="94" y="177" width="13" height="11" rx="3" fill="#9ec5f4"/><text x="113" y="186">3%</text>
+          </g>
+        </svg>
+        <div class="note">标签云保留在团队总览页做氛围导航；个人页用条形图，占比可读。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>推荐 × 触发 <span class="hint">— 该用户收到的推荐及实际触发；命中率 = 触发次数/推荐次数</span></h2>
+      <table>
+        <tr><th>skill</th><th>来源</th><th>推荐次数</th><th>触发次数</th><th style="width:140px">命中率</th><th>最近触发</th><th>结论</th></tr>
+        <tr><td><b>3gpp-spec-lookup</b></td><td><span class="chip src-own">团队蒸馏</span></td><td>18</td><td>11</td>
+            <td><div class="meter"><i style="width:61%"></i></div></td><td>2 天前</td><td><span class="status st-good"><i class="ic"></i>高价值 61%</span></td></tr>
+        <tr><td><b>nginx-subpath-proxy</b></td><td><span class="chip src-own">团队蒸馏</span></td><td>12</td><td>5</td>
+            <td><div class="meter"><i style="width:42%"></i></div></td><td>6 天前</td><td><span class="status st-good"><i class="ic"></i>正常 42%</span></td></tr>
+        <tr><td><b>excel-formula-gen</b></td><td><span class="chip src-hub">skillhub 三方</span></td><td>15</td><td>1</td>
+            <td><div class="meter"><i style="width:7%;background:var(--critical)"></i></div></td><td>34 天前</td><td><span class="status st-crit"><i class="ic"></i>常推不用 7% → 建议停推</span></td></tr>
+        <tr><td><b>minecraft-modding</b></td><td><span class="chip src-hub">skillhub 三方</span></td><td>9</td><td>0</td>
+            <td><div class="meter"><i style="width:2%;background:var(--critical)"></i></div></td><td>从未</td><td><span class="status st-crit"><i class="ic"></i>零触发 → 建议停推</span></td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="section-label" id="lbl-my"><b>④ 「我的」控制面（普通用户）</b>推给我的（可 pin）＋ 语义检索 ＋ 我的贡献去向漏斗 ＋ 右下角通知气泡</div>
+<div class="page-mock rel" id="pg-my">
+  <aside class="side">
+    <div class="brand">xskill 控制台</div>
+    <a>总览</a><a>技能库</a><a>轨迹 &amp; 原子</a><a>用户 &amp; 画像</a><a>灰度 Canary</a><a class="on">我的</a><a>管理</a>
+    <div class="role">bob · 普通用户</div>
+  </aside>
+  <div class="main">
+    <h1>我的</h1>
+    <p class="sub">身份：bob（connect --name）· 已 pin 2 · 未读通知 3</p>
+
+    <div class="toolbar">
+      <input placeholder="语义检索 skill：例如 '怎么配 nginx 子路径反代'" >
+      <button class="btn pri">检索</button>
+      <span style="color:var(--muted);font-size:11px">检索池 = 团队 main/staging + skillhub 三方</span>
+    </div>
+    <div class="searchhit"><span class="nm">nginx-subpath-proxy</span><span class="ds">nginx 单文件配置子路径反代到内网端口，处理 rewrite 与静态资源相对路径…</span><span class="chip src-own">团队蒸馏</span><button class="btn pin-on">已 pin ✓</button></div>
+    <div class="searchhit"><span class="nm">caddy-reverse-proxy</span><span class="ds">Caddyfile 反代与自动 HTTPS 配置…</span><span class="chip src-hub">skillhub 三方</span><button class="btn">pin</button></div>
+
+    <div class="row" style="margin-top:14px">
+      <div class="card grow">
+        <h2>推给我的 <span class="hint">— manifest 注入顺序：pinned → ranked → recommended</span></h2>
+        <table>
+          <tr><th>skill</th><th>来源</th><th>槽位</th><th>我触发过</th><th>操作</th></tr>
+          <tr><td><b>nginx-subpath-proxy</b></td><td><span class="chip src-own">团队蒸馏</span></td><td><span class="chip">pinned·自己</span></td><td>5 次</td><td><button class="btn">取消 pin</button></td></tr>
+          <tr><td><b>release-checklist</b></td><td><span class="chip src-admin">admin 指派</span></td><td><span class="chip">pinned·admin</span></td><td>2 次</td><td style="color:var(--muted)">admin pin 不可自行取消</td></tr>
+          <tr><td><b>3gpp-spec-lookup</b></td><td><span class="chip src-own">团队蒸馏</span></td><td><span class="chip">recommended</span></td><td>11 次</td><td><button class="btn">pin</button></td></tr>
+          <tr><td><b>pytest-retry-fix</b></td><td><span class="chip src-own">团队蒸馏</span></td><td><span class="chip">ranked</span></td><td>0 次</td><td><button class="btn">pin</button></td></tr>
+        </table>
+      </div>
+      <div class="card" style="width:410px">
+        <h2>我的贡献去向 <span class="hint">— 每级可点击钻取</span></h2>
+        <svg width="370" height="150" viewBox="0 0 370 150">
+          <g font-size="11">
+            <rect x="10" y="12" width="330" height="24" rx="5" fill="#86b6ef"/><text x="20" y="28" fill="#0b0b0b">我贡献的轨迹 38 条</text>
+            <rect x="10" y="46" width="260" height="24" rx="5" fill="#5598e7"/><text x="20" y="62" fill="#0b0b0b">切出原子 171 个</text>
+            <rect x="10" y="80" width="150" height="24" rx="5" fill="#2a78d6"/><text x="20" y="96" fill="#fff">进入 skill 9 个</text>
+            <rect x="10" y="114" width="96" height="24" rx="5" fill="#184f95"/><text x="20" y="130" fill="#fff">被 6 人使用</text>
+            <text x="350" y="28" text-anchor="end" fill="#52514e">100%</text>
+            <text x="280" y="62" fill="#52514e">45%*</text>
+            <text x="170" y="96" fill="#52514e">—</text>
+            <text x="116" y="130" fill="#52514e">—</text>
+          </g>
+        </svg>
+        <div class="axis-note">*采纳率口径见指标文档；后两级为绝对数不设百分比。</div>
+        <table style="margin-top:8px">
+          <tr><th>我贡献的 skill</th><th>使用者</th><th>评价</th></tr>
+          <tr><td>nginx-subpath-proxy</td><td>alice, m0032 +2</td><td><span class="status st-good"><i class="ic"></i>ux 8.4</span></td></tr>
+          <tr><td>e2e-docker-fixture</td><td>carol</td><td><span class="status st-ser"><i class="ic"></i>ux 5.2 走低</span></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>世界消息 <span class="hint">— 团队动态 feed（登录可见；只放 skill 名与动作）</span></h2>
+      <ul class="feed">
+        <li><span class="who">m00323121</span> 使用了 <b>bob</b> 蒸馏的 <b>nginx-subpath-proxy</b>，打了 <span class="status st-good"><i class="ic"></i>9.1 分</span><time>3 分钟前</time></li>
+        <li><span class="who">alice</span> 对 <b>3gpp-spec-lookup</b> 提交了修改（push-edit 分支）<time>1 小时前</time></li>
+        <li><b>excel-formula-gen</b> staging 灰度被回滚（5.9 &lt; 7.3）<time>昨天</time></li>
+        <li><span class="who">admin</span> 全局 pin 了 <b>release-checklist</b><time>2 天前</time></li>
+      </ul>
+    </div>
+  </div>
+  <div class="toast">
+    <div class="t-title">m00323121 使用了你的 skill</div>
+    <div>nginx-subpath-proxy · 打了 9.1 分（好评）</div>
+    <div class="t-act">查看详情 →</div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<div class="section-label" id="lbl-admin"><b>⑤ 管理页（admin）</b>用户×推送/pin 矩阵（可代 pin）＋ 画像相似度聚类 graph（点边看共同点）</div>
+<div class="page-mock" id="pg-admin">
+  <aside class="side">
+    <div class="brand">xskill 控制台</div>
+    <a>总览</a><a>技能库</a><a>轨迹 &amp; 原子</a><a>用户 &amp; 画像</a><a>灰度 Canary</a><a>我的</a><a class="on">管理</a>
+    <div class="role">admin · 管理员</div>
+  </aside>
+  <div class="main">
+    <h1>管理</h1>
+    <p class="sub">推送与 pin 管理 · 用户画像聚类 · 仅 admin 可见（写操作只在 serve 内置形态开放）</p>
+
+    <div class="row">
+      <div class="card grow">
+        <h2>用户 × 推送/pin <span class="hint">— 每行一个用户；点"代 pin"给该用户手动指派 skill</span></h2>
+        <table>
+          <tr><th>用户</th><th>被推荐（近30日）</th><th>已 pin</th><th>触发率</th><th>操作</th></tr>
+          <tr><td><b>alice</b></td><td>17 个 skill</td><td><span class="chip">3gpp-spec-lookup·自己</span></td>
+              <td><div class="meter"><i style="width:48%"></i></div></td><td><button class="btn">代 pin…</button></td></tr>
+          <tr><td><b>bob</b></td><td>14 个 skill</td><td><span class="chip">nginx-subpath-proxy·自己</span><span class="chip src-admin">release-checklist·admin</span></td>
+              <td><div class="meter"><i style="width:39%"></i></div></td><td><button class="btn">代 pin…</button></td></tr>
+          <tr><td><b>m0032</b></td><td>11 个 skill</td><td style="color:var(--muted)">无</td>
+              <td><div class="meter"><i style="width:22%;background:var(--serious)"></i></div></td><td><button class="btn">代 pin…</button></td></tr>
+          <tr><td><b>carol</b></td><td>8 个 skill</td><td style="color:var(--muted)">无</td>
+              <td><div class="meter"><i style="width:31%"></i></div></td><td><button class="btn">代 pin…</button></td></tr>
+        </table>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+          <button class="btn pri">全局 pin…</button>
+          <span style="font-size:11px;color:var(--muted)">当前全局 pin：release-checklist（所有用户 manifest 首位）</span>
+        </div>
+      </div>
+      <div class="card" style="width:440px">
+        <h2>画像聚类 <span class="hint">— 节点=用户，边=mean_tensor 余弦相似度＞0.6；点边看共同 tag/skill</span></h2>
+        <svg width="400" height="270" viewBox="0 0 400 270">
+          <g stroke="#c3c2b7">
+            <line x1="110" y1="80" x2="200" y2="120" stroke-width="3"/>
+            <line x1="110" y1="80" x2="90" y2="170" stroke-width="1.5"/>
+            <line x1="200" y1="120" x2="90" y2="170" stroke-width="2"/>
+            <line x1="300" y1="70" x2="340" y2="150" stroke-width="3"/>
+          </g>
+          <!-- edge tooltip -->
+          <rect x="128" y="66" width="130" height="34" rx="6" fill="#fff" stroke="rgba(11,11,11,.14)"/>
+          <text x="138" y="80" font-size="10" fill="#0b0b0b" font-weight="600">alice — bob · 0.81</text>
+          <text x="138" y="93" font-size="10" fill="#52514e">共同：3gpp / nginx / 部署</text>
+          <g font-size="10" text-anchor="middle">
+            <circle cx="110" cy="80" r="18" fill="#2a78d6"/><text x="110" y="84" fill="#fff">alice</text>
+            <circle cx="200" cy="120" r="15" fill="#2a78d6"/><text x="200" y="124" fill="#fff">bob</text>
+            <circle cx="90" cy="170" r="17" fill="#2a78d6"/><text x="90" y="174" fill="#fff">m0032</text>
+            <circle cx="300" cy="70" r="16" fill="#1baf7a"/><text x="300" y="74" fill="#fff">carol</text>
+            <circle cx="340" cy="150" r="14" fill="#1baf7a"/><text x="340" y="154" fill="#fff">dave</text>
+            <circle cx="320" cy="230" r="14" fill="#898781"/><text x="320" y="234" fill="#fff">frank</text>
+          </g>
+          <text x="150" y="215" font-size="10.5" fill="#1c5cab">通信协议组（疑似密切协作）</text>
+          <text x="300" y="110" font-size="10.5" fill="#0f7a52">前端组</text>
+          <text x="320" y="256" font-size="10.5" fill="#898781">孤立（冷启动）</text>
+        </svg>
+        <div class="legend"><span>节点大小 = 原子数</span><span>边粗细 = 相似度</span><span><b style="background:#898781"></b>冷启动/孤立用户</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
