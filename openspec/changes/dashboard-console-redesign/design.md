@@ -29,12 +29,21 @@
 | **原子点向量不落盘** | `ProfileStore` 只存聚类中心，原子 embedding 现算 | 画像散点图要么现算（慢）要么补存 | P3 决策点（§6 Q4） |
 | **指标口径 bug** | 用户判定"很多指标代码层面不通、数字不可信"（具体清单待审计产出） | 看板可信度为负 | P1 第一任务：审计 |
 | **CDN 依赖** | index.html 从 jsdelivr 拉 Tabler CSS | 内网部署样式裸奔 | P1 vendor 化 |
+| **回滚节点 ref 不可达**（评审发现） | `discard_staging` 对被拒 staging 直接 `git branch -D`，`canary_decision` 表不存 sha | 进化图画不出回滚节点，裁决无法定位到 commit | P1：`canary_decision` 加 `staging_sha/main_sha` 列；reject 时保留只读 ref `refs/rejected/<ts>-<sha>`；存量裁决在图上显式标"无法定位到节点"（同 D6 断链风格），不做时间戳模糊匹配 |
+| **身份键分裂**（评审发现） | `recommendation_log`/`RecoStore`/push-edit 分支用 client_id（hex），sessions 桶目录名/`watch_dirs.label` 用 user_name 明文 | 用户级 join 跨两种键域，数字对不上 | 拍板 canonical key = **user_name**；归因列命名 `user_key`；聚合层统一经 ClientRegistry 把 client_id 译成 user_name（见 D5） |
+| **recommendation_log 注水**（评审发现） | `build_manifest` 每次 `/sync` 对每个 recommended slot 各插一条记录，推荐次数随 sync 频率线性膨胀；且只记 recommended 不记 ranked/pinned | "命中率"分母失真，正砸在"指标可信"卖点上 | P1 审计定义**曝光口径**（user×skill×version 去重或按天去重），并拍板 ranked/pinned 是否计入曝光 |
+| **skill_used 单值**（评审发现） | `trajectories.skill_used` 单值列，而 `atom.used_skills` 多值 | 多 skill 轨迹触发计数被系统性低估，波及触发率全链 | P1 审计点名：以 atom 级 `used_skills` 为触发事实源 |
 
 ### 1.3 部署形态约束
 
 dashboard 有两种运行形态：serve 内置挂载（读写皆可）和**独立只读实例**（公网 demo，
 systemd 常驻）。控制面的所有写操作（pin 等）只在 serve 内置形态开放；只读实例物理上
 不挂写路由——这是安全边界，不是可选项。
+
+**公网只读实例内容白名单**（评审采纳）：只读实例只挂聚合类端点（KPI/趋势/分布）；
+`/traj/{id}`、`/atom/{id}`（含轨迹原文切片）、用户画像与用户列表端点**物理不挂载**
+（同写路由手法）——公网一道共享 Basic 口令挡不住轨迹原文级敏感内容。语义检索入口
+同样只在 serve 内置形态渲染（依赖 embed_client，只读实例无 api_key，见 §2.4）。
 
 ## 2. 信息架构与页面设计（0号提案主体）
 
@@ -50,7 +59,8 @@ systemd 常驻）。控制面的所有写操作（pin 等）只在 serve 内置�
 | 用户 & 画像 | ✓（全员可见） | ✓ | 用户列表 → 用户画像页（图③）；互相可见是社交属性的一部分 |
 | 灰度 Canary | ✓ | ✓ | v0 现有页改造（裁决历史 + 跳 skill 进化图） |
 | 我的 | ✓ | ✓ | 普通用户控制面（图④），登录后默认落地页 |
-| 管理 | — | ✓ | pin 管理 + 用户聚类（图⑤） |
+| 管理 | — | ✓ | pin 管理 + 技能生命周期 + 用户聚类（图⑤） |
+| 设置 | — | ✓ | config.yaml 分段表单 + 原文编辑 + 校验并热加载（图⑦） |
 
 ### 2.1 Skill 分析页（图① `mockups/img/1-skill-detail.png`）
 
@@ -117,7 +127,8 @@ atom 详情；点击 ▲ 跳 skill 分析页。
 普通用户登录后的默认落地页：
 
 - **语义检索 + pin**：检索框（复用 `relevance_search`，检索池=团队 main/staging +
-  skillhub 三方）；结果行带来源 chip 和 pin 按钮。
+  skillhub 三方）；结果行带来源 chip 和 pin 按钮。**仅 serve 内置形态提供**——query
+  编码依赖 embed_client，独立只读实例无 api_key，该形态下不渲染检索入口（评审采纳）。
 - **推给我的（skill 自配置，v3）**：每行两个操作——**pin**（持久化推送）与 **✕ 屏蔽**
   （不再推送，进"已屏蔽"折叠组，可随时恢复）。槽位 chip 标注注入类型（pinned·自己 /
   pinned·admin / ranked / recommended）+ 我触发过的次数。admin pin 的条目普通用户不可
@@ -147,7 +158,8 @@ atom 详情；点击 ▲ 跳 skill 分析页。
   chip，行内不铺全量）/ 触发率 meter（异常低的用 serious 色）/ "配置…"操作。点行或
   "配置…" → **右侧抽屉**打开该用户的全部被推荐 skill（§2.7 数量伸缩原则：搜索框 +
   分组 tab〔全部/pinned/已屏蔽〕+ 滚动列表，每行可代 pin / 代屏蔽）——量大也不挤不溢出。
-  底部"全局 pin…"按钮 + 当前全局 pin 状态说明。
+  底部"全局 pin…"按钮 + **全局 pin 列表**（可多个，chip 列表逐个可移除；全局 pinned +
+  该用户 pinned 合计仍受 slot 上限约束，超量报错——no-fallback）。
 - **技能管理（v3 新增）**：skill 生命周期操作表——每行 skill + 状态徽章（在役/灰度中）+
   近 30 日使用数 + 操作：**下线**（停止分发与推荐，数据与 git 历史保留）与**删除**
   （彻底移除，需二次确认并输入 skill 名）。两段式设计：先下线观察、再删除，误删不可逆
@@ -160,11 +172,31 @@ atom 详情；点击 ▲ 跳 skill 分析页。
 （代 pin/代屏蔽/global）、`POST /admin/skill/{name}/retire`、
 `DELETE /admin/skill/{name}`、`GET /admin/cluster-graph`。
 
-### 2.6 总览页（v0 改造，无新 mockup）
+### 2.6 总览页（图⑥ `mockups/img/6-overview.png`，v4 补齐）
 
-指标审计（§3 A3）后重排：只留可信 KPI，每卡带口径 tooltip（与 `docs/dashboard-metrics.md`
-同源）+ 点击跳对应分析页（从"陈列"变"分析入口"）。加近 30 日轨迹/原子/成本三条趋势
-折线与按生态/模型分组柱状。
+- **可信 KPI 行**：轨迹/原子/skill/今日成本/平均 ux，每卡带口径 tooltip（与
+  `docs/dashboard-metrics.md` 同源）+ 点击跳对应分析页（从"陈列"变"分析入口"）。
+- **蒸馏管线实时进度**（v4 新增，回应"冷启动蒸馏进度不可见"）：五阶段步进
+  （待拆分轨迹 → TaskAgent 拆分中 → 聚类分派中 → 候选累积 → 蒸馏/灰度中），
+  活跃阶段脉冲点标记，点击阶段查看队列明细；数据源 = `trajectories.status` 计数 +
+  watcher 在途状态。
+- **冷启动屏障进度条**：已收集 N / 目标 M 条轨迹（`pipeline/cold_start.py` 状态）。
+- **候选孵化进度**：每个候选 skill 的 weightscore 进度条（x / 阈值 10，
+  `.candidates.yml` 累积值），baby 状态标签、贡献原子数、最后累积时间；
+  "全部 N 个候选 →" 进列表。
+- **近 30 日新增原子/日趋势** + **生态分布**占比条。
+
+### 2.8 设置页（admin，图⑦ `mockups/img/7-settings.png`，v4 新增）
+
+- **分段表单**：dashboard / canary / recommend / skillhub 段的关键字段以表单渲染
+  （开关/数值），与右侧原文编辑器双向同步。
+- **原文编辑器**：config.yaml 语法高亮，修改行高亮标注；"仅校验" 与 **"校验并热加载"**
+  两个动作。校验失败：不落盘、不生效、直接展示错误（no-fallback，不存在"部分生效"）。
+- **热加载范围显式声明**：dashboard/canary/recommend/skillhub 段即时生效（server 重读
+  config 并重建相应组件）；llm/watch_dirs 段涉及进程级资源，页面明确标注"改动需重启
+  serve"，不做静默半生效。
+- 仅 admin 可见；写端点只在 serve 内置形态挂载（同 D4）。
+- 新 API：`GET /admin/config`、`POST /admin/config/validate`、`POST /admin/config/reload`。
 
 ### 2.7 可视化与视觉规范（全站统一，v2）
 
@@ -223,8 +255,13 @@ graph 类手写 SVG。示意图 `mockups/panels.html` 即按 Tailwind 制作（`
 **D4 写操作只在 serve 内置形态**：独立只读实例（公网 demo）物理上不挂写路由（不是靠
 中间件挡，是根本不 include），杜绝配置失误。
 
-**D5 归因列手动迁移**：`trajectories.client_id` 新列由 bridge 入库写入；存量数据写一次性
-迁移脚本按 sessions 桶目录名回填，跑完即弃。代码不写"列可能不存在"的兼容分支。
+**D5 归因列手动迁移（评审修订）**：全站 canonical 身份键拍板为 **user_name**，归因列
+命名 **`trajectories.user_key`**（不叫 client_id——避免与 hex client_id 键域混淆）。
+bridge 入库时写入；存量按 sessions 桶目录名回填（目录名本就是 user_name），一次性脚本
+跑完即弃。凡是存 client_id 的表（`recommendation_log`/`RecoStore`），聚合层统一经
+ClientRegistry 译成 user_name 再 join。列上线后 `metrics.skill_by_user` 等 watch_dir
+label JOIN 口径**废弃改读新列**——source 唯一，不留两条归因链路。代码不写"列可能
+不存在"的兼容分支。
 
 **D6 no-fallback 贯穿**：血缘断链在 UI 显式标"源已清理"而不是静默跳过；pin 超 slot
 报错；指标算不出就不显示该卡片，不显示 0 或假数。
@@ -233,6 +270,21 @@ graph 类手写 SVG。示意图 `mockups/panels.html` 即按 Tailwind 制作（`
 （他人 atom `used_skills` 命中 × ux_score）；修改意见就是既有的 **push-edit 事件**
 （client 改本地 skill → `user-staging/<client_id>` 分支）。events 只做既有事实源的消费者，
 不引入 👍/👎/短评这类新的用户动作。
+**事件扇出规则**（评审采纳，写入 P3 spec）：按 traj 去重（同一轨迹多 atom 命中同一
+skill 只发一条）；通知发给 weightscore ≥ 阈值的贡献者；本人触发本人贡献的 skill 不通知。
+
+**D8 pinned 超量校验在写入侧（评审采纳）**：slot 上限的不变量由 `POST /my/prefs` 与
+admin pin（global pin 需对全员合计校验）在**写入时拒绝**，超量状态根本不可能入库；
+`build_manifest`/sync 路径永远不需要处理该错误——在 sync 时 throw 会让该用户此后每次
+同步 500、skill 分发断供，违背"后台链路绝不阻塞"的既有裁决。
+
+**D9 canary 裁决可定位（评审采纳）**：`canary_decision` 表新增 `staging_sha`/`main_sha`
+列（新裁决写入）；`discard_staging` 拒绝分支前保留只读 ref `refs/rejected/<ts>-<sha>`，
+使进化图能画出回滚节点并 diff。存量无 sha 的裁决在图上显式标"裁决无法定位到节点"。
+
+**D10 Web Notifications 是 HTTPS 增强而非基线（评审采纳）**：Web Notifications 要求
+secure context，内网 `http://host:port` 下 API 不存在。通知基线 = 全局铃铛 + 页面内
+toast 两层；浏览器系统通知仅在 HTTPS 部署时提供，验收文档写明该前置条件。
 
 ## 5. 测试与验收
 
@@ -247,9 +299,11 @@ graph 类手写 SVG。示意图 `mockups/panels.html` 即按 Tailwind 制作（`
 
 ## 6. Open Questions（讨论后拍板）
 
-- **Q1 分期认可度**：P1/P2/P3 的切法与顺序是否 OK？第一个 PR 就按 P1 全量，还是再拆？
-- **Q2 普通用户登录机制**：(a) server 给每个 name 发 dashboard token（connect 时打印）；
-  (b) 用户名 + 全局共享口令；(c) 内网免密、输 name 即登录。admin 无论如何单独强口令。
+- **Q1 分期认可度**：P1/P2/P3 的切法与顺序是否 OK？评审建议 P1 再拆两个 PR：
+  "指标审计+vendor"先行（尽早兑现信任修复），"图形页"随后——认可吗？
+- **Q2 普通用户登录机制**：评审强烈倾向 **(a) connect 成功时 server 发 dashboard
+  token 并打印**——(c) 免密输 name 与 P2 写操作直接矛盾（任何人可冒充他人 pin/屏蔽/
+  读通知，"admin pin 不可取消"形同虚设），且 (a) 实现成本与 (c) 几乎相同。待拍板。
 - ~~Q3 显式 skill 反馈~~ → **已拍板见 D7**。
 - **Q4 画像散点的原子向量**：现算（慢、无 schema 变更）还是入库补存（快、加存储）？
   倾向：P3 时在 `ProfileStore` 旁加 points 落盘（更新画像时顺手存，无额外 LLM 调用）。

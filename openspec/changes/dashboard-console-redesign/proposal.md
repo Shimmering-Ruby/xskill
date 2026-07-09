@@ -92,8 +92,9 @@
   登录与角色中间件（演进 `security.py`）。
 - **`src/xskill/pipeline/registry.py`**：`trajectories.client_id` 列（手动迁移）、`pins` 表、
   `events` 表、若干血缘聚合查询。
-- **`src/xskill/team/server/`**：bridge 入库写 `client_id`；`build_manifest` pinned 注入；
-  `RecoStore` 读扩展。
+- **`src/xskill/team/server/`**：bridge 入库写 `user_key`；`build_manifest` prefs 注入
+  （blocked 排除/pinned 占位）；`RecoStore` 读扩展；skill 下线/删除需 manifest、推荐候选
+  池、canary controller 三处尊重（复用 skill_repo_lock）；config 校验与热加载端点。
 - **`src/xskill/recommend/`**：只读复用（`relevance_search`/`find_friend`/`ProfileStore`），
   P3 加 numpy-only PCA（可选 t-SNE）。
 - **依赖**：不新增 Python 重包；前端图表库 vendor 进 static（候选 uPlot，~45KB，无构建）。
