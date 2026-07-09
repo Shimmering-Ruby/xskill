@@ -6,8 +6,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/claude-1000/-home-admin-traj2skill/1a2105e9-f3ad-4c9e-99c5-b36976f209a4/scratchpad/demo_home")
-sys.path.insert(0, "/home/admin/traj2skill/src")
+ROOT = Path(sys.argv[1] if len(sys.argv) > 1
+            else "/tmp/xskill-dashboard-demo-home")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import shutil
 if ROOT.exists():
@@ -96,7 +97,6 @@ s2 = mk_skill("pytest-retry-fix", "flaky 单测重试与隔离修复手法", ["v
 
 # 一次真实的"拒绝"：走 discard_staging 留 refs/rejected
 from xskill.canary import discard_staging, staging_sha, main_sha
-rej_sha = staging_sha(s2) or ""
 git(s2, "checkout", "-q", "-b", "staging")
 (s2 / "SKILL.md").write_text("---\nname: pytest-retry-fix\ndescription: bad rewrite\n---\n", encoding="utf-8")
 git(s2, "add", "."); git(s2, "commit", "-q", "-m", "staging: 表格解析重写(劣化)")
