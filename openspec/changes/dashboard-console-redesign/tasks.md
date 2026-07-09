@@ -13,6 +13,7 @@
 - [ ] 1.6 tag 占比按用户切分视图
 - [ ] 1.7 推荐×触发（skill 粗粒度版，口径诚实标注）
 - [ ] 1.7b 总览页改造：可信 KPI + 蒸馏管线五阶段实时进度 + 冷启动屏障进度条 + 候选孵化 weightscore 进度（纯读：trajectories.status / cold_start / .candidates.yml）
+- [ ] 1.7c 用户连接状态看板（读侧）：在线/离线（last_seen 阈值）、上次活跃、轨迹·原子、触发次数、harness/主力模型占比（样本不足显式标注）；版本列 P2 点亮
 - [ ] 1.8 单测（空库/断链/git fixture 边界）+ 验收文档 `docs/acceptance/dashboard-p1.md` + playwright E2E
 
 ## P2 身份 + 控制面 + Pin
@@ -25,6 +26,7 @@
 - [ ] 2.4c admin 技能管理：下线（停止分发保留数据）/ 删除（二次确认输名）两段式；server 侧影响面单列——retire 状态需 build_manifest、推荐引擎候选池、canary controller 三处尊重；删除复用 skill_repo_lock 防与 watcher/canary 并发；定义"删后同名 skill 再生"语义
 - [ ] 2.4d pinned 超量校验在写入侧（D8）：POST /my/prefs 与 admin/global pin 写入时拒绝，sync 路径永不报错
 - [ ] 2.9 设置页：config.yaml 分段表单 + 原文编辑 + 仅校验/校验并热加载（失败不落盘直接报错）；热加载范围 dashboard/canary/recommend/skillhub，llm/watch_dirs 标注需重启
+- [ ] 2.10 client 版本上报：register + sync 携带 X-Xskill-Version，server 写 clients.client_version（touch 时 upsert）；连接状态看板版本列 + "落后"标注点亮
 - [ ] 2.5 "我的贡献去向"：traj → skill → 使用者钻取
 - [ ] 2.6 推荐触发率升级为用户级精确口径 + "常推不用"排行
 - [ ] 2.7 写端点只挂 serve 内置形态；只读实例物理不挂载

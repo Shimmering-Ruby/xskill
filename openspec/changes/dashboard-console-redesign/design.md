@@ -33,6 +33,7 @@
 | **身份键分裂**（评审发现） | `recommendation_log`/`RecoStore`/push-edit 分支用 client_id（hex），sessions 桶目录名/`watch_dirs.label` 用 user_name 明文 | 用户级 join 跨两种键域，数字对不上 | 拍板 canonical key = **user_name**；归因列命名 `user_key`；聚合层统一经 ClientRegistry 把 client_id 译成 user_name（见 D5） |
 | **recommendation_log 注水**（评审发现） | `build_manifest` 每次 `/sync` 对每个 recommended slot 各插一条记录，推荐次数随 sync 频率线性膨胀；且只记 recommended 不记 ranked/pinned | "命中率"分母失真，正砸在"指标可信"卖点上 | P1 审计定义**曝光口径**（user×skill×version 去重或按天去重），并拍板 ranked/pinned 是否计入曝光 |
 | **skill_used 单值**（评审发现） | `trajectories.skill_used` 单值列，而 `atom.used_skills` 多值 | 多 skill 轨迹触发计数被系统性低估，波及触发率全链 | P1 审计点名：以 atom 级 `used_skills` 为触发事实源 |
+| **client 版本不上报** | RegisterRequest 无 version 字段，sync header 只有 token/client；server 不知道每个 client 跑什么版本 | 连接状态看板的版本列/“落后"标注无数据 | P2：register + sync 携带 `X-Xskill-Version`，server 写 `clients.client_version` 列（touch 时顺带 upsert） |
 
 ### 1.3 部署形态约束
 
@@ -104,7 +105,20 @@ categorical 蓝/青）；竖虚线 = 版本切换点（标 v3/v4/v5）。交互�
 
 新 API：`GET /traj/{id}`、`GET /traj/{id}/atoms`、`GET /atom/{id}`（含原文切片）。
 
-### 2.3 用户画像页（图③ `mockups/img/3-user-profile.png`）
+### 2.3 用户 & 画像（列表页图⑧ + 详情页图③）
+
+**列表页 = 连接状态看板（图⑧ `mockups/img/8-users-status.png`，v5 补齐）**：每行一个用户——
+- **在线状态**：绿点在线 / 灰点离线；在线 = `clients.last_seen` 在 2 个同步周期内
+  （last_seen 每次 sync 鉴权 touch，现成数据）；上次活跃相对时间。
+- **client 版本**：`clients.client_version` 新列（数据缺口：client 在 register 与每次
+  sync 携带 `X-Xskill-Version`，server 写入——P2 轻量埋点）；低于 server 当前分发版本
+  标"落后"（amber）。页头汇总"在线 x/N · 版本落后 y"。
+- **使用统计**：累计轨迹·原子数、触发次数（= 该用户 atom `used_skills` 命中计数）。
+- **harness / 主力模型**：按 `source_harness`/`source_model` 占比 chip（样本不足显式
+  标注，不显示误导性 100%）。
+- 点行进画像详情页（图③），详情页 header 同步展示版本/最后活跃/harness。
+
+**详情页（图③ `mockups/img/3-user-profile.png`）**：
 
 **画像散点**：该用户全部原子摘要向量 + skill 向量做 **PCA 2D 投影**（numpy SVD；t-SNE
 为可选增强，§6 Q5）。原子=圆点按所属兴趣簇着色（≤5 簇 = ≤5 个 categorical 色，天然不超

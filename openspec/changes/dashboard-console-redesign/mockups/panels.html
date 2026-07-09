@@ -1243,6 +1243,119 @@
   </main>
 </div>
 
+<!-- ══════════════════════ ⑧ 用户连接状态 ══════════════════════ -->
+<div class="w-[1280px] mx-auto mt-10 mb-2 text-slate-500 text-sm"><b class="text-slate-800 text-base mr-2">⑧ 用户列表 · 连接状态看板</b>在线/离线 ＋ client 版本（落后标注）＋ 上次活跃 ＋ 使用统计 ＋ harness/模型</div>
+<div id="pg-users" class="w-[1280px] mx-auto flex bg-slate-50 rounded-2xl ring-1 ring-slate-200 shadow-sm overflow-hidden">
+  <aside class="w-52 shrink-0 bg-white border-r border-slate-200 flex flex-col">
+    <div class="px-5 pt-5 pb-4 flex items-center gap-2.5">
+      <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-teal-500 to-cyan-700 flex items-center justify-center text-white font-bold text-base">x</div>
+      <div><div class="font-bold text-[15px] leading-4 text-slate-900">xskill</div><div class="text-[10.5px] text-slate-400 mt-0.5">控制台</div></div>
+    </div>
+    <nav class="px-3 space-y-0.5 mt-1 text-[13px]">
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="5.4" height="5.4" rx="1.5"/><rect x="9.1" y="1.5" width="5.4" height="5.4" rx="1.5"/><rect x="1.5" y="9.1" width="5.4" height="5.4" rx="1.5"/><rect x="9.1" y="9.1" width="5.4" height="5.4" rx="1.5"/></svg>总览</a>
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7l-5.5 3-5.5-3v-7l5.5-3z"/><path d="M2.5 4.5L8 7.5l5.5-3M8 7.5v7"/></svg>技能库</a>
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h9M2 8h12M2 12h7"/><circle cx="13.5" cy="4" r="1.4" fill="currentColor" stroke="none"/></svg>轨迹 &amp; 原子</a>
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-teal-50 text-teal-800 font-semibold"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5.5" cy="5" r="2.4"/><circle cx="11.5" cy="6" r="1.9"/><path d="M1.5 13.5c0-2.4 1.8-4 4-4s4 1.6 4 4M10 13.5c0-1.9 1.3-3.2 3-3.2s3 1.3 3 3.2" transform="scale(0.92)"/></svg>用户 &amp; 画像</a>
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 1.5h4M7 1.5v4.2L3 12a2 2 0 001.8 3h6.4A2 2 0 0013 12L9 5.7V1.5"/><path d="M4.5 10.5h7"/></svg>灰度 Canary</a>
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5.2" r="2.7"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/></svg>我的</a>
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 2v3.6c0 3.6-2.3 6-5.5 7.4-3.2-1.4-5.5-3.8-5.5-7.4V3.5l5.5-2z"/></svg>管理</a>
+      <a class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2M3.8 3.8l1.5 1.5M10.7 10.7l1.5 1.5M12.2 3.8l-1.5 1.5M5.3 10.7l-1.5 1.5"/></svg>设置</a>
+    </nav>
+    <div class="mt-auto px-4 py-4 border-t border-slate-100 flex items-center gap-2.5">
+      <div class="w-7 h-7 rounded-full bg-slate-800 text-white flex items-center justify-center text-[11px] font-bold">ad</div>
+      <div class="text-xs"><div class="font-medium text-slate-700">admin</div><div class="text-slate-400 text-[10.5px]">管理员</div></div>
+    </div>
+  </aside>
+
+  <main class="flex-1 p-7 min-w-0">
+    <div class="flex items-baseline justify-between">
+      <h1 class="text-xl font-bold tracking-tight">用户 &amp; 画像</h1>
+      <div class="flex gap-4 text-[11px] text-slate-500">
+        <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>在线 3 / 6</span>
+        <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-amber-400"></span>版本落后 2</span>
+        <span>server 最新 0.6.1a8</span>
+      </div>
+    </div>
+    <div class="text-slate-500 text-xs mt-1">连接状态每次 sync 心跳更新（last_seen）；在线 = 2 个同步周期内有心跳；点行进画像详情</div>
+
+    <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
+      <table class="w-full text-[12.5px]">
+        <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
+          <th class="text-left font-medium py-2">用户</th><th class="text-left font-medium">状态</th>
+          <th class="text-left font-medium">client 版本</th><th class="text-left font-medium">上次活跃</th>
+          <th class="text-right font-medium">轨迹 · 原子</th><th class="text-right font-medium">触发次数</th>
+          <th class="text-left font-medium pl-6">harness</th><th class="text-left font-medium">主力模型</th>
+        </tr></thead>
+        <tbody class="divide-y divide-slate-50">
+          <tr>
+            <td class="py-3"><div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-bold flex items-center justify-center">al</div><b>alice</b></div></td>
+            <td><span class="inline-flex items-center gap-1.5 text-emerald-600 font-medium text-xs"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>在线</span></td>
+            <td><span class="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-mono">0.6.1a8</span></td>
+            <td class="text-slate-500 text-xs">2 分钟前</td>
+            <td class="text-right num text-slate-600">46 · 212</td>
+            <td class="text-right num text-slate-600">37</td>
+            <td class="pl-6"><span class="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[10.5px]">claude-code 82%</span> <span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10.5px]">codex 18%</span></td>
+            <td class="text-slate-600 text-xs">dsv4 <span class="text-slate-400">62%</span></td>
+          </tr>
+          <tr>
+            <td class="py-3"><div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-sky-100 text-sky-700 text-[10px] font-bold flex items-center justify-center">bo</div><b>bob</b></div></td>
+            <td><span class="inline-flex items-center gap-1.5 text-emerald-600 font-medium text-xs"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>在线</span></td>
+            <td><span class="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-mono">0.6.1a8</span></td>
+            <td class="text-slate-500 text-xs">刚刚</td>
+            <td class="text-right num text-slate-600">38 · 171</td>
+            <td class="text-right num text-slate-600">29</td>
+            <td class="pl-6"><span class="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[10.5px]">claude-code 100%</span></td>
+            <td class="text-slate-600 text-xs">sonnet-5 <span class="text-slate-400">71%</span></td>
+          </tr>
+          <tr>
+            <td class="py-3"><div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold flex items-center justify-center">m0</div><b>m0032</b></div></td>
+            <td><span class="inline-flex items-center gap-1.5 text-emerald-600 font-medium text-xs"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>在线</span></td>
+            <td><span class="px-2 py-0.5 rounded-md bg-amber-50 ring-1 ring-amber-200 text-amber-700 text-[11px] font-mono">0.6.0a4 落后</span></td>
+            <td class="text-slate-500 text-xs">18 分钟前</td>
+            <td class="text-right num text-slate-600">24 · 96</td>
+            <td class="text-right num text-slate-600">11</td>
+            <td class="pl-6"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10.5px]">codex 64%</span> <span class="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[10.5px]">claude-code 36%</span></td>
+            <td class="text-slate-600 text-xs">k2 <span class="text-slate-400">55%</span></td>
+          </tr>
+          <tr>
+            <td class="py-3"><div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold flex items-center justify-center">ca</div><b>carol</b></div></td>
+            <td><span class="inline-flex items-center gap-1.5 text-slate-400 text-xs"><span class="w-2 h-2 rounded-full bg-slate-300"></span>离线</span></td>
+            <td><span class="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-mono">0.6.1a8</span></td>
+            <td class="text-slate-500 text-xs">昨天 19:02</td>
+            <td class="text-right num text-slate-600">17 · 64</td>
+            <td class="text-right num text-slate-600">8</td>
+            <td class="pl-6"><span class="px-1.5 py-0.5 rounded bg-violet-50 text-violet-600 text-[10.5px]">opencode 90%</span></td>
+            <td class="text-slate-600 text-xs">dsv4 <span class="text-slate-400">88%</span></td>
+          </tr>
+          <tr>
+            <td class="py-3"><div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold flex items-center justify-center">da</div><b>dave</b></div></td>
+            <td><span class="inline-flex items-center gap-1.5 text-slate-400 text-xs"><span class="w-2 h-2 rounded-full bg-slate-300"></span>离线</span></td>
+            <td><span class="px-2 py-0.5 rounded-md bg-amber-50 ring-1 ring-amber-200 text-amber-700 text-[11px] font-mono">0.5.3 落后</span></td>
+            <td class="text-slate-500 text-xs">3 天前</td>
+            <td class="text-right num text-slate-600">9 · 31</td>
+            <td class="text-right num text-slate-600">2</td>
+            <td class="pl-6"><span class="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[10.5px]">claude-code 100%</span></td>
+            <td class="text-slate-600 text-xs">dsv4 <span class="text-slate-400">100%</span></td>
+          </tr>
+          <tr>
+            <td class="py-3"><div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold flex items-center justify-center">fr</div><b>frank</b></div></td>
+            <td><span class="inline-flex items-center gap-1.5 text-slate-400 text-xs"><span class="w-2 h-2 rounded-full bg-slate-300"></span>离线</span></td>
+            <td><span class="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-mono">0.6.1a8</span></td>
+            <td class="text-slate-500 text-xs">12 天前</td>
+            <td class="text-right num text-slate-600">2 · 5</td>
+            <td class="text-right num text-slate-400">0</td>
+            <td class="pl-6"><span class="px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[10.5px]">claude-code 100%</span></td>
+            <td class="text-slate-400 text-xs">样本不足</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
+        版本列数据源：client 在 register 与每次 sync 携带 X-Xskill-Version，server 写入 clients.client_version（新增轻量埋点）；"落后" = 低于 server 当前分发版本。触发次数 = 该用户 atom used_skills 命中计数。
+      </div>
+    </div>
+  </main>
+</div>
+
 <div class="h-10"></div>
 </body>
 </html>
