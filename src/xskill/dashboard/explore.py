@@ -145,7 +145,6 @@ def skill_lineage(skill_dir: Path, name: str,
     """skill 血缘（图①下半区）：贡献原子（adoption 事件 + 在途 candidates）
     及其用户/模型归因。原子文件已清理的行标 ``source_cleaned``，保留可得字段。
     """
-    from xskill.dashboard.metrics import DashboardMetrics
     sub = Path(skill_dir) / name
     if not sub.is_dir():
         raise KeyError(f"skill not found: {name}")
