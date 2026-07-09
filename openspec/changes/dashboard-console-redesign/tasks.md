@@ -26,9 +26,9 @@
 
 ## P3 社交 + 画像可视化
 
-- [ ] 3.1 `events` 表 + 四处埋点（他人触发/canary 裁决/被 pin/显式反馈）
+- [ ] 3.1 `events` 表 + 四类埋点（他人触发+原子 ux 打分即评价 / push-edit 修改分支即修改意见 / canary 裁决 / 被 pin）
 - [ ] 3.2 通知气泡 + 通知中心 + 世界消息 feed（轮询）
-- [ ] 3.3 显式 skill 反馈 👍/👎/短评（若 Q3 通过）
+- [ ] 3.3 评价事件口径：ux 分数段 → 好评/差劲措辞；push-edit 事件带分支引用可点开 diff
 - [ ] 3.4 画像散点：numpy PCA 投影（原子点+中心+skill），hover 预览/点击跳转；t-SNE 可选增强
 - [ ] 3.5 admin 用户聚类交互 graph（mean_tensor 相似度，手写 force 布局）
 - [ ] 3.6 单测 + 验收文档 + E2E

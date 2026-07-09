@@ -23,7 +23,7 @@
 | 缺口 | 现状 | 影响 | 修法 |
 | --- | --- | --- | --- |
 | **traj 无 client_id** | `trajectories` 表无该列；CS 模式下只能靠 sessions 桶目录名（=user_name）反查 | 推荐触发率只能 skill 粗粒度；"我触发过什么"、"我的 skill 被谁用了"算不准 | P2 加列，bridge 入库时写入；存量手动迁移（目录名→回填），不做兼容读 |
-| **无显式用户反馈** | ux_score 是自动算的，没有"A 给 skill 打 👍/👎/评论"的动作 | "表示好评/差劲"的通知没有事实来源 | P3 决策点（§5 Q3） |
+| ~~无显式用户反馈~~（已拍板，不是缺口） | 好评/差劲 = 原子打分（他人 atom 的 `used_skills` × 该 atom 的 ux_score）；修改意见 = client 改本地 skill → `push-edit` 落成 `user-staging/<client_id>` 分支（`api.py` `team_push_edit`），本身就是事件 | 无需新增反馈 UI（见 D7） | P3 直接消费既有事实源 |
 | **无事件流** | 各埋点表是孤立的宽表，没有统一 events | 通知/世界消息无处可读 | P3 新 `events` 表 + 埋点 |
 | **原子点向量不落盘** | `ProfileStore` 只存聚类中心，原子 embedding 现算 | 画像散点图要么现算（慢）要么补存 | P3 决策点（§5 Q4） |
 | **指标口径 bug** | 用户判定"很多指标代码层面不通、数字不可信"（具体清单待审计产出） | 看板可信度为负 | P1 第一任务：审计 |
@@ -109,13 +109,17 @@ skill 详情复用。"我触发的"依赖 P2 归因。
 页面："我的贡献"分区 —— 我贡献了 N 条轨迹 → 蒸馏进 M 个 skill → 被 K 个用户触发过，
 每级可钻取。依赖 P2 归因列。
 
-**B5. 通知气泡 + 世界消息** — ⚠️ 值得做，但"好评/差劲"缺事实来源，P3。
-新 `events` 表 `(ts, type, actor, target_user, skill, payload)`，埋点四处：他人触发你贡献的
-skill（watcher 检出 used_skills 时）、canary 裁决你贡献的 skill、你被 admin pin 了 skill、
-显式反馈（若 Q3 通过）。前端简单轮询（看板已是轮询模式，不上 SSE），右下角气泡 + 通知
-中心，点击跳转。世界消息 = events 的全局 feed 页（脱敏：只放 skill 名与动作，不放轨迹内容）。
-**但**："A 表示好评/提出修改意见/表示差劲"需要显式反馈动作——当前只有自动 ux 分，没有
-用户主动评价。要么 P3 加 👍/👎/短评（新特性，Q3），要么第一版通知只播"使用了"不播"评价了"。
+**B5. 通知气泡 + 世界消息** — ✅ 事实来源全部已有（review 拍板，D7），P3。
+新 `events` 表 `(ts, type, actor, target_user, skill, payload)`，埋点四类，全部消费既有机制、
+不新增任何用户动作：
+1. **使用 + 评价**：他人 atom 的 `used_skills` 命中你贡献的 skill 时，该 atom 的 ux_score
+   就是评价——"A 使用了你的 skill xxx，打了 8.5 分"（好评/差劲按分数段措辞）；
+2. **修改意见**：他人在 client 侧改了 skill，daemon `push-edit` 到 server 落成
+   `user-staging/<client_id>` 分支——"A 对你的 skill xxx 提交了修改（分支可点开看 diff）"；
+3. **canary 裁决**：你贡献的 skill 晋升/回滚；
+4. **pin**：你被 admin pin 了 skill / 你的 skill 被别人 pin。
+前端简单轮询（看板已是轮询模式，不上 SSE），右下角气泡 + 通知中心，点击跳转。
+世界消息 = events 的全局 feed 页（脱敏：只放 skill 名与动作，不放轨迹内容）。
 
 **B6. admin：看每人被推了什么/pin 了什么，手动 pin** — ✅ `RecoStore` 双向记录 + B3 pins 表
 的直接投影，P2。
@@ -154,6 +158,11 @@ P3 社交的地基，顺序不可换。
 **D6 no-fallback 贯穿**：血缘断链（atom 文件被清理）在 UI 显式标"源已清理"而不是静默跳过；
 pin 超 slot 报错；指标算不出就不显示该卡片，不显示 0 或假数。
 
+**D7 评价与修改意见不新增反馈 UI（PR review 已拍板）**：好评/差劲从**原子打分**获得
+（他人 atom `used_skills` 命中 × ux_score）；修改意见就是既有的 **push-edit 事件**
+（client 改本地 skill → `user-staging/<client_id>` 分支）。events 只做既有事实源的消费者，
+不引入 👍/👎/短评这类新的用户动作。
+
 ## 4. 测试
 
 - `metrics` 新聚合方法：内存 registry 喂样本单测（空库/断链/单用户边界）。
@@ -169,8 +178,8 @@ pin 超 slot 报错；指标算不出就不显示该卡片，不显示 0 或假�
 - **Q2 普通用户登录机制**：(a) server 给每个 name 发 dashboard token（connect 时打印，安全但
   多一步）；(b) 用户名 + 全局共享口令（弱，内网可接受）；(c) 内网免密、输 name 即登录
   （最顺滑，靠内网边界）。admin 建议无论如何单独强口令。
-- **Q3 显式 skill 反馈要不要**：👍/👎/短评是"好评/差劲"通知的事实来源，也是社交属性的核心
-  一环；但它是新的产品行为（用户要动手）。做（P3）还是先只播"使用了"？
+- ~~**Q3 显式 skill 反馈要不要**~~ → **已拍板见 D7**：不加新反馈 UI；好评/差劲用原子
+  打分，修改意见用 push-edit 分支事件。
 - **Q4 画像散点的原子向量**：现算（慢、无 schema 变更）还是入库补存（快、加存储）？
   倾向：P3 时在 `ProfileStore` 旁加 points 落盘（更新画像时顺手存，无额外 LLM 调用）。
 - **Q5 降维算法**：PCA 先行、t-SNE 手写做可选增强——认可吗？还是必须一步到位 t-SNE？
