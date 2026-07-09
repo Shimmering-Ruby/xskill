@@ -1410,6 +1410,53 @@ def _h_merge(args: list[str], cwd: str) -> tuple[int, str, str]:
         return 0, f"Merge made (sha={new_commit.id[:7].decode('ascii')})", ""
 
 
+def _h_for_each_ref(args: list[str], cwd: str) -> tuple[int, str, str]:
+    """``git for-each-ref [<prefix>]``：按前缀列 ref，输出 ``<sha> <ref>`` 行。"""
+    prefix = ""
+    for a in args:
+        if not a.startswith("--"):
+            prefix = a
+            break
+    with _open_repo(cwd) as repo:
+        lines = []
+        for ref, sha in sorted(repo.refs.as_dict().items()):
+            name = ref.decode("utf-8")
+            if prefix and not name.startswith(prefix):
+                continue
+            lines.append(f"{sha.decode('ascii')} {name}")
+        return 0, "\n".join(lines), ""
+
+
+def _h_update_ref(args: list[str], cwd: str) -> tuple[int, str, str]:
+    """``git update-ref <ref> <sha>``（创建/移动任意 ref）与 ``-d <ref>``（删）。
+
+    D9 用它在 discard_staging 前把被拒 staging commit 挂到
+    ``refs/rejected/<ts>-<sha>`` 只读 ref，保持对 log/show 可达。
+    """
+    if args and args[0] == "-d":
+        if len(args) != 2:
+            return 1, "", "usage: update-ref -d <ref>"
+        with _open_repo(cwd) as repo:
+            ref = args[1].encode("utf-8")
+            if ref not in repo.refs:
+                return 1, "", f"ref not found: {args[1]}"
+            del repo.refs[ref]
+            return 0, "", ""
+    if len(args) != 2:
+        return 1, "", "usage: update-ref <ref> <sha>"
+    ref, sha = args
+    if not ref.startswith("refs/"):
+        return 1, "", f"refusing non-refs/ ref: {ref}"
+    with _open_repo(cwd) as repo:
+        try:
+            obj_id = sha.encode("ascii")
+            repo.object_store[obj_id]  # 校验对象存在，坏 sha 直接报错
+        except KeyError:
+            return 1, "", f"bad object: {sha}"
+        repo.refs[ref.encode("utf-8")] = obj_id
+        return 0, "", ""
+
+
 _DISPATCH: dict[str, Callable[[list[str], str], tuple[int, str, str]]] = {
     "init": _h_init,
     "config": _h_config,
@@ -1427,6 +1474,8 @@ _DISPATCH: dict[str, Callable[[list[str], str], tuple[int, str, str]]] = {
     "diff": _h_diff,
     "clean": _h_clean,
     "merge": _h_merge,
+    "update-ref": _h_update_ref,
+    "for-each-ref": _h_for_each_ref,
 }
 
 

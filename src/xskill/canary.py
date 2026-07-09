@@ -226,6 +226,13 @@ def discard_staging(skill_dir: Path) -> bool:
     with skill_repo_lock(skill_dir):
         if not has_staging(skill_dir):
             return False
+        # D9：删分支前把被拒 commit 挂到只读 ref，保持对 git log 可达——
+        # 进化图要能画出回滚节点并 diff；否则历史被拒版本永久失联。
+        s_sha = staging_sha(skill_dir)
+        if s_sha:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            run_git(["update-ref", f"refs/rejected/{stamp}-{s_sha[:12]}", s_sha],
+                    cwd=cwd)
         run_git(["checkout", "main"], cwd=cwd)
         code, _, err = run_git(["branch", "-D", STAGING_BRANCH], cwd=cwd)
         if code != 0:
@@ -543,7 +550,8 @@ def check_and_decide(skill_dir: Path, config: CanaryConfig | None = None,
         if age_days is not None and age_days >= cfg.max_days_hold:
             discard_staging(skill_dir)
             _record_decision(skill_dir, "timeout_discarded", 0.0, 0.0,
-                             main_n, staging_n, age_days)
+                             main_n, staging_n, age_days,
+                             main_sha=m_sha, staging_sha=s_sha)
             return {"action": "timeout_discarded", "age_days": age_days,
                     "main_samples": main_n, "staging_samples": staging_n}
         return {"action": "waiting", "age_days": age_days,
@@ -569,16 +577,19 @@ def check_and_decide(skill_dir: Path, config: CanaryConfig | None = None,
         ok = merge_staging_to_main(skill_dir)
         if ok:
             _record_decision(skill_dir, "promoted", main_w, staging_w,
-                             main_n, staging_n, age_days)
+                             main_n, staging_n, age_days,
+                             main_sha=m_sha, staging_sha=s_sha)
         return {"action": "promoted" if ok else "merge_failed", **summary}
     discard_staging(skill_dir)
     _record_decision(skill_dir, "rejected", main_w, staging_w,
-                     main_n, staging_n, age_days)
+                     main_n, staging_n, age_days,
+                     main_sha=m_sha, staging_sha=s_sha)
     return {"action": "rejected", **summary}
 
 
 def _record_decision(skill_dir, action: str, main_avg: float, staging_avg: float,
-                     main_n: int, staging_n: int, age_days) -> None:
+                     main_n: int, staging_n: int, age_days, *,
+                     main_sha: str = "", staging_sha: str = "") -> None:  # pylint: disable=redefined-outer-name
     """埋点：记一次灰度终态裁决(best-effort，失败不阻断判定/翻牌)。"""
     try:
         from xskill.pipeline.registry import record_canary_decision
@@ -586,7 +597,8 @@ def _record_decision(skill_dir, action: str, main_avg: float, staging_avg: float
             skill=Path(skill_dir).name, action=action,
             main_avg=float(main_avg or 0), staging_avg=float(staging_avg or 0),
             main_samples=int(main_n or 0), staging_samples=int(staging_n or 0),
-            age_days=float(age_days or 0))
+            age_days=float(age_days or 0),
+            main_sha=main_sha or "", staging_sha=staging_sha or "")
     except Exception:  # pylint: disable=broad-exception-caught
         logger.debug("canary decision telemetry skipped", exc_info=True)
 

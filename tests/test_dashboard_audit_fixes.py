@@ -225,3 +225,54 @@ def test_canary_sides_from_usage_records(tmp_path):
     assert sides["main"]["uses"] == 1
     assert sides["staging"]["uses"] == 2
     assert sides["staging"]["avg_ux"] == 8.5
+
+
+# ── D9：canary 裁决可定位（进化图数据地基） ─────────────────────────
+
+def _init_skill_repo(path):
+    import subprocess
+    def g(*args):
+        subprocess.run(["git", "-C", str(path)] + list(args),
+                       capture_output=True, text=True, check=True)
+    path.mkdir(parents=True)
+    g("init", "-q", "-b", "main")
+    g("config", "user.email", "t@t")
+    g("config", "user.name", "t")
+    (path / "SKILL.md").write_text("v1", encoding="utf-8")
+    g("add", "."); g("commit", "-q", "-m", "v1")
+    g("checkout", "-q", "-b", "staging")
+    (path / "SKILL.md").write_text("v2-staging", encoding="utf-8")
+    g("add", "."); g("commit", "-q", "-m", "staging work")
+    g("checkout", "-q", "main")
+
+
+def test_discard_staging_preserves_rejected_ref(tmp_path):
+    """被拒 staging 的 commit 经 refs/rejected/* 仍对 git log 可达。"""
+    import subprocess
+    from xskill.canary import discard_staging, staging_sha
+    sk = tmp_path / "skill" / "s-a"
+    _init_skill_repo(sk)
+    rejected = staging_sha(sk)
+    assert discard_staging(sk)
+    out = subprocess.run(
+        ["git", "-C", str(sk), "for-each-ref", "refs/rejected",
+         "--format=%(objectname)"],
+        capture_output=True, text=True, check=True).stdout.split()
+    assert rejected in out
+    # 且 commit 内容可达（能 show）
+    show = subprocess.run(["git", "-C", str(sk), "show", "--stat", rejected],
+                          capture_output=True, text=True, check=True)
+    assert "staging work" in show.stdout
+
+
+def test_record_canary_decision_stores_shas(tmp_path):
+    from xskill.pipeline.registry import record_canary_decision
+    db = tmp_path / "r.db"
+    record_canary_decision(skill="s-a", action="rejected", main_avg=7.3,
+                           staging_avg=5.9, main_samples=3, staging_samples=3,
+                           age_days=2.0, main_sha="m" * 40, staging_sha="s" * 40,
+                           db_path=db)
+    conn = get_connection(db)
+    row = conn.execute("SELECT main_sha, staging_sha FROM canary_decision").fetchone()
+    conn.close()
+    assert row["main_sha"] == "m" * 40 and row["staging_sha"] == "s" * 40

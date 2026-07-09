@@ -213,6 +213,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             " recommendation_log(client_id, skill, side, sha)"
         )
 
+    # ── canary_decision ──（D9：裁决可定位到 commit——进化图数据地基）
+    cur = conn.execute("PRAGMA table_info(canary_decision)")
+    cd_cols = {row[1] for row in cur.fetchall()}
+    for col in ("main_sha", "staging_sha"):
+        if col not in cd_cols:
+            conn.execute(
+                f"ALTER TABLE canary_decision ADD COLUMN {col} TEXT DEFAULT ''")
+
     cur = conn.execute("PRAGMA table_info(watch_dirs)")
     wd_cols = {row[1] for row in cur.fetchall()}
     if "ecosystem" not in wd_cols:
@@ -337,15 +345,22 @@ def trigger_eval_for_skill(skill: str, *, db_path: Optional[Path] = None) -> lis
 def record_canary_decision(*, skill: str, action: str, main_avg: float,
                            staging_avg: float, main_samples: int,
                            staging_samples: int, age_days: float,
+                           main_sha: str = "", staging_sha: str = "",
                            db_path: Optional[Path] = None) -> None:
-    """记一次灰度裁决(promoted/rejected/timeout_discarded)。供算晋升率。"""
+    """记一次灰度裁决(promoted/rejected/timeout_discarded)。供算晋升率。
+
+    ``main_sha``/``staging_sha`` 是裁决时两侧 HEAD——进化图据此把裁决挂到
+    具体 commit（D9）；存量无 sha 的历史裁决在图上显式标"无法定位"。
+    """
     conn = get_connection(db_path)
     try:
         conn.execute(
             "INSERT INTO canary_decision(skill,action,main_avg,staging_avg,"
-            "main_samples,staging_samples,age_days) VALUES(?,?,?,?,?,?,?)",
+            "main_samples,staging_samples,age_days,main_sha,staging_sha)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
             (skill, action, main_avg, staging_avg, int(main_samples),
-             int(staging_samples), float(age_days)),
+             int(staging_samples), float(age_days),
+             main_sha or "", staging_sha or ""),
         )
         conn.commit()
     finally:
