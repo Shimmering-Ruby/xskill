@@ -118,30 +118,47 @@ atom 详情；点击 ▲ 跳 skill 分析页。
 
 - **语义检索 + pin**：检索框（复用 `relevance_search`，检索池=团队 main/staging +
   skillhub 三方）；结果行带来源 chip 和 pin 按钮。
-- **推给我的**：表格，槽位 chip 标注 manifest 注入类型（pinned·自己 / pinned·admin /
-  ranked / recommended）+ 我触发过的次数 + pin/取消 pin 操作。admin pin 的条目普通用户
-  不可自行取消（显式置灰说明）。
+- **推给我的（skill 自配置，v3）**：每行两个操作——**pin**（持久化推送）与 **✕ 屏蔽**
+  （不再推送，进"已屏蔽"折叠组，可随时恢复）。槽位 chip 标注注入类型（pinned·自己 /
+  pinned·admin / ranked / recommended）+ 我触发过的次数。admin pin 的条目普通用户不可
+  取消/屏蔽（显式置灰说明）。列表遵守 §2.7 数量伸缩原则：默认 top-N + "查看全部 N 个"
+  进抽屉（搜索 + 分组 + 滚动）。
+- **偏好统一存储**：原 `pins` 表升级为 `skill_prefs(user_id | '*global*', skill_name,
+  pref: pinned|blocked, set_by, ts)`；manifest 注入顺序：**blocked 先排除 → pinned 占位
+  → ranked → recommended 回填**（pinned 超 slot 报错，no-fallback）。
 - **我的贡献去向**（v2 调整：弃漏斗图，改四级步进指标 38→171→9→6，箭头连接、每级
   点击钻取——漏斗形状在这里是伪装饰，数字+箭头更直观）；下方"我贡献的 skill ×
   使用者头像 × 评价（ux 分徽章）"列表。
-- **世界消息**：团队动态 feed（"m00323121 使用了 bob 蒸馏的 nginx-subpath-proxy，打了
-  9.1 分"/"alice 对 3gpp-spec-lookup 提交了修改（push-edit 分支）"/灰度裁决/全局 pin）。
-  只放 skill 名与动作，不放轨迹内容。
-- **通知气泡**：右下角 toast（新事件轮询到即弹，点击跳转）+ 顶部未读计数。
+- **世界消息（v3 重设计，去呆板）**：卡片式动态 feed——头像 + 富文本句（skill 名为可点
+  chip、分数为语义色徽章）+ 按"今天/昨天"分组 + hover 显示快捷跳转；只放 skill 名与
+  动作，不放轨迹内容。
+- **通知（v3：全局 + 浏览器系统级）**：三层——① 顶栏铃铛 + 未读数是**全局组件**，挂在
+  所有页面；② 页面内右下角 toast（任意页面都会弹）；③ **浏览器系统通知**（Web
+  Notifications API，用户授权一次后，即使浏览器最小化/在别的 tab 也能在系统层弹窗，
+  点击唤起对应详情页）。授权入口在铃铛下拉里，未授权时降级为页面内 toast——这是能力
+  分层不是 fallback 逻辑。
 
-新 API：`GET /my/manifest`、`/my/contributions`、`/events?target=me`、`POST /my/pin`。
+新 API：`GET /my/manifest`、`/my/contributions`、`/events?target=me`、
+`POST /my/prefs`（pin/block/恢复）。
 
 ### 2.5 管理页（admin，图⑤ `mockups/img/5-admin.png`）
 
-- **用户 × 推送/pin 矩阵**：每行一个用户：被推荐数 / 已 pin 列表（chip 标注 pin 来源）/
-  触发率 meter（异常低的用 serious 色）/ "代 pin…"操作。底部"全局 pin…"按钮 + 当前
-  全局 pin 状态说明。
+- **用户 × 推送/配置矩阵**：每行一个用户：被推荐数 / 配置摘要（pinned·blocked 计数
+  chip，行内不铺全量）/ 触发率 meter（异常低的用 serious 色）/ "配置…"操作。点行或
+  "配置…" → **右侧抽屉**打开该用户的全部被推荐 skill（§2.7 数量伸缩原则：搜索框 +
+  分组 tab〔全部/pinned/已屏蔽〕+ 滚动列表，每行可代 pin / 代屏蔽）——量大也不挤不溢出。
+  底部"全局 pin…"按钮 + 当前全局 pin 状态说明。
+- **技能管理（v3 新增）**：skill 生命周期操作表——每行 skill + 状态徽章（在役/灰度中）+
+  近 30 日使用数 + 操作：**下线**（停止分发与推荐，数据与 git 历史保留）与**删除**
+  （彻底移除，需二次确认并输入 skill 名）。两段式设计：先下线观察、再删除，误删不可逆
+  的动作永远隔一道闸。
 - **画像聚类 graph**：节点=用户（大小=原子数），边=`mean_tensor` 余弦相似度>0.6
   （粗细=相似度），手写 force-directed（用户十的量级）。点边 → tooltip 显示相似度值 +
   共同 top tag / 共同 skill；孤立节点灰色标"冷启动"。类群旁可加人工注记。
 
-新 API：`GET /admin/users-matrix`、`POST /admin/pin`（per-user/global）、
-`GET /admin/cluster-graph`。
+新 API：`GET /admin/users-matrix`、`GET /admin/user/{id}/prefs`、`POST /admin/prefs`
+（代 pin/代屏蔽/global）、`POST /admin/skill/{name}/retire`、
+`DELETE /admin/skill/{name}`、`GET /admin/cluster-graph`。
 
 ### 2.6 总览页（v0 改造，无新 mockup）
 
@@ -162,6 +179,9 @@ atom 详情；点击 ▲ 跳 skill 分析页。
 - **状态永不只靠颜色**：徽章 = 色 + 文字（"晋升"“回滚”“建议停推"）。
 - **交互默认**：折线 crosshair+tooltip；散点/节点 hover 预览卡；一切图形节点可点击跳
   详情——"分析工具"的钻取原则：任何聚合数字都能追到明细。
+- **数量伸缩原则（v3）**：任何可能变多的列表（某人被推荐的 skill、pin/屏蔽清单、事件
+  feed）行内只放摘要（top-N chip + "+12" 计数），全量一律进**右侧抽屉**：搜索过滤 +
+  分组 tab + 滚动（超过百级虚拟滚动）。禁止行内铺满换行导致挤压溢出。
 - **实现**：折线用 vendor 的 uPlot（~45KB 单文件）；DAG/时间线/二部图/散点/聚类 graph
   手写 SVG（数据量都在百级以下）。样式为编译产物 CSS，运行时零依赖、无 CDN。
 

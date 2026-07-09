@@ -18,7 +18,9 @@
 - [ ] 2.1 `trajectories.client_id` 列 + bridge 入库写入 + 存量一次性迁移脚本（跑完即弃）
 - [ ] 2.2 dashboard 登录（复用 connect --name 身份）+ `dashboard.admins` 角色 + 中间件演进
 - [ ] 2.3 普通用户视图：推给我的 / 我触发的 / skill 详情复用 / 语义检索
-- [ ] 2.4 `pins` 表 + `build_manifest` pinned 优先注入（超量报错）+ 用户自 pin / admin per-user & global pin
+- [ ] 2.4 `skill_prefs` 表（pinned|blocked）+ `build_manifest` 注入（blocked 排除 → pinned 占位 → ranked → recommended；pinned 超量报错）+ 用户自 pin/屏蔽 + admin 代 pin/代屏蔽 & global pin
+- [ ] 2.4b 数量伸缩交互：用户/admin 的 skill 清单右侧抽屉（搜索 + 分组 tab + 滚动）
+- [ ] 2.4c admin 技能管理：下线（停止分发保留数据）/ 删除（二次确认输名）两段式
 - [ ] 2.5 "我的贡献去向"：traj → skill → 使用者钻取
 - [ ] 2.6 推荐触发率升级为用户级精确口径 + "常推不用"排行
 - [ ] 2.7 写端点只挂 serve 内置形态；只读实例物理不挂载
@@ -27,7 +29,7 @@
 ## P3 社交 + 画像可视化
 
 - [ ] 3.1 `events` 表 + 四类埋点（他人触发+原子 ux 打分即评价 / push-edit 修改分支即修改意见 / canary 裁决 / 被 pin）
-- [ ] 3.2 通知气泡 + 通知中心 + 世界消息 feed（轮询）
+- [ ] 3.2 全局通知三层：全局铃铛组件（所有页面）+ 页面内 toast + 浏览器系统通知（Web Notifications，授权入口在铃铛下拉）；世界消息卡片式 feed（头像/skill chip/语义徽章/按天分组）
 - [ ] 3.3 评价事件口径：ux 分数段 → 好评/差劲措辞；push-edit 事件带分支引用可点开 diff
 - [ ] 3.4 画像散点：numpy PCA 投影（原子点+中心+skill），hover 预览/点击跳转；t-SNE 可选增强
 - [ ] 3.5 admin 用户聚类交互 graph（mean_tensor 相似度，手写 force 布局）
