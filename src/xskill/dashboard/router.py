@@ -122,6 +122,69 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         d["versions_git"] = _git_versions(_skill_path(skill_dir, name))
         return d
 
+    @router.get("/api/v1/dashboard/skill/{name}/graph")
+    def skill_graph(name: str) -> dict:
+        """进化图：main/staging/refs-rejected 的 commit DAG + 裁决标注（图①）。"""
+        from xskill.dashboard.gitgraph import skill_commit_graph
+        try:
+            return skill_commit_graph(skill_dir, name, db_path=db_path)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/skill/{name}/lineage")
+    def skill_lineage_ep(name: str) -> dict:
+        """血缘：贡献原子 + 用户/模型归因（断链显式标 source_cleaned）。"""
+        from xskill.dashboard.explore import skill_lineage
+        try:
+            return skill_lineage(skill_dir, name, db_path=db_path)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/skill/{name}/ux/daily")
+    def skill_ux_daily_ep(name: str) -> dict:
+        """按日 × side 的 ux 均值（得分趋势折线）。"""
+        from xskill.dashboard.explore import skill_ux_daily
+        return {"skill": name, "daily": skill_ux_daily(skill_dir, name)}
+
+    # ── 轨迹/原子详情（图②）与总览进度/连接状态（图⑥⑧）──────────────
+
+    @router.get("/api/v1/dashboard/traj/{traj_id}")
+    def traj_detail(traj_id: str) -> dict:
+        from xskill.dashboard.explore import TrajExplorer
+        try:
+            return TrajExplorer(db_path, skill_dir).traj_detail(traj_id)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/traj/{traj_id}/atoms")
+    def traj_atoms(traj_id: str) -> dict:
+        from xskill.dashboard.explore import TrajExplorer
+        try:
+            return {"traj_id": traj_id,
+                    "atoms": TrajExplorer(db_path, skill_dir).traj_atoms(traj_id)}
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/traj/{traj_id}/atom/{atom_id}")
+    def atom_detail(traj_id: str, atom_id: str) -> dict:
+        from xskill.dashboard.explore import TrajExplorer
+        try:
+            return TrajExplorer(db_path, skill_dir).atom_detail(traj_id, atom_id)
+        except (KeyError, FileNotFoundError) as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    @router.get("/api/v1/dashboard/pipeline")
+    def pipeline() -> dict:
+        """蒸馏管线进度：状态计数 + 冷启动信号 + 候选孵化进度（图⑥）。"""
+        from xskill.dashboard.explore import pipeline_progress
+        return pipeline_progress(db_path, skill_dir)
+
+    @router.get("/api/v1/dashboard/users/status")
+    def users_status_ep() -> dict:
+        """用户连接状态看板（图⑧，P1 读侧；版本列 P2 点亮）。"""
+        from xskill.dashboard.explore import users_status
+        return users_status(db_path)
+
     @router.get("/api/v1/dashboard/skill/{name}/tree")
     def skill_tree(name: str) -> dict:
         """skill 目录的文件树（相对路径 + 类型 + 大小）。"""
