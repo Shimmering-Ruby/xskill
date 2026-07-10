@@ -231,7 +231,7 @@ def _connect_handshake(args, state_path):
     from xskill.team.client.state import (
         ClientState, load_client_state, save_client_state,
     )
-    from xskill.team.client.daemon import register_with_server
+    from xskill.team.client.daemon import register_with_server_full
 
     if not args.token:
         print("error: 首次 connect 必须带 --token（server 启动时打印的 join token）",
@@ -258,13 +258,14 @@ def _connect_handshake(args, state_path):
     http = httpx.Client(base_url=server_url, timeout=30.0,
                         trust_env=args.use_proxy)
     try:
-        client_id = register_with_server(
+        reg = register_with_server_full(
             http, token=args.token,
             label=args.label or _socket.gethostname(),
             hostname=_socket.gethostname(),
             existing_client_id=existing_client_id,
             user_name=args.name or None,
         )
+        client_id = reg["client_id"]
     except Exception as e:
         print(f"error: 注册失败: {e}", file=sys.stderr)
         return None
@@ -273,6 +274,12 @@ def _connect_handshake(args, state_path):
     save_client_state(state, state_path)
     name_hint = f"  (--name={args.name})" if args.name else ""
     print(f"connected: client_id={client_id}  server={server_url}{name_hint}")
+    # P2-2.2(Q2a):server 为命名用户发放 dashboard 登录 token,这里打印一次。
+    # token 幂等(重连拿到同一个),丢了重新 connect 即可再看到。
+    dash_token = reg.get("dashboard_token")
+    if dash_token:
+        print(f"dashboard 登录: 用户名 {args.name} + token {dash_token}"
+              f"  (server 看板地址 {server_url}/)")
     return state
 
 

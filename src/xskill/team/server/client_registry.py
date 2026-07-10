@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -109,6 +110,10 @@ class ClientRegistry:
                 # P2-2.10:client 上报的 xskill 版本,register/sync 时 upsert
                 conn.execute(
                     "ALTER TABLE clients ADD COLUMN client_version TEXT DEFAULT ''")
+            if "dashboard_token" not in cols:
+                # P2-2.2(Q2a):dashboard 登录凭证,--name 注册时发放并回传打印
+                conn.execute(
+                    "ALTER TABLE clients ADD COLUMN dashboard_token TEXT DEFAULT ''")
             conn.commit()
         finally:
             conn.close()
@@ -214,6 +219,46 @@ class ClientRegistry:
                 (hostname, label),
             ).fetchone()
             return row["client_id"] if row else None
+        finally:
+            conn.close()
+
+    def ensure_dashboard_token(self, client_id: str) -> str:
+        """确保该 client 行有 dashboard token（无则生成）,返回 token。
+
+        P2-2.2(Q2a):``--name`` 注册路径调用。token 与 user_name 1:1
+        （命名用户的 client_id 由 name 确定性派生）。"""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT dashboard_token FROM clients WHERE client_id=?",
+                (client_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown client_id: {client_id}")
+            existing = row["dashboard_token"] or ""
+            if existing:
+                return existing
+            token = secrets.token_hex(16)
+            conn.execute(
+                "UPDATE clients SET dashboard_token=? WHERE client_id=?",
+                (token, client_id),
+            )
+            conn.commit()
+            return token
+        finally:
+            conn.close()
+
+    def dashboard_token_for(self, user_name: str) -> str | None:
+        """按 user_name 取 dashboard token（登录校验用）。未注册/无 token → None。"""
+        norm = _normalize_user_name(user_name)
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT dashboard_token FROM clients WHERE user_name=?"
+                " ORDER BY last_seen DESC LIMIT 1",
+                (norm,),
+            ).fetchone()
+            return (row["dashboard_token"] or None) if row else None
         finally:
             conn.close()
 

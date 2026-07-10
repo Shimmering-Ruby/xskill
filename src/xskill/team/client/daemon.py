@@ -45,6 +45,20 @@ def register_with_server(
     ``user_name`` 即 ``--name <工号/userid>``：非空时 server 派生确定性 client_id
     （跨设备同 name 共享画像），优先于 claimed/fingerprint。
     """
+    return register_with_server_full(
+        http, token=token, label=label, hostname=hostname,
+        existing_client_id=existing_client_id, user_name=user_name,
+    )["client_id"]
+
+
+def register_with_server_full(
+    http, *,
+    token: str, label: str, hostname: str,
+    existing_client_id: str | None = None,
+    user_name: str | None = None,
+) -> dict:
+    """同 ``register_with_server``，但返回完整响应 dict——CLI 用它拿
+    ``dashboard_token``（P2-2.2）在 connect 成功时打印一次。"""
     from xskill import __version__ as _xskill_version
     body = {
         "token": token,
@@ -61,7 +75,7 @@ def register_with_server(
         raise RuntimeError(
             f"register failed: HTTP {resp.status_code} — {resp.text}"
         )
-    return resp.json()["client_id"]
+    return resp.json()
 
 
 class TeamClient:

@@ -340,10 +340,17 @@ def dashboard_config(cfg: dict) -> dict:
     """从已加载 config 取 dashboard 段，缺字段用显式默认（非 fallback 兼容）。"""
     d = cfg.get("dashboard") or {}
     attr = _resolve_attribution(d)
+    admins = d.get("admins") or []
+    if not isinstance(admins, list):
+        raise ValueError("dashboard.admins 必须是 user_name 列表")
     return {
         "enabled": bool(d.get("enabled", False)),
         "public": bool(d.get("public", False)),
         "password": str(d.get("password", "") or ""),
+        # P2-2.2(D2/Q2a):admin 名单(user_name) + admin 单独强口令。
+        # admin_password 为空 = admin 登录关闭(显式缺省,非默认开)。
+        "admins": [str(a).strip() for a in admins if str(a).strip()],
+        "admin_password": str(d.get("admin_password", "") or ""),
         "default_harness": attr["harness"],
         "default_model": attr["model"],
     }

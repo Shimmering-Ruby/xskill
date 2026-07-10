@@ -370,7 +370,13 @@ async def team_register(req: RegisterRequest) -> RegisterResponse:
     )
     logger.info("team client registered: %s (label=%s, name=%s)",
                 client_id, req.client_label, user_name or "<anonymous>")
-    return RegisterResponse(client_id=client_id)
+    # P2-2.2(Q2a):命名用户发放 dashboard 登录 token(幂等,已有则原样返回)。
+    # 匿名用户无 user_name 身份键,dashboard 登录不适用 → None。
+    dashboard_token = (
+        _ctx.client_registry.ensure_dashboard_token(client_id)
+        if user_name else None
+    )
+    return RegisterResponse(client_id=client_id, dashboard_token=dashboard_token)
 
 
 @router.post("/upload", response_model=UploadResponse)

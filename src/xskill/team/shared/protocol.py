@@ -42,6 +42,9 @@ class RegisterRequest(BaseModel):
 
 class RegisterResponse(BaseModel):
     client_id: str
+    # P2-2.2(Q2a):--name 注册时发放的 dashboard 登录 token,client 侧打印一次。
+    # 匿名注册为 None(dashboard 登录依赖 user_name 身份)。
+    dashboard_token: str | None = None
 
 
 class UploadTrajectory(BaseModel):
