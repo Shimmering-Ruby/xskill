@@ -1,5 +1,12 @@
-# xskill + Cursor one-shot setup (dirs, junction, import, registry)
+﻿# xskill + Cursor one-shot setup (dirs, junction, import, registry)
 # Run from repo root: powershell -ExecutionPolicy Bypass -File scripts\cursor_setup.ps1
+
+# 输出统一 UTF-8：中文 Windows 的 PowerShell 5.1 默认按系统代码页(GBK)写管道，
+# agent/CI 按 UTF-8 读会得到乱码，报错信息无法排查
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch {}
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path $PSScriptRoot -Parent
