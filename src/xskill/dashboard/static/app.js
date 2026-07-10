@@ -696,6 +696,9 @@ async function loadUsersStatus() {
         ? '<span class="inline-flex items-center gap-1.5 text-emerald-600 font-medium text-xs"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>在线</span>'
         : '<span class="inline-flex items-center gap-1.5 text-slate-400 text-xs"><span class="w-2 h-2 rounded-full bg-slate-300"></span>离线</span>'}</td>
       <td class="text-slate-500 text-xs">${fdate(u.last_seen)}</td>
+      <td class="text-xs">${u.client_version
+        ? `${esc(u.client_version)}${u.version_stale ? ' <span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px]">落后</span>' : ''}`
+        : '<span class="text-slate-300">未上报</span>'}</td>
       <td class="text-right tabular-nums text-slate-600">${u.trajs} · ${u.atoms}</td>
       <td class="pl-6">${hs}</td>
       <td class="text-slate-600 text-xs">${model}</td></tr>`;
@@ -750,7 +753,7 @@ async function loadCanary() {
 }
 
 // ── SPA-lite 路由（hash）─────────────────────────────────────────
-const NAMES = { overview: '总览', skills: '技能库', traj: '轨迹 & 原子', users: '用户 & 画像', canary: '灰度 Canary' };
+const NAMES = { overview: '总览', skills: '技能库', traj: '轨迹 & 原子', users: '用户 & 画像', canary: '灰度 Canary', my: '我的', admin: '管理', settings: '设置' };
 function showPage(pg) {
   if (!document.getElementById('pg-' + pg)) pg = 'overview';
   document.querySelectorAll('.sec-page').forEach(s => s.classList.remove('on'));
@@ -868,3 +871,241 @@ for (const f of [loadOverview, loadRates, loadPipeline, loadDomain, loadCost,
   loadSkills, loadDirs, loadUsersStatus, loadTags, loadCanary]) {
   f().catch(e => console.error(e));
 }
+
+// ═════════════ P2:登录/角色 + 我的/管理/设置 ═════════════
+let IDENT = null;   // {user, role} | null
+
+async function jpost(u, body, method) {
+  const r = await fetch(u, { method: method || 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || (u + ' ' + r.status));
+  return data;
+}
+
+function applyIdent() {
+  const logged = !!IDENT, admin = logged && IDENT.role === 'admin';
+  document.querySelectorAll('.auth-user').forEach(e => e.classList.toggle('hidden', !logged));
+  document.querySelectorAll('.auth-admin').forEach(e => e.classList.toggle('hidden', !admin));
+  document.getElementById('who-anon').classList.toggle('hidden', logged);
+  document.getElementById('who-user').classList.toggle('hidden', !logged);
+  if (logged) {
+    document.getElementById('who-name').textContent = IDENT.user;
+    document.getElementById('who-role').textContent = IDENT.role;
+  }
+  document.getElementById('my-guard').classList.toggle('hidden', logged);
+  document.getElementById('my-body').classList.toggle('hidden', !logged);
+  document.getElementById('admin-guard').classList.toggle('hidden', admin);
+  document.getElementById('admin-body').classList.toggle('hidden', !admin);
+  document.getElementById('settings-guard').classList.toggle('hidden', admin);
+  document.getElementById('settings-body').classList.toggle('hidden', !admin);
+}
+
+async function initIdent() {
+  try { IDENT = await j('/api/v1/dashboard/me'); } catch { IDENT = null; }
+  applyIdent();
+  if (IDENT) loadMy().catch(console.error);
+  if (IDENT && IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
+}
+
+// 登录弹窗
+const _lm = document.getElementById('login-modal');
+document.getElementById('btn-login').addEventListener('click', () => { _lm.classList.remove('hidden'); document.getElementById('login-user').focus(); });
+document.getElementById('login-cancel').addEventListener('click', () => _lm.classList.add('hidden'));
+document.getElementById('login-submit').addEventListener('click', async () => {
+  const user = document.getElementById('login-user').value.trim();
+  const sec = document.getElementById('login-secret').value;
+  const err = document.getElementById('login-err');
+  err.textContent = '';
+  try {
+    IDENT = await jpost('/api/v1/dashboard/login', { user_name: user, secret: sec });
+    _lm.classList.add('hidden');
+    applyIdent();
+    loadMy().catch(console.error);
+    if (IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
+  } catch (e) { err.textContent = e.message; }
+});
+document.getElementById('login-secret').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('login-submit').click(); });
+document.getElementById('btn-logout').addEventListener('click', async () => {
+  await jpost('/api/v1/dashboard/logout').catch(() => {});
+  IDENT = null; applyIdent(); location.hash = '#overview';
+});
+
+// ── 我的 ────────────────────────────────────────────────────────
+const BUCKET_CHIP = {
+  pinned: 'bg-violet-100 text-violet-700',
+  ranked: 'bg-teal-50 text-teal-700 ring-1 ring-teal-100',
+  recommended: 'bg-sky-100 text-sky-700',
+};
+function bucketLabel(s) {
+  if (s.bucket !== 'pinned') return s.bucket;
+  return s.pin_scope === 'global' ? 'pinned·全局' : (s.user_removable ? 'pinned·自己' : 'pinned·admin');
+}
+async function loadMy() {
+  if (!IDENT) return;
+  const [m, ct, rt] = await Promise.all([
+    j('/api/v1/dashboard/my/manifest'),
+    j('/api/v1/dashboard/my/contributions'),
+    j('/api/v1/dashboard/my/reco-trigger'),
+  ]);
+  document.getElementById('my-slot-sum').textContent = `${m.slots.length}/${m.total_slots} 槽位`;
+  document.getElementById('my-slots').innerHTML = m.slots.map(s => `
+    <div class="flex items-center gap-2.5 px-3 py-2 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50">
+      <span class="skill-jump cursor-pointer font-medium text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${s.skill_name}">${s.skill_name}</span>
+      <span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP[s.bucket] || 'bg-slate-100 text-slate-500'}">${bucketLabel(s)}</span>
+      <span class="text-[10px] text-slate-400">${s.side}</span>
+      <span class="flex-1"></span>
+      ${s.bucket === 'pinned'
+        ? (s.user_removable ? `<button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${s.skill_name}" data-act="clear">取消 pin</button>`
+                            : `<span class="text-[10px] text-slate-300 cursor-not-allowed" title="admin/全局 pin,不可取消">锁定</span>`)
+        : `<button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${s.skill_name}" data-act="pin">pin</button>
+           <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50 text-rose-600" data-skill="${s.skill_name}" data-act="block" title="不再推送">✕</button>`}
+    </div>`).join('') || '<span class="text-slate-400">暂无槽位</span>';
+  document.getElementById('my-blocked').innerHTML = m.blocked.map(b => `
+    <span class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-rose-50 text-rose-700 ring-1 ring-rose-200">${b.skill_name}
+      <button class="my-pref font-medium" data-skill="${b.skill_name}" data-act="clear">恢复</button></span>`).join('')
+    || '<span class="text-[11px] text-slate-400">无</span>';
+  const st = ct.steps;
+  document.getElementById('my-steps').innerHTML =
+    [['轨迹', st.trajs], ['原子', st.atoms], ['被采纳', st.adopted_atoms], ['进入 skill', st.skills]]
+      .map(([k, v], i) => `${i ? '<span class="text-slate-300">→</span>' : ''}
+        <div class="px-4 py-2 rounded-xl bg-slate-50 ring-1 ring-slate-100 text-center">
+          <div class="text-lg font-semibold tabular-nums">${v}</div><div class="text-[10.5px] text-slate-400">${k}</div></div>`).join('');
+  document.getElementById('my-usage').innerHTML = ct.usage.map(u => `
+    <div class="flex items-center gap-2 text-[12.5px]"><span class="skill-jump cursor-pointer text-teal-700" data-skill="${u.skill}">${u.skill}</span>
+      <span class="text-[11px] text-slate-400">均分 ${u.avg_score ?? '—'}</span>
+      <span class="flex flex-wrap gap-1">${u.users.map(x => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">${x.user}×${x.count}</span>`).join('')}</span></div>`).join('')
+    || '<span class="text-[11px] text-slate-400">还没有被他人使用的记录</span>';
+  const VC = { '高价值': 'bg-emerald-100 text-emerald-700', '正常': 'bg-slate-100 text-slate-600' };
+  rows('my-rt-body', rt.rows.map(r => `<tr>
+    <td class="py-2"><span class="skill-jump cursor-pointer text-teal-700" data-skill="${r.skill}">${r.skill}</span></td>
+    <td class="text-right tabular-nums">${r.exposures}</td><td class="text-right tabular-nums">${r.triggers}</td>
+    <td class="text-right tabular-nums">${pctf(r.rate)}</td>
+    <td class="pl-6"><span class="text-[10px] px-1.5 py-0.5 rounded ${VC[r.verdict] || 'bg-rose-100 text-rose-700'}">${r.verdict}</span></td></tr>`).join(''),
+    '暂无推荐记录');
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest('.my-pref');
+  if (!b) return;
+  try { await jpost('/api/v1/dashboard/my/prefs', { skill_name: b.dataset.skill, action: b.dataset.act }); await loadMy(); }
+  catch (err) { alert(err.message); }
+});
+
+// ── 管理 ────────────────────────────────────────────────────────
+async function loadAdmin() {
+  if (!IDENT || IDENT.role !== 'admin') return;
+  const [um, sk] = await Promise.all([
+    j('/api/v1/dashboard/admin/users-matrix'),
+    j('/api/v1/dashboard/admin/skills'),
+  ]);
+  document.getElementById('admin-gpins').innerHTML = um.global_pinned.map(g => `
+    <span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">${g}
+      <button class="gpin-del font-bold" data-skill="${g}" title="移除全局 pin">✕</button></span>`).join('') || '<span class="text-slate-400">无</span>';
+  rows('admin-users-body', um.users.map(u => `<tr>
+    <td class="py-2 font-medium">${u.user}</td>
+    <td>${u.client_version || '<span class="text-slate-300">未上报</span>'}</td>
+    <td class="text-right tabular-nums">${u.exposures}</td>
+    <td class="text-right tabular-nums">${u.rate === null ? '—' : pctf(u.rate)}</td>
+    <td class="text-right tabular-nums">${u.pinned} · ${u.blocked}</td>
+    <td class="pl-6">${u.stale_advice.map(a => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 mr-2">${a.skill}</span>`).join('') || '<span class="text-slate-300">—</span>'}</td>
+    <td class="text-right"><button class="adm-cfg text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-user="${u.user}">配置…</button></td></tr>`).join(''),
+    '暂无 client');
+  const ST = { active: ['在役', 'bg-emerald-100 text-emerald-700'], canary: ['灰度中', 'bg-amber-100 text-amber-700'], retired: ['已下线', 'bg-rose-100 text-rose-700'] };
+  rows('admin-skills-body', sk.skills.map(s => {
+    const [label, cls] = ST[s.state];
+    return `<tr><td class="py-2 font-medium">${s.name}</td>
+      <td><span class="text-[10px] px-1.5 py-0.5 rounded ${cls}">${label}</span></td>
+      <td class="text-right tabular-nums">${s.usage_30d}</td>
+      <td class="text-right">
+        ${s.state === 'retired'
+          ? `<button class="adm-life text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${s.name}" data-act="unretire">恢复在役</button>
+             <button class="adm-life text-[11px] px-2 py-0.5 rounded ring-1 ring-rose-200 text-rose-700 hover:bg-rose-50 ml-1" data-skill="${s.name}" data-act="delete">删除…</button>`
+          : `<button class="adm-life text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${s.name}" data-act="retire">下线</button>`}
+      </td></tr>`;
+  }).join(''), '暂无 skill');
+}
+async function openAdminDrawer(user) {
+  const d = document.getElementById('admin-drawer');
+  const p = await j('/api/v1/dashboard/admin/user/' + encodeURIComponent(user) + '/prefs');
+  d.classList.remove('hidden');
+  d.innerHTML = `<div class="flex items-baseline justify-between">
+      <h3 class="font-medium text-[12.5px]">${user} 的偏好 <span class="text-[10.5px] text-slate-400 font-normal ml-1">pinned=${p.effective.pinned.length} blocked=${p.effective.blocked.length}</span></h3>
+      <button id="adm-drawer-x" class="text-[11px] text-slate-400 hover:bg-slate-100 px-1.5 rounded">收起</button></div>
+    <div class="mt-2 flex flex-wrap gap-1.5">${p.prefs.map(r => `
+      <span class="inline-flex items-center gap-1 text-[10.5px] px-2 py-1 rounded-lg ${r.pref === 'pinned' ? 'bg-violet-100 text-violet-700' : 'bg-rose-50 text-rose-700'} ring-1 ring-slate-200">
+        ${r.skill_name} <span class="opacity-60">${r.pref}·${r.set_by}</span>
+        <button class="adm-pref font-bold" data-user="${user}" data-skill="${r.skill_name}" data-act="clear">✕</button></span>`).join('') || '<span class="text-[11px] text-slate-400">无</span>'}</div>
+    <div class="mt-3 flex gap-2">
+      <input id="adm-skill-in" class="ring-1 ring-slate-200 rounded-lg px-2 py-1 outline-none focus:ring-teal-500 font-mono text-[11px] w-36" placeholder="skill 名">
+      <button class="adm-pref px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-[11px]" data-user="${user}" data-act="pin">代 pin</button>
+      <button class="adm-pref px-2 py-1 rounded-lg ring-1 ring-rose-200 text-rose-700 hover:bg-rose-50 text-[11px]" data-user="${user}" data-act="block">代屏蔽</button>
+    </div>`;
+}
+document.addEventListener('click', async e => {
+  const cfg = e.target.closest('.adm-cfg');
+  if (cfg) { openAdminDrawer(cfg.dataset.user).catch(err => alert(err.message)); return; }
+  if (e.target.id === 'adm-drawer-x') { document.getElementById('admin-drawer').classList.add('hidden'); return; }
+  const ap = e.target.closest('.adm-pref');
+  if (ap) {
+    const skill = ap.dataset.skill || (document.getElementById('adm-skill-in') || {}).value;
+    if (!skill) return;
+    try {
+      await jpost('/api/v1/dashboard/admin/prefs', { user_key: ap.dataset.user, skill_name: skill.trim(), action: ap.dataset.act });
+      await openAdminDrawer(ap.dataset.user); await loadAdmin();
+    } catch (err) { alert(err.message); }
+    return;
+  }
+  const gd = e.target.closest('.gpin-del');
+  if (gd) {
+    try { await jpost('/api/v1/dashboard/admin/prefs', { user_key: '*global*', skill_name: gd.dataset.skill, action: 'clear' }); await loadAdmin(); }
+    catch (err) { alert(err.message); }
+    return;
+  }
+  const lf = e.target.closest('.adm-life');
+  if (lf) {
+    const name = lf.dataset.skill, act = lf.dataset.act;
+    try {
+      if (act === 'delete') {
+        const typed = prompt(`删除不可逆：skill 目录与 git 历史将被移除。\n请输入 skill 名确认: ${name}`);
+        if (typed === null) return;
+        await jpost('/api/v1/dashboard/admin/skill/' + encodeURIComponent(name), { confirm_name: typed }, 'DELETE');
+      } else {
+        await jpost(`/api/v1/dashboard/admin/skill/${encodeURIComponent(name)}/${act}`);
+      }
+      await loadAdmin();
+    } catch (err) { alert(err.message); }
+  }
+});
+document.getElementById('gpin-add').addEventListener('click', async () => {
+  const v = document.getElementById('gpin-input').value.trim();
+  if (!v) return;
+  try { await jpost('/api/v1/dashboard/admin/prefs', { user_key: '*global*', skill_name: v, action: 'pin' }); document.getElementById('gpin-input').value = ''; await loadAdmin(); }
+  catch (err) { alert(err.message); }
+});
+
+// ── 设置 ────────────────────────────────────────────────────────
+async function loadSettings() {
+  if (!IDENT || IDENT.role !== 'admin') return;
+  const c = await j('/api/v1/dashboard/admin/config');
+  document.getElementById('cfg-path').textContent = c.path;
+  document.getElementById('cfg-editor').value = c.raw;
+}
+async function cfgAction(endpoint) {
+  const res = document.getElementById('cfg-result');
+  res.className = 'text-[12.5px] text-slate-500'; res.textContent = '…';
+  try {
+    const r = await jpost('/api/v1/dashboard/admin/config/' + endpoint, { raw: document.getElementById('cfg-editor').value });
+    if (endpoint === 'validate') { res.className = 'text-[12.5px] text-emerald-700'; res.textContent = '✓ 校验通过'; }
+    else {
+      res.className = 'text-[12.5px] text-emerald-700';
+      res.textContent = `✓ 已生效 ${r.hot_reloaded.join('/') || '无变更'}` +
+        (r.needs_restart.length ? `;⚠ ${r.needs_restart.join('/')} 段需重启 serve` : '');
+      if (r.needs_restart.length) res.className = 'text-[12.5px] text-amber-700';
+    }
+  } catch (err) { res.className = 'text-[12.5px] text-rose-600'; res.textContent = '✗ ' + err.message; }
+}
+document.getElementById('cfg-validate').addEventListener('click', () => cfgAction('validate'));
+document.getElementById('cfg-reload').addEventListener('click', () => cfgAction('reload'));
+
+initIdent().catch(console.error);
