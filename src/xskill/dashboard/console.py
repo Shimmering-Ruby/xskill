@@ -170,6 +170,35 @@ class DeleteSkillRequest(BaseModel):
     confirm_name: str      # 二次确认:必须输入 skill 名
 
 
+class ConfigPayload(BaseModel):
+    raw: str               # config.yaml 全文(原文编辑器提交)
+
+
+# 热加载范围显式声明(2.9):这些段改完即生效(读方每次现取);
+# llm/watch_dirs 涉及进程级资源(client 连接池/watcher 注册),改动需重启 serve。
+HOT_RELOAD_SECTIONS = ("dashboard", "canary", "recommend", "skillhub")
+RESTART_SECTIONS = ("llm", "llm_skill", "embedding", "watcher", "team")
+
+
+def _validate_config_text(raw: str) -> dict:
+    """解析并逐段校验。失败抛 ValueError(带原因),绝不返回半合法配置。"""
+    import yaml
+    try:
+        cfg = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        raise ValueError(f"YAML 解析失败: {e}") from e
+    if not isinstance(cfg, dict):
+        raise ValueError("config.yaml 顶层必须是 mapping")
+    from xskill.config import dashboard_config
+    dashboard_config(cfg)  # admins 类型等
+    from xskill.canary import CanaryConfig
+    CanaryConfig.from_dict(cfg.get("canary", {}) or {})
+    llm = cfg.get("llm", {}) or {}
+    if llm and not llm.get("base_url"):
+        raise ValueError("llm.base_url 不能为空")
+    return cfg
+
+
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -451,6 +480,72 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         _invalidate_engine_cache()
         logger.info("admin %s deleted skill %s", ident["user"], name)
         return {"ok": True}
+
+    # ── 设置页（admin,2.9） ─────────────────────────────────────────
+
+    @router.get("/admin/config")
+    def admin_config(_=Depends(require_admin)):
+        from xskill.config import CONFIG_PATH
+        if not CONFIG_PATH.is_file():
+            raise HTTPException(status_code=404,
+                                detail=f"config 不存在: {CONFIG_PATH}")
+        return {"path": str(CONFIG_PATH),
+                "raw": CONFIG_PATH.read_text(encoding="utf-8"),
+                "hot_reload_sections": list(HOT_RELOAD_SECTIONS),
+                "restart_sections": list(RESTART_SECTIONS)}
+
+    @router.post("/admin/config/validate")
+    def admin_config_validate(req: ConfigPayload, _=Depends(require_admin)):
+        try:
+            _validate_config_text(req.raw)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return {"ok": True}
+
+    @router.post("/admin/config/reload")
+    def admin_config_reload(req: ConfigPayload, ident=Depends(require_admin)):
+        """校验并热加载：校验失败不落盘、不生效、直接报错（no-fallback，
+        不存在"部分生效"）。
+
+        热加载实现：原地更新 serve 进程的 ``_config`` dict——watcher/canary/
+        recommend 等读方都持同一引用且每次现取相应段；推荐引擎缓存失效重建。
+        llm/watch_dirs 段的改动响应里显式标注需重启,不做静默半生效。
+        """
+        try:
+            new_cfg = _validate_config_text(req.raw)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        from xskill.config import CONFIG_PATH
+        import os
+        import tempfile as _tf
+        from xskill.api import app as app_mod
+
+        old_cfg = dict(app_mod._config or {})
+        changed = sorted(
+            k for k in set(old_cfg) | set(new_cfg)
+            if old_cfg.get(k) != new_cfg.get(k))
+        # 原子落盘:同目录 tmp + rename,写一半断电不会留半个 config
+        fd, tmp = _tf.mkstemp(dir=str(CONFIG_PATH.parent), suffix=".yaml.tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(req.raw)
+            os.replace(tmp, str(CONFIG_PATH))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        # 原地更新:所有持引用的读方(watcher self.config 等)即刻看到新值
+        if app_mod._config is not None:
+            app_mod._config.clear()
+            app_mod._config.update(new_cfg)
+        _invalidate_engine_cache()
+        needs_restart = [k for k in changed if k in RESTART_SECTIONS]
+        hot = [k for k in changed if k not in RESTART_SECTIONS]
+        logger.info("admin %s reloaded config (hot=%s, needs_restart=%s)",
+                    ident["user"], hot, needs_restart)
+        return {"ok": True, "hot_reloaded": hot, "needs_restart": needs_restart}
 
     return router
 
