@@ -7,20 +7,24 @@ from xskill.config import dashboard_config, dashboard_attribution_defaults
 def test_dashboard_config_defaults_when_absent():
     assert dashboard_config({}) == {
         "enabled": False, "public": False, "password": "",
+        "admins": [], "admin_password": "",
         "default_harness": "unknown", "default_model": "unknown"}
 
 
 def test_dashboard_config_reads_values():
     cfg = {"dashboard": {"enabled": True, "public": True, "password": "s3cret",
+                         "admins": ["boss", " lead "], "admin_password": "S!",
                          "default_harness": "claude_code", "default_model": "deepseek-v4-flash"}}
     assert dashboard_config(cfg) == {
         "enabled": True, "public": True, "password": "s3cret",
+        "admins": ["boss", "lead"], "admin_password": "S!",
         "default_harness": "claude_code", "default_model": "deepseek-v4-flash"}
 
 
 def test_dashboard_config_partial_fills_defaults():
     assert dashboard_config({"dashboard": {"enabled": True}}) == {
         "enabled": True, "public": False, "password": "",
+        "admins": [], "admin_password": "",
         "default_harness": "unknown", "default_model": "unknown"}
 
 
