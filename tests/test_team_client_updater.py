@@ -28,14 +28,16 @@ def test_pypi_newer_version_uses_pypi_and_skips_server(monkeypatch):
     assert restarted == [True]
 
 
-def test_current_pypi_version_does_not_fallback_to_server(monkeypatch):
+def test_current_pypi_version_still_checks_server(monkeypatch):
+    """回归(2026-07-10):PyPI 无新版时曾直接 return,不查 server。
+
+    内网场景 server 预置 wheel 常领先公网 PyPI(先内部分发、后补发)。
+    旧行为下只要 pypi.org JSON API 可达且无新版,server 渠道永远不会被
+    查询,内网更新静默失效。现在 PyPI 不领先时必须继续问 server。"""
+    fallback_reasons: list[str] = []
+
     monkeypatch.setattr(updater_mod, "_current_version", lambda package: "1.0.0")
     monkeypatch.setattr(updater_mod, "_latest_pypi_version", lambda package: "1.0.0")
-    monkeypatch.setattr(
-        updater_mod,
-        "_server_version",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("server fallback used")),
-    )
 
     updater = AutoUpdater(server_url="http://server", client_id="cid", join_token="tok")
     monkeypatch.setattr(
@@ -43,8 +45,32 @@ def test_current_pypi_version_does_not_fallback_to_server(monkeypatch):
         "_install",
         lambda version: (_ for _ in ()).throw(AssertionError("pypi install used")),
     )
+    monkeypatch.setattr(
+        updater,
+        "_check_server_fallback",
+        lambda current_str, current, *, reason: fallback_reasons.append(reason),
+    )
 
     updater._check_and_update()
+
+    assert fallback_reasons == ["pypi_not_ahead"], (
+        "PyPI 无新版时必须仍查询 server——server wheel 领先 PyPI 是内网常态")
+
+
+def test_pip_hang_returns_false_instead_of_blocking(monkeypatch):
+    """回归(2026-07-10):subprocess.run 没有 timeout,pip 挂死(代理黑洞
+    涓涓细流)会把单线程 updater 永久卡死,之后每小时的检查全部消失。"""
+    import subprocess as _sp
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("timeout"), "pip 调用必须带 subprocess timeout"
+        raise _sp.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", fake_run)
+    updater = AutoUpdater(server_url="http://server", client_id="cid", join_token="tok")
+
+    assert updater._install("9.9.9") is False
+    assert updater._install_wheel(Path("/tmp/fake.whl")) is False
 
 
 def test_pypi_query_failure_falls_back_to_server_wheel(monkeypatch):

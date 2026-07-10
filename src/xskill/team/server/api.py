@@ -323,8 +323,12 @@ async def team_version(
     x_xskill_client: str | None = Header(default=None),
 ) -> dict:
     """返回 server 当前 xskill 版本，以及同版本 wheel 是否可下载。"""
-    _auth(x_xskill_token, x_xskill_client)
+    client_id = _auth(x_xskill_token, x_xskill_client)
     wheel = _ensure_server_wheel()
+    # 带 client_id 留痕——排查"某用户的更新请求到过没"时，access log
+    # 只有 IP 没有身份，这行是唯一能按用户查的服务端痕迹
+    logger.info("updater check: client=%s server_version=%s wheel=%s",
+                client_id, XSKILL_VERSION, wheel.name if wheel else None)
     return {
         "package": "xskill",
         "version": XSKILL_VERSION,
@@ -339,10 +343,13 @@ async def team_wheel(
     x_xskill_client: str | None = Header(default=None),
 ) -> FileResponse:
     """下载 server 当前版本对应的 xskill wheel。"""
-    _auth(x_xskill_token, x_xskill_client)
+    client_id = _auth(x_xskill_token, x_xskill_client)
     wheel = _ensure_server_wheel()
     if wheel is None:
+        logger.warning("updater wheel miss: client=%s 请求 wheel 但 server 无货",
+                       client_id)
         raise HTTPException(status_code=404, detail="xskill wheel not found")
+    logger.info("updater wheel pull: client=%s -> %s", client_id, wheel.name)
     return FileResponse(
         wheel,
         media_type="application/octet-stream",

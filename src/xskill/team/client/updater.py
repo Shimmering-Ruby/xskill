@@ -253,7 +253,14 @@ class AutoUpdater:
             return
 
         if latest <= current:
-            logger.debug("updater: 当前版本 %s 已是最新", current_str)
+            logger.debug("updater: 当前版本 %s 不低于 PyPI 最新 %s",
+                         current_str, latest_str)
+            # 内网场景 server 预置的 wheel 常常领先公网 PyPI（先内部分发、
+            # 后补发 PyPI）。这里曾直接 return——只要 pypi.org 的 JSON API
+            # 可达且没有新版，server 渠道就永远不会被查询，内网更新静默
+            # 失效。PyPI 无新版 ≠ 没有更新。
+            self._check_server_fallback(current_str, current,
+                                        reason="pypi_not_ahead")
             return
 
         logger.info("updater: 发现新版本 %s（当前 %s），开始升级...",
@@ -264,21 +271,32 @@ class AutoUpdater:
             return
         self._check_server_fallback(current_str, current, reason="pypi_install_failed")
 
+    # pip 卡死的硬上限。pip 自带的 socket timeout 只覆盖"完全无数据"，
+    # 代理黑洞式的涓涓细流永远不触发；而 updater 是单线程循环，一次
+    # subprocess.run 挂死 = 之后每小时的检查全部消失，自动更新静默死亡。
+    _PIP_TIMEOUT = 600
+
     def _install(self, target_version: str) -> bool:
         """用 pip 升级到指定版本。返回是否成功。"""
         cmd = [
             sys.executable, "-m", "pip", "install", "--upgrade",
             f"{self.package}=={target_version}",
             "-i", self.pypi_url,
+            "--timeout", "15", "--retries", "2",
             "-q",     # quiet：只打印错误
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=self._PIP_TIMEOUT)
             if result.returncode == 0:
                 logger.info("updater: 升级到 %s 成功", target_version)
                 return True
             logger.warning("updater: pip 升级失败:\n%s",
                            result.stderr.strip() or result.stdout.strip())
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("updater: pip 超过 %ds 未退出，放弃本次升级",
+                           self._PIP_TIMEOUT)
             return False
         except Exception:
             logger.warning("updater: 执行 pip 失败", exc_info=True)
@@ -335,12 +353,17 @@ class AutoUpdater:
             "-q",
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=self._PIP_TIMEOUT)
             if result.returncode == 0:
                 logger.info("updater: 安装 server wheel 成功: %s", wheel_path.name)
                 return True
             logger.warning("updater: server wheel 安装失败:\n%s",
                            result.stderr.strip() or result.stdout.strip())
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("updater: pip 装 server wheel 超过 %ds 未退出，放弃",
+                           self._PIP_TIMEOUT)
             return False
         except Exception:
             logger.warning("updater: 执行 pip 安装 server wheel 失败", exc_info=True)
