@@ -903,6 +903,17 @@ def create_app(home_root: Path | str | None = None,
         带 None client 带病跑（CLAUDE.md 第 1 条）。create_llm_client 内部仍可能
         返回 None（其它调用方依赖此语义），所以在 daemon startup 处显式断言。
         """
+        # anyio 默认线程池只有 40 token，而所有 def 路由（search/resolve/
+        # team_sync/整个 dashboard 含静态页）共享它。embedding 后端慢时
+        # /sync 单请求可占线程数分钟，40 会被打满 → 网页整体失联
+        # （2026-07-10 生产事故）。抬到 300 只是抬水位保命，堆积机制的根治
+        # 走 openspec/backend-slow-resilience（PR #76）。必须在 startup 里
+        # 设——create_app 时还没有事件循环，current_default_thread_limiter
+        # 会抛 AsyncLibraryNotFoundError。
+        import anyio.to_thread
+        anyio.to_thread.current_default_thread_limiter().total_tokens = int(
+            _config.get("server", {}).get("thread_pool_tokens", 300))
+
         llm = create_llm_client(_config)
         if llm is None:
             raise RuntimeError(

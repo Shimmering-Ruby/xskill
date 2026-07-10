@@ -144,3 +144,37 @@ def test_rate_bucket_wait_aborts_on_shutdown():
     elapsed = time.monotonic() - t0
     assert wait > 0, "竖旗后应按桶耗尽路径返回剩余等待秒数"
     assert elapsed < 1.0, f"竖旗后等桶应立即返回,实测 {elapsed:.1f}s"
+
+
+# ---------------------------------------------------------------------------
+# 5. anyio 默认线程池容量(2026-07-10 二次事故回归)
+# ---------------------------------------------------------------------------
+
+def test_startup_raises_thread_pool_capacity():
+    """所有 def 路由(search/resolve/team_sync/整个 dashboard)共享 anyio
+    默认线程池(40)。embedding 后端慢时 /sync 单请求占线程数分钟,40 被
+    打满 → 网页整体失联。startup 必须把容量抬到 server.thread_pool_tokens
+    (默认 300)。只能在 startup 里设——create_app 时还没有事件循环,
+    current_default_thread_limiter 会抛 AsyncLibraryNotFoundError。"""
+    from xskill.api import app as app_mod
+
+    src = inspect.getsource(app_mod.create_app)
+    assert "current_default_thread_limiter" in src, (
+        "startup 里的线程池扩容被删了——慢 embedding 后端会再次打满 40 "
+        "线程导致网页失联")
+    assert "thread_pool_tokens" in src, "线程池容量必须可配,不许写死"
+
+
+def test_thread_pool_limiter_settable_in_loop():
+    """守住 anyio 版本兼容:total_tokens setter 必须在事件循环内可用。"""
+    import anyio
+    import anyio.to_thread
+
+    async def main():
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        before = limiter.total_tokens
+        limiter.total_tokens = 123
+        assert anyio.to_thread.current_default_thread_limiter().total_tokens == 123
+        limiter.total_tokens = before
+
+    anyio.run(main)

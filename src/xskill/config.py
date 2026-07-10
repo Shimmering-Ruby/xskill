@@ -155,6 +155,17 @@ skill_opt:
                              # hanging the optimization loop. 0 disables.
   rerun_enabled:      true    # dashboard "re-run case" action endpoint on/off
 
+# ===== Server (uvicorn/FastAPI runtime knobs) =====
+# server:
+#   thread_pool_tokens: 300     # anyio default thread-pool capacity. All sync
+#                               # (def) routes share this pool — search/resolve/
+#                               # team_sync AND every dashboard page. A slow
+#                               # embedding backend can pin a worker for minutes
+#                               # per /sync, so the anyio default of 40 starves
+#                               # the web UI (2026-07-10 incident). 300 is a
+#                               # stopgap ceiling, not a fix — see
+#                               # openspec/backend-slow-resilience.
+
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:
   poll_interval:  30            # seconds between scans of every watch_dir
