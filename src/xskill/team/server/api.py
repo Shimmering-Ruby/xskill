@@ -85,15 +85,19 @@ def init_team_context(
     _ctx.skillhub = skillhub
 
 
-def _auth(token: str | None, client_id: str | None) -> str:
-    """校验 token + client_id，返回 client_id。失败抛 HTTPException。"""
+def _auth(token: str | None, client_id: str | None,
+          version: str | None = None) -> str:
+    """校验 token + client_id，返回 client_id。失败抛 HTTPException。
+
+    ``version``（P2-2.10）= 请求的 ``X-Xskill-Version`` header，非空时随
+    touch 一并 upsert 进 clients.client_version。"""
     if _ctx.client_registry is None:
         raise HTTPException(status_code=503, detail="team context not initialized")
     if not token or token != _ctx.join_token:
         raise HTTPException(status_code=401, detail="invalid join token")
     if not client_id or not _ctx.client_registry.exists(client_id):
         raise HTTPException(status_code=403, detail="unknown client_id")
-    _ctx.client_registry.touch(client_id)
+    _ctx.client_registry.touch(client_id, version=version)
     return client_id
 
 
@@ -362,6 +366,7 @@ async def team_register(req: RegisterRequest) -> RegisterResponse:
         hostname=req.hostname,
         claimed_client_id=req.claimed_client_id,
         user_name=user_name,
+        client_version=req.client_version,
     )
     logger.info("team client registered: %s (label=%s, name=%s)",
                 client_id, req.client_label, user_name or "<anonymous>")
@@ -470,12 +475,13 @@ async def team_ingest_db(
 def team_sync(
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
 ):
     """同步 def（而非 async def）：update_user_interest → encode_batch 是同步
     httpx（最长 60s）。每个 client 周期性打这个端点，冷启动期 atom 集频繁
     变化、画像指纹屡屡失效——写成 async 会让 embedding 后端一慢就把整个
     事件循环冻住，所有端点"连不上"。def 路由 FastAPI 自动丢线程池。"""
-    client_id = _auth(x_xskill_token, x_xskill_client)
+    client_id = _auth(x_xskill_token, x_xskill_client, version=x_xskill_version)
     # §5 sync 前刷新该 client 的用户画像（atom 集变化时重算，未变则指纹命中跳过）。
     # 画像由 build_manifest → _pick_recommended → engine.get_skill_for_client 消费。
     eng = None

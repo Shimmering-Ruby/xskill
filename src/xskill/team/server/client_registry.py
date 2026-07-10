@@ -68,12 +68,13 @@ def safe_dir_name(user_name: str | None, client_id: str) -> str:
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS clients (
-    client_id   TEXT PRIMARY KEY,
-    label       TEXT DEFAULT '',
-    hostname    TEXT DEFAULT '',
-    user_name   TEXT DEFAULT '',
-    joined_at   TEXT NOT NULL,
-    last_seen   TEXT NOT NULL
+    client_id      TEXT PRIMARY KEY,
+    label          TEXT DEFAULT '',
+    hostname       TEXT DEFAULT '',
+    user_name      TEXT DEFAULT '',
+    client_version TEXT DEFAULT '',
+    joined_at      TEXT NOT NULL,
+    last_seen      TEXT NOT NULL
 );
 """
 
@@ -104,6 +105,10 @@ class ClientRegistry:
             cols = {row["name"] for row in conn.execute("PRAGMA table_info(clients)")}
             if "user_name" not in cols:
                 conn.execute("ALTER TABLE clients ADD COLUMN user_name TEXT DEFAULT ''")
+            if "client_version" not in cols:
+                # P2-2.10:client 上报的 xskill 版本,register/sync 时 upsert
+                conn.execute(
+                    "ALTER TABLE clients ADD COLUMN client_version TEXT DEFAULT ''")
             conn.commit()
         finally:
             conn.close()
@@ -114,6 +119,7 @@ class ClientRegistry:
         hostname: str = "",
         claimed_client_id: str | None = None,
         user_name: str | None = None,
+        client_version: str = "",
     ) -> str:
         """注册或续用 client_id。
 
@@ -144,15 +150,18 @@ class ClientRegistry:
                 ).fetchone()
                 if existing:
                     conn.execute(
-                        "UPDATE clients SET last_seen=?, hostname=?, user_name=?"
+                        "UPDATE clients SET last_seen=?, hostname=?, user_name=?,"
+                        " client_version=?"
                         " WHERE client_id=?",
-                        (_now(), hostname or "", norm, client_id),
+                        (_now(), hostname or "", norm, client_version or "", client_id),
                     )
                 else:
                     conn.execute(
                         "INSERT INTO clients (client_id, label, hostname, user_name,"
-                        " joined_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
-                        (client_id, label or norm, hostname or "", norm, now, now),
+                        " client_version, joined_at, last_seen)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (client_id, label or norm, hostname or "", norm,
+                         client_version or "", now, now),
                     )
                 conn.commit()
             finally:
@@ -160,12 +169,12 @@ class ClientRegistry:
             return client_id
         # 优先级 ② — claimed_client_id 命中
         if claimed_client_id and self.exists(claimed_client_id):
-            self.touch(claimed_client_id)
+            self.touch(claimed_client_id, version=client_version or None)
             return claimed_client_id
         # 优先级 ③ — (hostname, label) 指纹回查
         existing = self._find_by_fingerprint(hostname=hostname, label=label)
         if existing:
-            self.touch(existing)
+            self.touch(existing, version=client_version or None)
             return existing
         # 优先级 ④ — 发新 uuid
         client_id = uuid.uuid4().hex
@@ -173,9 +182,10 @@ class ClientRegistry:
         conn = self._conn()
         try:
             conn.execute(
-                "INSERT INTO clients (client_id, label, hostname, joined_at, last_seen)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (client_id, label, hostname, now, now),
+                "INSERT INTO clients (client_id, label, hostname, client_version,"
+                " joined_at, last_seen)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (client_id, label, hostname, client_version or "", now, now),
             )
             conn.commit()
         finally:
@@ -236,14 +246,24 @@ class ClientRegistry:
         finally:
             conn.close()
 
-    def touch(self, client_id: str) -> None:
-        """更新 last_seen。client_id 不存在则静默 no-op。"""
+    def touch(self, client_id: str, *, version: str | None = None) -> None:
+        """更新 last_seen（P2-2.10:携带 version 时顺带 upsert client_version）。
+
+        client_id 不存在则静默 no-op。version=None（旧 client 未上报）不清
+        既有值。"""
         conn = self._conn()
         try:
-            conn.execute(
-                "UPDATE clients SET last_seen=? WHERE client_id=?",
-                (_now(), client_id),
-            )
+            if version:
+                conn.execute(
+                    "UPDATE clients SET last_seen=?, client_version=?"
+                    " WHERE client_id=?",
+                    (_now(), version, client_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE clients SET last_seen=? WHERE client_id=?",
+                    (_now(), client_id),
+                )
             conn.commit()
         finally:
             conn.close()

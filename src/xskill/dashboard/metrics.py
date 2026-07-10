@@ -187,13 +187,15 @@ class DashboardMetrics:
         return load_usage_records(self._skill_dir)
 
     def _traj_client_map(self) -> dict[str, str]:
-        """traj_id → 用户键。team_client 目录用 label（=user_name/client_id），
-        其余目录归 '(local)'。"""
+        """traj_id → 用户键（canonical=user_name，D5）。
+
+        P2-2.1 起直接读 ``trajectories.user_key``（team 桶入库时写、存量由
+        scripts/backfill_user_key.py 回填），不再 JOIN ``watch_dirs.label``——
+        source 唯一，不留两条归因链路。非 team 轨迹 user_key 为空 → '(local)'。"""
         conn = get_connection(self._db)
         try:
             rows = conn.execute(
-                "SELECT t.filename fn, w.label label, w.ecosystem eco"
-                " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                "SELECT filename fn, user_key uk FROM trajectories"
             ).fetchall()
         finally:
             conn.close()
@@ -201,7 +203,7 @@ class DashboardMetrics:
         for r in rows:
             fn = r["fn"] or ""
             stem = fn[:-3] if fn.endswith(".md") else fn
-            out[stem] = r["label"] or "(local)"
+            out[stem] = r["uk"] or "(local)"
         return out
 
     def overview(self) -> dict:

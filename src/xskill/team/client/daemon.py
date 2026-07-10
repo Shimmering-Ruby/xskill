@@ -45,11 +45,14 @@ def register_with_server(
     ``user_name`` 即 ``--name <工号/userid>``：非空时 server 派生确定性 client_id
     （跨设备同 name 共享画像），优先于 claimed/fingerprint。
     """
+    from xskill import __version__ as _xskill_version
     body = {
         "token": token,
         "client_label": label,
         "hostname": hostname,
         "claimed_client_id": existing_client_id,
+        # P2-2.10:server 写 clients.client_version,连接状态看板"落后"标注用
+        "client_version": _xskill_version,
     }
     if user_name:
         body["user_name"] = user_name
@@ -98,8 +101,11 @@ class TeamClient:
 
     # ── HTTP 鉴权头 ──────────────────────────────────────────────
     def _hdr(self, extra: dict | None = None) -> dict:
+        from xskill import __version__ as _xskill_version
         h = {"X-Xskill-Token": self.state.join_token,
-             "X-Xskill-Client": self.state.client_id}
+             "X-Xskill-Client": self.state.client_id,
+             # P2-2.10:每次 sync 携带版本,server touch 时 upsert 进 clients 表
+             "X-Xskill-Version": _xskill_version}
         if extra:
             h.update(extra)
         return h

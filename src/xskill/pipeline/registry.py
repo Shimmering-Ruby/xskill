@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS trajectories (
     canary_side   TEXT,
     source_model  TEXT,
     source_harness TEXT,
+    user_key      TEXT DEFAULT '',
     ux_score      REAL,
     error_msg     TEXT,
     retry_count   INTEGER DEFAULT 0,
@@ -186,6 +187,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # 用户 coding agent(harness):discover 时从 .json sidecar 的 harness 写入。
         # team server 据此按真实 coding agent 分组,替代把所有上传一律标 team_client。
         ("source_harness", "TEXT"),
+        # P2-2.1 归因地基(D5):canonical 身份键=user_name。team_client 桶
+        # discover 时从 watch_dirs.label(=sessions 桶目录名)写入;存量用
+        # scripts/backfill_user_key.py 一次性回填。非 team 目录留空。
+        ("user_key", "TEXT DEFAULT ''"),
     ]
     for col, typedef in migrations:
         if col not in cols:
@@ -620,6 +625,15 @@ def discover_trajectories(
     conn = get_connection(db_path)
     new_files: list[str] = []
     try:
+        # P2-2.1 归因(D5):team_client 桶的 label = sessions 桶目录名 =
+        # user_name(匿名 client 为 client_id)。入库时写进 user_key,
+        # 聚合层不再 JOIN watch_dirs.label。非 team 目录 user_key 留空。
+        wd = conn.execute(
+            "SELECT label, ecosystem FROM watch_dirs WHERE id=?",
+            (watch_dir_id,),
+        ).fetchone()
+        user_key = (wd["label"] or "") if (wd and wd["ecosystem"] == "team_client") else ""
+
         existing = {
             row["filename"]: row
             for row in conn.execute(
@@ -638,10 +652,10 @@ def discover_trajectories(
                 conn.execute(
                     "INSERT INTO trajectories"
                     " (watch_dir_id, filename, file_mtime, source_model,"
-                    "  source_harness)"
-                    " VALUES (?, ?, ?, ?, ?)",
+                    "  source_harness, user_key)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
                     (watch_dir_id, md.name, mtime, _sidecar_model(md),
-                     _sidecar_field(md, "harness")),
+                     _sidecar_field(md, "harness"), user_key),
                 )
                 new_files.append(md.name)
                 continue

@@ -35,6 +35,9 @@ class RegisterRequest(BaseModel):
     # 同 name 共享画像），优先于 claimed_client_id / 指纹回查。None = 匿名
     # （回退 hashid/uuid 逻辑；受 server allow_anonymous_user 闸门）。
     user_name: str | None = None
+    # P2-2.10:client 自报 xskill 版本。server 写 clients.client_version,
+    # 连接状态看板据此标注"落后"。空串=旧 client 未上报。
+    client_version: str = ""
 
 
 class RegisterResponse(BaseModel):
