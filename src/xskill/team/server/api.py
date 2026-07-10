@@ -502,6 +502,20 @@ def team_sync(
             eng.update_user_interest(ClientInterest(client_id))
         except Exception:  # pylint: disable=broad-exception-caught
             logger.debug("profile refresh for %s skipped", client_id, exc_info=True)
+    # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
+    # best-effort 读取(D8:超量在写入侧拒绝,这里读挂了退回无 prefs 分发,
+    # 后台链路绝不因控制面阻塞)。user_key=user_name(D5),匿名 client 只吃全局。
+    prefs = None
+    retired = None
+    try:
+        from xskill.pipeline.registry import effective_prefs, retired_skills
+        row = _ctx.client_registry.get(client_id) or {}
+        user_key = row.get("user_name") or ""
+        prefs = effective_prefs(user_key)
+        retired = retired_skills()
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.warning("skill prefs lookup failed, serving without control-plane",
+                       exc_info=True)
     resp = build_manifest(
         client_id=client_id,
         skill_dir=_ctx.skill_dir,
@@ -509,6 +523,8 @@ def team_sync(
         ranked_slots=_ctx.ranked_slots,
         total_slots=_ctx.total_slots,
         traj_root=_ctx.traj_root,
+        prefs=prefs,
+        retired=retired,
     )
     return resp.model_dump()
 

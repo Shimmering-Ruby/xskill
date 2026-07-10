@@ -19,7 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Side = Literal["main", "staging"]
-Bucket = Literal["ranked", "recommended"]
+Bucket = Literal["pinned", "ranked", "recommended"]  # P2-2.4:pinned=用户/admin 钉住
 SkillSource = Literal["repo", "skillhub"]
 
 

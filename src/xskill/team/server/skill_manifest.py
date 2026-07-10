@@ -90,6 +90,8 @@ def build_manifest(
     ranked_slots: int = 80,
     total_slots: int = 100,
     traj_root: Path | str | None = None,
+    prefs: dict | None = None,
+    retired: set | None = None,
 ) -> SyncResponse:
     """为 ``client_id`` 现算 manifest。skill 总数不足 total_slots 时全发。
 
@@ -98,36 +100,67 @@ def build_manifest(
     就不该下发给 client——这里直接过滤掉，不是 fallback 而是正确的可分发
     集合判定。
 
-    slot 分两段：
-    - 前 ``ranked_slots`` 个 ``ranked`` —— 按 ux 滑窗均分降序取高分。
-    - 其余 ``recommended`` —— SP3 画像推荐位：基于该 client 用过的 skill 的
-      质心，从「distributable 且不在 ranked、且 client 没用过」的候选里取
-      cosine 最近邻。``traj_root`` 为 None（非 team server 调用）或该 client
-      没有任何带 used_skills 的 atom（冷启动、无画像）时，``recommended``
-      退回 ux 排序往下接着取——这不是 fallback，是画像不存在时的正确定义。
+    P2-2.4 注入顺序（含 ``prefs``/``retired`` 时）：**blocked 先排除 →
+    pinned 占位 → ranked → recommended 回填**。
+    - ``prefs`` = ``registry.effective_prefs`` 的合并视图（调用方现查，
+      None = 无控制面语义，纯 ranked+recommended）。
+    - ``retired`` = 下线 skill 集合，无条件不分发（即便被 pin）。
+    - pinned 超量在**写入侧**拒绝（D8）,这里对"pin 的 skill 已不可分发"
+      只跳过不报错——sync 路径绝不 500。
+
+    slot 分段：
+    - pinned —— prefs 里的钉住 skill（全局在前），占位不参与排名。
+    - ranked —— 按 ux 滑窗均分降序取高分（配额 = min(ranked_slots, 余量)）。
+    - recommended —— SP3 画像推荐位：基于该 client 用过的 skill 的
+      质心，从「distributable 且不在 pinned/ranked、且 client 没用过」的候选
+      里取 cosine 最近邻。``traj_root`` 为 None（非 team server 调用）或该
+      client 没有任何带 used_skills 的 atom（冷启动、无画像）时，退回 ux
+      排序往下接着取——这不是 fallback，是画像不存在时的正确定义。
     """
     skill_dir = Path(skill_dir)
+    prefs = prefs or {"pinned": [], "blocked": set()}
+    retired = retired or set()
+    excluded = set(prefs.get("blocked") or set()) | retired
+
     repo = SkillRepo(skill_dir)
-    distributable = [s for s in repo if main_sha(s.path)]
+    distributable = [
+        s for s in repo if main_sha(s.path) and s.name not in excluded
+    ]
     skills = sorted(distributable, key=_rank_key, reverse=True)
+    by_name = {s.name: s for s in distributable}
 
-    reco_slots = max(total_slots - ranked_slots, 0)
-    ranked = skills[:ranked_slots]
-    ranked_names = {s.name for s in ranked}
+    # pinned 占位:不存在/尚不可分发(无 main)/已下线的 pin 跳过——读路径
+    # 绝不 throw(D8),写入侧校验已把守常规超量。
+    pinned = [by_name[n] for n in (prefs.get("pinned") or []) if n in by_name]
+    pinned = pinned[:total_slots]
+    pinned_names = {s.name for s in pinned}
 
-    chosen = ranked + _pick_recommended(
+    remaining = total_slots - len(pinned)
+    non_pinned = [s for s in skills if s.name not in pinned_names]
+    ranked = non_pinned[:min(ranked_slots, remaining)]
+    taken_names = pinned_names | {s.name for s in ranked}
+    reco_slots = max(remaining - len(ranked), 0)
+
+    # exclude 集合并入 blocked/retired:推荐引擎有自己的候选索引(skillhub 等),
+    # 不经 distributable 过滤,必须显式排除
+    chosen = pinned + ranked + _pick_recommended(
         client_id=client_id,
         skill_dir=skill_dir,
         ranked=ranked,
-        ranked_names=ranked_names,
-        ux_ordered=skills,
+        ranked_names=taken_names | excluded,
+        ux_ordered=non_pinned,
         reco_slots=reco_slots,
         traj_root=traj_root,
     )
 
     slots: list[SkillSlot] = []
     for idx, skill in enumerate(chosen):
-        bucket = "ranked" if idx < ranked_slots else "recommended"
+        if idx < len(pinned):
+            bucket = "pinned"
+        elif idx < len(pinned) + len(ranked):
+            bucket = "ranked"
+        else:
+            bucket = "recommended"
         slot = _resolve_slot(skill, client_id, probability, bucket)
         if slot is not None:
             slots.append(slot)

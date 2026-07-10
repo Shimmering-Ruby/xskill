@@ -1,0 +1,466 @@
+"""dashboard/console.py — P2 控制面端点（§2.4 我的 / §2.5 管理 / §2.6 归因）
+
+只在 **serve 内置形态**挂载（D4）：独立只读实例物理上拿不到这些路由。
+角色由 ``auth.require_user`` / ``auth.require_admin`` 把守（第二道闸）。
+
+team 上下文（skill_dir / slot 配置 / ClientRegistry）在 app startup 才就绪，
+这里全部经 provider 延迟解引用——与 ``dashboard.auth`` 同一模式。
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from xskill.dashboard.auth import require_admin, require_user
+from xskill.pipeline.registry import (
+    GLOBAL_PREF_KEY,
+    PinQuotaExceeded,
+    clear_skill_pref,
+    effective_prefs,
+    get_connection,
+    prefs_for,
+    purge_skill_records,
+    retire_skill,
+    retired_skills,
+    set_skill_pref,
+    unretire_skill,
+)
+
+logger = logging.getLogger("xskill.dashboard.console")
+
+
+def _team_ctx():
+    from xskill.team.server.api import _ctx
+    return _ctx
+
+
+def _require_team_ctx():
+    ctx = _team_ctx()
+    if getattr(ctx, "client_registry", None) is None:
+        raise HTTPException(
+            status_code=503,
+            detail="team server 未启用——控制面依赖 connect 身份与 skill 分发上下文")
+    return ctx
+
+
+def _total_slots() -> int:
+    ctx = _team_ctx()
+    return int(getattr(ctx, "total_slots", 100) or 100)
+
+
+def _traj_user_map(db_path: Optional[Path]) -> dict[str, str]:
+    """traj_id(stem) → user_key。直接读 trajectories.user_key（P2-2.1）。"""
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT filename fn, user_key uk FROM trajectories").fetchall()
+    finally:
+        conn.close()
+    out: dict[str, str] = {}
+    for r in rows:
+        fn = r["fn"] or ""
+        out[fn[:-3] if fn.endswith(".md") else fn] = r["uk"] or ""
+    return out
+
+
+def _client_to_user(registry) -> dict[str, str]:
+    """client_id → user_name 翻译表（D5:凡存 client_id 的表聚合时统一翻译）。
+    匿名 client 无 user_name → 保留 client_id 原文（诚实标注,不伪装成用户名）。"""
+    out: dict[str, str] = {}
+    for row in registry.list():
+        out[row["client_id"]] = row.get("user_name") or row["client_id"]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 推荐 × 触发（2.6 用户级精确口径）
+# ---------------------------------------------------------------------------
+
+def reco_trigger_for_users(*, db_path: Optional[Path], skill_dir: Path,
+                           registry) -> dict[str, list[dict]]:
+    """全量算 user_key → [{skill, exposures, triggers, rate, last_trigger,
+    verdict}]。
+
+    口径（与 docs/dashboard-metrics.md 同源原则）：
+    - 曝光 = recommendation_log 去重行（已按 (client,skill,side,sha) 唯一），
+      client_id 经 ClientRegistry 译成 user_name（D5）。
+    - 触发 = 该用户轨迹产生的 .ux_scores.jsonl 打分记录（atom used_skills
+      命中事实源，PR#74 审计口径），按 (skill,traj) 计数。
+    - 结论列（阈值写死并在此注明,不是可调玄学）：
+        exposures>=3 且 triggers==0            → 零触发→建议停推
+        exposures>=5 且 rate<0.1               → 常推不用→建议停推
+        rate>=0.5 且 triggers>=2               → 高价值
+        其余                                    → 正常
+    """
+    from xskill.dashboard.metrics import load_usage_records
+
+    c2u = _client_to_user(registry)
+    conn = get_connection(db_path)
+    try:
+        reco_rows = conn.execute(
+            "SELECT client_id, skill, ts FROM recommendation_log").fetchall()
+    finally:
+        conn.close()
+
+    exposures: dict[tuple, int] = {}
+    for r in reco_rows:
+        user = c2u.get(r["client_id"] or "", r["client_id"] or "")
+        key = (user, r["skill"] or "")
+        exposures[key] = exposures.get(key, 0) + 1
+
+    traj_user = _traj_user_map(db_path)
+    triggers: dict[tuple, int] = {}
+    last_trigger: dict[tuple, str] = {}
+    for rec in load_usage_records(skill_dir):
+        user = traj_user.get(rec.get("traj_id") or "", "")
+        if not user:
+            continue
+        key = (user, rec.get("skill") or "")
+        triggers[key] = triggers.get(key, 0) + 1
+        ts = rec.get("scored_at") or ""
+        if ts > last_trigger.get(key, ""):
+            last_trigger[key] = ts
+
+    out: dict[str, list[dict]] = {}
+    for (user, skill), n_exp in exposures.items():
+        n_trig = triggers.get((user, skill), 0)
+        rate = n_trig / n_exp if n_exp else 0.0
+        if n_exp >= 3 and n_trig == 0:
+            verdict = "零触发→建议停推"
+        elif n_exp >= 5 and rate < 0.1:
+            verdict = "常推不用→建议停推"
+        elif rate >= 0.5 and n_trig >= 2:
+            verdict = "高价值"
+        else:
+            verdict = "正常"
+        out.setdefault(user, []).append({
+            "skill": skill, "exposures": n_exp, "triggers": n_trig,
+            "rate": round(rate, 3),
+            "last_trigger": last_trigger.get((user, skill), ""),
+            "verdict": verdict,
+        })
+    for rows in out.values():
+        rows.sort(key=lambda r: (-r["exposures"], r["skill"]))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 请求模型
+# ---------------------------------------------------------------------------
+
+PrefAction = Literal["pin", "block", "clear"]
+
+
+class MyPrefRequest(BaseModel):
+    skill_name: str
+    action: PrefAction
+
+
+class AdminPrefRequest(BaseModel):
+    user_key: str          # user_name 或 '*global*'
+    skill_name: str
+    action: PrefAction
+
+
+class DeleteSkillRequest(BaseModel):
+    confirm_name: str      # 二次确认:必须输入 skill 名
+
+
+# ---------------------------------------------------------------------------
+# Router
+# ---------------------------------------------------------------------------
+
+def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
+    router = APIRouter(prefix="/api/v1/dashboard")
+
+    # ── 我的（普通用户,2.3/2.4/2.5） ─────────────────────────────────
+
+    @router.get("/my/manifest")
+    def my_manifest(ident=Depends(require_user)):
+        """登录用户视角的 slot 清单 + 已屏蔽组。槽位 chip 标注注入类型。"""
+        ctx = _require_team_ctx()
+        from xskill.team.server.skill_manifest import build_manifest
+        user = ident["user"]
+        prefs = effective_prefs(user, db_path=db_path)
+        client_id = ctx.client_registry.find_by_user_name(user) or user
+        resp = build_manifest(
+            client_id=client_id,
+            skill_dir=ctx.skill_dir,
+            probability=ctx.probability,
+            ranked_slots=ctx.ranked_slots,
+            total_slots=ctx.total_slots,
+            traj_root=ctx.traj_root,
+            prefs=prefs,
+            retired=retired_skills(db_path=db_path),
+        )
+        slots = []
+        for s in resp.slots:
+            meta = prefs["pin_meta"].get(s.skill_name, {})
+            slots.append({
+                "skill_name": s.skill_name, "side": s.side, "sha": s.sha,
+                "bucket": s.bucket, "source": s.source,
+                # pinned 细分:自己 pin / admin 代 pin / 全局 pin——前端置灰依据
+                "pin_scope": meta.get("scope", ""),
+                "pin_set_by": meta.get("set_by", ""),
+                "user_removable": (
+                    s.bucket != "pinned" or meta.get("set_by") == user),
+            })
+        blocked_rows = [r for r in prefs_for(user, db_path=db_path)
+                        if r["pref"] == "blocked"]
+        return {"user": user, "slots": slots,
+                "blocked": [{"skill_name": r["skill_name"],
+                             "set_by": r["set_by"], "ts": r["ts"]}
+                            for r in blocked_rows],
+                "total_slots": ctx.total_slots}
+
+    @router.post("/my/prefs")
+    def my_prefs(req: MyPrefRequest, ident=Depends(require_user)):
+        """用户自 pin / 屏蔽 / 恢复。admin 设的条目不可动（403,前端置灰）。"""
+        _require_team_ctx()
+        user = ident["user"]
+        existing = {r["skill_name"]: r for r in prefs_for(user, db_path=db_path)}
+        row = existing.get(req.skill_name)
+        if row is not None and row["set_by"] != user:
+            raise HTTPException(
+                status_code=403,
+                detail=f"该条目由 admin({row['set_by']}) 设置,普通用户不可更改")
+        gprefs = {r["skill_name"]: r for r in
+                  prefs_for(GLOBAL_PREF_KEY, db_path=db_path)}
+        if req.skill_name in gprefs and gprefs[req.skill_name]["pref"] == "pinned" \
+                and req.action in ("block", "clear"):
+            raise HTTPException(
+                status_code=403, detail="全局 pin 的条目普通用户不可取消/屏蔽")
+        if req.action == "clear":
+            if not clear_skill_pref(user_key=user, skill_name=req.skill_name,
+                                    db_path=db_path):
+                raise HTTPException(status_code=404, detail="没有这条偏好")
+            return {"ok": True}
+        pref = "pinned" if req.action == "pin" else "blocked"
+        try:
+            set_skill_pref(user_key=user, skill_name=req.skill_name, pref=pref,
+                           set_by=user,
+                           max_pinned=_total_slots(), db_path=db_path)
+        except PinQuotaExceeded as e:
+            # D8/2.4d:超量在写入侧拒绝——409 冲突,永不进 sync 路径
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return {"ok": True}
+
+    @router.get("/my/contributions")
+    def my_contributions(ident=Depends(require_user)):
+        """我的贡献去向（2.5）：四级步进 trajs→atoms→采纳→skills + 使用者。"""
+        ctx = _require_team_ctx()
+        from xskill.dashboard.metrics import load_usage_records
+        user = ident["user"]
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) n, COALESCE(SUM(tasks_extracted),0) atoms"
+                " FROM trajectories WHERE user_key=?", (user,)).fetchone()
+            my_stems = {
+                (r["filename"][:-3] if r["filename"].endswith(".md")
+                 else r["filename"])
+                for r in conn.execute(
+                    "SELECT filename FROM trajectories WHERE user_key=?",
+                    (user,)).fetchall()
+            }
+            adoption = conn.execute(
+                "SELECT atom_id, skill, weightscore FROM atom_adoption"
+            ).fetchall()
+        finally:
+            conn.close()
+        # atom_id 内嵌 traj_id（atom_<traj_id>_NNNN）——按包含判定归属
+        my_adopted = [dict(a) for a in adoption
+                      if any(stem in (a["atom_id"] or "") for stem in my_stems)]
+        my_skills = sorted({a["skill"] for a in my_adopted if a["skill"]})
+
+        traj_user = _traj_user_map(db_path)
+        usage_by_skill: dict[str, dict] = {}
+        for rec in load_usage_records(ctx.skill_dir):
+            skill = rec.get("skill") or ""
+            if skill not in my_skills:
+                continue
+            u = traj_user.get(rec.get("traj_id") or "", "") or "(unknown)"
+            entry = usage_by_skill.setdefault(
+                skill, {"skill": skill, "users": {}, "scores": []})
+            entry["users"][u] = entry["users"].get(u, 0) + 1
+            if rec.get("score") is not None:
+                entry["scores"].append(rec["score"])
+        usage = []
+        for skill, e in sorted(usage_by_skill.items()):
+            scores = e.pop("scores")
+            e["avg_score"] = round(sum(scores) / len(scores), 2) if scores else None
+            e["users"] = [{"user": u, "count": c}
+                          for u, c in sorted(e["users"].items(),
+                                             key=lambda kv: -kv[1])]
+            usage.append(e)
+        return {
+            "user": user,
+            "steps": {"trajs": row["n"], "atoms": row["atoms"],
+                      "adopted_atoms": len(my_adopted),
+                      "skills": len(my_skills)},
+            "skills": my_skills,
+            "usage": usage,
+        }
+
+    @router.get("/my/reco-trigger")
+    def my_reco_trigger(ident=Depends(require_user)):
+        """推给我的 × 我触发的（2.6 用户级精确口径,结论列可执行）。"""
+        ctx = _require_team_ctx()
+        table = reco_trigger_for_users(
+            db_path=db_path, skill_dir=Path(ctx.skill_dir),
+            registry=ctx.client_registry)
+        return {"user": ident["user"], "rows": table.get(ident["user"], [])}
+
+    # ── 管理（admin,2.5/2.4c） ───────────────────────────────────────
+
+    @router.get("/admin/users-matrix")
+    def admin_users_matrix(_=Depends(require_admin)):
+        """用户 × 推送/配置矩阵：被推荐数/pinned·blocked 计数/触发率。"""
+        ctx = _require_team_ctx()
+        table = reco_trigger_for_users(
+            db_path=db_path, skill_dir=Path(ctx.skill_dir),
+            registry=ctx.client_registry)
+        rows = []
+        for client in ctx.client_registry.list():
+            user = client.get("user_name") or client["client_id"]
+            prefs = {r["skill_name"]: r["pref"]
+                     for r in prefs_for(user, db_path=db_path)}
+            rt = table.get(user, [])
+            n_exp = sum(r["exposures"] for r in rt)
+            n_trig = sum(r["triggers"] for r in rt)
+            rows.append({
+                "user": user,
+                "client_version": client.get("client_version") or "",
+                "last_seen": client.get("last_seen") or "",
+                "exposures": n_exp,
+                "triggers": n_trig,
+                "rate": round(n_trig / n_exp, 3) if n_exp else None,
+                "pinned": sum(1 for p in prefs.values() if p == "pinned"),
+                "blocked": sum(1 for p in prefs.values() if p == "blocked"),
+                "stale_advice": [r for r in rt if "停推" in r["verdict"]][:5],
+            })
+        rows.sort(key=lambda r: r["user"])
+        global_pins = [r["skill_name"] for r in
+                       prefs_for(GLOBAL_PREF_KEY, db_path=db_path)
+                       if r["pref"] == "pinned"]
+        return {"users": rows, "global_pinned": global_pins}
+
+    @router.get("/admin/user/{user_key}/prefs")
+    def admin_user_prefs(user_key: str, _=Depends(require_admin)):
+        return {"user_key": user_key,
+                "prefs": prefs_for(user_key, db_path=db_path),
+                "effective": {
+                    **effective_prefs(user_key, db_path=db_path),
+                    "blocked": sorted(
+                        effective_prefs(user_key, db_path=db_path)["blocked"]),
+                }}
+
+    @router.post("/admin/prefs")
+    def admin_prefs(req: AdminPrefRequest, ident=Depends(require_admin)):
+        """admin 代 pin / 代屏蔽 / 全局 pin(user_key='*global*')。"""
+        _require_team_ctx()
+        if not req.user_key:
+            raise HTTPException(status_code=400, detail="user_key required")
+        if req.action == "clear":
+            if not clear_skill_pref(user_key=req.user_key,
+                                    skill_name=req.skill_name, db_path=db_path):
+                raise HTTPException(status_code=404, detail="没有这条偏好")
+            return {"ok": True}
+        pref = "pinned" if req.action == "pin" else "blocked"
+        try:
+            set_skill_pref(user_key=req.user_key, skill_name=req.skill_name,
+                           pref=pref, set_by=ident["user"],
+                           max_pinned=_total_slots(), db_path=db_path)
+        except PinQuotaExceeded as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return {"ok": True}
+
+    @router.get("/admin/skills")
+    def admin_skills(_=Depends(require_admin)):
+        """技能生命周期表：状态徽章 + 近 30 日使用数。"""
+        ctx = _require_team_ctx()
+        from xskill.canary import has_staging
+        from xskill.dashboard.metrics import load_usage_records
+        from xskill.skill.repo import SkillRepo
+        import datetime as _dt
+        retired = retired_skills(db_path=db_path)
+        cutoff = (_dt.datetime.now(_dt.timezone.utc)
+                  - _dt.timedelta(days=30)).isoformat()
+        usage30: dict[str, int] = {}
+        for rec in load_usage_records(Path(ctx.skill_dir)):
+            if (rec.get("scored_at") or "") >= cutoff:
+                usage30[rec.get("skill") or ""] = \
+                    usage30.get(rec.get("skill") or "", 0) + 1
+        out = []
+        for s in SkillRepo(Path(ctx.skill_dir)):
+            if s.name in retired:
+                state = "retired"
+            elif has_staging(s.path):
+                state = "canary"
+            else:
+                state = "active"
+            out.append({"name": s.name, "state": state,
+                        "usage_30d": usage30.get(s.name, 0)})
+        out.sort(key=lambda r: r["name"])
+        return {"skills": out}
+
+    @router.post("/admin/skill/{name}/retire")
+    def admin_retire(name: str, ident=Depends(require_admin)):
+        ctx = _require_team_ctx()
+        if not (Path(ctx.skill_dir) / name).is_dir():
+            raise HTTPException(status_code=404, detail=f"skill not found: {name}")
+        retire_skill(skill_name=name, set_by=ident["user"], db_path=db_path)
+        _invalidate_engine_cache()
+        return {"ok": True, "state": "retired"}
+
+    @router.post("/admin/skill/{name}/unretire")
+    def admin_unretire(name: str, _=Depends(require_admin)):
+        _require_team_ctx()
+        if not unretire_skill(skill_name=name, db_path=db_path):
+            raise HTTPException(status_code=404, detail=f"{name} 不在下线状态")
+        _invalidate_engine_cache()
+        return {"ok": True, "state": "active"}
+
+    @router.delete("/admin/skill/{name}")
+    def admin_delete(name: str, req: DeleteSkillRequest,
+                     ident=Depends(require_admin)):
+        """删除（两段式第二段）：需 confirm_name 输入 skill 名。
+
+        抢 ``skill_repo_lock``（与 watcher/canary 同一把锁）防并发；删目录 +
+        清 prefs/lifecycle 行——删后同名 skill 再生从零开始（2.4c 语义）。
+        """
+        ctx = _require_team_ctx()
+        if req.confirm_name != name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"二次确认失败:请输入 skill 名 {name!r}")
+        skill_dir = Path(ctx.skill_dir)
+        if not (skill_dir / name).is_dir():
+            raise HTTPException(status_code=404, detail=f"skill not found: {name}")
+        from xskill.skill.git import skill_repo_lock
+        from xskill.skill.skill import delete_skill
+        with skill_repo_lock(skill_dir / name):
+            ok = delete_skill(skill_dir, name)
+        if not ok:
+            raise HTTPException(status_code=500, detail="delete commit failed")
+        purge_skill_records(skill_name=name, db_path=db_path)
+        _invalidate_engine_cache()
+        logger.info("admin %s deleted skill %s", ident["user"], name)
+        return {"ok": True}
+
+    return router
+
+
+def _invalidate_engine_cache() -> None:
+    """retire/delete 后失效推荐引擎缓存——否则引擎继续按旧候选池推荐。"""
+    try:
+        from xskill.team.server.skill_manifest import get_recommend_engine
+        eng = get_recommend_engine()
+        if eng is not None:
+            eng.invalidate_cache()
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("engine cache invalidation skipped", exc_info=True)

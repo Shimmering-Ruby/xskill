@@ -131,6 +131,27 @@ CREATE TABLE IF NOT EXISTS canary_decision (
     age_days        REAL
 );
 
+-- P2-2.4 控制面:用户/全局 skill 偏好(pinned|blocked)。
+-- user_key='*global*' 为全局 pin/屏蔽(admin 设);其余为 user_name(D5)。
+-- 超量校验在写入侧(D8),sync 读路径永不因此报错。
+CREATE TABLE IF NOT EXISTS skill_prefs (
+    user_key   TEXT NOT NULL,
+    skill_name TEXT NOT NULL,
+    pref       TEXT NOT NULL CHECK(pref IN ('pinned','blocked')),
+    set_by     TEXT DEFAULT '',
+    ts         TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_key, skill_name)
+);
+
+-- P2-2.4c skill 生命周期:retired=下线(停止分发/推荐,数据与 git 历史保留)。
+-- 删除是物理动作不入此表;"在役"=无行。
+CREATE TABLE IF NOT EXISTS skill_lifecycle (
+    skill_name TEXT PRIMARY KEY,
+    state      TEXT NOT NULL CHECK(state IN ('retired')),
+    set_by     TEXT DEFAULT '',
+    ts         TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS skill_trigger_eval (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     ts           TEXT DEFAULT (datetime('now')),
@@ -276,6 +297,191 @@ def record_usage(*, step: str, model: str, prompt: int, completion: int,
 # 埋点(instrumentation)：三类事件的记录 + 聚合，供看板算衍生率
 # 记录函数走旁路 telemetry——调用点用 try/except 包，记录失败绝不阻断管线。
 # ---------------------------------------------------------------------------
+
+GLOBAL_PREF_KEY = "*global*"
+
+
+class PinQuotaExceeded(ValueError):
+    """pinned 总量(用户+全局)超 slot 上限——写入侧拒绝(D8)。"""
+
+
+def set_skill_pref(*, user_key: str, skill_name: str, pref: str, set_by: str,
+                   max_pinned: Optional[int] = None,
+                   db_path: Optional[Path] = None) -> None:
+    """写入/覆盖一条偏好(pinned|blocked)。
+
+    D8:``max_pinned`` 给定且 pref='pinned' 时在**写入侧**校验——该用户
+    pinned + 全局 pinned 合计(去重,含本次)不得超过 max_pinned,超量抛
+    ``PinQuotaExceeded``,超量状态根本不可能入库;全局 pin 则对**全员**
+    逐一校验合计。sync 读路径永远不需要处理该错误。
+    """
+    if pref not in ("pinned", "blocked"):
+        raise ValueError(f"pref 必须是 pinned|blocked,得到 {pref!r}")
+    if not user_key or not skill_name:
+        raise ValueError("user_key/skill_name 不能为空")
+    conn = get_connection(db_path)
+    try:
+        if pref == "pinned" and max_pinned is not None:
+            _check_pin_quota(conn, user_key=user_key, skill_name=skill_name,
+                             max_pinned=max_pinned)
+        conn.execute(
+            "INSERT INTO skill_prefs(user_key,skill_name,pref,set_by)"
+            " VALUES(?,?,?,?)"
+            " ON CONFLICT(user_key,skill_name)"
+            " DO UPDATE SET pref=excluded.pref, set_by=excluded.set_by,"
+            "               ts=datetime('now')",
+            (user_key, skill_name, pref, set_by),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _check_pin_quota(conn, *, user_key: str, skill_name: str,
+                     max_pinned: int) -> None:
+    """pinned 配额校验(含本次写入)。全局 pin 对全员合计逐一校验。"""
+    def pinned_set(key: str) -> set:
+        return {r["skill_name"] for r in conn.execute(
+            "SELECT skill_name FROM skill_prefs WHERE user_key=? AND pref='pinned'",
+            (key,),
+        ).fetchall()}
+
+    global_pinned = pinned_set(GLOBAL_PREF_KEY)
+    if user_key == GLOBAL_PREF_KEY:
+        global_pinned = global_pinned | {skill_name}
+        user_keys = [r["user_key"] for r in conn.execute(
+            "SELECT DISTINCT user_key FROM skill_prefs WHERE user_key!=?",
+            (GLOBAL_PREF_KEY,),
+        ).fetchall()]
+        for uk in user_keys + [None]:  # None=只有全局 pin 的裸用户基线
+            merged = global_pinned | (pinned_set(uk) if uk else set())
+            if len(merged) > max_pinned:
+                raise PinQuotaExceeded(
+                    f"全局 pin {skill_name!r} 会使用户 {uk or '(baseline)'} 的"
+                    f" pinned 合计 {len(merged)} 超过 slot 上限 {max_pinned}")
+    else:
+        merged = global_pinned | pinned_set(user_key) | {skill_name}
+        if len(merged) > max_pinned:
+            raise PinQuotaExceeded(
+                f"pin {skill_name!r} 会使 pinned 合计(含全局) {len(merged)}"
+                f" 超过 slot 上限 {max_pinned}")
+
+
+def clear_skill_pref(*, user_key: str, skill_name: str,
+                     db_path: Optional[Path] = None) -> bool:
+    """删除一条偏好(pin 取消/屏蔽恢复)。返回是否真的删了行。"""
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM skill_prefs WHERE user_key=? AND skill_name=?",
+            (user_key, skill_name),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def prefs_for(user_key: str, *, db_path: Optional[Path] = None) -> list[dict]:
+    """某 user_key(或 '*global*')的全部偏好行。"""
+    conn = get_connection(db_path)
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
+            " WHERE user_key=? ORDER BY ts",
+            (user_key,),
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
+def effective_prefs(user_key: str, *, db_path: Optional[Path] = None) -> dict:
+    """manifest 注入用的合并视图:{'pinned': [...有序...], 'blocked': set,
+    'pin_meta': {skill: set_by}}。
+
+    合并规则:全局行先于用户行(admin 全局 pin 排最前);同一 skill 用户行
+    与全局行冲突时,**blocked 优先**(任何一侧屏蔽即不分发——全局屏蔽用户
+    不能自行恢复;用户自己屏蔽的全局推荐仅对自己生效)。
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
+            " WHERE user_key IN (?, ?) ORDER BY CASE user_key WHEN ? THEN 0"
+            " ELSE 1 END, ts",
+            (GLOBAL_PREF_KEY, user_key, GLOBAL_PREF_KEY),
+        ).fetchall()]
+    finally:
+        conn.close()
+    blocked = {r["skill_name"] for r in rows if r["pref"] == "blocked"}
+    pinned: list[str] = []
+    pin_meta: dict = {}
+    for r in rows:
+        if r["pref"] == "pinned" and r["skill_name"] not in blocked \
+                and r["skill_name"] not in pinned:
+            pinned.append(r["skill_name"])
+            pin_meta[r["skill_name"]] = {
+                "set_by": r["set_by"],
+                "scope": "global" if r["user_key"] == GLOBAL_PREF_KEY else "user",
+            }
+    return {"pinned": pinned, "blocked": blocked, "pin_meta": pin_meta}
+
+
+# ---------------------------------------------------------------------------
+# P2-2.4c skill 生命周期
+# ---------------------------------------------------------------------------
+
+def retire_skill(*, skill_name: str, set_by: str,
+                 db_path: Optional[Path] = None) -> None:
+    """下线:停止分发与推荐,数据与 git 历史保留。幂等。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO skill_lifecycle(skill_name,state,set_by) VALUES(?,?,?)"
+            " ON CONFLICT(skill_name) DO UPDATE SET state='retired',"
+            " set_by=excluded.set_by, ts=datetime('now')",
+            (skill_name, "retired", set_by),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def unretire_skill(*, skill_name: str, db_path: Optional[Path] = None) -> bool:
+    """恢复在役。返回是否真的有行被删。"""
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM skill_lifecycle WHERE skill_name=?", (skill_name,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def retired_skills(*, db_path: Optional[Path] = None) -> set:
+    conn = get_connection(db_path)
+    try:
+        return {r["skill_name"] for r in conn.execute(
+            "SELECT skill_name FROM skill_lifecycle WHERE state='retired'"
+        ).fetchall()}
+    finally:
+        conn.close()
+
+
+def purge_skill_records(*, skill_name: str,
+                        db_path: Optional[Path] = None) -> None:
+    """删除 skill 时清掉它的 prefs/lifecycle 行——"删后同名 skill 再生"从
+    零开始,不继承旧 pin/屏蔽/下线状态(语义拍板,见 tasks.md 2.4c)。
+    评分/推荐等历史埋点(recommendation_log 等)保留作审计。"""
+    conn = get_connection(db_path)
+    try:
+        conn.execute("DELETE FROM skill_prefs WHERE skill_name=?", (skill_name,))
+        conn.execute("DELETE FROM skill_lifecycle WHERE skill_name=?", (skill_name,))
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def record_recommendation(*, client_id: str, skill: str, side: str, bucket: str,
                           sha: str = "", db_path: Optional[Path] = None) -> None:

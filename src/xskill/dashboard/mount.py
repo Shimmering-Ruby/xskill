@@ -41,5 +41,8 @@ def mount_dashboard(app, cfg: dict, *, db_path: Optional[Path] = None,
             registry_provider=_team_registry_provider,
         )
         app.include_router(build_auth_router())
+        # P2 控制面(我的/管理):同样只在 serve 内置形态
+        from xskill.dashboard.console import build_console_router
+        app.include_router(build_console_router(db_path=db_path))
     app.add_middleware(DashboardAccessMiddleware, public=dc["public"],
                        password=dc["password"])

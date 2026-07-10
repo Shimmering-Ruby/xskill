@@ -517,6 +517,12 @@ def check_and_decide(skill_dir: Path, config: CanaryConfig | None = None,
     cfg = config or CanaryConfig()
     skill_dir = Path(skill_dir)
 
+    # P2-2.4c:已下线 skill 不再参与灰度判定——不晋升、不翻牌,staging 原样
+    # 冻结(数据保留;恢复在役后按剩余样本继续)。
+    from xskill.pipeline.registry import retired_skills
+    if skill_dir.name in retired_skills():
+        return {"action": "retired"}
+
     if not has_staging(skill_dir):
         return {"action": "no_staging"}
 
