@@ -96,11 +96,19 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+          # 幂等重跑:同版本文件已在 PyPI(如 CI 挂掉后手工 twine 补传过)时
+          # 跳过而非 400 报错,让后面的 GitHub Release 步骤照常执行
+          skip-existing: true
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 幂等:release 已存在(重跑/手工补建过)则跳过
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists, skipping"
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" \
             dist/*.whl dist/*.tar.gz \
             --title "$GITHUB_REF_NAME" \
