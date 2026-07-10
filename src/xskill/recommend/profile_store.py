@@ -2,6 +2,10 @@
 
 server 端按 ``user_id`` 持久化每个用户的 ``ClientInterest``（feature_tensor / mean_tensor）
 与 ``used_skills``。tensor 以 pickle BLOB 存（numpy 数组）。client（瘦）不存画像。
+
+P3-3.4（Q4 拍板）:原子点向量 ``points``(n,D) + 逐点元数据 ``point_meta``
+（atom_id/summary/ux/tags,与 points 行对齐）随画像更新顺手落盘——画像散点
+图直接读库投影,不用现算 embedding。
 """
 from __future__ import annotations
 
@@ -20,6 +24,8 @@ CREATE TABLE IF NOT EXISTS client_interest (
     feature_tensor  BLOB,
     mean_tensor     BLOB,
     used_skills     TEXT DEFAULT '[]',
+    points          BLOB,
+    point_meta      TEXT DEFAULT '[]',
     updated_at      TEXT NOT NULL
 );
 """
@@ -34,6 +40,15 @@ class ProfileStore(_SqliteStore):
 
     _SCHEMA = _SCHEMA
 
+    def _migrate(self, conn) -> None:
+        cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info(client_interest)").fetchall()}
+        if "points" not in cols:
+            conn.execute("ALTER TABLE client_interest ADD COLUMN points BLOB")
+        if "point_meta" not in cols:
+            conn.execute(
+                "ALTER TABLE client_interest ADD COLUMN point_meta TEXT DEFAULT '[]'")
+
     def upsert(
         self,
         user_id: str,
@@ -41,23 +56,61 @@ class ProfileStore(_SqliteStore):
         feature_tensor: Optional[np.ndarray],
         mean_tensor: Optional[np.ndarray],
         used_skills: list[dict],
+        points: Optional[np.ndarray] = None,
+        point_meta: Optional[list[dict]] = None,
     ) -> None:
+        """写画像。``points``/``point_meta`` 与 feature_tensor 同一次计算产出,
+        必须一起传（散点图与聚类中心不同源会画出撒谎的图）;冷启动都为 None。"""
+        if (points is None) != (not point_meta):
+            raise ValueError("points 与 point_meta 必须同时给出或同时为空")
+        if points is not None and len(point_meta) != int(points.shape[0]):
+            raise ValueError(
+                f"point_meta 行数 {len(point_meta)} 与 points {points.shape[0]} 不对齐")
         ft_blob = pickle.dumps(feature_tensor) if feature_tensor is not None else None
         mt_blob = pickle.dumps(mean_tensor) if mean_tensor is not None else None
+        pt_blob = pickle.dumps(points) if points is not None else None
         used_json = json.dumps(used_skills, ensure_ascii=False)
+        meta_json = json.dumps(point_meta or [], ensure_ascii=False)
         conn = self._conn()
         try:
             conn.execute(
-                "INSERT INTO client_interest (user_id, feature_tensor, mean_tensor, used_skills, updated_at)"
-                " VALUES (?, ?, ?, ?, ?)"
+                "INSERT INTO client_interest (user_id, feature_tensor, mean_tensor,"
+                " used_skills, points, point_meta, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(user_id) DO UPDATE SET"
                 " feature_tensor=excluded.feature_tensor,"
                 " mean_tensor=excluded.mean_tensor,"
                 " used_skills=excluded.used_skills,"
+                " points=excluded.points,"
+                " point_meta=excluded.point_meta,"
                 " updated_at=excluded.updated_at",
-                (user_id, ft_blob, mt_blob, used_json, _now()),
+                (user_id, ft_blob, mt_blob, used_json, pt_blob, meta_json, _now()),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def load_points(self, user_id: str) -> Optional[dict]:
+        """散点图数据源:``{points (n,D), meta [n], updated_at}``。
+
+        无画像行返回 None;有行但无 points（冷启动/无 atom）返回
+        ``points=None``——调用方据此显式标注,不造假点（D6）。
+        """
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT points, point_meta, updated_at FROM client_interest"
+                " WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            pts = pickle.loads(row["points"]) if row["points"] else None
+            return {
+                "points": pts,
+                "meta": json.loads(row["point_meta"] or "[]"),
+                "updated_at": row["updated_at"],
+            }
         finally:
             conn.close()
 

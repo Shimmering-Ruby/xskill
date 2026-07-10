@@ -141,6 +141,29 @@ class TestUpdateUserInterest:
         eng.update_user_interest(ci)
         row = eng.profile_store.load("u1")
         assert row["feature_tensor"] is None
+        # P3-3.4:冷启动无点,散点读侧显式拿到 points=None
+        assert eng.profile_store.load_points("u1")["points"] is None
+
+    def test_points_persisted_with_profile(self, tmp_path):
+        """P3-3.4(Q4):更新画像顺手落盘原子点 + 对齐的元数据(散点数据源)。"""
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        traj_root = tmp_path / "traj"
+        sessions = traj_root / "clients" / "u1" / "sessions"
+        _write_atom(sessions, "traj_1", "atom_traj_1_0001",
+                    summary="fix django migration", used_skills=["s0"],
+                    ux_score=8)
+        _write_atom(sessions, "traj_1", "atom_traj_1_0002",
+                    summary="tune nginx cache", used_skills=[], ux_score=6)
+        eng = _engine(tmp_path, skill_dir, traj_root)
+        eng.update_user_interest(ClientInterest("u1"))
+        got = eng.profile_store.load_points("u1")
+        assert got["points"].shape[0] == 2
+        assert [m["atom_id"] for m in got["meta"]] == \
+            ["atom_traj_1_0001", "atom_traj_1_0002"]
+        assert got["meta"][0]["ux"] == 8
+        assert got["points"].shape[0] == len(got["meta"])  # 行对齐不变量
 
 
 # ── get_skill_for_client 80/20 + 回填 ─────────────────────────────
