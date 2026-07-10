@@ -21,7 +21,3 @@ SHUTTING_DOWN = threading.Event()
 def request_shutdown() -> None:
     """标记进程正在退出。幂等，可重复调用。"""
     SHUTTING_DOWN.set()
-
-
-def shutting_down() -> bool:
-    return SHUTTING_DOWN.is_set()
