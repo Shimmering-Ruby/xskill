@@ -30,9 +30,11 @@ def _seed_client(db, *, wd_id=1, path="/tc", label="alice", eco="team_client",
         "INSERT INTO watch_dirs(id,path,label,ecosystem) VALUES(?,?,?,?)",
         (wd_id, path, label, eco))
     for fn in trajs:
+        # P2-2.1(D5):入库即写 user_key(=team 桶 label);聚合层不再 JOIN label
         conn.execute(
-            "INSERT INTO trajectories(watch_dir_id,filename,status) VALUES(?,?,?)",
-            (wd_id, fn, "done"))
+            "INSERT INTO trajectories(watch_dir_id,filename,status,user_key)"
+            " VALUES(?,?,?,?)",
+            (wd_id, fn, "done", label if eco == "team_client" else ""))
     conn.commit()
     conn.close()
 

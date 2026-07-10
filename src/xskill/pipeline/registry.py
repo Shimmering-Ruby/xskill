@@ -831,14 +831,16 @@ def discover_trajectories(
     conn = get_connection(db_path)
     new_files: list[str] = []
     try:
-        # P2-2.1 归因(D5):team_client 桶的 label = sessions 桶目录名 =
-        # user_name(匿名 client 为 client_id)。入库时写进 user_key,
-        # 聚合层不再 JOIN watch_dirs.label。非 team 目录 user_key 留空。
+        # P2-2.1 归因(D5):入库即把 watch_dir 的 label 写进 user_key,聚合层
+        # 不再 JOIN watch_dirs.label——source 唯一。CS 模式各用户桶(label=
+        # sessions 桶目录名=user_name/client_id)不论 ecosystem 是 team_client
+        # 还是 bridge 检出的真实生态(ngagent 等)都归因;无 label 的本地目录
+        # 留空,聚合层显示 '(local)'。
         wd = conn.execute(
-            "SELECT label, ecosystem FROM watch_dirs WHERE id=?",
+            "SELECT label FROM watch_dirs WHERE id=?",
             (watch_dir_id,),
         ).fetchone()
-        user_key = (wd["label"] or "") if (wd and wd["ecosystem"] == "team_client") else ""
+        user_key = (wd["label"] or "") if wd else ""
 
         existing = {
             row["filename"]: row

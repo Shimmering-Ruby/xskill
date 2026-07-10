@@ -32,11 +32,10 @@ def backfill(db_path: Path | None = None) -> dict:
         conn.execute(
             "UPDATE trajectories SET user_key = ("
             "  SELECT w.label FROM watch_dirs w WHERE w.id = trajectories.watch_dir_id"
-            "    AND w.ecosystem = 'team_client' AND COALESCE(w.label,'') != ''"
+            "    AND COALESCE(w.label,'') != ''"
             ") WHERE COALESCE(user_key,'')=''"
             "  AND watch_dir_id IN ("
-            "    SELECT id FROM watch_dirs"
-            "    WHERE ecosystem='team_client' AND COALESCE(label,'')!='')"
+            "    SELECT id FROM watch_dirs WHERE COALESCE(label,'')!='')"
         )
         conn.commit()
         after = conn.execute(

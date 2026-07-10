@@ -65,7 +65,8 @@ def test_trigger_rate_exposure_dedup_and_pairing(tmp_path):
         "INSERT INTO watch_dirs(id,path,label,ecosystem)"
         " VALUES(1,'/w','c1','team_client')")
     conn.execute(
-        "INSERT INTO trajectories(watch_dir_id,filename) VALUES(1,'traj_u.md')")
+        "INSERT INTO trajectories(watch_dir_id,filename,user_key)"
+        " VALUES(1,'traj_u.md','c1')")  # P2-2.1:入库即写归因
     conn.commit(); conn.close()
     # s1 推给 c1 三次(反复同步——OR IGNORE 去重)+c2 一次；s2 推给 c1
     for _ in range(3):
