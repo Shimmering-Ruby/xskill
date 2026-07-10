@@ -24,6 +24,7 @@ import zipfile
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from xskill import __version__ as XSKILL_VERSION
 from xskill.config import get_team_server_whl_dir
@@ -451,7 +452,9 @@ async def team_ingest_db(
     # 桥接到该 client 的 sessions 桶，label=dir_name（与 team_upload 一致）
     sessions_dir = _ctx.traj_root / "clients" / _dir_name / "sessions"
     try:
-        summary = read_db_files(
+        # SQLite 解析 + 批量落盘是阻塞调用，卸到线程池，别占事件循环
+        summary = await run_in_threadpool(
+            read_db_files,
             dest, eco=eco, target_dir=sessions_dir, register_label=_dir_name,
         )
     except (FileNotFoundError, ValueError) as e:
@@ -464,10 +467,14 @@ async def team_ingest_db(
 
 
 @router.get("/sync")
-async def team_sync(
+def team_sync(
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
 ):
+    """同步 def（而非 async def）：update_user_interest → encode_batch 是同步
+    httpx（最长 60s）。每个 client 周期性打这个端点，冷启动期 atom 集频繁
+    变化、画像指纹屡屡失效——写成 async 会让 embedding 后端一慢就把整个
+    事件循环冻住，所有端点"连不上"。def 路由 FastAPI 自动丢线程池。"""
     client_id = _auth(x_xskill_token, x_xskill_client)
     # §5 sync 前刷新该 client 的用户画像（atom 集变化时重算，未变则指纹命中跳过）。
     # 画像由 build_manifest → _pick_recommended → engine.get_skill_for_client 消费。
@@ -543,6 +550,8 @@ async def team_push_edit(
     if not bundle:
         raise HTTPException(status_code=400, detail="empty bundle")
     dest_ref = f"refs/heads/user-staging/{client_id}"
-    sha = fetch_branch_from_bundle(bundle, repo_dir, "_useredit", dest_ref)
+    # git 子进程是阻塞调用，卸到线程池，别占事件循环
+    sha = await run_in_threadpool(
+        fetch_branch_from_bundle, bundle, repo_dir, "_useredit", dest_ref)
     logger.info("team push-edit: %s -> %s (%s)", x_xskill_skill, dest_ref, sha[:8])
     return PushEditResponse(branch=f"user-staging/{client_id}", ref_sha=sha)

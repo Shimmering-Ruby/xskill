@@ -33,6 +33,39 @@ logger = logging.getLogger("xskill.tasks")
 # ---------------------------------------------------------------------------
 _executor = ThreadPoolExecutor(max_workers=4)
 
+
+def shutdown_sse_executor() -> None:
+    """进程优雅退出时调用：丢弃排队任务，不等在跑的 worker。
+
+    worker 里的 LLM 重试循环会响应 SHUTTING_DOWN 事件自行放弃
+    （见 agno_factory._wrap_with_retry），这里只负责不再派新活。
+    """
+    _executor.shutdown(wait=False, cancel_futures=True)
+
+
+class ThreadSafeQueue:
+    """让 ThreadPoolExecutor worker 安全地向事件循环侧的 asyncio.Queue 投递。
+
+    asyncio.Queue 不是线程安全的：从 worker 线程裸调 put_nowait 走的是
+    loop.call_soon（非 threadsafe 版），不写 self-pipe，selector 睡着时
+    消费者不会被唤醒——线上表现为进度事件最多迟一个 sse ping 周期才到，
+    且跨线程改内部 deque 本身是未定义行为。统一经 call_soon_threadsafe。
+    """
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._loop = asyncio.get_running_loop()
+
+    def put_nowait(self, item) -> None:
+        try:
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
+        except RuntimeError:
+            pass  # loop 已关闭（服务退出中）——丢弃
+
+    async def get(self):
+        return await self._queue.get()
+
+
 # ---------------------------------------------------------------------------
 # SSE helpers
 # ---------------------------------------------------------------------------
@@ -50,7 +83,7 @@ def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-def make_sse_log(queue: asyncio.Queue):
+def make_sse_log(queue: "ThreadSafeQueue"):
     """Return a *log_fn(msg, tag)* that pushes SSE events onto *queue*.
 
     The returned callable is compatible with :class:`xskill.log.StreamLog`
@@ -68,7 +101,7 @@ def make_sse_log(queue: asyncio.Queue):
     return log_fn
 
 
-def _push(queue: asyncio.Queue, event: str, data: dict):
+def _push(queue: "ThreadSafeQueue", event: str, data: dict):
     """Convenience: put an (event, data) tuple onto the queue."""
     try:
         queue.put_nowait((event, data))
@@ -76,19 +109,19 @@ def _push(queue: asyncio.Queue, event: str, data: dict):
         pass
 
 
-def _finish(queue: asyncio.Queue, data: dict):
+def _finish(queue: "ThreadSafeQueue", data: dict):
     """Push a ``result`` event followed by the sentinel ``None``."""
     _push(queue, "result", data)
     queue.put_nowait(None)
 
 
-def _fail(queue: asyncio.Queue, error: str):
+def _fail(queue: "ThreadSafeQueue", error: str):
     """Push an ``error`` event followed by the sentinel ``None``."""
     _push(queue, "error", {"error": error})
     queue.put_nowait(None)
 
 
-async def _event_generator(queue: asyncio.Queue):
+async def _event_generator(queue: "ThreadSafeQueue"):
     """Async generator that drains *queue* and yields SSE dicts."""
     while True:
         item = await queue.get()
@@ -138,7 +171,7 @@ async def api_index(req: IndexRequest):
     旧 v1 走 index_dataset（meta + index）已删除。新流水线下"索引"=
     AtomTask 索引；不再有独立的"meta 提取"阶段。
     """
-    queue: asyncio.Queue = asyncio.Queue()
+    queue = ThreadSafeQueue()
 
     def run():
         try:
@@ -250,7 +283,7 @@ async def api_process(req: ProcessRequest):
     返回字段：
       {status, traj, n_atoms, edited_skills, atom_results}
     """
-    queue: asyncio.Queue = asyncio.Queue()
+    queue = ThreadSafeQueue()
 
     def run():
         try:
@@ -357,7 +390,7 @@ async def api_process(req: ProcessRequest):
 
 @sse_router.post("/skills/batch")
 async def api_batch(req: BatchRequest):
-    queue: asyncio.Queue = asyncio.Queue()
+    queue = ThreadSafeQueue()
 
     def run():
         try:

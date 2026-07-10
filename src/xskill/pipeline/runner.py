@@ -172,8 +172,12 @@ class DirectoryWatcher:
     def stop(self):
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=self.poll_interval + 5)
-        self._pool.shutdown(wait=False)
+            # watcher 线程是 daemon，不必等完整个 poll 周期（默认 30s+5s 会
+            # 把优雅退出拖过 supervisor 的 stopwaitsecs）；短等后直接放弃
+            self._thread.join(timeout=5)
+        # cancel_futures：排队未跑的任务直接丢弃。在跑的 worker 由
+        # SHUTTING_DOWN 事件叫停（agno_factory 重试循环），不在这里等。
+        self._pool.shutdown(wait=False, cancel_futures=True)
         logger.info("watcher stopped")
 
     def pause(self):

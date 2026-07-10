@@ -14,6 +14,8 @@ import time
 import unicodedata
 from typing import Any, Callable, Dict, Optional
 
+from xskill.utils.shutdown import SHUTTING_DOWN
+
 
 def estimate_tokens(text: str) -> int:
     """粗估字符串 token 数,英文 4 字符/token,中文 1.5 字符/token,× 1.2 余量。
@@ -95,7 +97,10 @@ class TokenBucket:
                 wait = shortfall / (self.rpm / 60.0)
             if timeout <= 0 or self._clock() + wait > deadline:
                 return wait
-            time.sleep(min(wait, max(0.01, deadline - self._clock())))
+            # Event.wait 代替 time.sleep：进程退出时立即放弃等桶,返回剩余
+            # 等待秒数,调用方按"桶耗尽"路径抛错,不再把优雅退出拖到分钟级
+            if SHUTTING_DOWN.wait(min(wait, max(0.01, deadline - self._clock()))):
+                return wait
 
     # ─── TPM ─────────────────────────────────────────────────
 
@@ -125,7 +130,8 @@ class TokenBucket:
                 wait = shortfall / (self.tpm / 60.0)
             if timeout <= 0 or self._clock() + wait > deadline:
                 return wait
-            time.sleep(min(wait, max(0.01, deadline - self._clock())))
+            if SHUTTING_DOWN.wait(min(wait, max(0.01, deadline - self._clock()))):
+                return wait  # 进程退出中,同 acquire_rpm
 
     def reconcile_tpm(self, *, estimated: int, actual: int) -> None:
         """请求完成后,按真实 token 数调整桶。

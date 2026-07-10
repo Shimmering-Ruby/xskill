@@ -235,7 +235,7 @@ def _wrap_with_retry(model, llm_cfg: dict):
     配置（``llm`` 段，全可选）：``max_retries``(默认 8) / ``retry_base_delay``(2.0s)
     / ``retry_max_delay``(60.0s)。
     """
-    import time as _time
+    from xskill.utils.shutdown import SHUTTING_DOWN
     max_retries = int(llm_cfg.get("max_retries", 8) or 8)
     base = float(llm_cfg.get("retry_base_delay", 2.0) or 2.0)
     cap = float(llm_cfg.get("retry_max_delay", 60.0) or 60.0)
@@ -255,7 +255,10 @@ def _wrap_with_retry(model, llm_cfg: dict):
                 logging.getLogger("xskill.agno_factory").warning(
                     "LLM 瞬时错误,第 %d/%d 次重试(%.0fs 后): %s",
                     attempt, max_retries, delay, str(exc)[:160])
-                _time.sleep(delay)
+                # 用 Event.wait 代替 time.sleep：进程优雅退出时立即放弃重试，
+                # 否则退避睡眠会把 worker join 拖到分钟级 → supervisor SIGKILL
+                if SHUTTING_DOWN.wait(delay):
+                    raise
 
     model.invoke = retrying_invoke
     return model

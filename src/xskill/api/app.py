@@ -204,8 +204,12 @@ router = APIRouter(prefix="/api/v1")
 # ---- Trajectories --------------------------------------------------------
 
 @router.post("/trajectories/search", response_model=TrajectorySearchResponse)
-async def api_search_trajectories(req: TrajectorySearchRequest):
+def api_search_trajectories(req: TrajectorySearchRequest):
     """Search for similar trajectories in the dataset index.
+
+    同步 def（而非 async def）：内部经 embed_client 走同步 httpx（最长 60s），
+    写成 async 会把整个事件循环冻住——embedding 后端一慢，所有端点集体
+    "连不上"。def 路由 FastAPI 自动丢 anyio 线程池，事件循环保持响应。
 
     When ``dataset_dir`` is omitted, searches across **all registered
     directories** via :func:`search_all`.
@@ -450,8 +454,11 @@ async def api_import_skill(req: ImportSkillRequest):
 # ---- Skill Search --------------------------------------------------------
 
 @router.post("/skills/search")
-async def api_search_skills(req: SkillSearchRequest):
-    """Search existing skills by semantic similarity."""
+def api_search_skills(req: SkillSearchRequest):
+    """Search existing skills by semantic similarity.
+
+    同步 def：embed 是同步网络调用，见 api_search_trajectories 的说明。
+    """
     try:
         embedding_client = create_embed_client(_config)
         return search_skill_index(
@@ -468,11 +475,13 @@ async def api_search_skills(req: SkillSearchRequest):
 # ---- Skill Resolve (canary-aware) ----------------------------------------
 
 @router.post("/skills/resolve")
-async def api_resolve_skill(req: SkillResolveRequest):
+def api_resolve_skill(req: SkillResolveRequest):
     """搜索 skill + canary 分流，返回 agent 应该读取的路径。
 
     ``accept_staging=True`` 时，若 skill 有活跃 staging 分支，按 80/20 概率
     决定返回 main 路径还是 ``.canary/`` 物化路径。
+
+    同步 def：embed 是同步网络调用，见 api_search_trajectories 的说明。
     """
     from xskill import canary
     import time
@@ -758,8 +767,12 @@ async def api_init(req: InitRequest):
 
 
 @router.post("/reindex", response_model=MessageResponse)
-async def api_reindex():
-    """Rebuild the skill vector index."""
+def api_reindex():
+    """Rebuild the skill vector index.
+
+    同步 def：全量重建 = 大量同步 embed 调用，可能持续分钟级；放事件循环上
+    会让服务整段假死，见 api_search_trajectories 的说明。
+    """
     try:
         embedding_client = create_embed_client(_config)
         rebuild_skill_index(
@@ -1321,6 +1334,12 @@ def create_app(home_root: Path | str | None = None,
 
     @app.on_event("shutdown")
     async def _shutdown():
+        # 先竖旗：所有 worker 线程里的 LLM 重试循环见旗即弃，退避睡眠立即
+        # 中断。不竖旗的话 join 最坏拖 11 分钟，supervisor 10s 后 SIGKILL。
+        from xskill.utils.shutdown import request_shutdown
+        from xskill.api.sse import shutdown_sse_executor
+        request_shutdown()
+        shutdown_sse_executor()
         watcher = _watcher_ref.get("instance")
         if watcher:
             watcher.stop()

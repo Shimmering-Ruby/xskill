@@ -188,7 +188,11 @@ class XSkill:
             print(f"xskill serve at http://{host}:{port}/")
             print(f"  standalone mode — skills 留在本机。team 共享用:"
                   f" xskill serve --server")
-        uvicorn.run(app, host=host, port=port)
+        # timeout_graceful_shutdown：SIGTERM 后最多等 10s 在途请求（SSE 长
+        # 连接不会自己结束），到点强制取消并触发 lifespan shutdown → 竖
+        # SHUTTING_DOWN 旗叫停 LLM 重试循环。不设的话 uvicorn 无限等在途
+        # 请求，SIGTERM 石沉大海，supervisor 只能 SIGKILL。
+        uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=10)
 
     def __repr__(self) -> str:
         return (f"XSkill(skill_repo_root={self.skill_repo.root}, "
