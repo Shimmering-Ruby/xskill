@@ -306,9 +306,14 @@ def users_status(db_path: Optional[Path], *,
     cconn = sqlite3.connect(str(clients_db))
     cconn.row_factory = sqlite3.Row
     try:
+        ccols = {r[1] for r in cconn.execute("PRAGMA table_info(clients)")}
+        # P2-2.10:client_version 列点亮版本列;旧库无列时按未上报处理
+        ver_expr = ("COALESCE(client_version,'')" if "client_version" in ccols
+                    else "''")
         crows = cconn.execute(
             "SELECT client_id, COALESCE(user_name,'') user_name,"
-            " COALESCE(label,'') label, last_seen, joined_at FROM clients"
+            f" COALESCE(label,'') label, {ver_expr} client_version,"
+            " last_seen, joined_at FROM clients"
         ).fetchall()
     finally:
         cconn.close()
@@ -366,10 +371,14 @@ def users_status(db_path: Optional[Path], *,
             online += 1
         total_h = sum(h["n"] for h in hs) or 1
         total_m = sum(m["n"] for m in ms) or 1
+        cver = c["client_version"] or ""
         users.append({
             "user": c["user_name"] or c["client_id"],
             "online": is_online,
             "last_seen": last_seen,
+            # 版本列(P2-2.10):空=未上报(旧 client);低于 server 版本标落后
+            "client_version": cver,
+            "version_stale": bool(cver) and _version_lt(cver, _server_version()),
             "trajs": st["trajs"], "atoms": st["atoms"],
             "harness": sorted(({**h, "pct": round(h["n"] / total_h * 100)}
                                for h in hs), key=lambda x: -x["n"]),
@@ -379,6 +388,20 @@ def users_status(db_path: Optional[Path], *,
     users.sort(key=lambda u: (not u["online"], u["last_seen"] and
                               -_ts_key(u["last_seen"])))
     return {"users": users, "online": online, "reason": ""}
+
+
+def _server_version() -> str:
+    from xskill import __version__
+    return __version__
+
+
+def _version_lt(a: str, b: str) -> bool:
+    """a < b?解析失败(dev 版本等)按不落后处理——不给误导性标注。"""
+    try:
+        from packaging.version import Version
+        return Version(a) < Version(b)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
 
 
 def _ts_key(ts: str) -> float:
