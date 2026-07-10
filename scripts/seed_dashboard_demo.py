@@ -1,5 +1,6 @@
 """为 P1 行为验收造一套演示数据（独立 XSKILL_HOME，不碰真实 ~/.xskill）。"""
 import json
+import pickle
 import sqlite3
 import subprocess
 import sys
@@ -43,8 +44,8 @@ for uname, n_traj in users:
         n_atoms = 3
         conn.execute(
             "INSERT INTO trajectories(watch_dir_id,filename,status,tasks_extracted,"
-            "source_harness,source_model,discovered_at) VALUES(?,?,?,?,?,?,?)",
-            (wd_id, f"{tid}.md", status, n_atoms, harness, model,
+            "source_harness,source_model,user_key,discovered_at) VALUES(?,?,?,?,?,?,?,?)",
+            (wd_id, f"{tid}.md", status, n_atoms, harness, model, uname,
              (now - timedelta(days=t)).strftime("%Y-%m-%d %H:%M:%S")))
         tasks = d / tid / "tasks"
         tasks.mkdir(parents=True)
@@ -171,5 +172,101 @@ for (u, _), ls in zip(users, seen):
                  ls.strftime("%Y-%m-%d %H:%M:%S")))
 cdb.commit(); cdb.close()
 
+# ── P3 画像 + events mini 样例（散点③ / 聚类图 / 世界消息·铃铛）────────
+# 画像库 team_profile.db 与 registry.db 同目录（profile_viz.profile_db_for
+# 旁推约定）。三个用户:alice/bob 主题重叠→聚类图有边;m0032 孤立→冷启动灰点。
+import numpy as np
+from xskill.recommend.profile_store import ProfileStore
+from xskill.events import EventStore
+
+np.random.seed(11)
+DIM = 16  # 画像点维度 = skill 索引 embedding 维度（散点 ▲ 要求一致，否则不画）
+
+
+def _unit(v):
+    v = np.asarray(v, dtype=float)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0 else v
+
+
+# 固定主题基向量（git/docker/frontend/data 各一个中心方向，16 维近似正交）
+_THEMES = {name: _unit(np.random.randn(DIM))
+           for name in ("git", "docker", "frontend", "data")}
+_TAGS = {"git": ["git", "rebase"], "docker": ["docker", "compose"],
+         "frontend": ["frontend", "react"], "data": ["data", "etl"]}
+_SUMS = {"git": "解决 rebase 冲突并保留双方改动",
+         "docker": "修 compose 网络与卷挂载失败",
+         "frontend": "React 组件状态与样式回归修复",
+         "data": "ETL 管道去重与增量拉取"}
+
+
+def _cluster_points(theme, n, spread=0.32):
+    """围绕主题中心撒 n 个已 L2 归一的原子点（分簇明显）。"""
+    pts = _THEMES[theme] + spread * np.random.randn(n, DIM)
+    return np.vstack([_unit(p) for p in pts])
+
+
+PROFILE_DB = ROOT / "team_profile.db"
+pstore = ProfileStore(PROFILE_DB)
+
+
+def _seed_profile(user, theme_counts, ux_cycle):
+    pts_list, meta, centers = [], [], []
+    k = 0
+    for theme, n in theme_counts:
+        centers.append(_THEMES[theme])
+        for row in _cluster_points(theme, n):
+            k += 1
+            pts_list.append(row)
+            meta.append({"atom_id": f"atom_traj_{user}_{k:02d}_0001",
+                         "summary": _SUMS[theme], "ux": ux_cycle[k % len(ux_cycle)],
+                         "tags": _TAGS[theme]})
+    points = np.vstack(pts_list)
+    feature_tensor = np.vstack([_unit(c) for c in centers])   # ≤3 兴趣中心
+    mean_tensor = _unit(points.mean(axis=0))                  # 与 points 同源
+    used_skills = [{"name": "nginx-subpath-proxy", "use_count": 6},
+                   {"name": "pytest-retry-fix", "use_count": 2}]
+    pstore.upsert(user, feature_tensor=feature_tensor, mean_tensor=mean_tensor,
+                  used_skills=used_skills, points=points, point_meta=meta)
+
+
+# alice: git+docker+frontend（三兴趣中心，24 点）
+_seed_profile("alice", [("git", 10), ("docker", 8), ("frontend", 6)], [9, 8, 7, 6])
+# bob: git+docker（与 alice 主题重叠→ mean 相似→聚类图有边，14 点）
+_seed_profile("bob", [("git", 8), ("docker", 6)], [8, 7, 5])
+# m0032: data（孤立主题→ 与 alice/bob 相似度低于阈值→冷启动灰点，12 点）
+_seed_profile("m0032", [("data", 12)], [6, 4])
+
+# skill 向量缓存 .skill_index.pkl（维度 = DIM，散点里 ▲ 才会出现）——
+# nginx-subpath-proxy 落在 git 簇附近、pytest-retry-fix 落在 docker 簇附近。
+skill_index = {
+    "skill_names": ["nginx-subpath-proxy", "pytest-retry-fix"],
+    "embeddings": np.vstack([
+        _unit(_THEMES["git"] + 0.10 * np.random.randn(DIM)),
+        _unit(_THEMES["docker"] + 0.10 * np.random.randn(DIM))]),
+}
+with (SKILL / ".skill_index.pkl").open("wb") as f:
+    pickle.dump(skill_index, f)
+
+# events：四类各来几条（feedback 好评+差劲 / push_edit / canary promoted+rejected
+# / pin）。actor/skill 用已有用户与 skill;贡献者 = nginx-subpath-proxy 的
+# atom_adoption 达阈值者（alice ws4 / bob ws3）→ 铃铛与世界消息有内容。
+estore = EventStore(DB)
+estore.emit_feedback(actor="bob", skill="nginx-subpath-proxy",
+                     traj_id="traj_ext_good_01", score_avg=8.6, n_atoms=2,
+                     side="main", sha=m_sha or "")          # → 通知 alice（好评）
+estore.emit_feedback(actor="m0032", skill="nginx-subpath-proxy",
+                     traj_id="traj_ext_bad_01", score_avg=3.4, n_atoms=1,
+                     side="main", sha=m_sha or "")          # → 通知 alice+bob（差劲）
+estore.emit_push_edit(actor="m0032", skill="nginx-subpath-proxy",
+                      branch="user-staging/m0032", ref_sha="a1b2c3d")
+estore.emit_canary(skill="nginx-subpath-proxy", action="promoted",
+                   main_avg=7.0, staging_avg=8.1)
+estore.emit_canary(skill="pytest-retry-fix", action="rejected",
+                   main_avg=7.3, staging_avg=5.9)            # 无贡献者→仅世界消息
+estore.emit_pin(actor="admin", skill="nginx-subpath-proxy",
+                target_user="alice", scope="user")
+
 print("demo home:", ROOT)
 print("db:", DB)
+print("profile db:", PROFILE_DB)
