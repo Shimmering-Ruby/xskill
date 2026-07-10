@@ -121,7 +121,7 @@ class TeamCollector:
         from xskill.ecosystems import (
             detect_known_ecosystems, JsonlIngester, SqliteIngester,
             TraeIngester,
-            CC_SPEC, CODEX_SPEC, OPENCODE_SPEC, NGAGENT_SPEC,
+            CC_SPEC, CODEX_SPEC, NGA3_SPEC, OPENCODE_SPEC, NGAGENT_SPEC,
         )
         for det in detect_known_ecosystems(home_root=self.home_root):
             eco = det["ecosystem"]
@@ -133,6 +133,13 @@ class TeamCollector:
                                     poll_interval=self.poll_interval)
             elif eco == "codex":
                 ing = JsonlIngester(CODEX_SPEC, target_traj_dir=bridge,
+                                    home_root=self.home_root,
+                                    poll_interval=self.poll_interval)
+            elif eco == "nga3":
+                # nga3 / CodeAgent3（~/.cac/projects）。daemon 侧
+                # （api/app.py）一直有这条分支，collector 这条平行分发链
+                # 漏掉了它——.cac 用户的轨迹从未被采集。
+                ing = JsonlIngester(NGA3_SPEC, target_traj_dir=bridge,
                                     home_root=self.home_root,
                                     poll_interval=self.poll_interval)
             elif eco == "opencode":

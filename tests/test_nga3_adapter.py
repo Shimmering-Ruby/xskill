@@ -324,3 +324,38 @@ class TestNga3Installer:
 
         src = inspect.getsource(DirectoryWatcher._install_skill_to_all_detected)
         assert '"nga3": install_to_nga3' in src
+
+
+class TestTeamCollectorNga3:
+    """回归：team client collector 的生态分发链曾漏掉 nga3。
+
+    detect_known_ecosystems 能探到 ~/.cac/projects 并返回 ecosystem="nga3"，
+    但 collector.start_ingesters 的 if/elif 链没有 nga3 分支，落进
+    ``else: continue`` 被静默跳过——.cac 用户的轨迹从未被采集上传
+    （2026-07-10 客户反馈）。daemon 侧（api/app.py）一直是好的，坏的只有
+    collector 这条平行分发链。
+    """
+
+    def test_start_ingesters_covers_nga3(self, tmp_path, monkeypatch):
+        from xskill.ecosystems import JsonlIngester
+        from xskill.team.client.collector import TeamCollector
+
+        fake_home = tmp_path / "home"
+        (fake_home / ".cac" / "projects").mkdir(parents=True)
+
+        # 不真起线程：把 start 打成记录器
+        monkeypatch.setattr(JsonlIngester, "start", lambda self: None)
+
+        collector = TeamCollector(
+            cursor_path=fake_home / ".xskill" / "cursor.json",
+            home_root=fake_home,
+        )
+        collector.start_ingesters()
+        try:
+            specs = [ing.spec.name for ing in collector._ingesters
+                     if isinstance(ing, JsonlIngester)]
+            assert "nga3" in specs, (
+                "collector 分发链又把 nga3 漏了——.cac 轨迹不会被采集")
+            assert (fake_home / ".xskill" / "nga3_sessions").is_dir()
+        finally:
+            collector.stop_ingesters()
