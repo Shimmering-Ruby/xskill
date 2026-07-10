@@ -18,19 +18,19 @@
 
 ## P2 身份 + 控制面 + Pin
 
-- [ ] 2.1 `trajectories.user_key` 列（canonical=user_name，D5）+ bridge 入库写入 + 存量按 sessions 桶目录名一次性回填（跑完即弃）；`metrics.skill_by_user` 等 label JOIN 口径废弃改读新列；client_id 表聚合层经 ClientRegistry 译成 user_name
-- [ ] 2.2 dashboard 登录（复用 connect --name 身份）+ `dashboard.admins` 角色 + 中间件演进
-- [ ] 2.3 普通用户视图：推给我的 / 我触发的 / skill 详情复用 / 语义检索
-- [ ] 2.4 `skill_prefs` 表（pinned|blocked）+ `build_manifest` 注入（blocked 排除 → pinned 占位 → ranked → recommended；pinned 超量报错）+ 用户自 pin/屏蔽 + admin 代 pin/代屏蔽 & global pin
-- [ ] 2.4b 数量伸缩交互：用户/admin 的 skill 清单右侧抽屉（搜索 + 分组 tab + 滚动）
-- [ ] 2.4c admin 技能管理：下线（停止分发保留数据）/ 删除（二次确认输名）两段式；server 侧影响面单列——retire 状态需 build_manifest、推荐引擎候选池、canary controller 三处尊重；删除复用 skill_repo_lock 防与 watcher/canary 并发；定义"删后同名 skill 再生"语义
-- [ ] 2.4d pinned 超量校验在写入侧（D8）：POST /my/prefs 与 admin/global pin 写入时拒绝，sync 路径永不报错
-- [ ] 2.9 设置页：config.yaml 分段表单 + 原文编辑 + 仅校验/校验并热加载（失败不落盘直接报错）；热加载范围 dashboard/canary/recommend/skillhub，llm/watch_dirs 标注需重启
-- [ ] 2.10 client 版本上报：register + sync 携带 X-Xskill-Version，server 写 clients.client_version（touch 时 upsert）；连接状态看板版本列 + "落后"标注点亮
-- [ ] 2.5 "我的贡献去向"：traj → skill → 使用者钻取
-- [ ] 2.6 推荐触发率升级为用户级精确口径 + "常推不用"排行
-- [ ] 2.7 写端点只挂 serve 内置形态；只读实例物理不挂载
-- [ ] 2.8 单测 + 验收文档 + E2E（CS server + 2 模拟 client）
+- [x] 2.1 `trajectories.user_key` 列（canonical=user_name，D5）+ bridge 入库写入 + 存量按 sessions 桶目录名一次性回填（跑完即弃）；`metrics.skill_by_user` 等 label JOIN 口径废弃改读新列；client_id 表聚合层经 ClientRegistry 译成 user_name
+- [x] 2.2 dashboard 登录（复用 connect --name 身份）+ `dashboard.admins` 角色 + 中间件演进
+- [x] 2.3 普通用户视图：推给我的 / 我触发的 / skill 详情复用 / 语义检索
+- [x] 2.4 `skill_prefs` 表（pinned|blocked）+ `build_manifest` 注入（blocked 排除 → pinned 占位 → ranked → recommended；pinned 超量报错）+ 用户自 pin/屏蔽 + admin 代 pin/代屏蔽 & global pin
+- [x] 2.4b 数量伸缩交互：用户/admin 的 skill 清单右侧抽屉（搜索 + 分组 tab + 滚动）
+- [x] 2.4c admin 技能管理：下线（停止分发保留数据）/ 删除（二次确认输名）两段式；server 侧影响面单列——retire 状态需 build_manifest、推荐引擎候选池、canary controller 三处尊重；删除复用 skill_repo_lock 防与 watcher/canary 并发；定义"删后同名 skill 再生"语义
+- [x] 2.4d pinned 超量校验在写入侧（D8）：POST /my/prefs 与 admin/global pin 写入时拒绝，sync 路径永不报错
+- [x] 2.9 设置页：config.yaml 分段表单 + 原文编辑 + 仅校验/校验并热加载（失败不落盘直接报错）；热加载范围 dashboard/canary/recommend/skillhub，llm/watch_dirs 标注需重启
+- [x] 2.10 client 版本上报：register + sync 携带 X-Xskill-Version，server 写 clients.client_version（touch 时 upsert）；连接状态看板版本列 + "落后"标注点亮
+- [x] 2.5 "我的贡献去向"：traj → skill → 使用者钻取
+- [x] 2.6 推荐触发率升级为用户级精确口径 + "常推不用"排行
+- [x] 2.7 写端点只挂 serve 内置形态；只读实例物理不挂载
+- [x] 2.8 单测 + 验收文档 + E2E（CS server + 2 模拟 client）
 
 ## P3 社交 + 画像可视化
 
