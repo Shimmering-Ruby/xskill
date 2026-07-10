@@ -182,3 +182,28 @@ def test_server_fallback_skips_non_newer_server_version(monkeypatch):
     updater._check_and_update()
 
     assert downloaded == []
+
+
+def test_pip_respects_system_index_by_default(monkeypatch):
+    """回归(0.6.8):曾写死 -i pypi.org/simple/,强行绕过用户 pip.ini 里配的
+    企业镜像,代理环境下必超时。缺省必须不传 -i(尊重 pip 配置),显式传入
+    pypi_url 时才覆盖。"""
+    captured: list[list[str]] = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return _R()
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", fake_run)
+
+    AutoUpdater()._install("1.2.3")
+    assert "-i" not in captured[-1], "缺省不许传 -i,必须尊重系统 pip 配置"
+
+    AutoUpdater(pypi_url="https://mirror.example/simple/")._install("1.2.3")
+    idx = captured[-1].index("-i")
+    assert captured[-1][idx + 1] == "https://mirror.example/simple/"

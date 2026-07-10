@@ -194,11 +194,15 @@ class AutoUpdater:
         self,
         package: str = "xskill",
         interval: float = 3600,       # 默认 1 小时
-        pypi_url: str = "https://pypi.org/simple/",
+        pypi_url: str | None = None,
         server_url: str | None = None,
         client_id: str | None = None,
         join_token: str | None = None,
     ):
+        # pypi_url 缺省 None = 不传 -i，尊重用户机器的 pip 配置（pip.ini /
+        # pip.conf 的 index-url，内网通常配了企业镜像）。曾写死
+        # https://pypi.org/simple/ ——强行绕过企业镜像直连公网，代理环境下
+        # 必超时，用户配好的镜像形同虚设。显式传入时才覆盖。
         self.package = package
         self.interval = interval
         self.pypi_url = pypi_url
@@ -281,10 +285,11 @@ class AutoUpdater:
         cmd = [
             sys.executable, "-m", "pip", "install", "--upgrade",
             f"{self.package}=={target_version}",
-            "-i", self.pypi_url,
             "--timeout", "15", "--retries", "2",
             "-q",     # quiet：只打印错误
         ]
+        if self.pypi_url:
+            cmd += ["-i", self.pypi_url]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=self._PIP_TIMEOUT)
