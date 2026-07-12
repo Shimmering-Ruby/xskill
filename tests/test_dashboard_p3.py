@@ -413,6 +413,7 @@ def test_frontend_shell_has_p3_components():
     assert "admin/cluster-graph" in js
     assert "'Notification' in window" in js  # HTTPS 能力分层探测
     assert "sc-hull" in js and "convexHull" in js  # 散点簇凸包描边
+    assert "💡" in js and "SKILL:" in js  # 兴趣点灯泡+tag 词图例 / SKILL: 前缀
     # 新增 Tailwind 类已进编译产物(BUILD.md 流程),不能只写在 JS 里没编译
     for cls in ("first\\:mt-0", ".space-y-1>"):
         assert cls in html, f"class {cls} not compiled into twcss"

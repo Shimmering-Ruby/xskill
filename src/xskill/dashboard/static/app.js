@@ -1376,26 +1376,32 @@ async function openUserProfile(uid) {
       data-tip="${esc(p.atom_id)}|${esc(p.summary)}|${p.ux != null ? esc(p.ux) : '—'}"
       cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="5" fill="${col}" fill-opacity="0.72"/>`;
   }).join('');
+  // 兴趣中心:💡 + 簇的 tag 词直接标在图上(匹配 tag 词汇,一眼读懂这簇是什么)
+  const labByCluster = Object.fromEntries((d.clusters || []).map(cl => [cl.cluster, cl.label]));
   const ctEls = (d.centers || []).map(ct => {
     const c = sc(ct), col = CLUSTER_COLORS[ct.cluster % CLUSTER_COLORS.length];
-    return `<rect x="${(c.x - 5.5).toFixed(1)}" y="${(c.y - 5.5).toFixed(1)}" width="11" height="11"
-      transform="rotate(45 ${c.x.toFixed(1)} ${c.y.toFixed(1)})" fill="${col}" stroke="#fff" stroke-width="1.5"><title>兴趣中心 · 簇 ${ct.cluster}</title></rect>`;
+    const lab = labByCluster[ct.cluster] || `簇 ${ct.cluster}`;
+    return `<g class="sc-center">
+      <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="11" fill="${col}" fill-opacity="0.14" stroke="${col}" stroke-width="1.5"/>
+      <text x="${c.x.toFixed(1)}" y="${(c.y + 4.5).toFixed(1)}" font-size="12" text-anchor="middle">💡</text>
+      <text x="${c.x.toFixed(1)}" y="${(c.y + 26).toFixed(1)}" font-size="10.5" font-weight="700" fill="${col}" text-anchor="middle">${esc(lab)}</text>
+      <title>兴趣点 · ${esc(lab)}</title></g>`;
   }).join('');
   const skEls = (d.skills || []).map(s => {
     const c = sc(s);
+    const short = s.name.length > 14 ? s.name.slice(0, 13) + '…' : s.name;
     return `<g class="skill-jump cursor-pointer" data-skill="${esc(s.name)}">
-      <path d="M${c.x.toFixed(1)} ${(c.y - 7).toFixed(1)} l6.2 11 h-12.4 z" fill="#0f172a"><title>${esc(s.name)} · 触发 ${esc(s.use_count)} 次</title></path>
-      <text x="${c.x.toFixed(1)}" y="${(c.y + 17).toFixed(1)}" font-size="9.5" fill="#475569" text-anchor="middle">${esc(s.name.length > 16 ? s.name.slice(0, 15) + '…' : s.name)}</text></g>`;
+      <path d="M${c.x.toFixed(1)} ${(c.y - 7).toFixed(1)} l6.2 11 h-12.4 z" fill="#0f172a"><title>SKILL:${esc(s.name)} · 触发 ${esc(s.use_count)} 次</title></path>
+      <text x="${c.x.toFixed(1)}" y="${(c.y + 17).toFixed(1)}" font-size="9.5" font-weight="600" fill="#334155" text-anchor="middle">SKILL:${esc(short)}</text></g>`;
   }).join('');
   const legend = (d.clusters || []).map(cl =>
-    `<span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><span class="w-2.5 h-2.5 rounded-full" style="background:${CLUSTER_COLORS[cl.cluster % CLUSTER_COLORS.length]}"></span>${esc(cl.label)}</span>`).join('');
+    `<span class="inline-flex items-center gap-1 text-[11px] font-medium" style="color:${CLUSTER_COLORS[cl.cluster % CLUSTER_COLORS.length]}">💡${esc(cl.label)}</span>`).join('');
   box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
     <div class="flex items-baseline justify-between flex-wrap gap-2">
       <h2 class="font-semibold text-sm flex items-center gap-2">${avatar(uid)} ${esc(uid)} 的兴趣画像
         <span class="font-normal text-[11px] text-slate-400">t-SNE 2D 投影 · 悬停原子预览,点击跳详情</span></h2>
-      <div class="flex gap-3 flex-wrap">${legend}
-        <span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><svg width="11" height="11"><rect x="2" y="2" width="7" height="7" transform="rotate(45 5.5 5.5)" fill="#64748b"/></svg>兴趣中心</span>
-        <span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><svg width="11" height="11"><path d="M5.5 1 l4.5 8 h-9 z" fill="#0f172a"/></svg>skill</span></div>
+      <div class="flex gap-3 flex-wrap items-center">${legend}
+        <span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><svg width="11" height="11"><path d="M5.5 1 l4.5 8 h-9 z" fill="#0f172a"/></svg>SKILL:技能名</span></div>
     </div>
     <svg viewBox="0 0 ${W} ${H}" class="w-full mt-2" style="max-height:440px" id="scatter-svg">
       <rect x="0" y="0" width="${W}" height="${H}" rx="14" fill="#f8fafc"/>
