@@ -1318,6 +1318,22 @@ function scScale(pts, W, H, pad) {
   const sx = x1 > x0 ? (W - 2 * pad) / (x1 - x0) : 0, sy = y1 > y0 ? (H - 2 * pad) / (y1 - y0) : 0;
   return p => ({ x: pad + (sx ? (p.x - x0) * sx : (W - 2 * pad) / 2), y: pad + (sy ? (p.y - y0) * sy : (H - 2 * pad) / 2) });
 }
+// 凸包(Andrew 单调链):簇描边轮廓用,点数十的量级
+function convexHull(pts) {
+  if (pts.length < 3) return pts.slice();
+  const s = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [], upper = [];
+  for (const p of s) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  for (const p of s.reverse()) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
 async function openUserProfile(uid) {
   const box = document.getElementById('user-profile');
   if (!box) return;
@@ -1337,6 +1353,23 @@ async function openUserProfile(uid) {
   const W = 680, H = 400, pad = 34;
   const all = [...d.points, ...(d.centers || []), ...(d.skills || [])];
   const sc = scScale(all, W, H, pad);
+  // 簇描边:每簇 ≥3 点画凸包轮廓(半透明填充+同簇色描边),类群一眼可辨
+  const byCluster = {};
+  d.points.forEach(p => { (byCluster[p.cluster] = byCluster[p.cluster] || []).push(sc(p)); });
+  const hullEls = Object.entries(byCluster).map(([cl, pts]) => {
+    const hull = convexHull(pts);
+    if (hull.length < 3) return '';
+    const col = CLUSTER_COLORS[cl % CLUSTER_COLORS.length];
+    const cx = hull.reduce((s, p) => s + p.x, 0) / hull.length;
+    const cy = hull.reduce((s, p) => s + p.y, 0) / hull.length;
+    const path = hull.map((p, i) => {  // 从质心向外扩 12px,轮廓不贴着点画
+      const dx = p.x - cx, dy = p.y - cy, m = Math.sqrt(dx * dx + dy * dy) || 1;
+      const x = p.x + dx / m * 12, y = p.y + dy / m * 12;
+      return `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(' ') + ' Z';
+    return `<path class="sc-hull" d="${path}" fill="${col}" fill-opacity="0.07"
+      stroke="${col}" stroke-opacity="0.45" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="5 4"/>`;
+  }).join('');
   const ptEls = d.points.map(p => {
     const c = sc(p), col = CLUSTER_COLORS[p.cluster % CLUSTER_COLORS.length];
     return `<circle class="sc-pt atom-jump cursor-pointer" data-atom="${esc(p.atom_id)}"
@@ -1366,7 +1399,7 @@ async function openUserProfile(uid) {
     </div>
     <svg viewBox="0 0 ${W} ${H}" class="w-full mt-2" style="max-height:440px" id="scatter-svg">
       <rect x="0" y="0" width="${W}" height="${H}" rx="14" fill="#f8fafc"/>
-      ${ptEls}${ctEls}${skEls}
+      ${hullEls}${ptEls}${ctEls}${skEls}
     </svg>
     <div class="text-[10.5px] text-slate-400 mt-1.5">画像更新于 ${fdate(d.updated_at)} · ${d.points.length} 个原子点${(d.skills || []).length ? '' : ' · skill 向量索引缺失,不显示 ▲(不现算)'}</div>
   </div>`;

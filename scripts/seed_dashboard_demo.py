@@ -94,6 +94,17 @@ s1 = mk_skill("nginx-subpath-proxy", "nginx 单文件配置子路径反代到内
               ["v1: 初版蒸馏", "v2: 补 rewrite 规则", "v3: 静态资源相对路径"],
               with_staging=True)
 s2 = mk_skill("pytest-retry-fix", "flaky 单测重试与隔离修复手法", ["v1: 初版蒸馏"])
+# P3 散点 ▲:再补三个与画像主题对应的 skill——描述会被真实 embedding,
+# 三角自然落在各自语义簇附近(git/docker/frontend)。
+mk_skill("git-conflict-resolver",
+         "多分支 rebase/merge 冲突的系统化排查与解决手法,含三方冲突整合",
+         ["v1: 初版蒸馏"])
+mk_skill("docker-compose-doctor",
+         "docker compose 网络不通/卷挂载/启动顺序依赖问题的诊断决策树",
+         ["v1: 初版蒸馏"])
+mk_skill("react-render-optimizer",
+         "React 长列表卡顿与重渲染性能问题的优化清单(虚拟滚动/memo/懒加载)",
+         ["v1: 初版蒸馏"])
 
 # 一次真实的"拒绝"：走 discard_staging 留 refs/rejected
 from xskill.canary import discard_staging, staging_sha, main_sha
@@ -290,15 +301,22 @@ def _write_atoms(user, themes, *, skill_hits=None):
             }, ensure_ascii=False), encoding="utf-8")
 
 
-# alice: git+docker+frontend（24 原子）；三个原子命中 nginx-subpath-proxy，
-# 一个命中 pytest-retry-fix。
+# alice: git+docker+frontend（24 原子）；命中五个 skill(原子序号按主题分段:
+# 1-10 git / 11-18 docker / 19-24 frontend),▲ 会散落在对应语义簇附近。
 _write_atoms("alice", [("git", _GIT_SUMS[:10]), ("docker", _DOCKER_SUMS[:8]),
                        ("frontend", _FRONTEND_SUMS[:6])],
             skill_hits={1: "nginx-subpath-proxy", 2: "nginx-subpath-proxy",
-                       3: "nginx-subpath-proxy", 11: "pytest-retry-fix"})
-# bob: git+docker（14 原子，与 alice 主题重叠→内容真实相似→聚类图有边）
+                       3: "nginx-subpath-proxy",
+                       4: "git-conflict-resolver", 6: "git-conflict-resolver",
+                       11: "pytest-retry-fix",
+                       12: "docker-compose-doctor", 14: "docker-compose-doctor",
+                       19: "react-render-optimizer", 21: "react-render-optimizer"})
+# bob: git+docker（14 原子，与 alice 主题重叠→内容真实相似→聚类图有边；
+# 原子序号 1-8 git / 9-14 docker）
 _write_atoms("bob", [("git", _GIT_SUMS[10:18]), ("docker", _DOCKER_SUMS[8:14])],
-            skill_hits={1: "nginx-subpath-proxy", 2: "nginx-subpath-proxy"})
+            skill_hits={1: "nginx-subpath-proxy", 2: "nginx-subpath-proxy",
+                       3: "git-conflict-resolver",
+                       9: "docker-compose-doctor", 10: "docker-compose-doctor"})
 # m0032: IT 支持角色，只处理账号/网络/设备工单（12 原子）→ 与 alice/bob 的
 # 研发内容语义不重叠→冷启动孤立点
 _write_atoms("m0032", [("support", _SUPPORT_SUMS)])
