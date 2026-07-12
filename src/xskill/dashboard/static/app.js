@@ -1310,7 +1310,7 @@ async function loadWorldFeed(more) {
 const _feedMoreBtn = document.getElementById('feed-more');
 if (_feedMoreBtn) _feedMoreBtn.addEventListener('click', () => loadWorldFeed(true).catch(console.error));
 
-// ── 画像散点(图③):PCA 投影,原子=圆点按簇着色,中心=◆,skill=▲ ──
+// ── 画像散点(图③):t-SNE 投影(邻域保持,簇分离比线性 PCA 明显),原子=圆点按簇着色,中心=◆,skill=▲ ──
 const CLUSTER_COLORS = ['#0d9488', '#6366f1', '#f59e0b', '#f43f5e', '#0ea5e9'];
 function scScale(pts, W, H, pad) {
   const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
@@ -1359,7 +1359,7 @@ async function openUserProfile(uid) {
   box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
     <div class="flex items-baseline justify-between flex-wrap gap-2">
       <h2 class="font-semibold text-sm flex items-center gap-2">${avatar(uid)} ${esc(uid)} 的兴趣画像
-        <span class="font-normal text-[11px] text-slate-400">PCA 2D 投影 · 保留方差 ${(d.explained * 100).toFixed(0)}% · 悬停原子预览,点击跳详情</span></h2>
+        <span class="font-normal text-[11px] text-slate-400">t-SNE 2D 投影 · 悬停原子预览,点击跳详情</span></h2>
       <div class="flex gap-3 flex-wrap">${legend}
         <span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><svg width="11" height="11"><rect x="2" y="2" width="7" height="7" transform="rotate(45 5.5 5.5)" fill="#64748b"/></svg>兴趣中心</span>
         <span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><svg width="11" height="11"><path d="M5.5 1 l4.5 8 h-9 z" fill="#0f172a"/></svg>skill</span></div>

@@ -14,14 +14,20 @@ SHALL 在写入侧抛错）。points 与 feature_tensor SHALL 出自同一次计
 - **当** 写入 2 行 points 但只给 1 条 point_meta
 - **那么** 写入抛 ValueError，不落半份数据
 
-### Requirement: PCA 散点端点（Q5：PCA 先行）
+### Requirement: t-SNE 散点端点（Q5 修订：PCA 线性投影对高维语义簇分离效果差，
+升级为 t-SNE 邻域保持投影）
 
 系统 SHALL 提供 `GET /user/{user_key}/scatter`（敏感内容端点，只读公网实例
-不注册）：numpy SVD PCA 2D 投影，返回原子点（按最近兴趣簇着色分组 + 簇语义
-名=簇内 top tag）、兴趣中心、skill 向量投影与保留方差。skill 向量 SHALL 只用
-`.skill_index.pkl` 已缓存的 embedding——dashboard 无 embed_client，算不出的
-不显示（D6，不现算不造假点）；维度不匹配（换过 embedding 模型）同样不显示。
-无画像 → 404；有画像无点（冷启动）→ 显式 note，SHALL NOT 造假点。
+不注册）：原子点、兴趣中心、skill 向量一次性联合做纯 numpy t-SNE（Van der
+Maaten & Hinton 2008，含 PCA 确定性初始化 + early exaggeration + 自适应
+gains）2D 投影——三者必须联合投影，t-SNE 没有 PCA 那种线性 basis 可对新点
+复用，分开投影会让簇位置互相对不上。返回原子点（按最近兴趣簇着色分组 + 簇
+语义名=簇内 top tag，簇归属用高维余弦而非 2D 坐标判定，比投影坐标更可信）、
+兴趣中心、skill 向量投影。同一批向量 SHALL 每次调用坐标一致（不依赖随机数,
+截图/复现稳定）。skill 向量 SHALL 只用 `.skill_index.pkl` 已缓存的
+embedding——dashboard 无 embed_client，算不出的不显示（D6，不现算不造假点）；
+维度不匹配（换过 embedding 模型）同样不显示。无画像 → 404；有画像无点（冷
+启动）→ 显式 note，SHALL NOT 造假点。
 
 #### Scenario: 簇着色与语义名
 

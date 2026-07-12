@@ -4,7 +4,7 @@
 - 3.1 events 四类埋点 + D7 扇出规则(按 traj 去重/weightscore 阈值/不自通知)
 - 3.2 通知读侧:未读游标只前进;世界消息分页
 - 3.3 评价口径:ux 分数段 → 好评/一般/差劲
-- 3.4 画像散点:points 落盘对齐校验、PCA 簇归属、冷启动显式标注、
+- 3.4 画像散点:points 落盘对齐校验、t-SNE 投影下簇分离、冷启动显式标注、
       skill 向量仅用已缓存索引(D6 不现算)
 - 3.5 聚类 graph:相似度阈值连边、孤立节点标冷启动、维度不一致不连边
 """
@@ -238,7 +238,15 @@ def test_scatter_clusters_and_labels(tmp_path):
     assert len(set(assign[:3])) == 1 and len(set(assign[3:])) == 1
     assert assign[0] != assign[3]
     assert {c["label"] for c in sc["clusters"]} == {"git", "docker"}
-    assert sc["explained"] > 0.5
+    assert sc["method"] == "tsne"
+    # t-SNE 邻域保持:两簇在 2D 投影里也应分得开(簇间距 > 簇内散布),
+    # 不是随手混在一起——这是从 PCA 换成 t-SNE 要保住的核心可视化诉求。
+    xy = np.array([[p["x"], p["y"]] for p in sc["points"]])
+    ga, gb = xy[:3].mean(axis=0), xy[3:].mean(axis=0)
+    within = max(np.linalg.norm(xy[:3] - ga, axis=1).mean(),
+                 np.linalg.norm(xy[3:] - gb, axis=1).mean())
+    between = np.linalg.norm(ga - gb)
+    assert between > 1.5 * within
 
 
 def test_scatter_cold_start_and_missing(tmp_path):

@@ -1,9 +1,10 @@
 """dashboard/profile_viz.py — P3 画像可视化数据（§2.3 散点 / §2.5 聚类 graph）
 
-- ``user_scatter``:某用户全部原子摘要向量 + 兴趣中心 + used_skills 向量做
-  numpy SVD PCA 2D 投影（Q5 拍板:PCA 先行）。原子按最近兴趣簇着色,簇语义
-  名取簇内 top tag。skill 向量只用 ``.skill_index.pkl`` 里已缓存的 embedding
-  ——dashboard 无 embed_client,算不出的不显示（D6,不现算不造假点）。
+- ``user_scatter``:某用户全部原子摘要向量 + 兴趣中心 + used_skills 向量联合
+  做纯 numpy t-SNE 2D 投影（Q5 拍板升级:PCA 线性投影对高维簇分离展示效果差,
+  改 t-SNE——邻域保持,簇间可读性远好于线性投影）。原子按最近兴趣簇着色,
+  簇语义名取簇内 top tag。skill 向量只用 ``.skill_index.pkl`` 里已缓存的
+  embedding——dashboard 无 embed_client,算不出的不显示（D6,不现算不造假点）。
 - ``cluster_graph``:节点=有画像的用户（大小=原子数）,边=mean_tensor 余弦
   相似度 > 阈值（粗细=相似度）。边注 = 共同 top tag + 共同 skill;无边节点
   前端灰标"冷启动"。布局在前端手写 force-directed（用户十的量级）。
@@ -35,26 +36,113 @@ def profile_db_for(db_path: Optional[Path]) -> Path:
     return XSKILL_HOME / "team_profile.db"
 
 
-def _pca_2d(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    """居中 SVD PCA。返回 ``(mean (D,), components (2,D), explained)``。
+class _TSNE2D:
+    """经典 t-SNE（Van der Maaten & Hinton, 2008），纯 numpy、零外部依赖。
 
-    点数或维度不足 2 时主轴不满 2 根——缺的补零轴（一维数据画在 x 轴上,
-    诚实反映"没有第二主轴"）。
+    比线性 PCA 投影更能展示高维语义簇的可分性——按邻域概率匹配布局,而非
+    单纯最大化方差方向,同一簇的点会在 2D 里聚在一起而不是被压扁成一条线。
+    PCA 初始化（无随机数生成，全程确定性）:同一批向量每次调用坐标一致
+    （截图/复现稳定,不依赖不可控的随机布局）。
+
+    点数很小时把困惑度降到 ``(n-1)/3`` 以内,避免二分搜索在稀疏样本上退化；
+    n<=2 时没有"邻域结构"可言，直接给一条由数据本身决定的确定性直线。
     """
-    mean = points.mean(axis=0)
-    centered = points - mean
-    _, singular, vt = np.linalg.svd(centered, full_matrices=False)
-    components = np.zeros((2, points.shape[1]), dtype=float)
-    n_axes = min(2, vt.shape[0])
-    components[:n_axes] = vt[:n_axes]
-    total = float((singular ** 2).sum())
-    explained = float((singular[:n_axes] ** 2).sum() / total) if total > 0 else 0.0
-    return mean, components, explained
 
+    def __init__(self, *, perplexity: float = 15.0, n_iter: int = 700):
+        self._perplexity = perplexity
+        self._n_iter = n_iter
 
-def _project(vectors: np.ndarray, mean: np.ndarray,
-             components: np.ndarray) -> np.ndarray:
-    return (np.asarray(vectors, dtype=float) - mean) @ components.T
+    def fit(self, vectors: np.ndarray) -> np.ndarray:
+        """返回 ``(n, 2)`` 低维坐标。"""
+        x = np.asarray(vectors, dtype=float)
+        n = x.shape[0]
+        if n <= 2:
+            return self._degenerate_layout(x)
+        perplexity = min(self._perplexity, max(1.0, (n - 1) / 3))
+        p = self._joint_probabilities(x, perplexity)
+        p_early = p * 4.0  # early exaggeration(前 100 轮放大簇间距,论文标准手法)
+        y = self._pca_init(x)
+        y_inc = np.zeros_like(y)
+        gains = np.ones_like(y)  # 自适应增益(参考 van der Maaten 原始实现):
+        for it in range(self._n_iter):  # 梯度反号则升、同号则降,收敛更稳,不像固定学习率后期震荡
+            q, num = self._low_dim_affinities(y)
+            pq = ((p_early if it < 100 else p) - q) * num
+            grad = 4 * (y * pq.sum(axis=1, keepdims=True) - pq @ y)
+            momentum = 0.5 if it < 250 else 0.8
+            gains = np.where((grad > 0) == (y_inc > 0), gains * 0.8, gains + 0.2)
+            gains = np.maximum(gains, 0.01)
+            y_inc = momentum * y_inc - 200.0 * gains * grad
+            y = y + y_inc
+            y = y - y.mean(axis=0)
+        return y
+
+    @staticmethod
+    def _degenerate_layout(x: np.ndarray) -> np.ndarray:
+        n = x.shape[0]
+        if n == 0:
+            return np.zeros((0, 2))
+        centered = x - x.mean(axis=0)
+        x0 = centered[:, 0] if centered.shape[1] else np.zeros(n)
+        return np.stack([x0, np.zeros(n)], axis=1)
+
+    @staticmethod
+    def _pca_init(x: np.ndarray) -> np.ndarray:
+        centered = x - x.mean(axis=0)
+        _, _, vt = np.linalg.svd(centered, full_matrices=False)
+        y = centered @ vt[:2].T
+        if y.shape[1] < 2:
+            y = np.hstack([y, np.zeros((y.shape[0], 2 - y.shape[1]))])
+        scale = float(np.abs(y).max())
+        return y / scale * 1e-4 if scale > 0 else y
+
+    @staticmethod
+    def _pairwise_sq_dists(x: np.ndarray) -> np.ndarray:
+        sq = np.sum(x ** 2, axis=1)
+        d = sq[:, None] + sq[None, :] - 2 * x @ x.T
+        return np.maximum(d, 0.0)
+
+    @classmethod
+    def _joint_probabilities(cls, x: np.ndarray, perplexity: float,
+                              tol: float = 1e-5, max_iter: int = 50) -> np.ndarray:
+        """逐行二分搜索 precision(beta)命中目标困惑度,再对称化成联合概率。"""
+        n = x.shape[0]
+        sq_dists = cls._pairwise_sq_dists(x)
+        target_entropy = float(np.log(perplexity))
+        p = np.zeros((n, n))
+        for i in range(n):
+            others = [j for j in range(n) if j != i]
+            di = sq_dists[i, others]
+            beta_min, beta_max, beta = -np.inf, np.inf, 1.0
+            row = np.zeros(len(others))
+            for _ in range(max_iter):
+                row = np.exp(-di * beta)
+                sum_row = float(row.sum())
+                if sum_row <= 1e-12:
+                    entropy = 0.0
+                else:
+                    row = row / sum_row
+                    entropy = float(-np.sum(row * np.log(row + 1e-12)))
+                diff = entropy - target_entropy
+                if abs(diff) < tol:
+                    break
+                if diff > 0:
+                    beta_min = beta
+                    beta = beta * 2 if beta_max == np.inf else (beta + beta_max) / 2
+                else:
+                    beta_max = beta
+                    beta = beta / 2 if beta_min == -np.inf else (beta + beta_min) / 2
+            p[i, others] = row
+        p = p + p.T
+        p = p / max(float(p.sum()), 1e-12)
+        return np.maximum(p, 1e-12)
+
+    @staticmethod
+    def _low_dim_affinities(y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        sq = np.sum(y ** 2, axis=1)
+        num = 1.0 / (1.0 + sq[:, None] + sq[None, :] - 2 * y @ y.T)
+        np.fill_diagonal(num, 0.0)
+        q = np.maximum(num / max(float(num.sum()), 1e-12), 1e-12)
+        return q, num
 
 
 def _skill_index_vecs(skill_dir: Optional[Path]) -> dict[str, np.ndarray]:
@@ -91,8 +179,13 @@ class ProfileViz:
     # ── §2.3 画像散点 ────────────────────────────────────────────
 
     def user_scatter(self, user_key: str) -> dict:
-        """PCA 2D 散点数据。无画像行 → KeyError（端点转 404）;有行无点
-        （冷启动）→ ``points=[]`` + ``note``,显式标注不造假。"""
+        """t-SNE 2D 散点数据。无画像行 → KeyError（端点转 404）;有行无点
+        （冷启动）→ ``points=[]`` + ``note``,显式标注不造假。
+
+        points/centers/skill 向量一次性联合投影（t-SNE 没有 PCA 那种线性
+        basis 可以对新点复用——邻域结构必须从投影一开始就联合建立,分开投影
+        会让簇位置互相对不上）。
+        """
         profile = self._store.load(user_key)
         stored = self._store.load_points(user_key)
         if profile is None or stored is None:
@@ -100,23 +193,38 @@ class ProfileViz:
         if stored["points"] is None or not len(stored["meta"]):
             return {"user": user_key, "updated_at": stored["updated_at"],
                     "points": [], "centers": [], "skills": [], "clusters": [],
-                    "explained": 0.0,
                     "note": "画像冷启动:该用户还没有可投影的原子"}
 
         points = np.asarray(stored["points"], dtype=float)
         meta = stored["meta"]
-        mean, components, explained = _pca_2d(points)
-        coords = _project(points, mean, components)
 
-        # 簇归属:最近兴趣中心(向量均已 L2 归一,内积即余弦)
         centers = profile.get("feature_tensor")
-        if centers is not None:
-            centers = np.asarray(centers, dtype=float)
+        centers = (np.asarray(centers, dtype=float) if centers is not None
+                   else np.zeros((0, points.shape[1])))
+
+        skill_vecs = _skill_index_vecs(self._skill_dir)
+        skill_entries = []
+        for entry in profile.get("used_skills") or []:
+            name = entry.get("name") or ""
+            vec = skill_vecs.get(name)
+            if vec is None or vec.shape[0] != points.shape[1]:
+                continue  # 索引没有该 skill 的缓存向量 → 不画(D6),不现算
+            skill_entries.append((name, entry.get("use_count", 0), vec))
+
+        blocks = [points, centers]
+        if skill_entries:
+            blocks.append(np.vstack([v for _, _, v in skill_entries]))
+        combined = np.vstack(blocks)
+        coords_all = _TSNE2D().fit(combined)
+        coords = coords_all[:len(points)]
+        center_coords = coords_all[len(points):len(points) + len(centers)]
+        skill_coords = coords_all[len(points) + len(centers):]
+
+        # 簇归属:最近兴趣中心(高维余弦,向量均已 L2 归一——与 2D 投影无关,更可信)
+        if len(centers):
             assignment = np.argmax(points @ centers.T, axis=1)
-            center_coords = _project(centers, mean, components)
         else:
             assignment = np.zeros(len(meta), dtype=int)
-            center_coords = np.zeros((0, 2))
 
         out_points = []
         cluster_tags: dict[int, Counter] = {}
@@ -143,18 +251,13 @@ class ProfileViz:
             for c in range(max(len(center_coords), 1))
         ]
 
-        skill_vecs = _skill_index_vecs(self._skill_dir)
-        skills = []
-        for entry in profile.get("used_skills") or []:
-            name = entry.get("name") or ""
-            vec = skill_vecs.get(name)
-            if vec is None or vec.shape[0] != points.shape[1]:
-                continue  # 索引没有该 skill 的缓存向量 → 不画(D6),不现算
-            pos = _project(vec.reshape(1, -1), mean, components)[0]
-            skills.append({"name": name,
-                           "x": round(float(pos[0]), 4),
-                           "y": round(float(pos[1]), 4),
-                           "use_count": entry.get("use_count", 0)})
+        skills = [
+            {"name": name,
+             "x": round(float(skill_coords[i, 0]), 4),
+             "y": round(float(skill_coords[i, 1]), 4),
+             "use_count": use_count}
+            for i, (name, use_count, _vec) in enumerate(skill_entries)
+        ]
 
         return {
             "user": user_key,
@@ -166,7 +269,7 @@ class ProfileViz:
                         for i in range(len(center_coords))],
             "clusters": clusters,
             "skills": skills,
-            "explained": round(explained, 3),
+            "method": "tsne",
         }
 
     # ── §2.5 admin 用户聚类 graph ────────────────────────────────
