@@ -313,6 +313,44 @@ def test_scatter_umap_method(tmp_path):
     assert np.allclose(xy, xy2)
 
 
+def test_scatter_umap_many_points_no_blowup(tmp_path):
+    """回归:全批斥力项数随点数线性增长,曾在 n≈300 时首轮步长爆炸,把布局
+    甩飞到初始尺度几十倍远、三簇挤成一团重叠——真实 qwen 向量画像上观察到
+    的现象。这里造 3×100=300 点(命中 _SCATTER_MAX_POINTS 上限,不触发抽样)
+    复现该规模,断言三簇仍分得开、坐标不发散。"""
+    pdb = tmp_path / "p.db"
+    store = ProfileStore(pdb)
+    rng = np.random.default_rng(1)
+    dim = 8
+    centers = np.eye(3, dim)
+    points, point_meta = [], []
+    for cluster_id in range(3):
+        for atom_id in range(100):  # 3×100 = 300 == _SCATTER_MAX_POINTS,不抽样
+            vector = centers[cluster_id] + 0.15 * rng.standard_normal(dim)
+            vector = vector / np.linalg.norm(vector)
+            points.append(vector)
+            point_meta.append({"atom_id": f"a_{cluster_id}_{atom_id}",
+                               "summary": f"s{cluster_id}{atom_id}", "ux": 7,
+                               "tags": [f"t{cluster_id}"]})
+    points = np.asarray(points)
+    store.upsert("u", feature_tensor=centers, mean_tensor=points.mean(0),
+                 used_skills=[], points=points, point_meta=point_meta)
+    scatter = ProfileViz(pdb).user_scatter("u", method="umap")
+    assert scatter["sampled"] is False and scatter["total"] == 300
+    xy = np.array([[p["x"], p["y"]] for p in scatter["points"]])
+    assignment = np.array([p["cluster"] for p in scatter["points"]])
+    cluster_means = [xy[assignment == cluster_id].mean(axis=0) for cluster_id in range(3)]
+    cluster_spreads = [np.linalg.norm(xy[assignment == cluster_id] - cluster_means[cluster_id],
+                                      axis=1).mean() for cluster_id in range(3)]
+    for i in range(3):
+        for j in range(i + 1, 3):
+            between = np.linalg.norm(cluster_means[i] - cluster_means[j])
+            assert between > 2.0 * max(cluster_spreads[i], cluster_spreads[j])
+    # 爆炸时单点会被甩到离质心几十倍远;正常收敛的全体坐标半径应与簇间距同量级。
+    overall_radius = np.linalg.norm(xy - xy.mean(axis=0), axis=1)
+    assert overall_radius.max() < 20.0 * np.median(overall_radius)
+
+
 def test_scatter_unknown_method_rejected(tmp_path):
     pdb = tmp_path / "p.db"
     _seed_profile(pdb)
