@@ -218,8 +218,7 @@ class SkillRecommendEngine:
         self.profile_store.upsert(
             user_id, feature_tensor=ft, mean_tensor=mt, used_skills=used_skills,
         )
-        # 指纹必须在 upsert 成功后才写：中途抛异常（embed 超时是常态）时若已
-        # 记下新指纹，这个用户的画像会一直停在旧值，直到 atom 集再次变化。
+        # 指纹在 upsert 成功后才写：中途失败不得挡住下次重算
         self._profile_fp_cache[user_id] = fp
 
     # ── 5.3 get_skill_for_client ─────────────────────────────────

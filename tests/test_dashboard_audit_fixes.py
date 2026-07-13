@@ -152,12 +152,9 @@ def test_migration_dedupes_legacy_inflated_rows(tmp_path):
             " VALUES(?,?,?,?,?,?)",
             (f"2026-07-0{i+1} 00:00:00", "alice", "s-a", "main",
              "recommended", ""))
+    conn.execute("PRAGMA user_version=0")  # 模拟旧库：schema 版本落后
     conn.commit()
     conn.close()
-    # 建表/迁移改为每进程每 DB 只跑一次；清掉本进程缓存，模拟
-    # "新进程首次打开旧库"——生产中迁移正是在那个时机跑的。
-    from xskill.pipeline import registry as _reg
-    _reg._SCHEMA_READY.clear()
     conn = get_connection(db)  # 重开触发迁移
     rows = conn.execute(
         "SELECT ts FROM recommendation_log WHERE client_id='alice'").fetchall()
