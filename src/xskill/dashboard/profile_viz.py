@@ -330,11 +330,17 @@ class _UMAP2D:
         return y / scale * 10.0  # 缩放到 ±10（umap 同款初始尺度）
 
     # ── 交叉熵布局（全批）────────────────────────────────────────
+    _MAX_STEP_NORM = 4.0  # 单点每轮位移范数上限(对齐 umap-learn 逐负样本 clip 的量级)
+
     def _optimize(self, y: np.ndarray, graph: np.ndarray,
                   a: float, b: float) -> np.ndarray:
         n = y.shape[0]
         neg = 1.0 - graph
         np.fill_diagonal(neg, 0.0)
+        # 全批斥力项数=n,随 n 线性膨胀;缩回 umap-learn 负采样等价量级(~5*k),避免大 n 时首轮步长爆炸把点甩飞。
+        neighbor_k = min(self._n_neighbors, n - 1)
+        neg_row_mass = float(neg.sum(axis=1).mean())
+        rep_scale = (5.0 * neighbor_k / neg_row_mass) if neg_row_mass > 0 else 1.0
         for epoch in range(self._n_epochs):
             alpha = self._init_alpha * (1.0 - epoch / self._n_epochs)
             diff = y[:, None, :] - y[None, :, :]     # (n,n,2)
@@ -346,11 +352,13 @@ class _UMAP2D:
             # 吸引力系数（沿边,权重=模糊隶属度）
             att = np.zeros((n, n))
             att[pos] = (-2.0 * a * b * np.power(d2[pos], b - 1.0)) / denom[pos]
-            # 斥力系数（负采样,权重=非隶属度）
+            # 斥力系数（负采样,权重=非隶属度,缩放见上）
             rep = np.zeros((n, n))
             rep[pos] = (2.0 * self._gamma * b) / ((0.001 + d2[pos]) * denom[pos])
-            coeff = graph * att + neg * rep          # (n,n)
+            coeff = graph * att + rep_scale * neg * rep  # (n,n)
             step = np.clip(coeff[:, :, None] * diff, -4.0, 4.0).sum(axis=1)
+            step_norm = np.linalg.norm(step, axis=1, keepdims=True)
+            step = step * np.minimum(1.0, self._MAX_STEP_NORM / np.maximum(step_norm, 1e-12))
             y = y + alpha * step
         return y - y.mean(axis=0)
 
