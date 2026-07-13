@@ -63,7 +63,7 @@ def _write_repo_identity(repo: Repo) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Per-skill-repo 串行化
+# Per-skill-repo 串行化 + 全进程写并发上限
 # ═══════════════════════════════════════════════════════════════════
 # watcher 线程（SkillEditAgent）与线程池（cluster → init_skill_repo_on_baby）
 # 会并发对同一个 skill 的 .git 跑 git 操作，撞坏 .git/index 和 refs。
@@ -74,6 +74,61 @@ def _write_repo_identity(repo: Repo) -> None:
 #     用，RLock 让其内部的 run_git 调用可重入不死锁。
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_meta = threading.Lock()
+
+
+class _GitWriteLimiter:
+    """进程内可重入的 Git 写并发限制器。
+
+    watcher 的 LLM 调用发生在进入 Git 写事务之前，所以等待模型响应时不会
+    占用这里的许可。Condition 允许服务启动时安全地调整上限；调低上限时，
+    已经开始的写事务会正常完成，新事务等 active 数降到新上限后再进入。
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._active = 0
+        self._condition = threading.Condition()
+        self._local = threading.local()
+
+    def configure(self, limit: int) -> None:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError(f"Git 写并发上限必须是正整数，got {limit!r}")
+        with self._condition:
+            self._limit = limit
+            self._condition.notify_all()
+
+    @contextmanager
+    def slot(self):
+        depth = getattr(self._local, "depth", 0)
+        if depth:
+            self._local.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._local.depth -= 1
+            return
+
+        with self._condition:
+            while self._active >= self._limit:
+                self._condition.wait()
+            self._active += 1
+        self._local.depth = 1
+        try:
+            yield
+        finally:
+            self._local.depth = 0
+            with self._condition:
+                self._active -= 1
+                self._condition.notify_all()
+
+
+_DEFAULT_GIT_WRITE_CONCURRENCY = 1
+_git_write_limiter = _GitWriteLimiter(limit=_DEFAULT_GIT_WRITE_CONCURRENCY)
+
+
+def configure_git_write_concurrency(limit: int) -> None:
+    """设置本进程同时执行的 skill Git 写事务数。"""
+    _git_write_limiter.configure(limit)
 
 
 def _repo_lock_for(cwd: str | Path) -> threading.RLock:
@@ -94,11 +149,16 @@ def skill_repo_lock(repo_dir: str | Path):
     ``run_git`` 调用可重入，不会自死锁。
     """
     lk = _repo_lock_for(repo_dir)
-    lk.acquire()
-    try:
-        yield
-    finally:
-        lk.release()
+    # 锁顺序固定为“全局写许可 -> 仓库锁”。若反过来，一个等待
+    # 全局许可的写任务会先占住仓库锁，连同仓的只读请求也会被堵住。
+    # limiter 和 RLock 都按线程可重入，复合写操作内嵌 run_git 不会重复
+    # 占用许可或自死锁。
+    with _git_write_limiter.slot():
+        lk.acquire()
+        try:
+            yield
+        finally:
+            lk.release()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -707,6 +767,31 @@ def _diff_head(repo: Repo) -> str:
 # run_git shim：按 args[0] dispatch
 # ═══════════════════════════════════════════════════════════════════
 
+_WRITE_SUBCOMMANDS = frozenset({
+    "init", "config", "add", "commit", "checkout", "reset", "clean",
+    "merge", "update-ref",
+})
+
+
+def _command_writes(args: list[str]) -> bool:
+    """当前 dulwich shim 是否会改工作区、index、object store 或 ref。"""
+    sub = args[0]
+    if sub in _WRITE_SUBCOMMANDS:
+        return True
+    if sub == "branch":
+        rest = args[1:]
+        return bool(rest) and rest[0] not in ("--list", "--show-current")
+    if sub == "diff":
+        rest = args[1:]
+        # diff HEAD 会调 _diff_head，其中 _stage_all 会写 index/object
+        # store；--cached --name-only 会用 index.commit 构造 tree object。
+        # 两个 commit/ref 之间的 diff 只读 object store，不应占写许可。
+        return rest == ["HEAD"] or (
+            "--cached" in rest and "--name-only" in rest
+        )
+    return False
+
+
 def run_git(args: list[str], cwd: str) -> tuple[int, str, str]:
     """老 caller 入口。按 args[0] dispatch 到 dulwich-backed handler。
 
@@ -722,7 +807,8 @@ def run_git(args: list[str], cwd: str) -> tuple[int, str, str]:
     if handler is None:
         return 1, "", f"unsupported git subcommand: {sub}"
 
-    with _repo_lock_for(cwd):
+    lock = skill_repo_lock(cwd) if _command_writes(args) else _repo_lock_for(cwd)
+    with lock:
         try:
             return handler(rest, cwd)
         except NotGitRepository as e:
@@ -1729,6 +1815,11 @@ def list_turn_branches(skill_dir: str, base_branch: str | None = None) -> list[s
 
 def ensure_repo(skill_dir: str):
     """确保 skill_dir 是一个 git 仓库，在 main 分支上。"""
+    with skill_repo_lock(skill_dir):
+        _ensure_repo_locked(skill_dir)
+
+
+def _ensure_repo_locked(skill_dir: str) -> None:
     p = Path(skill_dir)
     p.mkdir(parents=True, exist_ok=True)
     if not (p / ".git").exists():
