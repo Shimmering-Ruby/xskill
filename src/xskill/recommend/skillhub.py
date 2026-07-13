@@ -23,9 +23,13 @@ import numpy as np
 # 的三方 skill 画成散点 ▲（D6:不现算不造假）。结构对齐自产 ``.skill_index.pkl``。
 INDEX_CACHE_NAME = ".skillhub_index.pkl"
 
+# 三方 skill description 的向量复用缓存（与 dashboard 只读产物分开存）。
+EMBED_CACHE_NAME = ".skillhub_embed_cache.pkl"
+
 from xskill.canary import aggregate_ux_by_version, load_ux_scores
 from xskill.config import skillhub_config
 from xskill.skill.frontmatter import parse as fm_parse
+from xskill.utils.embed_store import EmbedStore
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:
@@ -95,10 +99,18 @@ class SkillHub:
                 "description": desc,
                 "path": sub,
             }
-            if include_vec:
-                vec = _normalize(np.asarray(self.embed_client.encode(desc), dtype=float))
-                entry["vec"] = vec
             entries.append(entry)
+        if include_vec and entries:
+            # 批量 + 按内容哈希复用：重启/改一个 SKILL.md 不再全量重 embed。
+            embed_store = EmbedStore(
+                self.dir / EMBED_CACHE_NAME, self.embed_client,
+            )
+            vectors = embed_store.encode_cached(
+                [entry["description"] for entry in entries],
+            )
+            embed_store.flush_pruned()
+            for entry, vector in zip(entries, vectors):
+                entry["vec"] = _normalize(np.asarray(vector, dtype=float))
         return entries
 
     def fingerprint(self) -> tuple[tuple[str, str, str], ...]:
