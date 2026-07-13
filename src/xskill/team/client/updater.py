@@ -308,11 +308,13 @@ class AutoUpdater:
             logger.warning("updater: 执行 pip 失败", exc_info=True)
             return False
 
-    def _check_server_fallback(self, current_str: str, current, *, reason: str) -> bool:
-        """PyPI 不可用时，从 team server 下载同版本 wheel 回退升级。
+    def _check_server_fallback(
+        self, current_str: str, current, *, reason: str, restart: bool = True,
+    ) -> bool:
+        """PyPI 不可用时从 server 下载 wheel 回退升级，返回是否成功。
 
-        返回是否升级成功。生产环境成功路径 ``_restart`` 不返回；返回值
-        服务手动 ``xskill update`` 的结果提示与测试。
+        ``restart=False`` 供一次性 CLI 用：装完直接返回，不 ``_restart``——
+        CLI 进程重启只会重跑 update 命令本身，还会以报错收场。
         """
         if not (self.server_url and self.client_id and self.join_token):
             logger.debug("updater: 无 server 回退配置，跳过（%s）", reason)
@@ -353,7 +355,8 @@ class AutoUpdater:
             logger.info("updater: PyPI 不可用（%s），改用 server wheel 升级到 %s",
                         reason, server_version_str)
             if self._install_wheel(wheel):
-                _restart()
+                if restart:
+                    _restart()
                 return True
             return False
 
