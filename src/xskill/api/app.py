@@ -18,13 +18,15 @@ try:
 except ImportError:
     pass
 
+import asyncio
 import logging
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
 from dulwich.errors import NotGitRepository
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -54,6 +56,47 @@ from xskill.utils.llm import create_llm_client, create_embed_client
 from xskill.skill.git import ensure_repo, current_branch
 
 logger = logging.getLogger("xskill.server")
+
+_CONTROL_PLANE_EXECUTOR_STATE = "xskill_control_plane_executor"
+
+
+def _start_control_plane_executor(app: FastAPI) -> ThreadPoolExecutor:
+    """为单个 app 创建控制面线程池。
+
+    app factory 在测试和嵌入式部署中可能被调用多次，因此不能把
+    executor 放在模块级共享。startup 每次都会创建新实例，shutdown 对称回收。
+    """
+    existing = getattr(app.state, _CONTROL_PLANE_EXECUTOR_STATE, None)
+    if existing is not None:
+        return existing
+    executor = ThreadPoolExecutor(
+        max_workers=4,
+        thread_name_prefix="xskill-control-plane",
+    )
+    setattr(app.state, _CONTROL_PLANE_EXECUTOR_STATE, executor)
+    return executor
+
+
+def _stop_control_plane_executor(app: FastAPI) -> None:
+    executor = getattr(app.state, _CONTROL_PLANE_EXECUTOR_STATE, None)
+    if executor is None:
+        return
+    delattr(app.state, _CONTROL_PLANE_EXECUTOR_STATE)
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
+async def _run_control_plane(func, app: FastAPI | None = None):
+    """在不依赖 anyio 默认线程池的线程中执行同步读取。
+
+    正常服务走 app 专用 executor。不执行 lifespan 的 ASGI 单测和直接调用
+    走 asyncio 默认 executor，由事件循环负责回收，避免单测泄漏专用线程。
+    """
+    executor = (
+        getattr(app.state, _CONTROL_PLANE_EXECUTOR_STATE, None)
+        if app is not None else None
+    )
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, func)
 
 # ---------------------------------------------------------------------------
 # Module-level config -- lazy loaded
@@ -741,17 +784,23 @@ async def api_health():
 
 
 @router.get("/status", response_model=StatusResponse)
-async def api_status():
+async def api_status(request: Request = None):
     """Return system status: skill dir, skill count, git branch."""
-    skills = list_skills(_skill_dir)
-    try:
-        branch = current_branch(str(_skill_dir))
-    except NotGitRepository:
-        branch = None
-    return StatusResponse(
-        skill_dir=str(_skill_dir),
-        skill_count=len(skills),
-        git_branch=branch,
+    def _read_status():
+        skills = list_skills(_skill_dir)
+        try:
+            branch = current_branch(str(_skill_dir))
+        except NotGitRepository:
+            branch = None
+        return StatusResponse(
+            skill_dir=str(_skill_dir),
+            skill_count=len(skills),
+            git_branch=branch,
+        )
+
+    return await _run_control_plane(
+        _read_status,
+        request.app if request is not None else None,
     )
 
 
@@ -885,17 +934,21 @@ def create_app(home_root: Path | str | None = None,
     # -- Usage / cost stats (Issue #43) --
     @app.get("/api/v1/stats")
     async def api_stats():
-        from xskill.pipeline.registry import model_share, usage_summary
         watcher = (_watcher_ref["instance"].stats
                    if _watcher_ref.get("instance") else None)
         profile_refresh = (
             _profile_refresh_ref["instance"].metrics
             if _profile_refresh_ref.get("instance") else None
         )
+        def _read_registry_stats():
+            from xskill.pipeline.registry import model_share, usage_summary
+            return usage_summary(), model_share()
+
+        cost, models = await _run_control_plane(_read_registry_stats, app)
         return {
             "role": "server" if _config.get("team", {}).get("server") else "client",
-            "cost": usage_summary(),
-            "models": model_share(),
+            "cost": cost,
+            "models": models,
             "pipeline": watcher,
             "profile_refresh": profile_refresh,
         }
@@ -1385,6 +1438,10 @@ def create_app(home_root: Path | str | None = None,
         except Exception:
             logger.warning("watcher startup failed", exc_info=True)
 
+        # 依赖初始化全部成功后才创建线程池；如果 startup 在此之前
+        # 失败，不会留下需要额外回收的非 daemon 线程。
+        _start_control_plane_executor(app)
+
     @app.on_event("shutdown")
     async def _shutdown():
         # 先竖旗：所有 worker 线程里的 LLM 重试循环见旗即弃，退避睡眠立即
@@ -1393,6 +1450,9 @@ def create_app(home_root: Path | str | None = None,
         from xskill.api.sse import shutdown_sse_executor
         request_shutdown()
         shutdown_sse_executor()
+        # 先停止控制面新任务并等待已接收的短 Git/SQLite 读取退出。
+        # 即使后续 team/watcher 清理抛异常，也不会泄漏这个 app 的线程池。
+        _stop_control_plane_executor(app)
         # 画像 worker 先停止接收并有界等待，随后清理 team 上下文；
         # watcher 在两者之后停止，避免慢 embedding 占用 watcher/anyio 资源。
         if team_server:

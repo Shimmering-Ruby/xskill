@@ -179,3 +179,133 @@ def test_thread_pool_limiter_settable_in_loop():
         limiter.total_tokens = before
 
     anyio.run(main)
+
+
+@pytest.mark.asyncio
+async def test_stats_sqlite_read_does_not_block_health(tmp_path, monkeypatch):
+    """stats 即使被 SQLite 卡住，health 也必须继续响应。
+
+    这里直接用 ASGI 传输共享一个事件循环。若 stats 在 async
+    路由内同步读库，它会一并卡住 health，直到 0.8s 的保险定时器
+    释放门闩。
+    """
+    import httpx
+    from xskill.api import app as app_module
+    from xskill.pipeline import registry as pipeline_registry
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_usage_summary():
+        entered.set()
+        assert release.wait(2)
+        return {"total_calls": 0}
+
+    monkeypatch.setattr(app_module, "_config", {
+        "team": {"server": False},
+        "dashboard": {"enabled": False},
+    })
+    monkeypatch.setattr(app_module, "_skill_dir", tmp_path / "skill")
+    monkeypatch.setattr(app_module, "_watcher_ref", {})
+    monkeypatch.setattr(app_module, "_profile_refresh_ref", {})
+    monkeypatch.setattr(pipeline_registry, "usage_summary", slow_usage_summary)
+    monkeypatch.setattr(pipeline_registry, "model_share", lambda: [])
+    app = app_module.create_app()
+    app_module._start_control_plane_executor(app)
+
+    timer = threading.Timer(0.8, release.set)
+    timer.daemon = True
+    timer.start()
+    started = time.monotonic()
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            stats_task = asyncio.create_task(client.get("/api/v1/stats"))
+            deadline = time.monotonic() + 0.4
+            while not entered.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.005)
+            assert entered.is_set()
+
+            health = await client.get("/api/v1/health")
+            health_elapsed = time.monotonic() - started
+            release.set()
+            stats = await stats_task
+    finally:
+        release.set()
+        timer.cancel()
+        app_module._stop_control_plane_executor(app)
+
+    assert health.status_code == 200
+    assert health_elapsed < 0.5
+    assert stats.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_control_plane_executors_are_per_app_and_shutdown_cleanly():
+    """多 app 必须使用不同 executor，各自 shutdown 不影响另一个。"""
+    from fastapi import FastAPI
+    from xskill.api import app as app_module
+
+    app_one = FastAPI()
+    app_two = FastAPI()
+    executor_one = app_module._start_control_plane_executor(app_one)
+    executor_two = app_module._start_control_plane_executor(app_two)
+    assert executor_one is not executor_two
+    # 重复 startup 幂等，不能覆盖并泄漏原 executor。
+    assert app_module._start_control_plane_executor(app_one) is executor_one
+
+    try:
+        one_ident, two_ident = await asyncio.gather(
+            app_module._run_control_plane(threading.get_ident, app_one),
+            app_module._run_control_plane(threading.get_ident, app_two),
+        )
+        assert one_ident != two_ident
+
+        app_module._stop_control_plane_executor(app_one)
+        # app_two 仍然可接收任务。
+        assert await app_module._run_control_plane(lambda: "ok", app_two) == "ok"
+    finally:
+        app_module._stop_control_plane_executor(app_one)
+        app_module._stop_control_plane_executor(app_two)
+
+    assert getattr(
+        app_one.state, app_module._CONTROL_PLANE_EXECUTOR_STATE, None,
+    ) is None
+    assert getattr(
+        app_two.state, app_module._CONTROL_PLANE_EXECUTOR_STATE, None,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_stats_propagates_unexpected_registry_errors(tmp_path, monkeypatch):
+    """stats 只隔离阻塞，不能把真实 SQLite 异常改成成功响应。"""
+    import httpx
+    from xskill.api import app as app_module
+    from xskill.pipeline import registry as pipeline_registry
+
+    monkeypatch.setattr(app_module, "_config", {
+        "team": {"server": False},
+        "dashboard": {"enabled": False},
+    })
+    monkeypatch.setattr(app_module, "_skill_dir", tmp_path / "skill")
+    monkeypatch.setattr(app_module, "_watcher_ref", {})
+    monkeypatch.setattr(app_module, "_profile_refresh_ref", {})
+
+    def fail_usage_summary():
+        raise RuntimeError("registry read failed")
+
+    monkeypatch.setattr(pipeline_registry, "usage_summary", fail_usage_summary)
+    monkeypatch.setattr(pipeline_registry, "model_share", lambda: [])
+    app = app_module.create_app()
+    app_module._start_control_plane_executor(app)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            with pytest.raises(RuntimeError, match="registry read failed"):
+                await client.get("/api/v1/stats")
+    finally:
+        app_module._stop_control_plane_executor(app)

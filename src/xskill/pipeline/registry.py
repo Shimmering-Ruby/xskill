@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import zlib
 from datetime import datetime, timezone
 from enum import Enum
@@ -28,6 +29,25 @@ from xskill.config import get_registry_db_path
 from xskill.types import WatchDir
 
 logger = logging.getLogger("xskill.registry")
+
+_REGISTRY_DB_LOCKS_GUARD = threading.Lock()
+_REGISTRY_WAL_LOCKS: dict[Path, threading.Lock] = {}
+_REGISTRY_SCHEMA_LOCKS: dict[Path, threading.Lock] = {}
+_REGISTRY_WAL_READY: dict[Path, tuple[int, int]] = {}
+
+
+def _registry_db_lock(
+    mapping: dict[Path, threading.Lock],
+    db_path: Path,
+) -> threading.Lock:
+    """返回进程内按 registry DB 文件共享的锁。"""
+    with _REGISTRY_DB_LOCKS_GUARD:
+        return mapping.setdefault(db_path, threading.Lock())
+
+
+def _registry_db_identity(db_path: Path) -> tuple[int, int]:
+    stat = db_path.stat()
+    return stat.st_dev, stat.st_ino
 
 
 class TrajectoryStatus(str, Enum):
@@ -215,16 +235,50 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    # schema 内容指纹存 DB 头：指纹一致则跳过建表/迁移（此函数在热路径高频调用）
-    schema_fingerprint = zlib.crc32(_SCHEMA_SQL.encode()) & 0x7FFFFFFF
-    if conn.execute("PRAGMA user_version").fetchone()[0] != schema_fingerprint:
-        conn.executescript(_SCHEMA_SQL)
-        # Migrate existing DBs that lack new columns
-        _migrate(conn)
-        conn.execute(f"PRAGMA user_version={schema_fingerprint}")
-    return conn
+    # ``journal_mode=WAL`` is a persistent database setting, not a per-
+    # connection option.  Reissuing the assignment on every telemetry write
+    # makes otherwise independent hot connections contend for SQLite's schema
+    # lock.  Reading the current mode is lock-free once WAL is active; only a
+    # new/legacy database needs the mutating pragma.
+    conn.execute("PRAGMA busy_timeout=10000")
+    db_key = db_path.expanduser().resolve()
+    wal_lock = _registry_db_lock(_REGISTRY_WAL_LOCKS, db_key)
+    schema_lock = _registry_db_lock(_REGISTRY_SCHEMA_LOCKS, db_key)
+    try:
+        db_identity = _registry_db_identity(db_key)
+        with _REGISTRY_DB_LOCKS_GUARD:
+            wal_ready = _REGISTRY_WAL_READY.get(db_key) == db_identity
+        if not wal_ready:
+            # 新 DB 的多个首请求可能同时打开 delete-mode
+            # connection。SQLite 会让这些已打开连接保留旧查询结果，
+            # 所以不能只在锁内重查，还要记录本进程已成功设置。
+            # 记录文件 inode，同路径 DB 被删除重建时会重新初始化。
+            with wal_lock:
+                db_identity = _registry_db_identity(db_key)
+                with _REGISTRY_DB_LOCKS_GUARD:
+                    wal_ready = _REGISTRY_WAL_READY.get(db_key) == db_identity
+                if not wal_ready:
+                    journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                    if str(journal_mode).lower() != "wal":
+                        conn.execute("PRAGMA journal_mode=WAL")
+                    with _REGISTRY_DB_LOCKS_GUARD:
+                        _REGISTRY_WAL_READY[db_key] = _registry_db_identity(db_key)
+        conn.execute("PRAGMA foreign_keys=ON")
+        # schema 内容指纹存 DB 头：指纹一致则跳过建表/迁移（此函数在热路径高频调用）
+        schema_fingerprint = zlib.crc32(_SCHEMA_SQL.encode()) & 0x7FFFFFFF
+        if conn.execute("PRAGMA user_version").fetchone()[0] != schema_fingerprint:
+            # WAL 设置完成不代表 schema 已就绪。首次并发连接的
+            # 建表/迁移也必须按 DB 串行，并在锁内重查指纹。
+            with schema_lock:
+                if conn.execute("PRAGMA user_version").fetchone()[0] != schema_fingerprint:
+                    conn.executescript(_SCHEMA_SQL)
+                    # Migrate existing DBs that lack new columns
+                    _migrate(conn)
+                    conn.execute(f"PRAGMA user_version={schema_fingerprint}")
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
