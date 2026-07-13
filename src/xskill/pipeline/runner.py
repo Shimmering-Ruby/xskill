@@ -302,11 +302,7 @@ class DirectoryWatcher:
             self._reconcile_skill_sides()
 
     def _run_skill_edit_step(self):
-        """Step 5 的冷启动感知封装。
-
-        hold 判定是「rebuild 快照内的轨迹全部到达终态」，不是全局队列空闲——
-        活跃团队持续上传新轨迹时后者永远不成立（#87）。
-        """
+        """Step 5 的冷启动感知封装：hold 只等 rebuild 快照内轨迹到终态。"""
         from xskill.pipeline.cold_start import COLD_START_MAX_HOLD_SECONDS
         cold_start_signal = self._cold_start_signal
         if not cold_start_signal.exists:

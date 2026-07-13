@@ -76,18 +76,6 @@ def _insert_trajectory(database_path, filename, status):
         connection.close()
 
 
-def _set_trajectory_status(database_path, trajectory_id, status):
-    connection = get_connection(database_path)
-    try:
-        connection.execute(
-            "UPDATE trajectories SET status=? WHERE id=?",
-            (status, trajectory_id),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-
 class TestColdStartSignal:
     def test_signal_path_is_fixed_under_home(self, tmp_path):
         cold_start_signal = ColdStartSignal(tmp_path)
@@ -183,7 +171,29 @@ class TestColdStartFlush:
         assert adopted["trajectory_ids"] == [legacy_trajectory_id]
         assert current_branch(str(skill_directory)) == "baby"
 
-        _set_trajectory_status(database_path, legacy_trajectory_id, "done")
+        connection = get_connection(database_path)
+        connection.execute(
+            "UPDATE trajectories SET status='done' WHERE id=?",
+            (legacy_trajectory_id,),
+        )
+        connection.commit()
+        connection.close()
+        watcher._run_skill_edit_step()
+        watcher._drain_futures(stage="skill_edit")
+
+        assert current_branch(str(skill_directory)) == "main"
+        assert not (tmp_path / COLD_START_FILENAME).exists()
+
+    def test_error_status_counts_as_terminal(self, tmp_path):
+        skill_root = tmp_path / "skill"
+        skill_root.mkdir()
+        skill_directory = _seed_baby_skill(skill_root, "sk-cold", [4, 4, 4])
+        watcher = _make_watcher(tmp_path, skill_root)
+        failed_trajectory_id = _insert_trajectory(
+            tmp_path / "test.db", "traj_failed.md", "error",
+        )
+        ColdStartSignal(tmp_path).create([failed_trajectory_id])
+
         watcher._run_skill_edit_step()
         watcher._drain_futures(stage="skill_edit")
 

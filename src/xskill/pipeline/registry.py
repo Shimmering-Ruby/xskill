@@ -1462,12 +1462,18 @@ def get_pending_traj_ids(
     *,
     db_path: Optional[Path] = None,
 ) -> list[int]:
-    """返回处于 pending 状态的轨迹 id；``trajectory_ids=None`` 时查全库。"""
+    """返回处于 pending 状态的轨迹 id；``trajectory_ids=None`` 时查全库。
+
+    只计 ``auto_index=1`` 的 watch dir——watcher 不处理关闭索引的目录，其中
+    的轨迹永远不会离开 pending，计入会让 cold-start 只能靠超时退出。
+    """
     conn = get_connection(db_path)
     try:
         status_placeholders = ",".join("?" * len(PENDING_TRAJECTORY_STATUSES))
         base_sql = (
-            f"SELECT id FROM trajectories WHERE status IN ({status_placeholders})"
+            "SELECT t.id FROM trajectories t "
+            "JOIN watch_dirs w ON t.watch_dir_id = w.id "
+            f"WHERE w.auto_index=1 AND t.status IN ({status_placeholders})"
         )
         if trajectory_ids is None:
             rows = conn.execute(base_sql, PENDING_TRAJECTORY_STATUSES).fetchall()
@@ -1478,7 +1484,7 @@ def get_pending_traj_ids(
             chunk = trajectory_ids[chunk_start:chunk_start + 500]
             id_placeholders = ",".join("?" * len(chunk))
             rows = conn.execute(
-                base_sql + f" AND id IN ({id_placeholders})",
+                base_sql + f" AND t.id IN ({id_placeholders})",
                 (*PENDING_TRAJECTORY_STATUSES, *chunk),
             ).fetchall()
             pending_ids += [row["id"] for row in rows]

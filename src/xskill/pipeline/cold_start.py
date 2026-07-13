@@ -8,6 +8,7 @@ SkillEdit 扫描并删除该文件——rebuild 之后新进的轨迹不延长�
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +40,10 @@ class ColdStartSignal:
             "trajectory_ids": list(trajectory_ids),
             "created_at": time.time(),
         }
-        self.file_path.write_text(json.dumps(payload), encoding="utf-8")
+        # 原子写：CLI 与 watcher 补录跨进程双写，不能让对方读到半截 JSON。
+        temp_path = self.file_path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temp_path, self.file_path)
         return payload
 
     def snapshot(self) -> dict | None:
