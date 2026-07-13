@@ -354,7 +354,9 @@ def cmd_start(args) -> int:
 
 
 def cmd_update(args) -> int:
-    """立即检查 PyPI 是否有新版 xskill，有则升级并重启。"""
+    """立即检查 PyPI 是否有新版 xskill；PyPI 通道失败时走 team server wheel 回退。"""
+    from packaging.version import Version
+    from xskill.config import get_team_client_state_path
     from xskill.team.client.updater import (
         AutoUpdater, _current_version, _latest_pypi_version, _restart,
     )
@@ -362,21 +364,50 @@ def cmd_update(args) -> int:
     if not current:
         print("error: 无法读取当前版本", file=sys.stderr)
         return 1
+    try:
+        current_version = Version(current)
+    except Exception:
+        current_version = None
+
+    # 已 connect 过 team server 时带上连接信息，PyPI 失败可回退 server wheel。
+    updater = AutoUpdater()
+    client_state_path = get_team_client_state_path()
+    if client_state_path.is_file():
+        from xskill.team.client.state import load_client_state
+        client_state = load_client_state(client_state_path)
+        updater = AutoUpdater(
+            server_url=client_state.server_url,
+            client_id=client_state.client_id,
+            join_token=client_state.join_token,
+        )
+
     print(f"当前版本: {current}")
     print("正在查询 PyPI...")
     latest = _latest_pypi_version("xskill")
     if not latest:
-        print("error: 查询 PyPI 失败，请检查网络", file=sys.stderr)
+        print("查询 PyPI 失败，尝试 team server 通道...")
+        if current_version is not None and updater._check_server_fallback(
+            current, current_version, reason="pypi_query_failed",
+        ):
+            print("已通过 team server wheel 升级，正在重启...")
+            return 0
+        print("error: 查询 PyPI 失败且 server 通道不可用，请检查网络",
+              file=sys.stderr)
         return 1
     try:
-        from packaging.version import Version
-        if Version(latest) <= Version(current):
+        if current_version is not None and Version(latest) <= current_version:
             print(f"已是最新版本 ({current})")
             return 0
     except Exception:
         pass
     print(f"发现新版本: {latest}，开始升级...")
-    if not AutoUpdater()._install(latest):
+    if not updater._install(latest):
+        print("pip 升级失败，尝试 team server 通道...")
+        if current_version is not None and updater._check_server_fallback(
+            current, current_version, reason="pypi_install_failed",
+        ):
+            print("已通过 team server wheel 升级，正在重启...")
+            return 0
         print("error: 升级失败，请检查 pip 配置和日志", file=sys.stderr)
         return 1
     print(f"升级到 {latest} 成功，正在重启...")
