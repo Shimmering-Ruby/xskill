@@ -308,15 +308,21 @@ class AutoUpdater:
             logger.warning("updater: 执行 pip 失败", exc_info=True)
             return False
 
-    def _check_server_fallback(self, current_str: str, current, *, reason: str) -> None:
-        """PyPI 不可用时，从 team server 下载同版本 wheel 回退升级。"""
+    def _check_server_fallback(
+        self, current_str: str, current, *, reason: str, restart: bool = True,
+    ) -> bool:
+        """PyPI 不可用时从 server 下载 wheel 回退升级，返回是否成功。
+
+        ``restart=False`` 供一次性 CLI 用：装完直接返回，不 ``_restart``——
+        CLI 进程重启只会重跑 update 命令本身，还会以报错收场。
+        """
         if not (self.server_url and self.client_id and self.join_token):
             logger.debug("updater: 无 server 回退配置，跳过（%s）", reason)
-            return
+            return False
 
         info = _server_version(self.server_url, self.join_token, self.client_id)
         if not info:
-            return
+            return False
 
         server_version_str = str(info.get("version") or "")
         try:
@@ -325,16 +331,16 @@ class AutoUpdater:
         except Exception:
             logger.debug("updater: server 版本不可解析: %s",
                          server_version_str, exc_info=True)
-            return
+            return False
 
         if server_version <= current:
             logger.debug("updater: server 版本 %s 不高于当前版本 %s",
                          server_version_str, current_str)
-            return
+            return False
         if not info.get("wheel_available"):
             logger.warning("updater: server 版本 %s 可用，但未提供 wheel",
                            server_version_str)
-            return
+            return False
 
         with tempfile.TemporaryDirectory(prefix="xskill-update-") as td:
             wheel = _download_server_wheel(
@@ -345,11 +351,14 @@ class AutoUpdater:
                 str(info.get("wheel_filename") or ""),
             )
             if wheel is None:
-                return
+                return False
             logger.info("updater: PyPI 不可用（%s），改用 server wheel 升级到 %s",
                         reason, server_version_str)
             if self._install_wheel(wheel):
-                _restart()
+                if restart:
+                    _restart()
+                return True
+            return False
 
     def _install_wheel(self, wheel_path: Path) -> bool:
         """用 pip 安装 server 下载的 wheel。返回是否成功。"""
