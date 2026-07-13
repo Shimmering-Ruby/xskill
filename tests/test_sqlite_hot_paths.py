@@ -148,8 +148,8 @@ class _FakeConnectionOperation:
             self._probe.leave()
 
 
-def test_close_fetch_and_connect_cannot_overlap():
-    """Reproduce the native close/fetch/connect lock order without deadlock."""
+def test_close_cannot_overlap_fetch_or_connect():
+    """Connection close is isolated while fetch and connect may overlap."""
     from xskill._sqlite_connect import connect_with_lock
 
     probe = _ConcurrencyProbe()
@@ -189,7 +189,7 @@ def test_close_fetch_and_connect_cannot_overlap():
         close_future.result(timeout=10)
         connected = connect_future.result(timeout=10)
 
-    assert probe.max_active == 1
+    assert probe.max_active == 2
     # Do not leave proxy finalizers to affect a later concurrency assertion.
     cursor.close()
     fetch_conn.close()
@@ -253,6 +253,25 @@ def test_native_connection_and_cursor_api_remains_compatible():
             raise RuntimeError("rollback")
     assert conn.execute("SELECT count(*) FROM sample").fetchone()[0] == 0
     conn.close()
+
+
+def test_optional_pysqlite_connection_uses_matching_cursor_types():
+    """The server's newer pysqlite3 build must not mix stdlib C types."""
+    pysqlite3 = pytest.importorskip("pysqlite3")
+    from xskill._sqlite_connect import connect_with_lock
+
+    conn = connect_with_lock(pysqlite3.connect, ":memory:")
+    try:
+        assert isinstance(conn, pysqlite3.Connection)
+        conn.row_factory = pysqlite3.Row
+        conn.executescript(
+            "CREATE TABLE sample (value INTEGER);"
+            "INSERT INTO sample VALUES (1);"
+        )
+        rows = [row["value"] for row in conn.execute("SELECT value FROM sample")]
+        assert rows == [1]
+    finally:
+        conn.close()
 
 
 def test_sqlite_operation_lock_is_reentrant_for_user_callbacks():
@@ -484,10 +503,10 @@ def test_connect_open_lock_is_released_when_connect_raises():
         conn.close()
 
 
-def test_profile_sqlite_c_operations_are_process_wide_serial(
+def test_profile_sqlite_opens_and_sql_remain_concurrent(
     tmp_path, monkeypatch,
 ):
-    """30 profile workers serialize both connect and SQLite execution."""
+    """30 profile workers can open connections and run SQL concurrently."""
     from xskill.recommend import _sqlite_base
     from xskill.recommend.profile_store import ProfileStore
 
@@ -504,14 +523,14 @@ def test_profile_sqlite_c_operations_are_process_wide_serial(
     with ThreadPoolExecutor(max_workers=30) as executor:
         list(executor.map(load_profile, range(30)))
 
-    assert connect_probe.max_active == 1
-    assert execute_probe.max_active == 1
+    assert connect_probe.max_active > 1
+    assert execute_probe.max_active > 1
 
 
-def test_registry_sqlite_c_operations_are_process_wide_serial(
+def test_registry_sqlite_opens_and_sql_remain_concurrent(
     tmp_path, monkeypatch,
 ):
-    """Registry connection bursts use the same process-wide operation lock."""
+    """Registry opens and SQL share the non-finalizing side of the gate."""
     from xskill.pipeline import registry
 
     db_path = tmp_path / "registry.db"
@@ -530,14 +549,14 @@ def test_registry_sqlite_c_operations_are_process_wide_serial(
     with ThreadPoolExecutor(max_workers=30) as executor:
         list(executor.map(open_registry, range(30)))
 
-    assert connect_probe.max_active == 1
-    assert execute_probe.max_active == 1
+    assert connect_probe.max_active > 1
+    assert execute_probe.max_active > 1
 
 
-def test_server_sqlite_call_sites_share_process_wide_connect_open_lock(
+def test_server_sqlite_call_sites_keep_open_and_sql_calls_concurrent(
     tmp_path, monkeypatch,
 ):
-    """Profile, registry, client auth and dashboard share one open guard."""
+    """Profile, registry, client auth and dashboard opens can overlap."""
     from xskill.dashboard.explore import users_status
     from xskill.pipeline import registry
     from xskill.recommend import _sqlite_base
@@ -578,8 +597,8 @@ def test_server_sqlite_call_sites_share_process_wide_connect_open_lock(
     finally:
         client_registry.close()
 
-    assert connect_probe.max_active == 1
-    assert execute_probe.max_active == 1
+    assert connect_probe.max_active > 1
+    assert execute_probe.max_active > 1
 
 
 def test_registry_new_db_concurrent_open_assigns_wal_once(tmp_path, monkeypatch):
