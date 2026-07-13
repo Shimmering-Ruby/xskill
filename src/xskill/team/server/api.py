@@ -58,6 +58,12 @@ class _Ctx:
 _ctx = _Ctx()
 _WHEEL_BUILD_LOCK = threading.Lock()
 
+# /sync 画像刷新的同 client 在途去重。慢 embedding 后端下一次刷新可达分钟级，
+# 而 client 30s 超时后会齐步重试——不去重则同一 client 的重试逐个占住线程池
+# token 跑重复计算，池满 → dashboard/def 路由全部饿死（2026-07-13 复盘）。
+_PROFILE_REFRESH_LOCK = threading.Lock()
+_PROFILE_REFRESH_INFLIGHT: set[str] = set()
+
 
 def init_team_context(
     *,
@@ -504,11 +510,24 @@ def team_sync(
     except Exception:  # pylint: disable=broad-exception-caught
         eng = None
     if eng is not None:
-        try:
-            from xskill.recommend.client_interest import ClientInterest
-            eng.update_user_interest(ClientInterest(client_id))
-        except Exception:  # pylint: disable=broad-exception-caught
-            logger.debug("profile refresh for %s skipped", client_id, exc_info=True)
+        with _PROFILE_REFRESH_LOCK:
+            refreshing = client_id in _PROFILE_REFRESH_INFLIGHT
+            if not refreshing:
+                _PROFILE_REFRESH_INFLIGHT.add(client_id)
+        if refreshing:
+            # 该 client 已有一个刷新在跑（多半是它自己超时后的重试）——直接用
+            # 现有画像出 manifest，不排队重算。
+            logger.debug("profile refresh for %s already in flight, serving "
+                         "cached profile", client_id)
+        else:
+            try:
+                from xskill.recommend.client_interest import ClientInterest
+                eng.update_user_interest(ClientInterest(client_id))
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.debug("profile refresh for %s skipped", client_id, exc_info=True)
+            finally:
+                with _PROFILE_REFRESH_LOCK:
+                    _PROFILE_REFRESH_INFLIGHT.discard(client_id)
     # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
     # best-effort 读取(D8:超量在写入侧拒绝,这里读挂了退回无 prefs 分发,
     # 后台链路绝不因控制面阻塞)。user_key=user_name(D5),匿名 client 只吃全局。

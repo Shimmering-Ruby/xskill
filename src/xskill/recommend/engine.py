@@ -199,7 +199,6 @@ class SkillRecommendEngine:
         fp = self._user_atom_fingerprint(user_id)
         if self._profile_fp_cache.get(user_id) == fp:
             return  # atom 集未变，画像仍有效
-        self._profile_fp_cache[user_id] = fp
 
         atoms = self._user_atoms(user_id)
         summaries = [a.summary for a in atoms if a.summary]
@@ -208,6 +207,7 @@ class SkillRecommendEngine:
             self.profile_store.upsert(
                 user_id, feature_tensor=None, mean_tensor=None, used_skills=used_skills,
             )
+            self._profile_fp_cache[user_id] = fp
             return
         vecs = _normalize_rows(np.asarray(
             self.embed_client.encode_batch(summaries), dtype=float,
@@ -218,6 +218,9 @@ class SkillRecommendEngine:
         self.profile_store.upsert(
             user_id, feature_tensor=ft, mean_tensor=mt, used_skills=used_skills,
         )
+        # 指纹必须在 upsert 成功后才写：中途抛异常（embed 超时是常态）时若已
+        # 记下新指纹，这个用户的画像会一直停在旧值，直到 atom 集再次变化。
+        self._profile_fp_cache[user_id] = fp
 
     # ── 5.3 get_skill_for_client ─────────────────────────────────
     def get_skill_for_client(

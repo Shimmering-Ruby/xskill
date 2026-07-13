@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -167,18 +168,34 @@ CREATE INDEX IF NOT EXISTS idx_trig_skill ON skill_trigger_eval(skill);
 """
 
 
+# 建表 + 迁移每进程每个 DB 只跑一次。get_connection 在热路径上被高频调用
+# （record_usage 每条 embedding 一次、watcher 每次状态翻转一次），此前每次
+# 都重放整份 _SCHEMA_SQL + 逐表 _migrate，既烧 CPU 又放大 DB 写锁竞争
+# （2026-07-13 复盘：/sync 风暴期 82 个并发线程各自反复建表）。
+_SCHEMA_READY: set[str] = set()
+_SCHEMA_READY_LOCK = threading.Lock()
+
+
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """打开（或创建）注册表 DB。首次调用自动建表。"""
     if db_path is None:
         db_path = get_registry_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    # DB 文件不存在（首次 / 被删重建）时无条件重放建表，不看缓存。
+    fresh = not db_path.exists()
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(_SCHEMA_SQL)
-    # Migrate existing DBs that lack new columns
-    _migrate(conn)
+    key = str(db_path.resolve())
+    with _SCHEMA_READY_LOCK:
+        ready = key in _SCHEMA_READY
+    if fresh or not ready:
+        conn.executescript(_SCHEMA_SQL)
+        # Migrate existing DBs that lack new columns
+        _migrate(conn)
+        with _SCHEMA_READY_LOCK:
+            _SCHEMA_READY.add(key)
     return conn
 
 

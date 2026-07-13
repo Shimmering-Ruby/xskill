@@ -388,3 +388,50 @@ class TestFindTrajFile:
         assert result is None
         msgs = [r.message for r in caplog.records]
         assert any("not found in any registered watch dir" in m for m in msgs)
+
+
+class TestSchemaOnce:
+    """get_connection 的建表 + 迁移每进程每 DB 只跑一次（热路径高频调用，
+    2026-07-13 复盘：record_usage 每条 embedding 都重放全份 schema）。"""
+
+    def test_schema_replayed_once_per_path(self, tmp_path, monkeypatch):
+        import xskill.pipeline.registry as reg
+
+        db = tmp_path / "once.db"
+        calls = {"n": 0}
+        orig_migrate = reg._migrate
+
+        def counting_migrate(conn):
+            calls["n"] += 1
+            orig_migrate(conn)
+
+        monkeypatch.setattr(reg, "_migrate", counting_migrate)
+        reg.get_connection(db).close()
+        conn = reg.get_connection(db)
+        # 第二次连接跳过建表，但表可用
+        conn.execute("SELECT 1 FROM trajectories").fetchall()
+        conn.close()
+        assert calls["n"] == 1
+
+    def test_schema_replayed_when_db_file_recreated(self, tmp_path, monkeypatch):
+        import xskill.pipeline.registry as reg
+
+        db = tmp_path / "recreate.db"
+        calls = {"n": 0}
+        orig_migrate = reg._migrate
+
+        def counting_migrate(conn):
+            calls["n"] += 1
+            orig_migrate(conn)
+
+        monkeypatch.setattr(reg, "_migrate", counting_migrate)
+        reg.get_connection(db).close()
+        assert calls["n"] == 1
+        # DB 文件被删（连同 WAL sidecar）后重连：必须重放建表
+        for p in (db, Path(str(db) + "-wal"), Path(str(db) + "-shm")):
+            if p.exists():
+                p.unlink()
+        conn = reg.get_connection(db)
+        conn.execute("SELECT 1 FROM trajectories").fetchall()
+        conn.close()
+        assert calls["n"] == 2

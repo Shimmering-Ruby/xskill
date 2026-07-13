@@ -126,3 +126,66 @@ def test_sync_idempotent_when_atoms_unchanged(team_client):
     client.get("/api/v1/team/sync",
                headers={"X-Xskill-Token": "tok", "X-Xskill-Client": cid})
     assert embed_calls["n"] == 0  # 未重 embed
+
+
+def test_sync_inflight_dedup_serves_cached_profile(team_client):
+    """在途去重：同 client 的画像刷新还挂在 embed 上时，后续 /sync 不重复
+    触发 embed、立即用现有画像返回（2026-07-13 线程池饱和复盘）。"""
+    import threading
+
+    eng, client, cid = team_client
+    headers = {"X-Xskill-Token": "tok", "X-Xskill-Client": cid}
+    started, release = threading.Event(), threading.Event()
+    calls = {"n": 0}
+    orig = eng.embed_client.encode_batch
+
+    def slow_batch(texts):
+        calls["n"] += 1
+        started.set()
+        assert release.wait(10), "test deadlock: release never set"
+        return orig(texts)
+
+    eng.embed_client.encode_batch = slow_batch
+    results = {}
+    first = threading.Thread(
+        target=lambda: results.setdefault(
+            "r", TestClient(client.app).get("/api/v1/team/sync", headers=headers)))
+    first.start()
+    try:
+        assert started.wait(10), "first sync never reached embed"
+        # 第一个刷新还在 embed 上：第二个 sync 必须立即成功且不再进 embed
+        r2 = client.get("/api/v1/team/sync", headers=headers)
+        assert r2.status_code == 200
+        assert calls["n"] == 1
+    finally:
+        release.set()
+        first.join(10)
+    assert results["r"].status_code == 200
+    # 在途标记已清理：atom 集变化后能再次触发刷新
+    _write_atom(eng.traj_root / "clients" / cid / "sessions", "traj_2",
+                "atom_traj_2_0001", summary="tune nginx", used_skills=["s0"])
+    client.get("/api/v1/team/sync", headers=headers)
+    assert calls["n"] == 2
+
+
+def test_fingerprint_not_poisoned_by_embed_failure(team_client):
+    """指纹缓存只在画像 upsert 成功后写入：embed 失败不得把新指纹记成
+    "已算过"，否则画像永久停在旧值直到 atom 集再次变化。"""
+    eng, client, cid = team_client
+    headers = {"X-Xskill-Token": "tok", "X-Xskill-Client": cid}
+    orig = eng.embed_client.encode_batch
+
+    def boom(texts):
+        raise RuntimeError("embed backend down")
+
+    eng.embed_client.encode_batch = boom
+    # 刷新失败被路由吞掉（best-effort），manifest 照常返回
+    r = client.get("/api/v1/team/sync", headers=headers)
+    assert r.status_code == 200
+    assert eng.profile_store.load(cid) is None
+    # 后端恢复：atom 集没变，也必须能重算出画像（指纹未被污染）
+    eng.embed_client.encode_batch = orig
+    r = client.get("/api/v1/team/sync", headers=headers)
+    assert r.status_code == 200
+    row = eng.profile_store.load(cid)
+    assert row is not None and row["feature_tensor"] is not None
