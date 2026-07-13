@@ -208,10 +208,12 @@ commit message 写明本次基于哪些 atom_id 整理，例如：
 # 可用工具
 - AtomTaskRead(atom_id) — 读 atom JSON
 - ReadTraj(traj_id, offset_start, offset_end) — 按行号取轨迹原文（offset 即 1-based 行号）
-- SkillRead(skill_name) — 读现有 SKILL.md（更新场景用）
-- read_file(path, offset=1, limit=200) — 按 1-based 行号窗口读取 skill workspace
-  或 /tmp 下的 spill 文件；trim 后的 ``spill_path`` 也用它分页回读
+- SkillRead(skill_name) — 读现有 SKILL.md + 该 skill 目录其余文件树（更新场景先看这个）
+- read_file(path, offset=1, limit=200) — 按 1-based 行号窗口读取 skill 仓 /
+  ~/.xskill / /tmp spill 下的文件；trim 后的 ``spill_path`` 也用它分页回读
 - list_files(path) — 列目录文件，返回可直接传给 read_file 的完整路径
+- grep_files(pattern, path="", glob="", max_results=100) — 全文检索（ripgrep），
+  返回「文件:行号:内容」；先检索定位、再 read_file 精读，别逐个翻文件
 - write_file(path, content) — 写任意文件到 skill_dir 下
 - commit_baby_to_main(skill_name, message) — 仅 baby 分支可用
 - commit_to_staging(skill_name, message) — 仅 main 分支可用
@@ -706,6 +708,7 @@ class SkillEditAgent:
             agent_tools.skill_read,
             agent_tools.read_file,
             agent_tools.list_files,
+            agent_tools.grep_files,
             agent_tools.write_file,
         ]
         if is_last:
@@ -793,6 +796,7 @@ class SkillEditAgent:
             agent_tools.skill_read,
             agent_tools.read_file,
             agent_tools.list_files,
+            agent_tools.grep_files,
             agent_tools.write_file,
         ]
         if is_last:
