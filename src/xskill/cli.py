@@ -468,6 +468,7 @@ def cmd_dashboard(args) -> int:
     print(f"身份: {link_info['user']}")
     print("免密登录链接（10 分钟内有效，仅可用一次）:")
     print(f"  {server_base}{link_info['path']}")
+    print("  （打不开时：需 server 看板允许远程访问，见 dashboard.public 配置）")
     return 0
 
 

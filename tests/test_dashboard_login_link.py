@@ -185,3 +185,14 @@ class TestCmdDashboard:
         args = build_parser().parse_args(["dashboard"])
         assert cmd_dashboard(args) == 1
         assert "connect" in capsys.readouterr().err
+
+
+def test_issue_endpoint_503_when_team_context_missing(link_env, monkeypatch):
+    """standalone（无 team ctx）：签发端点须 503 而非 500。"""
+    monkeypatch.setattr(server_api._ctx, "client_registry", None)
+    client = TestClient(link_env["app"])
+
+    r = client.post("/api/v1/team/dashboard_link",
+                    headers=_team_headers(link_env["named_client_id"]))
+
+    assert r.status_code == 503

@@ -136,7 +136,9 @@ class _AuthContext:
         self.signer: SessionSigner | None = None
         self.admins: list[str] = []
         self.admin_password: str = ""
-        self.redeemed_link_ids: dict[str, float] = {}  # link_id → 过期时刻
+        # link_id → 过期时刻。单次性依赖单进程（uvicorn 单 worker）；重启清空
+        # 意味着已兑换链接在剩余时效内可再兑换一次，多 worker 部署前须挪持久层。
+        self.redeemed_link_ids: dict[str, float] = {}
         # 零参 callable → ClientRegistry | None。用 provider 而非实例:
         # mount_dashboard 在 create_app 时跑,而 ClientRegistry 在 app startup
         # 才创建(team ctx 初始化),登录时才解引用。
