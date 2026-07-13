@@ -1,7 +1,7 @@
 """team /sync 的缓存响应和后台画像刷新接线。"""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 import json
 import pickle
 import subprocess
@@ -325,16 +325,22 @@ def test_thirty_clients_return_while_embedding_is_bounded(tmp_path, monkeypatch)
             used_skills=["s0"],
         )
 
+    executor = ThreadPoolExecutor(max_workers=30)
+    futures = [
+        executor.submit(
+            server_api.team_sync,
+            x_xskill_token="tok",
+            x_xskill_client=client_id,
+            x_xskill_version=None,
+        )
+        for client_id in client_ids
+    ]
     try:
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            futures = [
-                executor.submit(
-                    client.get, "/api/v1/team/sync", headers=_headers(client_id),
-                )
-                for client_id in client_ids
-            ]
-            responses = [future.result(timeout=5) for future in futures]
-        assert all(response.status_code == 200 for response in responses)
+        done, not_done = wait(futures, timeout=5)
+        assert not not_done, f"{len(not_done)} sync calls did not return"
+        responses = [future.result() for future in done]
+        assert all(set(response) == {"slots", "server_time"}
+                   for response in responses)
         assert embed.started.wait(2)
         assert service.metrics["running"] <= 4
         assert embed.max_active <= 4
@@ -349,6 +355,9 @@ def test_thirty_clients_return_while_embedding_is_bounded(tmp_path, monkeypatch)
                    for client_id in client_ids)
     finally:
         embed.release.set()
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
         server_api.clear_team_context(profile_refresh_shutdown_timeout=2)
         set_recommend_engine(None)
 
