@@ -340,6 +340,35 @@ async def team_version(
     }
 
 
+@router.post("/dashboard_link")
+async def team_dashboard_link(
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+) -> dict:
+    """给已命名 client 签发一次性看板登录链接（``xskill dashboard`` 用）。"""
+    client_id = _auth(x_xskill_token, x_xskill_client)
+    client_row = (
+        _ctx.client_registry.get(client_id)
+        if _ctx.client_registry is not None else None
+    )
+    user_name = str((client_row or {}).get("user_name") or "").strip()
+    if not user_name:
+        raise HTTPException(
+            status_code=400,
+            detail="匿名 client 无面板身份：先 `xskill connect <host:port> "
+                   "--token <t> --name <你的名字>` 注册命名身份",
+        )
+    from xskill.dashboard.auth import issue_login_link_token
+    link_token = issue_login_link_token(user_name)
+    if link_token is None:
+        raise HTTPException(status_code=503, detail="server 未启用 dashboard 登录")
+    logger.info("dashboard link issued: client=%s user=%s", client_id, user_name)
+    return {
+        "user": user_name,
+        "path": f"/api/v1/dashboard/login/link?t={link_token}",
+    }
+
+
 @router.get("/wheel")
 async def team_wheel(
     x_xskill_token: str | None = Header(default=None),

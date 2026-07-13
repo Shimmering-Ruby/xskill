@@ -421,6 +421,56 @@ def cmd_update(args) -> int:
     return 0  # 不会到达这里
 
 
+def cmd_dashboard(args) -> int:
+    """向 server 要一条免密登录链接并打印：点开即以自己的身份进入看板。"""
+    import json
+    import urllib.error
+    import urllib.request
+    from xskill.config import get_team_client_state_path
+    from xskill.team.client.state import load_client_state
+
+    state_path = get_team_client_state_path()
+    if not state_path.is_file():
+        from xskill.runtime import read_status
+        status = read_status()
+        if status.get("running"):
+            print(f"本机看板: http://127.0.0.1:{status.get('port')}/")
+            return 0
+        print("error: 未连接 team server，本机也没有运行中的 serve。\n"
+              "  先跑：xskill connect <host:port> --token <t> --name <你的名字>",
+              file=sys.stderr)
+        return 1
+    state = load_client_state(state_path)
+    server_base = state.server_url.rstrip("/")
+    request = urllib.request.Request(
+        f"{server_base}/api/v1/team/dashboard_link",
+        method="POST",
+        headers={
+            "X-Xskill-Token": state.join_token,
+            "X-Xskill-Client": state.client_id,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            link_info = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as http_error:
+        detail = http_error.read().decode("utf-8", "replace")[:300]
+        if http_error.code == 404:
+            print("error: server 版本过旧，不支持免密链接（需 ≥0.6.14），"
+                  "请管理员先升级 server", file=sys.stderr)
+        else:
+            print(f"error: server 拒绝签发登录链接（HTTP {http_error.code}）: "
+                  f"{detail}", file=sys.stderr)
+        return 1
+    except Exception as network_error:
+        print(f"error: 连不上 server: {network_error}", file=sys.stderr)
+        return 1
+    print(f"身份: {link_info['user']}")
+    print("免密登录链接（10 分钟内有效，仅可用一次）:")
+    print(f"  {server_base}{link_info['path']}")
+    return 0
+
+
 def cmd_stop(args) -> int:
     """停止并撤销 connect 常驻任务。"""
     from xskill.team.client.service import ServiceError, get_backend
@@ -716,6 +766,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("update", help="立即检查 PyPI 新版并升级（有新版则重启）")
     p_status.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
+    sub.add_parser(
+        "dashboard",
+        help="打印免密登录链接，点击即以自己的身份进入 server 看板",
+    )
+
     p_stats = sub.add_parser(
         "stats", help="Show token usage & estimated cost (Issue #43)",
     )
@@ -814,6 +869,8 @@ def main() -> int:
         return cmd_status(args)
     if args.command == "update":
         return cmd_update(args)
+    if args.command == "dashboard":
+        return cmd_dashboard(args)
 
     # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
     if args.command == "stats":
