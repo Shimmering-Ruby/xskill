@@ -567,7 +567,6 @@ async def team_ingest_db(
             "bridged": summary["bridged"]}
 
 
-@router.get("/sync")
 def team_sync(
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
@@ -579,30 +578,42 @@ def team_sync(
     慢 embedding 只在独立的 ProfileRefreshService worker 中执行。
     """
     client_id = _auth(x_xskill_token, x_xskill_client, version=x_xskill_version)
-    # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
-    # best-effort 读取(D8:超量在写入侧拒绝,这里读挂了退回无 prefs 分发,
-    # 后台链路绝不因控制面阻塞)。user_key=user_name(D5),匿名 client 只吃全局。
-    prefs = None
-    retired = None
-    try:
-        from xskill.pipeline.registry import effective_prefs, retired_skills
-        row = _ctx.client_registry.get(client_id) or {}
-        user_key = row.get("user_name") or ""
-        prefs = effective_prefs(user_key)
-        retired = retired_skills()
-    except Exception:  # pylint: disable=broad-exception-caught
-        logger.warning("skill prefs lookup failed, serving without control-plane",
-                       exc_info=True)
-    resp = build_manifest(
-        client_id=client_id,
-        skill_dir=_ctx.skill_dir,
-        probability=_ctx.probability,
-        ranked_slots=_ctx.ranked_slots,
-        total_slots=_ctx.total_slots,
-        traj_root=_ctx.traj_root,
-        prefs=prefs,
-        retired=retired,
-    )
+    if _ctx.total_slots <= 0:
+        # 明确禁用分发时无需读取 client 行、偏好和 retired 集合。300 并发
+        # 冷启动会放大这些无效 SQLite 打开；画像刷新仍按下方路径提交。
+        resp = build_manifest(
+            client_id=client_id,
+            skill_dir=_ctx.skill_dir,
+            probability=_ctx.probability,
+            ranked_slots=_ctx.ranked_slots,
+            total_slots=0,
+            traj_root=_ctx.traj_root,
+        )
+    else:
+        # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
+        # best-effort 读取(D8:超量在写入侧拒绝,这里读挂了退回无 prefs 分发,
+        # 后台链路绝不因控制面阻塞)。user_key=user_name(D5),匿名 client 只吃全局。
+        prefs = None
+        retired = None
+        try:
+            from xskill.pipeline.registry import effective_prefs, retired_skills
+            row = _ctx.client_registry.get(client_id) or {}
+            user_key = row.get("user_name") or ""
+            prefs = effective_prefs(user_key)
+            retired = retired_skills()
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("skill prefs lookup failed, serving without control-plane",
+                           exc_info=True)
+        resp = build_manifest(
+            client_id=client_id,
+            skill_dir=_ctx.skill_dir,
+            probability=_ctx.probability,
+            ranked_slots=_ctx.ranked_slots,
+            total_slots=_ctx.total_slots,
+            traj_root=_ctx.traj_root,
+            prefs=prefs,
+            retired=retired,
+        )
     # 本次响应必须使用 request() 之前的已落库画像。request 只操作
     # 有界内存队列；服务缺失、正在停止、队列满或自身异常都不改变
     # /sync 的成功响应。
@@ -614,6 +625,27 @@ def team_sync(
             logger.warning("profile refresh request failed for %s", client_id,
                            exc_info=True)
     return resp.model_dump()
+
+
+@router.get("/sync")
+async def team_sync_endpoint(
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+):
+    """零分发配置直接响应；其余 manifest 计算继续在线程池执行。"""
+    if _ctx.total_slots <= 0:
+        return team_sync(
+            x_xskill_token=x_xskill_token,
+            x_xskill_client=x_xskill_client,
+            x_xskill_version=x_xskill_version,
+        )
+    return await run_in_threadpool(
+        team_sync,
+        x_xskill_token=x_xskill_token,
+        x_xskill_client=x_xskill_client,
+        x_xskill_version=x_xskill_version,
+    )
 
 
 @router.get("/skill/{name}/bundle")

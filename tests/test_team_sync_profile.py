@@ -177,6 +177,36 @@ def test_sync_returns_before_uncached_embedding_finishes(team_runtime):
     assert engine.profile_store.load(client_id)["feature_tensor"] is not None
 
 
+def test_zero_slots_skips_preference_reads_but_still_refreshes_profile(
+    team_runtime, monkeypatch,
+):
+    """禁用分发时 sync 不做无效控制面查询，后台画像语义保持不变。"""
+    engine, embed, service, client, client_id, _registry, _traj_root = team_runtime
+    from xskill.pipeline import registry as pipeline_registry
+
+    preference_calls: list[str] = []
+    monkeypatch.setattr(
+        pipeline_registry,
+        "effective_prefs",
+        lambda _user: preference_calls.append("prefs") or {},
+    )
+    monkeypatch.setattr(
+        pipeline_registry,
+        "retired_skills",
+        lambda: preference_calls.append("retired") or set(),
+    )
+    server_api._ctx.total_slots = 0
+
+    response = client.get("/api/v1/team/sync", headers=_headers(client_id))
+
+    assert response.status_code == 200
+    assert response.json()["slots"] == []
+    assert preference_calls == []
+    assert embed.started.wait(2)
+    assert service.wait_idle(timeout=2)
+    assert engine.profile_store.load(client_id) is not None
+
+
 def test_sync_uses_old_profile_then_refreshes_in_background(team_runtime):
     engine, embed, service, client, client_id, _registry, traj_root = team_runtime
     engine.update_user_interest(
