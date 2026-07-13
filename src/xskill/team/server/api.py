@@ -603,4 +603,14 @@ async def team_push_edit(
     sha = await run_in_threadpool(
         fetch_branch_from_bundle, bundle, repo_dir, "_useredit", dest_ref)
     logger.info("team push-edit: %s -> %s (%s)", x_xskill_skill, dest_ref, sha[:8])
+    # P3-3.1 埋点:手改分支即修改意见——通知该 skill 贡献者(旁路,失败不阻断)
+    try:
+        from xskill.events import EventStore
+        row = _ctx.client_registry.get(client_id) or {}
+        EventStore().emit_push_edit(
+            actor=row.get("user_name") or client_id,
+            skill=x_xskill_skill,
+            branch=f"user-staging/{client_id}", ref_sha=sha)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("push-edit event emit skipped", exc_info=True)
     return PushEditResponse(branch=f"user-staging/{client_id}", ref_sha=sha)

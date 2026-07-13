@@ -153,6 +153,35 @@ CREATE TABLE IF NOT EXISTS skill_lifecycle (
     ts         TEXT DEFAULT (datetime('now'))
 );
 
+-- P3-3.1 events:四类既有事实源的消费者(D7),通知+世界消息共用。
+-- kind: feedback(他人触发+ux打分) / push_edit(修改分支) / canary(裁决) / pin。
+-- targets 单独成表:一条事件可通知多个贡献者;世界消息 feed 直接读 events。
+-- 已读状态是每用户一个游标(event_reads.last_read_id),不做逐行 read 标记。
+CREATE TABLE IF NOT EXISTS events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      TEXT DEFAULT (datetime('now')),
+    kind    TEXT NOT NULL CHECK(kind IN ('feedback','push_edit','canary','pin')),
+    actor   TEXT DEFAULT '',
+    skill   TEXT DEFAULT '',
+    traj_id TEXT DEFAULT '',
+    payload TEXT DEFAULT '{}'
+);
+-- D7 扇出去重:同一轨迹多 atom 命中同一 skill 只发一条 feedback
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_feedback_dedup
+    ON events(skill, traj_id) WHERE kind='feedback';
+
+CREATE TABLE IF NOT EXISTS event_targets (
+    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    user_key TEXT NOT NULL,
+    PRIMARY KEY (event_id, user_key)
+);
+CREATE INDEX IF NOT EXISTS idx_event_targets_user ON event_targets(user_key);
+
+CREATE TABLE IF NOT EXISTS event_reads (
+    user_key     TEXT PRIMARY KEY,
+    last_read_id INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS skill_trigger_eval (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     ts           TEXT DEFAULT (datetime('now')),

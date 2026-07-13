@@ -116,57 +116,91 @@ def _branches(skill_path: Path) -> set[str]:
     return out
 
 
-def skills_catalog(skill_dir: Path) -> list[dict]:
+def _skillhub_entries(skillhub) -> list[dict]:
+    """把 ``skills_catalog`` 的 skillhub 入参归一成三方 skill 原始条目列表。
+
+    入参三态（契约）：``None`` → 无三方 skill（[]）；``list`` → 已是条目列表直接
+    用；否则视作 ``SkillHub`` 对象，读其无向量条目（``include_vec=False`` 免去
+    embed_client——技能库列表不需要向量，只要 name/description/来源路径）。禁用的
+    SkillHub 返回 []（其 ``_entries`` 内部已判 ``enabled``）。
+    """
+    if skillhub is None:
+        return []
+    if isinstance(skillhub, list):
+        return skillhub
+    return skillhub._entries(  # pylint: disable=protected-access
+        include_vec=False, require_description=True)
+
+
+def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
     """列出 skill 库里的所有 skill —— 纯分析式(读目录 + SKILL.md + .candidates.yml)。
 
     不依赖任何埋点事件,永远有内容(只要库里有 skill 目录)。每条含:
-    name / state(baby|main|staging) / description / version / use_count / candidates。
-    供"技能库"页直接展示库存,不再只靠空的触发率表。
+    name / state(baby|main|staging) / description / version / use_count / candidates,
+    并统一带 ``source``：自产 git 技能为 ``"native"``。
+
+    ``skillhub``（可选，向后兼容——不传即旧行为）：三方 skill 来源，可传 SkillHub
+    对象或其条目列表。合入的三方条目 ``source="skillhub"`` / ``state="skillhub"``
+    （无 git 分支）,额外带 ``hub``（skillhub 目录下相对路径/子目录名）与 ``skill_id``
+    （``name@path_hash``）,``use_count`` 有则带否则 0。
     """
     from xskill.skill.frontmatter import parse as fm_parse
     skill_dir = Path(skill_dir)
-    if not skill_dir.is_dir():
-        return []
     out: list[dict] = []
-    for d in sorted(skill_dir.iterdir()):
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        branches = _branches(d)
-        if "staging" in branches:
-            state = "staging"
-        elif "main" in branches:
-            state = "main"
-        elif "baby" in branches:
-            state = "baby"
-        else:
-            state = "unknown"
-        desc, version = "", 0
-        smd = d / "SKILL.md"
-        if smd.is_file():
-            try:
-                fm, _ = fm_parse(smd.read_text(encoding="utf-8"))
-                desc = (fm.get("description") or "").strip().replace("\n", " ")
-                meta = fm.get("metadata", {}) or {}
-                version = meta.get("version", 0)
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
-        n_cand = 0
-        cand = d / ".candidates.yml"
-        if cand.is_file():
-            try:
-                import yaml
-                data = yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
-                n_cand = len(data.get("candidates", []) or [])
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
-        out.append({
-            "name": d.name, "state": state,
-            "description": desc[:300], "version": version,
-            "candidates": n_cand,
-        })
+    if skill_dir.is_dir():
+        for d in sorted(skill_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            branches = _branches(d)
+            if "staging" in branches:
+                state = "staging"
+            elif "main" in branches:
+                state = "main"
+            elif "baby" in branches:
+                state = "baby"
+            else:
+                state = "unknown"
+            desc, version = "", 0
+            smd = d / "SKILL.md"
+            if smd.is_file():
+                try:
+                    fm, _ = fm_parse(smd.read_text(encoding="utf-8"))
+                    desc = (fm.get("description") or "").strip().replace("\n", " ")
+                    meta = fm.get("metadata", {}) or {}
+                    version = meta.get("version", 0)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+            n_cand = 0
+            cand = d / ".candidates.yml"
+            if cand.is_file():
+                try:
+                    import yaml
+                    data = yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
+                    n_cand = len(data.get("candidates", []) or [])
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+            out.append({
+                "name": d.name, "state": state, "source": "native",
+                "description": desc[:300], "version": version,
+                "candidates": n_cand,
+            })
     # main/staging（已正式产出）排前,其次 baby,再按名字
     order = {"main": 0, "staging": 0, "baby": 1, "unknown": 2}
     out.sort(key=lambda s: (order.get(s["state"], 3), s["name"]))
+    # 三方（skillhub）技能追加在自产之后：独立目录、无 git 分支 → state="skillhub"。
+    hub_rows: list[dict] = []
+    for e in _skillhub_entries(skillhub):
+        desc = str(e.get("description") or "").strip().replace("\n", " ")
+        hub_rows.append({
+            "name": e.get("display_name") or e.get("name") or "",
+            "state": "skillhub", "source": "skillhub",
+            "hub": e.get("source_path") or "",
+            "skill_id": e.get("skill_id") or e.get("name") or "",
+            "description": desc[:300], "version": 0,
+            "candidates": 0, "use_count": e.get("use_count", 0) or 0,
+        })
+    hub_rows.sort(key=lambda s: (s["hub"], s["name"]))
+    out.extend(hub_rows)
     return out
 
 

@@ -112,8 +112,13 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
 
     @router.get("/api/v1/dashboard/skills")
     def skills() -> dict:
-        """skill 库存清单(分析式：读 skill 目录,不依赖埋点)。"""
-        cat = skills_catalog(skill_dir)
+        """skill 库存清单(分析式：读 skill 目录,不依赖埋点)。
+
+        自产 git 技能标 ``source="native"``；skillhub 三方技能（启用时）合入
+        并标 ``source="skillhub"`` + ``hub`` + ``skill_id``。skillhub 缺省禁用
+        → ``_build_skillhub()`` 返回 None → no-op，列表只有自产技能。
+        """
+        cat = skills_catalog(skill_dir, skillhub=_build_skillhub())
         states: dict = {}
         for s in cat:
             states[s["state"]] = states.get(s["state"], 0) + 1
@@ -499,3 +504,22 @@ def _register_explorer_endpoints(router: APIRouter, db_path: Optional[Path],
         """用户连接状态看板（图⑧，P1 读侧；版本列 P2 点亮）。"""
         from xskill.dashboard.explore import users_status
         return users_status(db_path)
+
+    @router.get("/api/v1/dashboard/user/{user_key}/scatter")
+    def user_scatter_ep(user_key: str, method: str = "tsne") -> dict:
+        """画像散点（图③,P3-3.4）:原子点降维投影 + 兴趣中心 + skill 向量。
+        ``method`` ∈ {tsne, umap}——同一批向量、同款前置,换降维算法对比效果。"""
+        from xskill.dashboard.profile_viz import (
+            ProfileViz, profile_db_for, skillhub_index_for)
+        pdb = profile_db_for(db_path)
+        if not pdb.is_file():
+            raise HTTPException(status_code=404,
+                                detail="画像库不存在(team 模式未启用或还没有画像)")
+        try:
+            return ProfileViz(pdb, skill_dir=skill_dir, db_path=db_path,
+                              skillhub_index=skillhub_index_for(db_path)
+                              ).user_scatter(user_key, method=method)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e

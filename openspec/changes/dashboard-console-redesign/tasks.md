@@ -34,9 +34,9 @@
 
 ## P3 社交 + 画像可视化
 
-- [ ] 3.1 `events` 表 + 四类埋点（他人触发+原子 ux 打分即评价 / push-edit 修改分支即修改意见 / canary 裁决 / 被 pin）
-- [ ] 3.2 全局通知三层：全局铃铛组件（所有页面）+ 页面内 toast + 浏览器系统通知（Web Notifications，授权入口在铃铛下拉）；世界消息卡片式 feed（头像/skill chip/语义徽章/按天分组）
-- [ ] 3.3 评价事件口径：ux 分数段 → 好评/差劲措辞；push-edit 事件带分支引用可点开 diff
-- [ ] 3.4 画像散点：numpy PCA 投影（原子点+中心+skill），hover 预览/点击跳转；t-SNE 可选增强
-- [ ] 3.5 admin 用户聚类交互 graph（mean_tensor 相似度，手写 force 布局）
-- [ ] 3.6 单测 + 验收文档 + E2E
+- [x] 3.1 `events` 表 + 四类埋点（他人触发+原子 ux 打分即评价 / push-edit 修改分支即修改意见 / canary 裁决 / 被 pin）；扇出=按 traj 去重 + weightscore≥3 贡献者 + 不自通知（D7）
+- [x] 3.2 全局通知三层：全局铃铛组件（所有页面）+ 页面内 toast + 浏览器系统通知（Web Notifications，授权入口在铃铛下拉，HTTPS 增强 D10）；世界消息卡片式 feed（头像/skill chip/语义徽章/按天分组）
+- [x] 3.3 评价事件口径：ux 分数段（≥7 好评 / ≤4 差劲 / 其余一般）→ 措辞；push-edit 事件带分支引用可点开 diff
+- [x] 3.4 画像散点：numpy t-SNE 联合投影（原子点+中心+skill，PCA 初始化+early exaggeration+自适应 gains），hover 预览/点击跳转；points 随画像落盘（Q4）；skill 向量仅用已缓存索引（D6）；Q5 修订——上线后发现 PCA 线性投影分离效果差，已升级为 t-SNE
+- [x] 3.5 admin 用户聚类交互 graph（mean_tensor 相似度>0.6，手写 force 布局，孤立节点标冷启动）
+- [x] 3.6 单测（tests/test_dashboard_p3.py 21 例 + engine points 落盘用例）+ 验收文档 docs/acceptance/dashboard-p3.md + specs/（events-notifications / profile-scatter / user-cluster-graph）
