@@ -175,6 +175,12 @@ const STATE_BADGE = {
 const stateBadge = s =>
   `<span class="px-2 py-0.5 rounded-md text-[11px] font-medium ${STATE_BADGE[s] || STATE_BADGE.unknown}">${esc(s)}</span>`;
 
+// 来源徽章：skillhub 三方技能标醒目的"第三方"并显示 hub 来源；自产技能标淡色"自产"。
+const sourceBadge = s => s.source === 'skillhub'
+  ? `<span class="ml-2 inline-block px-2 py-0.5 rounded-md text-[11px] font-medium bg-indigo-100 text-indigo-700">第三方 · skillhub</span>`
+    + (s.hub ? `<span class="ml-2 inline-block text-[11px] text-slate-400">${esc(s.hub)}</span>` : '')
+  : `<span class="ml-2 inline-block px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-500">自产</span>`;
+
 async function loadSkills() {
   const d = await jc('api/v1/dashboard/skills');
   const bs = d.by_state || {};
@@ -182,7 +188,7 @@ async function loadSkills() {
   put('skills.summary', `共 ${d.total} 个${parts ? ' · ' + parts : ''}`);
   rows('skills-body', (d.skills || []).map(s =>
     `<tr class="hover:bg-slate-50 cursor-pointer" data-skill-row="${esc(s.name)}">`
-    + `<td class="py-2.5 font-medium text-teal-700">${esc(s.name)}</td>`
+    + `<td class="py-2.5 font-medium text-teal-700">${esc(s.name)}${sourceBadge(s)}</td>`
     + `<td>${stateBadge(s.state)}</td>`
     + `<td class="text-slate-500 max-w-[480px] truncate" title="${esc(s.description)}">${esc(s.description) || '—'}</td>`
     + `<td class="text-right tabular-nums">v${esc(s.version)}</td>`

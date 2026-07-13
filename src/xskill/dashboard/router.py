@@ -112,8 +112,13 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
 
     @router.get("/api/v1/dashboard/skills")
     def skills() -> dict:
-        """skill 库存清单(分析式：读 skill 目录,不依赖埋点)。"""
-        cat = skills_catalog(skill_dir)
+        """skill 库存清单(分析式：读 skill 目录,不依赖埋点)。
+
+        自产 git 技能标 ``source="native"``；skillhub 三方技能（启用时）合入
+        并标 ``source="skillhub"`` + ``hub`` + ``skill_id``。skillhub 缺省禁用
+        → ``_build_skillhub()`` 返回 None → no-op，列表只有自产技能。
+        """
+        cat = skills_catalog(skill_dir, skillhub=_build_skillhub())
         states: dict = {}
         for s in cat:
             states[s["state"]] = states.get(s["state"], 0) + 1
