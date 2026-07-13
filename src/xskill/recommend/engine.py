@@ -25,6 +25,10 @@ from xskill.recommend.profile_store import ProfileStore
 from xskill.recommend.reco_store import RecoStore
 from xskill.recommend.skillhub import SkillHub
 from xskill.skill.repo import SkillRepo
+from xskill.utils.embed_store import EmbedStore
+
+# tag 向量的磁盘复用缓存文件（落 traj_root，tag 集稳定，不做 prune）。
+TAG_EMBED_CACHE_NAME = ".tag_embed_cache.pkl"
 
 if TYPE_CHECKING:
     from xskill.recommend.client_interest import ClientInterest
@@ -434,8 +438,11 @@ class SkillRecommendEngine:
                         tags.append(t)
         if not tags:
             return []
+        tag_embed_store = EmbedStore(
+            self.traj_root / TAG_EMBED_CACHE_NAME, self.embed_client,
+        )
         vecs = _normalize_rows(np.asarray(
-            self.embed_client.encode_batch(tags), dtype=float,
+            tag_embed_store.encode_cached(tags), dtype=float,
         ))
         return list(zip(tags, vecs))
 
@@ -484,8 +491,11 @@ class SkillRecommendEngine:
             skill_vec = np.asarray(skill.vec, dtype=float)
         except Exception:  # pylint: disable=broad-exception-caught
             return tags[:top_k]  # 无 vec（如无 description）→ 退回集合截断
+        tag_embed_store = EmbedStore(
+            self.traj_root / TAG_EMBED_CACHE_NAME, self.embed_client,
+        )
         tag_vecs = _normalize_rows(np.asarray(
-            self.embed_client.encode_batch(tags), dtype=float,
+            tag_embed_store.encode_cached(tags), dtype=float,
         ))
         sims = tag_vecs @ skill_vec
         order = np.argsort(-sims)

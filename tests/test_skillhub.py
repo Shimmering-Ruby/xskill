@@ -108,6 +108,40 @@ class TestSkillHub:
         assert hub.enabled is False
         assert hub.index() == []
 
+    def test_index_reuses_embeddings_for_unchanged_skill_md(self, tmp_path):
+        """重启/改一个 SKILL.md 只重算变化项，不再全量重 embed（EmbedStore）。"""
+
+        class CountingEmbed(FakeEmbed):
+            def __init__(self, dim=4):
+                super().__init__(dim=dim)
+                self.encoded: list[str] = []
+
+            def encode_batch(self, texts):
+                self.encoded.extend(texts)
+                return super().encode_batch(texts)
+
+        hub_dir = tmp_path / "hub"
+        _write_hub_skill(hub_dir, "foo", "django migration helper")
+        _write_hub_skill(hub_dir, "bar", "react component gen")
+        first_client = CountingEmbed()
+        SkillHub(enabled=True, hub_dir=hub_dir, embed_client=first_client).index()
+        assert sorted(first_client.encoded) == [
+            "django migration helper", "react component gen",
+        ]
+
+        # 模拟重启：新实例、缓存在盘上 → 内容未变零重算
+        restart_client = CountingEmbed()
+        SkillHub(enabled=True, hub_dir=hub_dir, embed_client=restart_client).index()
+        assert restart_client.encoded == []
+
+        # 只改一个 SKILL.md → 只重算这一条
+        (hub_dir / "foo" / "SKILL.md").write_text(
+            "---\nname: foo\ndescription: fastapi helper\n---\n# foo\n",
+            encoding="utf-8")
+        changed_client = CountingEmbed()
+        SkillHub(enabled=True, hub_dir=hub_dir, embed_client=changed_client).index()
+        assert changed_client.encoded == ["fastapi helper"]
+
     def test_recursively_scans_nested_skill_md_under_multiple_folders(self, tmp_path):
         hub_dir = tmp_path / "hub"
         _write_hub_skill(

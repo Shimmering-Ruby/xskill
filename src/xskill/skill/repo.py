@@ -195,8 +195,10 @@ def rebuild_skill_index(
     skill_names, descriptions = zip(*entries)
     descriptions = list(descriptions)
 
-    # 主特征：description-only 向量
-    embeddings = embed_client.encode_batch(descriptions)
+    # 主特征：description-only 向量（EmbedStore 按内容哈希复用，只算变化项）
+    from xskill.utils.embed_store import EmbedStore
+    embed_store = EmbedStore(skill_root / ".skill_embed_cache.pkl", embed_client)
+    embeddings = embed_store.encode_cached(descriptions)
     embeddings = numpy.asarray(embeddings, dtype=float)
     norms = numpy.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1
@@ -212,11 +214,14 @@ def rebuild_skill_index(
         )
         if not summaries:
             continue
-        vecs = numpy.asarray(embed_client.encode_batch(summaries), dtype=float)
+        vecs = numpy.asarray(embed_store.encode_cached(summaries), dtype=float)
         mean = vecs.mean(axis=0)
         n = float(numpy.linalg.norm(mean))
         atom_feats[i] = mean / n if n > 0 else mean
         atom_present[i] = True
+
+    # 本轮已覆盖全部 description + summary，压掉已删除/改写条目的陈旧向量。
+    embed_store.flush_pruned()
 
     index_data = {
         "skill_names": list(skill_names),

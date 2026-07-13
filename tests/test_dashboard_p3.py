@@ -360,6 +360,9 @@ class _FakeEmbed:
         self.dim = dim
         self.model = "fake-embed"
 
+    def encode_batch(self, texts):
+        return np.stack([self.encode(t) for t in texts])
+
     def encode(self, text):
         v = np.zeros(self.dim, dtype=float)
         for i, ch in enumerate(text):
