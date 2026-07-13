@@ -62,7 +62,7 @@ def test_template_top_level_keys_are_exactly_live_set():
     parsed = yaml.safe_load(CONFIG_TEMPLATE)
     assert set(parsed.keys()) == {
         "skill_dir", "llm", "embedding", "canary", "watcher", "team", "dashboard",
-        "skill_opt", "ingest", "interests",
+        "skill_opt", "ingest", "interests", "server",
         # ingest 段由 config.ingest_config 消费（settle 屏障/去壳掩码）
         # recommend 段由 config.recommend_config 消费（推荐引擎参数）
         # skillhub 段由 config.skillhub_config 消费（三方 skill 选配）

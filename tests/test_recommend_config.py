@@ -9,9 +9,42 @@ import pytest
 from xskill.config import (
     CONFIG_TEMPLATE,
     allow_anonymous_user,
+    profile_refresh_config,
     recommend_config,
     skillhub_config,
 )
+
+
+class TestProfileRefreshConfig:
+    def test_defaults_and_overrides(self):
+        assert profile_refresh_config({}) == {
+            "workers": 4,
+            "queue_size": 1024,
+            "shutdown_timeout": 5.0,
+        }
+        assert profile_refresh_config({"server": {
+            "profile_refresh_workers": 8,
+            "profile_refresh_queue_size": 99,
+            "profile_refresh_shutdown_timeout": 1.5,
+        }}) == {"workers": 8, "queue_size": 99, "shutdown_timeout": 1.5}
+
+    @pytest.mark.parametrize("key,value", [
+        ("profile_refresh_workers", 0),
+        ("profile_refresh_workers", 1.5),
+        ("profile_refresh_queue_size", -1),
+        ("profile_refresh_queue_size", True),
+        ("profile_refresh_shutdown_timeout", 0),
+        ("profile_refresh_shutdown_timeout", float("inf")),
+        ("profile_refresh_shutdown_timeout", float("nan")),
+        ("profile_refresh_shutdown_timeout", "5"),
+    ])
+    def test_invalid_values_fail_loud(self, key, value):
+        with pytest.raises(ValueError, match=key):
+            profile_refresh_config({"server": {key: value}})
+
+    def test_template_contains_profile_refresh_defaults(self):
+        assert "profile_refresh_workers: 4" in CONFIG_TEMPLATE
+        assert "profile_refresh_queue_size: 1024" in CONFIG_TEMPLATE
 
 
 # ── recommend_config ──────────────────────────────────────────────

@@ -53,9 +53,7 @@ class _Ctx:
     allow_anonymous_user: bool = True
     register_dir: Callable[[Path, str], None] | None = None
     skillhub = None
-    # /sync 画像刷新的同 client 在途去重（慢 embedding 后端下重复 tick 不排队重算）
-    profile_refresh_lock: threading.Lock = threading.Lock()
-    profile_refresh_inflight: set[str] = set()
+    profile_refresh_service = None
 
 
 _ctx = _Ctx()
@@ -74,8 +72,18 @@ def init_team_context(
     register_dir: Callable[[Path, str], None],
     allow_anonymous_user: bool = True,
     skillhub=None,
+    profile_refresh_service=None,
 ) -> None:
     """create_app(team_server=True) 在 startup 时调用一次。"""
+    # create_app/TestClient 可在同一进程内反复初始化。新上下文接管前
+    # 先有界停止旧服务，避免留下持有旧 engine 的 daemon 线程。
+    previous = _ctx.profile_refresh_service
+    if previous is not None and previous is not profile_refresh_service:
+        try:
+            previous.stop(timeout=5.0)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("failed to stop previous profile refresh service",
+                           exc_info=True)
     _ctx.join_token = join_token
     _ctx.client_registry = client_registry
     _ctx.skill_dir = Path(skill_dir)
@@ -86,6 +94,35 @@ def init_team_context(
     _ctx.allow_anonymous_user = allow_anonymous_user
     _ctx.register_dir = register_dir
     _ctx.skillhub = skillhub
+    _ctx.profile_refresh_service = profile_refresh_service
+
+
+def clear_team_context(*, profile_refresh_shutdown_timeout: float = 5.0) -> bool:
+    """有界停止画像服务并清空模块上下文。
+
+    先调用 ``stop`` 让新的 ``/sync`` 刷新请求立即被拒绝，再清空
+    registry/路径等引用。返回画像 worker 是否在时限内全部退出。
+    """
+    service = _ctx.profile_refresh_service
+    stopped = True
+    if service is not None:
+        try:
+            stopped = bool(service.stop(timeout=profile_refresh_shutdown_timeout))
+        except Exception:  # pylint: disable=broad-exception-caught
+            stopped = False
+            logger.warning("failed to stop profile refresh service", exc_info=True)
+    _ctx.join_token = ""
+    _ctx.client_registry = None
+    _ctx.skill_dir = None
+    _ctx.traj_root = None
+    _ctx.probability = 0.2
+    _ctx.ranked_slots = 80
+    _ctx.total_slots = 100
+    _ctx.allow_anonymous_user = True
+    _ctx.register_dir = None
+    _ctx.skillhub = None
+    _ctx.profile_refresh_service = None
+    return stopped
 
 
 def _auth(token: str | None, client_id: str | None,
@@ -98,9 +135,10 @@ def _auth(token: str | None, client_id: str | None,
         raise HTTPException(status_code=503, detail="team context not initialized")
     if not token or token != _ctx.join_token:
         raise HTTPException(status_code=401, detail="invalid join token")
-    if not client_id or not _ctx.client_registry.exists(client_id):
+    if not client_id or not _ctx.client_registry.authenticate_and_touch(
+        client_id, version,
+    ):
         raise HTTPException(status_code=403, detail="unknown client_id")
-    _ctx.client_registry.touch(client_id, version=version)
     return client_id
 
 
@@ -522,36 +560,12 @@ def team_sync(
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
 ):
-    """同步 def（而非 async def）：update_user_interest → encode_batch 是同步
-    httpx（最长 60s）。每个 client 周期性打这个端点，冷启动期 atom 集频繁
-    变化、画像指纹屡屡失效——写成 async 会让 embedding 后端一慢就把整个
-    事件循环冻住，所有端点"连不上"。def 路由 FastAPI 自动丢线程池。"""
+    """只读已落库画像构建 manifest，再提交后台刷新。
+
+    路由保持 ``def``，因为 manifest 路径仍包含同步 SQLite/Git 读取；
+    慢 embedding 只在独立的 ProfileRefreshService worker 中执行。
+    """
     client_id = _auth(x_xskill_token, x_xskill_client, version=x_xskill_version)
-    # §5 sync 前刷新该 client 的用户画像（atom 集变化时重算，未变则指纹命中跳过）。
-    # 画像由 build_manifest → _pick_recommended → engine.get_skill_for_client 消费。
-    eng = None
-    try:
-        from xskill.team.server.skill_manifest import get_recommend_engine
-        eng = get_recommend_engine()
-    except Exception:  # pylint: disable=broad-exception-caught
-        eng = None
-    if eng is not None:
-        with _ctx.profile_refresh_lock:
-            refresh_in_flight = client_id in _ctx.profile_refresh_inflight
-            if not refresh_in_flight:
-                _ctx.profile_refresh_inflight.add(client_id)
-        if refresh_in_flight:
-            logger.debug("profile refresh for %s already in flight, serving "
-                         "cached profile", client_id)
-        else:
-            try:
-                from xskill.recommend.client_interest import ClientInterest
-                eng.update_user_interest(ClientInterest(client_id))
-            except Exception:  # pylint: disable=broad-exception-caught
-                logger.debug("profile refresh for %s skipped", client_id, exc_info=True)
-            finally:
-                with _ctx.profile_refresh_lock:
-                    _ctx.profile_refresh_inflight.discard(client_id)
     # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
     # best-effort 读取(D8:超量在写入侧拒绝,这里读挂了退回无 prefs 分发,
     # 后台链路绝不因控制面阻塞)。user_key=user_name(D5),匿名 client 只吃全局。
@@ -576,6 +590,16 @@ def team_sync(
         prefs=prefs,
         retired=retired,
     )
+    # 本次响应必须使用 request() 之前的已落库画像。request 只操作
+    # 有界内存队列；服务缺失、正在停止、队列满或自身异常都不改变
+    # /sync 的成功响应。
+    service = _ctx.profile_refresh_service
+    if service is not None:
+        try:
+            service.request(client_id)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("profile refresh request failed for %s", client_id,
+                           exc_info=True)
     return resp.model_dump()
 
 

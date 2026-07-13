@@ -19,6 +19,13 @@ embedding:
   api_key: PUT_YOUR_EMBEDDING_API_KEY_HERE
   dim: 1024                             # embedding 维度，填 0 则首次调用时自动探测
 
+# ===== Server runtime =====
+server:
+  thread_pool_tokens: 300          # 同步 HTTP 路由的 anyio 线程池容量
+  profile_refresh_workers: 4       # 画像刷新使用的独立固定 worker 数
+  profile_refresh_queue_size: 1024 # 待刷新 client 的有界队列容量
+  profile_refresh_shutdown_timeout: 5 # 停机最长等待画像 worker 的秒数
+
 canary:
   enabled: true
   probability: 0.2       # 每次命中 skill 时，有 20% 概率走候选版本（staging）而非正式版（main）

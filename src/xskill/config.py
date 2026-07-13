@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -156,15 +157,11 @@ skill_opt:
   rerun_enabled:      true    # dashboard "re-run case" action endpoint on/off
 
 # ===== Server (uvicorn/FastAPI runtime knobs) =====
-# server:
-#   thread_pool_tokens: 300     # anyio default thread-pool capacity. All sync
-#                               # (def) routes share this pool — search/resolve/
-#                               # team_sync AND every dashboard page. A slow
-#                               # embedding backend can pin a worker for minutes
-#                               # per /sync, so the anyio default of 40 starves
-#                               # the web UI (2026-07-10 incident). 300 is a
-#                               # stopgap ceiling, not a fix — see
-#                               # openspec/backend-slow-resilience.
+server:
+  thread_pool_tokens: 300          # anyio 同步路由线程池容量（兼容旧配置）
+  profile_refresh_workers: 4       # 用户画像后台刷新固定并发数
+  profile_refresh_queue_size: 1024 # 待刷新 client 的有界队列容量
+  profile_refresh_shutdown_timeout: 5 # 停机等待画像 worker 的最长秒数
 
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:
@@ -508,6 +505,37 @@ def skillhub_config(cfg: Optional[dict] = None) -> dict:
             f"skillhub.dir 必须是字符串路径，got {type(raw_dir).__name__}"
         )
     return {"enabled": enabled, "dir": Path(raw_dir).expanduser()}
+
+
+def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
+    """读取 team server 的后台画像刷新配置并严格校验。
+
+    worker 数和队列容量必须是正整数，停机超时必须是正数。
+    """
+    section = (cfg or {}).get("server") or {}
+    workers = section.get("profile_refresh_workers", 4)
+    queue_size = section.get("profile_refresh_queue_size", 1024)
+    shutdown_timeout = section.get("profile_refresh_shutdown_timeout", 5)
+
+    for key, value in (
+        ("profile_refresh_workers", workers),
+        ("profile_refresh_queue_size", queue_size),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"server.{key} 必须是正整数，got {value!r}")
+    if (not isinstance(shutdown_timeout, (int, float))
+            or isinstance(shutdown_timeout, bool)
+            or not math.isfinite(shutdown_timeout)
+            or shutdown_timeout <= 0):
+        raise ValueError(
+            "server.profile_refresh_shutdown_timeout 必须是正数，"
+            f"got {shutdown_timeout!r}"
+        )
+    return {
+        "workers": workers,
+        "queue_size": queue_size,
+        "shutdown_timeout": float(shutdown_timeout),
+    }
 
 
 def allow_anonymous_user(cfg: Optional[dict] = None) -> bool:

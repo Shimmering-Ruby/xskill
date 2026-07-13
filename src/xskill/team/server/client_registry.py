@@ -13,6 +13,7 @@ import hashlib
 import re
 import secrets
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,33 +91,38 @@ class ClientRegistry:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.RLock()
         self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 10000")
+        conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
     def _init_schema(self) -> None:
-        conn = self._conn()
-        try:
-            conn.executescript(_SCHEMA)
-            # 幂等迁移：CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，
-            # 老 db 缺 user_name 列时显式 ALTER 补上。
-            cols = {row["name"] for row in conn.execute("PRAGMA table_info(clients)")}
-            if "user_name" not in cols:
-                conn.execute("ALTER TABLE clients ADD COLUMN user_name TEXT DEFAULT ''")
-            if "client_version" not in cols:
-                # P2-2.10:client 上报的 xskill 版本,register/sync 时 upsert
-                conn.execute(
-                    "ALTER TABLE clients ADD COLUMN client_version TEXT DEFAULT ''")
-            if "dashboard_token" not in cols:
-                # P2-2.2(Q2a):dashboard 登录凭证,--name 注册时发放并回传打印
-                conn.execute(
-                    "ALTER TABLE clients ADD COLUMN dashboard_token TEXT DEFAULT ''")
-            conn.commit()
-        finally:
-            conn.close()
+        with self._write_lock:
+            conn = self._conn()
+            try:
+                conn.execute("PRAGMA journal_mode = WAL")
+                conn.executescript(_SCHEMA)
+                # 幂等迁移：CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，
+                # 老 db 缺 user_name 列时显式 ALTER 补上。
+                cols = {row["name"] for row in conn.execute("PRAGMA table_info(clients)")}
+                if "user_name" not in cols:
+                    conn.execute("ALTER TABLE clients ADD COLUMN user_name TEXT DEFAULT ''")
+                if "client_version" not in cols:
+                    # P2-2.10:client 上报的 xskill 版本,register/sync 时 upsert
+                    conn.execute(
+                        "ALTER TABLE clients ADD COLUMN client_version TEXT DEFAULT ''")
+                if "dashboard_token" not in cols:
+                    # P2-2.2(Q2a):dashboard 登录凭证,--name 注册时发放并回传打印
+                    conn.execute(
+                        "ALTER TABLE clients ADD COLUMN dashboard_token TEXT DEFAULT ''")
+                conn.commit()
+            finally:
+                conn.close()
 
     def register(
         self, *,
@@ -148,29 +154,30 @@ class ClientRegistry:
             norm = _normalize_user_name(user_name)
             client_id = client_id_from_name(user_name)
             now = _now()
-            conn = self._conn()
-            try:
-                existing = conn.execute(
-                    "SELECT 1 FROM clients WHERE client_id=?", (client_id,)
-                ).fetchone()
-                if existing:
-                    conn.execute(
-                        "UPDATE clients SET last_seen=?, hostname=?, user_name=?,"
-                        " client_version=?"
-                        " WHERE client_id=?",
-                        (_now(), hostname or "", norm, client_version or "", client_id),
-                    )
-                else:
-                    conn.execute(
-                        "INSERT INTO clients (client_id, label, hostname, user_name,"
-                        " client_version, joined_at, last_seen)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (client_id, label or norm, hostname or "", norm,
-                         client_version or "", now, now),
-                    )
-                conn.commit()
-            finally:
-                conn.close()
+            with self._write_lock:
+                conn = self._conn()
+                try:
+                    existing = conn.execute(
+                        "SELECT 1 FROM clients WHERE client_id=?", (client_id,)
+                    ).fetchone()
+                    if existing:
+                        conn.execute(
+                            "UPDATE clients SET last_seen=?, hostname=?, user_name=?,"
+                            " client_version=?"
+                            " WHERE client_id=?",
+                            (_now(), hostname or "", norm, client_version or "", client_id),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO clients (client_id, label, hostname, user_name,"
+                            " client_version, joined_at, last_seen)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (client_id, label or norm, hostname or "", norm,
+                             client_version or "", now, now),
+                        )
+                    conn.commit()
+                finally:
+                    conn.close()
             return client_id
         # 优先级 ② — claimed_client_id 命中
         if claimed_client_id and self.exists(claimed_client_id):
@@ -184,17 +191,18 @@ class ClientRegistry:
         # 优先级 ④ — 发新 uuid
         client_id = uuid.uuid4().hex
         now = _now()
-        conn = self._conn()
-        try:
-            conn.execute(
-                "INSERT INTO clients (client_id, label, hostname, client_version,"
-                " joined_at, last_seen)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (client_id, label, hostname, client_version or "", now, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        with self._write_lock:
+            conn = self._conn()
+            try:
+                conn.execute(
+                    "INSERT INTO clients (client_id, label, hostname, client_version,"
+                    " joined_at, last_seen)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (client_id, label, hostname, client_version or "", now, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         return client_id
 
     def _find_by_fingerprint(
@@ -227,26 +235,27 @@ class ClientRegistry:
 
         P2-2.2(Q2a):``--name`` 注册路径调用。token 与 user_name 1:1
         （命名用户的 client_id 由 name 确定性派生）。"""
-        conn = self._conn()
-        try:
-            row = conn.execute(
-                "SELECT dashboard_token FROM clients WHERE client_id=?",
-                (client_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"unknown client_id: {client_id}")
-            existing = row["dashboard_token"] or ""
-            if existing:
-                return existing
-            token = secrets.token_hex(16)
-            conn.execute(
-                "UPDATE clients SET dashboard_token=? WHERE client_id=?",
-                (token, client_id),
-            )
-            conn.commit()
-            return token
-        finally:
-            conn.close()
+        with self._write_lock:
+            conn = self._conn()
+            try:
+                row = conn.execute(
+                    "SELECT dashboard_token FROM clients WHERE client_id=?",
+                    (client_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"unknown client_id: {client_id}")
+                existing = row["dashboard_token"] or ""
+                if existing:
+                    return existing
+                token = secrets.token_hex(16)
+                conn.execute(
+                    "UPDATE clients SET dashboard_token=? WHERE client_id=?",
+                    (token, client_id),
+                )
+                conn.commit()
+                return token
+            finally:
+                conn.close()
 
     def dashboard_token_for(self, user_name: str) -> str | None:
         """按 user_name 取 dashboard token（登录校验用）。未注册/无 token → None。"""
@@ -296,22 +305,30 @@ class ClientRegistry:
 
         client_id 不存在则静默 no-op。version=None（旧 client 未上报）不清
         既有值。"""
-        conn = self._conn()
-        try:
-            if version:
-                conn.execute(
-                    "UPDATE clients SET last_seen=?, client_version=?"
-                    " WHERE client_id=?",
-                    (_now(), version, client_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE clients SET last_seen=? WHERE client_id=?",
-                    (_now(), client_id),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        self.authenticate_and_touch(client_id, version)
+
+    def authenticate_and_touch(
+        self, client_id: str, version: str | None = None,
+    ) -> bool:
+        """原子确认 client 存在并更新 last_seen；不存在时返回 False。"""
+        with self._write_lock:
+            conn = self._conn()
+            try:
+                if version:
+                    cursor = conn.execute(
+                        "UPDATE clients SET last_seen=?, client_version=?"
+                        " WHERE client_id=?",
+                        (_now(), version, client_id),
+                    )
+                else:
+                    cursor = conn.execute(
+                        "UPDATE clients SET last_seen=? WHERE client_id=?",
+                        (_now(), client_id),
+                    )
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
 
     def get(self, client_id: str) -> dict | None:
         conn = self._conn()

@@ -215,6 +215,9 @@ def _pick_recommended(
             # get_skill_for_client 已记录推荐 + resolve side；只取 reco_slots 个
             return picked[:reco_slots]
         # 冷启动（无画像）→ ux_tail（与既有 RECOMMENDER 冷启动语义一致）
+        # team server 的 /sync 必须保持纯缓存路径，不得再落到下方会
+        # 扫描 atom store 的旧 RECOMMENDER。
+        return ux_tail[:reco_slots]
 
     # 延迟 import：profile_reco 依赖 numpy + atom store，非 team 路径不付代价。
     from xskill.team.server.profile_reco import RECOMMENDER

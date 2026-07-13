@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from dulwich.errors import NotGitRepository
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -68,6 +69,7 @@ logger = logging.getLogger("xskill.server")
 _config: dict | None = None
 _skill_dir: Path | None = None
 _watcher_ref: dict = {}  # {"instance": DirectoryWatcher} — set in create_app startup
+_profile_refresh_ref: dict = {}  # {"instance": ProfileRefreshService}
 
 # debug 模式：把生态扫描的 home_root 指向用户自选目录，不扫真正的 $HOME。
 # 用法：xskill serve --debug --home /tmp/test-home → 只扫
@@ -183,7 +185,7 @@ class HealthResponse(BaseModel):
 class StatusResponse(BaseModel):
     skill_dir: str
     skill_count: int
-    git_branch: str
+    git_branch: Optional[str] = None
 
 
 class InitRequest(BaseModel):
@@ -741,17 +743,16 @@ async def api_health():
 @router.get("/status", response_model=StatusResponse)
 async def api_status():
     """Return system status: skill dir, skill count, git branch."""
+    skills = list_skills(_skill_dir)
     try:
-        skills = list_skills(_skill_dir)
         branch = current_branch(str(_skill_dir))
-        return StatusResponse(
-            skill_dir=str(_skill_dir),
-            skill_count=len(skills),
-            git_branch=branch,
-        )
-    except Exception as e:
-        logger.exception("status check failed")
-        raise HTTPException(status_code=500, detail=str(e))
+    except NotGitRepository:
+        branch = None
+    return StatusResponse(
+        skill_dir=str(_skill_dir),
+        skill_count=len(skills),
+        git_branch=branch,
+    )
 
 
 @router.post("/init", response_model=MessageResponse)
@@ -887,11 +888,16 @@ def create_app(home_root: Path | str | None = None,
         from xskill.pipeline.registry import model_share, usage_summary
         watcher = (_watcher_ref["instance"].stats
                    if _watcher_ref.get("instance") else None)
+        profile_refresh = (
+            _profile_refresh_ref["instance"].metrics
+            if _profile_refresh_ref.get("instance") else None
+        )
         return {
             "role": "server" if _config.get("team", {}).get("server") else "client",
             "cost": usage_summary(),
             "models": model_share(),
             "pipeline": watcher,
+            "profile_refresh": profile_refresh,
         }
 
     # ------------------------------------------------------------------
@@ -903,16 +909,19 @@ def create_app(home_root: Path | str | None = None,
         带 None client 带病跑（CLAUDE.md 第 1 条）。create_llm_client 内部仍可能
         返回 None（其它调用方依赖此语义），所以在 daemon startup 处显式断言。
         """
-        # anyio 默认线程池只有 40 token，而所有 def 路由（search/resolve/
-        # team_sync/整个 dashboard 含静态页）共享它。embedding 后端慢时
-        # /sync 单请求可占线程数分钟，40 会被打满 → 网页整体失联
-        # （2026-07-10 生产事故）。抬到 300 只是抬水位保命，堆积机制的根治
-        # 走 openspec/backend-slow-resilience（PR #76）。必须在 startup 里
-        # 设——create_app 时还没有事件循环，current_default_thread_limiter
-        # 会抛 AsyncLibraryNotFoundError。
+        # 所有 def 路由仍共享 anyio 线程池，保留可配容量以兼容
+        # 现有部署。画像 embedding 已转到独立固定 worker，不使用此池。
+        # limiter 必须在 startup 的事件循环内设置。
         import anyio.to_thread
         anyio.to_thread.current_default_thread_limiter().total_tokens = int(
             _config.get("server", {}).get("thread_pool_tokens", 300))
+
+        # 配置错误必须让 team server 启动失败，不能在下方 best-effort
+        # 上下文初始化中被吞掉。
+        profile_refresh_cfg = None
+        if team_server:
+            from xskill.config import profile_refresh_config
+            profile_refresh_cfg = profile_refresh_config(_config)
 
         llm = create_llm_client(_config)
         if llm is None:
@@ -1267,9 +1276,11 @@ def create_app(home_root: Path | str | None = None,
 
         # team server：初始化 team 上下文 + 注册 traj_root 为 watch_dir 基。
         if team_server:
+            profile_refresh_service = None
             try:
                 from xskill.team.server.client_registry import ClientRegistry
                 from xskill.team.server.api import init_team_context
+                from xskill.team.server.profile_refresh import ProfileRefreshService
                 from xskill.team.server.state import ensure_join_token
                 from xskill.config import (
                     allow_anonymous_user as _allow_anonymous,
@@ -1302,6 +1313,12 @@ def create_app(home_root: Path | str | None = None,
                     client_registry=client_registry,
                 )
                 set_recommend_engine(_engine)
+                profile_refresh_service = ProfileRefreshService(
+                    _engine,
+                    workers=profile_refresh_cfg["workers"],
+                    queue_size=profile_refresh_cfg["queue_size"],
+                    autostart=False,
+                )
 
                 init_team_context(
                     join_token=join_token,
@@ -1314,9 +1331,34 @@ def create_app(home_root: Path | str | None = None,
                     register_dir=_team_register_dir,
                     allow_anonymous_user=_allow_anonymous(_config),
                     skillhub=_engine.skillhub,
+                    profile_refresh_service=profile_refresh_service,
                 )
-                logger.info("team server context ready (traj_root=%s)", traj_root)
+                profile_refresh_service.start()
+                _profile_refresh_ref["instance"] = profile_refresh_service
+                _profile_refresh_ref["shutdown_timeout"] = profile_refresh_cfg[
+                    "shutdown_timeout"
+                ]
+                logger.info(
+                    "team server context ready (traj_root=%s, profile_workers=%d)",
+                    traj_root, profile_refresh_cfg["workers"],
+                )
             except Exception:
+                if profile_refresh_service is not None:
+                    profile_refresh_service.stop(
+                        timeout=profile_refresh_cfg["shutdown_timeout"],
+                    )
+                _profile_refresh_ref.clear()
+                try:
+                    from xskill.team.server.api import clear_team_context
+                    clear_team_context(profile_refresh_shutdown_timeout=0)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    logger.warning("failed to clear partial team context",
+                                   exc_info=True)
+                try:
+                    from xskill.team.server.skill_manifest import set_recommend_engine
+                    set_recommend_engine(None)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
                 logger.warning("team server context init failed", exc_info=True)
 
         # watcher 无条件启动——即便此刻 registry 为空。
@@ -1351,9 +1393,24 @@ def create_app(home_root: Path | str | None = None,
         from xskill.api.sse import shutdown_sse_executor
         request_shutdown()
         shutdown_sse_executor()
+        # 画像 worker 先停止接收并有界等待，随后清理 team 上下文；
+        # watcher 在两者之后停止，避免慢 embedding 占用 watcher/anyio 资源。
+        if team_server:
+            try:
+                from xskill.team.server.api import clear_team_context
+                clear_team_context(
+                    profile_refresh_shutdown_timeout=float(
+                        _profile_refresh_ref.get("shutdown_timeout", 5.0),
+                    ),
+                )
+            finally:
+                _profile_refresh_ref.clear()
+                from xskill.team.server.skill_manifest import set_recommend_engine
+                set_recommend_engine(None)
         watcher = _watcher_ref.get("instance")
         if watcher:
             watcher.stop()
+            _watcher_ref.pop("instance", None)
         # Stop any ecosystem ingesters started in startup.
         for k, v in list(_watcher_ref.items()):
             if k.startswith("ingester_"):

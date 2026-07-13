@@ -11,10 +11,13 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import hashlib
+import json
 import logging
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
@@ -36,6 +39,18 @@ if TYPE_CHECKING:
     from xskill.skill.skill import Skill
 
 logger = logging.getLogger("xskill.recommend.engine")
+
+
+@dataclass(frozen=True)
+class ProfileUpdateResult:
+    """一次画像刷新结果，供后台刷新服务累计指标。"""
+
+    changed: bool
+    embed_items: int
+    source_revision: str
+    embed_batches: int = 0
+    reused_vector_items: int = 0
+    cancelled: bool = False
 
 
 def _normalize_rows(v: np.ndarray) -> np.ndarray:
@@ -69,7 +84,9 @@ class SkillRecommendEngine:
         self.staging_need = self.rcfg["staging_need"] or self.canary_cfg.min_samples
         self._skill_index_cache: Optional[dict] = None
         self._skillhub_cache: Optional[tuple[tuple, list[dict]]] = None
-        self._profile_fp_cache: dict[str, tuple] = {}  # user_id → 上次画像计算时的 atom 指纹
+        # 保留该属性以兼容仍会清理旧进程内缓存的调用方；画像新鲜度以数据库中的
+        # source_revision 为准，进程重启不会导致无谓重算。
+        self._profile_fp_cache: dict[str, tuple] = {}
         self.skillhub = SkillHub.from_config(config, embed_client)
         self.client_registry = client_registry  # 用于 user_name → 目录名解析
 
@@ -155,10 +172,11 @@ class SkillRecommendEngine:
             return []
         return list(AtomTaskStore(root=root).all_atoms())
 
-    def _user_used_skills(self, user_id: str) -> list[dict]:
+    @staticmethod
+    def _used_skills_from_atoms(atoms: list) -> list[dict]:
         """从用户 atom 聚合 ``{name, use_count, avg_score}``。"""
         agg: dict[str, list[float]] = {}
-        for atom in self._user_atoms(user_id):
+        for atom in atoms:
             for name in (atom.used_skills or []):
                 agg.setdefault(name, []).append(
                     float(atom.ux_score) if atom.ux_score is not None else 0.0
@@ -173,46 +191,76 @@ class SkillRecommendEngine:
         out.sort(key=lambda d: d["use_count"], reverse=True)
         return out
 
+    def _user_used_skills(self, user_id: str) -> list[dict]:
+        """兼容旧调用；画像刷新路径使用单次 atom 快照。"""
+        return self._used_skills_from_atoms(self._user_atoms(user_id))
+
     # ── 5.2 update_user_interest ─────────────────────────────────
-    def _user_atom_fingerprint(self, user_id: str) -> tuple:
-        """用户 atom 集指纹：(traj_id, atom 文件数) 排序元组。变了才重算画像。"""
-        root = self._client_store_root(user_id)
-        if not root.is_dir():
-            return ()
-        parts: list[tuple[str, int]] = []
-        for traj_dir in sorted(root.iterdir()):
-            if not traj_dir.is_dir():
-                continue
-            tasks = traj_dir / "tasks"
-            if not tasks.is_dir():
-                continue
-            n = sum(1 for _ in tasks.glob("atom_*.json"))
-            parts.append((traj_dir.name, n))
-        return tuple(parts)
+    @staticmethod
+    def _atom_revision(atoms: list) -> str:
+        """对单次 atom 快照生成稳定版本；内容原地变化也能被发现。"""
+        payload = [{
+            "atom_id": atom.atom_id,
+            "summary": atom.summary or "",
+            "used_skills": sorted(atom.used_skills or []),
+            "ux_score": atom.ux_score,
+            "tags": sorted(atom.tags or []),
+        } for atom in sorted(atoms, key=lambda item: item.atom_id)]
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def update_user_interest(
-        self, client_interest: "ClientInterest", task_atom=None,
-    ) -> None:
+        self,
+        client_interest: "ClientInterest",
+        task_atom=None,
+        *,
+        should_commit: Optional[Callable[[], bool]] = None,
+    ) -> ProfileUpdateResult:
         """atom 触发：重扫用户 atom 摘要 → 重新聚类 → upsert 画像。
 
         ``task_atom`` 为触发事件（增量优化预留，当前以 atom store 为单一真源重扫）。
-        带**指纹缓存**：atom 集未变则跳过重算（避免每次 /sync 都重 embed）。
+        新鲜度版本持久化到 SQLite；只有完整计算和 upsert 成功后才推进版本。
         """
         # pylint: disable=unused-argument
         user_id = client_interest.user_id
-        fp = self._user_atom_fingerprint(user_id)
-        if self._profile_fp_cache.get(user_id) == fp:
-            return  # atom 集未变，画像仍有效
+        snapshot = sorted(self._user_atoms(user_id), key=lambda item: item.atom_id)
+        revision = self._atom_revision(snapshot)
+        model = getattr(self.embed_client, "model", "") or ""
+        persisted = self.profile_store.get_revision(user_id)
+        if (persisted is not None
+                and persisted["source_revision"] == revision
+                and persisted["embed_model"] == model):
+            return ProfileUpdateResult(
+                changed=False, embed_items=0, source_revision=revision,
+            )
 
-        atoms = [a for a in self._user_atoms(user_id) if a.summary]
-        used_skills = self._user_used_skills(user_id)
+        used_skills = self._used_skills_from_atoms(snapshot)
+        atoms = [atom for atom in snapshot if atom.summary]
         if not atoms:
+            if should_commit is not None and not should_commit():
+                return ProfileUpdateResult(
+                    changed=False,
+                    embed_items=0,
+                    source_revision=revision,
+                    cancelled=True,
+                )
             self.profile_store.upsert(
                 user_id, feature_tensor=None, mean_tensor=None, used_skills=used_skills,
+                embed_model=model, source_revision=revision,
             )
-            self._profile_fp_cache[user_id] = fp
-            return
-        vecs = self._embed_atoms_incremental(user_id, atoms)
+            return ProfileUpdateResult(
+                changed=True, embed_items=0, source_revision=revision,
+            )
+        if should_commit is not None and not should_commit():
+            return ProfileUpdateResult(
+                changed=False,
+                embed_items=0,
+                source_revision=revision,
+                cancelled=True,
+            )
+        vecs, embed_items, reused_items = self._embed_atoms_incremental(user_id, atoms)
         client_interest.reset_points(vecs)
         ft = client_interest.feature_tensor
         mt = client_interest.mean_tensor
@@ -220,24 +268,44 @@ class SkillRecommendEngine:
         point_meta = [{"atom_id": a.atom_id, "summary": a.summary,
                        "ux": a.ux_score, "tags": list(a.tags or [])}
                       for a in atoms]
+        # stop() 可能在慢 embedding 执行期间发生。后台服务传入的检查必须放在
+        # 最终 upsert 之前，避免服务停止后把已经过时的快照写回数据库。
+        if should_commit is not None and not should_commit():
+            return ProfileUpdateResult(
+                changed=False,
+                embed_items=embed_items,
+                source_revision=revision,
+                embed_batches=int(embed_items > 0),
+                reused_vector_items=reused_items,
+                cancelled=True,
+            )
         self.profile_store.upsert(
             user_id, feature_tensor=ft, mean_tensor=mt, used_skills=used_skills,
             points=vecs, point_meta=point_meta,
-            embed_model=getattr(self.embed_client, "model", ""),
+            embed_model=model, source_revision=revision,
         )
-        # 指纹在 upsert 成功后才写：中途失败不得挡住下次重算
-        self._profile_fp_cache[user_id] = fp
+        return ProfileUpdateResult(
+            changed=True, embed_items=embed_items, source_revision=revision,
+            embed_batches=int(embed_items > 0),
+            reused_vector_items=reused_items,
+        )
 
-    def _embed_atoms_incremental(self, user_id: str, atoms: list) -> np.ndarray:
-        """只对没缓存过的原子调 embedding,其余按 ``atom_id`` 复用上次落盘的向量。
+    def _embed_atoms_incremental(
+        self, user_id: str, atoms: list,
+    ) -> tuple[np.ndarray, int, int]:
+        """只对新增或 summary 变化的原子调 embedding。
 
-        atom 内容随 ``atom_id`` 不变（轨迹入库后原子不可变）,故按 id 复用安全；
+        只有 ``atom_id`` 和 ``summary`` 都一致才复用；summary 原地变化时只重算该条。
         换 embedding 模型时 ``load_vector_cache`` 返回空 → 整体重算（护栏在存储层）。
         避免一个攒了上万原子的用户每次新增几条就全量重 embed。
         """
         model = getattr(self.embed_client, "model", "")
-        cache = self.profile_store.load_vector_cache(user_id, model)
-        missing = [a for a in atoms if a.atom_id not in cache]
+        cache = self.profile_store.load_vector_cache_entries(user_id, model)
+        missing = [
+            atom for atom in atoms
+            if atom.atom_id not in cache
+            or cache[atom.atom_id]["summary"] != (atom.summary or "")
+        ]
         if missing:
             fresh = _normalize_rows(np.asarray(
                 self.embed_client.encode_batch([a.summary for a in missing]),
@@ -245,8 +313,12 @@ class SkillRecommendEngine:
             ))
             cache = dict(cache)
             for a, v in zip(missing, fresh):
-                cache[a.atom_id] = v
-        return np.asarray([cache[a.atom_id] for a in atoms], dtype=float)
+                cache[a.atom_id] = {"summary": a.summary or "", "vector": v}
+        return (
+            np.asarray([cache[a.atom_id]["vector"] for a in atoms], dtype=float),
+            len(missing),
+            len(atoms) - len(missing),
+        )
 
     # ── 5.3 get_skill_for_client ─────────────────────────────────
     def get_skill_for_client(

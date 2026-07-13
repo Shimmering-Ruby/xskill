@@ -223,6 +223,101 @@ class TestUpdateUserInterest:
         eng.update_user_interest(ClientInterest("u1"))
         assert embedded == [["a", "b"]]
 
+    def test_persisted_revision_survives_engine_restart(self, tmp_path):
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        traj_root = tmp_path / "traj"
+        sessions = traj_root / "clients" / "u1" / "sessions"
+        _write_atom(sessions, "traj_1", "atom_1", summary="same",
+                    used_skills=[], ux_score=5)
+        first = _engine(tmp_path, skill_dir, traj_root)
+        first.update_user_interest(ClientInterest("u1"))
+
+        second = _engine(tmp_path, skill_dir, traj_root)
+        embedded = []
+        second.embed_client.encode_batch = lambda texts: embedded.append(texts)
+        result = second.update_user_interest(ClientInterest("u1"))
+        assert result.changed is False
+        assert result.embed_items == 0
+        assert embedded == []
+
+    def test_delete_and_metadata_change_do_not_reembed(self, tmp_path):
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        traj_root = tmp_path / "traj"
+        sessions = traj_root / "clients" / "u1" / "sessions"
+        _write_atom(sessions, "traj_1", "atom_1", summary="one",
+                    used_skills=[], ux_score=5, tags=["old"])
+        _write_atom(sessions, "traj_1", "atom_2", summary="two",
+                    used_skills=[], ux_score=6)
+        eng = _engine(tmp_path, skill_dir, traj_root)
+        eng.update_user_interest(ClientInterest("u1"))
+
+        embedded = []
+        real_batch = eng.embed_client.encode_batch
+        eng.embed_client.encode_batch = lambda texts: (
+            embedded.append(list(texts)) or real_batch(texts)
+        )
+        _write_atom(sessions, "traj_1", "atom_1", summary="one",
+                    used_skills=["s0"], ux_score=9, tags=["new"])
+        metadata_result = eng.update_user_interest(ClientInterest("u1"))
+        assert metadata_result.changed is True
+        assert metadata_result.embed_items == 0
+        assert embedded == []
+        assert eng.profile_store.load("u1")["used_skills"][0]["name"] == "s0"
+
+        (sessions / "traj_1" / "tasks" / "atom_2.json").unlink()
+        delete_result = eng.update_user_interest(ClientInterest("u1"))
+        assert delete_result.changed is True
+        assert delete_result.embed_items == 0
+        assert embedded == []
+        assert len(eng.profile_store.load_points("u1")["meta"]) == 1
+
+    def test_in_place_summary_change_reembeds_one(self, tmp_path):
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        traj_root = tmp_path / "traj"
+        sessions = traj_root / "clients" / "u1" / "sessions"
+        _write_atom(sessions, "traj_1", "atom_1", summary="before",
+                    used_skills=[], ux_score=5)
+        _write_atom(sessions, "traj_1", "atom_2", summary="stable",
+                    used_skills=[], ux_score=6)
+        eng = _engine(tmp_path, skill_dir, traj_root)
+        eng.update_user_interest(ClientInterest("u1"))
+
+        embedded = []
+        real_batch = eng.embed_client.encode_batch
+        eng.embed_client.encode_batch = lambda texts: (
+            embedded.append(list(texts)) or real_batch(texts)
+        )
+        _write_atom(sessions, "traj_1", "atom_1", summary="after",
+                    used_skills=[], ux_score=5)
+        result = eng.update_user_interest(ClientInterest("u1"))
+        assert result.embed_items == 1
+        assert embedded == [["after"]]
+
+    def test_cancel_after_embedding_does_not_write_profile(self, tmp_path):
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        traj_root = tmp_path / "traj"
+        sessions = traj_root / "clients" / "u1" / "sessions"
+        _write_atom(sessions, "traj_1", "atom_1", summary="slow embed",
+                    used_skills=[], ux_score=5)
+        eng = _engine(tmp_path, skill_dir, traj_root)
+        checks = iter([True, False])
+
+        result = eng.update_user_interest(
+            ClientInterest("u1"), should_commit=lambda: next(checks),
+        )
+
+        assert result.cancelled is True
+        assert result.embed_items == 1
+        assert eng.profile_store.load("u1") is None
+
 
 # ── get_skill_for_client 80/20 + 回填 ─────────────────────────────
 

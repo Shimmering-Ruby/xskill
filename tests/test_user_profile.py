@@ -153,3 +153,50 @@ class TestProfileStore:
         row = ProfileStore(db).load("u1")  # 新实例重开
         assert row is not None
         assert np.allclose(row["feature_tensor"], [[1.0]])
+
+    def test_source_revision_migrates_and_round_trips(self, tmp_path):
+        import sqlite3
+
+        db = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db)
+        conn.execute("""CREATE TABLE client_interest (
+            user_id TEXT PRIMARY KEY, feature_tensor BLOB, mean_tensor BLOB,
+            used_skills TEXT DEFAULT '[]', points BLOB,
+            point_meta TEXT DEFAULT '[]', embed_model TEXT DEFAULT '',
+            updated_at TEXT NOT NULL)""")
+        conn.commit()
+        conn.close()
+
+        store = ProfileStore(db)
+        store.upsert(
+            "u1", feature_tensor=None, mean_tensor=None, used_skills=[],
+            embed_model="embed-v1", source_revision="rev-1",
+        )
+        assert store.get_revision("u1") == {
+            "source_revision": "rev-1", "embed_model": "embed-v1",
+        }
+        row = store.load("u1")
+        assert set(row) == {
+            "user_id", "feature_tensor", "mean_tensor", "used_skills", "updated_at",
+        }
+
+    def test_vector_cache_keeps_legacy_return_shape(self, tmp_path):
+        store = ProfileStore(tmp_path / "profile.db")
+        points = np.asarray([[1.0, 0.0]])
+        store.upsert(
+            "u1",
+            feature_tensor=points,
+            mean_tensor=points[0],
+            used_skills=[],
+            points=points,
+            point_meta=[{"atom_id": "a1", "summary": "hello"}],
+            embed_model="embed-v1",
+            source_revision="rev-1",
+        )
+
+        legacy = store.load_vector_cache("u1", "embed-v1")
+        assert set(legacy) == {"a1"}
+        assert np.allclose(legacy["a1"], points[0])
+        detailed = store.load_vector_cache_entries("u1", "embed-v1")
+        assert detailed["a1"]["summary"] == "hello"
+        assert np.allclose(detailed["a1"]["vector"], points[0])

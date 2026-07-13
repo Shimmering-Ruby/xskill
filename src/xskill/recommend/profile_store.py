@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS client_interest (
     points          BLOB,
     point_meta      TEXT DEFAULT '[]',
     embed_model     TEXT DEFAULT '',
+    source_revision TEXT DEFAULT '',
     updated_at      TEXT NOT NULL
 );
 """
@@ -52,6 +53,9 @@ class ProfileStore(_SqliteStore):
         if "embed_model" not in cols:
             conn.execute(
                 "ALTER TABLE client_interest ADD COLUMN embed_model TEXT DEFAULT ''")
+        if "source_revision" not in cols:
+            conn.execute(
+                "ALTER TABLE client_interest ADD COLUMN source_revision TEXT DEFAULT ''")
 
     def upsert(
         self,
@@ -63,6 +67,7 @@ class ProfileStore(_SqliteStore):
         points: Optional[np.ndarray] = None,
         point_meta: Optional[list[dict]] = None,
         embed_model: str = "",
+        source_revision: str = "",
     ) -> None:
         """写画像。``points``/``point_meta`` 与 feature_tensor 同一次计算产出,
         必须一起传（散点图与聚类中心不同源会画出撒谎的图）;冷启动都为 None。
@@ -82,8 +87,8 @@ class ProfileStore(_SqliteStore):
         try:
             conn.execute(
                 "INSERT INTO client_interest (user_id, feature_tensor, mean_tensor,"
-                " used_skills, points, point_meta, embed_model, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                " used_skills, points, point_meta, embed_model, source_revision, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(user_id) DO UPDATE SET"
                 " feature_tensor=excluded.feature_tensor,"
                 " mean_tensor=excluded.mean_tensor,"
@@ -91,16 +96,17 @@ class ProfileStore(_SqliteStore):
                 " points=excluded.points,"
                 " point_meta=excluded.point_meta,"
                 " embed_model=excluded.embed_model,"
+                " source_revision=excluded.source_revision,"
                 " updated_at=excluded.updated_at",
                 (user_id, ft_blob, mt_blob, used_json, pt_blob, meta_json,
-                 embed_model, _now()),
+                 embed_model, source_revision, _now()),
             )
             conn.commit()
         finally:
             conn.close()
 
-    def load_vector_cache(self, user_id: str, embed_model: str) -> dict:
-        """增量 embedding 复用源:``{atom_id: 向量(D,)}``。
+    def load_vector_cache_entries(self, user_id: str, embed_model: str) -> dict:
+        """增量 embedding 复用源:``{atom_id: {summary, vector}}``。
 
         仅当已落盘的 ``embed_model`` 与当前一致才返回（换模型 → 空,强制整体
         重算,不混用不同模型的向量）。无画像/无 points → 空 dict。
@@ -118,9 +124,39 @@ class ProfileStore(_SqliteStore):
                 return {}  # 模型护栏:旧向量与当前模型不同源,作废
             pts = pickle.loads(row["points"])
             meta = json.loads(row["point_meta"] or "[]")
-            return {m.get("atom_id"): pts[i]
+            return {m.get("atom_id"): {
+                        "summary": m.get("summary") or "",
+                        "vector": pts[i],
+                    }
                     for i, m in enumerate(meta)
                     if i < len(pts) and m.get("atom_id")}
+        finally:
+            conn.close()
+
+    def load_vector_cache(self, user_id: str, embed_model: str) -> dict:
+        """兼容旧接口，返回 ``{atom_id: 向量(D,)}``。"""
+        return {
+            atom_id: entry["vector"]
+            for atom_id, entry in self.load_vector_cache_entries(
+                user_id, embed_model,
+            ).items()
+        }
+
+    def get_revision(self, user_id: str) -> Optional[dict]:
+        """返回持久化的来源版本和 embedding 模型；无画像返回 ``None``。"""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT source_revision, embed_model FROM client_interest"
+                " WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "source_revision": row["source_revision"] or "",
+                "embed_model": row["embed_model"] or "",
+            }
         finally:
             conn.close()
 

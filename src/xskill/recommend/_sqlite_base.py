@@ -25,6 +25,11 @@ class _SqliteStore:
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
+        # WAL 允许画像刷新写入时，/sync、看板等读取方继续工作。busy_timeout
+        # 必须逐连接设置；synchronous 也是连接级设置，不能只在建库时执行一次。
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
     def _init_schema(self) -> None:
