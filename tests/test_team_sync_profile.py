@@ -126,3 +126,68 @@ def test_sync_idempotent_when_atoms_unchanged(team_client):
     client.get("/api/v1/team/sync",
                headers={"X-Xskill-Token": "tok", "X-Xskill-Client": cid})
     assert embed_calls["n"] == 0  # 未重 embed
+
+
+def test_sync_inflight_dedup_serves_cached_profile(team_client):
+    """同 client 的画像刷新还挂在 embed 上时，后续 /sync 不重复触发
+    embed、立即用现有画像返回。"""
+    import threading
+
+    eng, client, cid = team_client
+    headers = {"X-Xskill-Token": "tok", "X-Xskill-Client": cid}
+    embed_started = threading.Event()
+    release_embed = threading.Event()
+    embed_calls = {"count": 0}
+    original_encode_batch = eng.embed_client.encode_batch
+
+    def blocking_encode_batch(texts):
+        embed_calls["count"] += 1
+        embed_started.set()
+        assert release_embed.wait(10), "test deadlock: release never set"
+        return original_encode_batch(texts)
+
+    eng.embed_client.encode_batch = blocking_encode_batch
+    first_result = {}
+    first_request = threading.Thread(
+        target=lambda: first_result.setdefault(
+            "response",
+            TestClient(client.app).get("/api/v1/team/sync", headers=headers)))
+    first_request.start()
+    try:
+        assert embed_started.wait(10), "first sync never reached embed"
+        # 第一个刷新还在 embed 上：第二个 sync 必须立即成功且不再进 embed
+        second_response = client.get("/api/v1/team/sync", headers=headers)
+        assert second_response.status_code == 200
+        assert embed_calls["count"] == 1
+    finally:
+        release_embed.set()
+        first_request.join(10)
+    assert first_result["response"].status_code == 200
+    # 在途标记已清理：atom 集变化后能再次触发刷新
+    _write_atom(eng.traj_root / "clients" / cid / "sessions", "traj_2",
+                "atom_traj_2_0001", summary="tune nginx", used_skills=["s0"])
+    client.get("/api/v1/team/sync", headers=headers)
+    assert embed_calls["count"] == 2
+
+
+def test_fingerprint_not_poisoned_by_embed_failure(team_client):
+    """指纹缓存只在画像 upsert 成功后写入：embed 失败后、atom 集未变，
+    下一次 sync 也必须能重算出画像。"""
+    eng, client, cid = team_client
+    headers = {"X-Xskill-Token": "tok", "X-Xskill-Client": cid}
+    original_encode_batch = eng.embed_client.encode_batch
+
+    def failing_encode_batch(texts):
+        raise RuntimeError("embed backend down")
+
+    eng.embed_client.encode_batch = failing_encode_batch
+    # 刷新失败被路由吞掉（best-effort），manifest 照常返回
+    response = client.get("/api/v1/team/sync", headers=headers)
+    assert response.status_code == 200
+    assert eng.profile_store.load(cid) is None
+    # 后端恢复：atom 集没变，也必须能重算出画像（指纹未被污染）
+    eng.embed_client.encode_batch = original_encode_batch
+    response = client.get("/api/v1/team/sync", headers=headers)
+    assert response.status_code == 200
+    profile_row = eng.profile_store.load(cid)
+    assert profile_row is not None and profile_row["feature_tensor"] is not None

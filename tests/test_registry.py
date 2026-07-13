@@ -388,3 +388,50 @@ class TestFindTrajFile:
         assert result is None
         msgs = [r.message for r in caplog.records]
         assert any("not found in any registered watch dir" in m for m in msgs)
+
+
+class TestSchemaOnce:
+    """schema 建表 + 迁移只在 user_version 落后（含新建 DB）时重放。"""
+
+    def test_schema_replayed_once_per_path(self, tmp_path, monkeypatch):
+        import xskill.pipeline.registry as registry_mod
+
+        db_file = tmp_path / "once.db"
+        migrate_calls = {"count": 0}
+        original_migrate = registry_mod._migrate
+
+        def counting_migrate(conn):
+            migrate_calls["count"] += 1
+            original_migrate(conn)
+
+        monkeypatch.setattr(registry_mod, "_migrate", counting_migrate)
+        registry_mod.get_connection(db_file).close()
+        conn = registry_mod.get_connection(db_file)
+        # 第二次连接跳过建表，但表可用
+        conn.execute("SELECT 1 FROM trajectories").fetchall()
+        conn.close()
+        assert migrate_calls["count"] == 1
+
+    def test_schema_replayed_when_db_file_recreated(self, tmp_path, monkeypatch):
+        import xskill.pipeline.registry as registry_mod
+
+        db_file = tmp_path / "recreate.db"
+        migrate_calls = {"count": 0}
+        original_migrate = registry_mod._migrate
+
+        def counting_migrate(conn):
+            migrate_calls["count"] += 1
+            original_migrate(conn)
+
+        monkeypatch.setattr(registry_mod, "_migrate", counting_migrate)
+        registry_mod.get_connection(db_file).close()
+        assert migrate_calls["count"] == 1
+        # DB 文件被删（连同 WAL sidecar）后重连：必须重放建表
+        for sidecar in (db_file, Path(str(db_file) + "-wal"),
+                        Path(str(db_file) + "-shm")):
+            if sidecar.exists():
+                sidecar.unlink()
+        conn = registry_mod.get_connection(db_file)
+        conn.execute("SELECT 1 FROM trajectories").fetchall()
+        conn.close()
+        assert migrate_calls["count"] == 2

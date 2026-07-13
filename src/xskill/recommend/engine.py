@@ -199,7 +199,6 @@ class SkillRecommendEngine:
         fp = self._user_atom_fingerprint(user_id)
         if self._profile_fp_cache.get(user_id) == fp:
             return  # atom 集未变，画像仍有效
-        self._profile_fp_cache[user_id] = fp
 
         atoms = [a for a in self._user_atoms(user_id) if a.summary]
         used_skills = self._user_used_skills(user_id)
@@ -207,6 +206,7 @@ class SkillRecommendEngine:
             self.profile_store.upsert(
                 user_id, feature_tensor=None, mean_tensor=None, used_skills=used_skills,
             )
+            self._profile_fp_cache[user_id] = fp
             return
         vecs = self._embed_atoms_incremental(user_id, atoms)
         client_interest.reset_points(vecs)
@@ -221,6 +221,8 @@ class SkillRecommendEngine:
             points=vecs, point_meta=point_meta,
             embed_model=getattr(self.embed_client, "model", ""),
         )
+        # 指纹在 upsert 成功后才写：中途失败不得挡住下次重算
+        self._profile_fp_cache[user_id] = fp
 
     def _embed_atoms_incremental(self, user_id: str, atoms: list) -> np.ndarray:
         """只对没缓存过的原子调 embedding,其余按 ``atom_id`` 复用上次落盘的向量。

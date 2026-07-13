@@ -152,6 +152,7 @@ def test_migration_dedupes_legacy_inflated_rows(tmp_path):
             " VALUES(?,?,?,?,?,?)",
             (f"2026-07-0{i+1} 00:00:00", "alice", "s-a", "main",
              "recommended", ""))
+    conn.execute("PRAGMA user_version=0")  # 模拟旧库：schema 版本落后
     conn.commit()
     conn.close()
     conn = get_connection(db)  # 重开触发迁移

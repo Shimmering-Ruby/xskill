@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import zlib
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -197,7 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_trig_skill ON skill_trigger_eval(skill);
 
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    """打开（或创建）注册表 DB。首次调用自动建表。"""
+    """打开（或创建）注册表 DB。schema 过期（含新建）时自动建表 + 迁移。"""
     if db_path is None:
         db_path = get_registry_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,9 +206,13 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(_SCHEMA_SQL)
-    # Migrate existing DBs that lack new columns
-    _migrate(conn)
+    # schema 内容指纹存 DB 头：指纹一致则跳过建表/迁移（此函数在热路径高频调用）
+    schema_fingerprint = zlib.crc32(_SCHEMA_SQL.encode()) & 0x7FFFFFFF
+    if conn.execute("PRAGMA user_version").fetchone()[0] != schema_fingerprint:
+        conn.executescript(_SCHEMA_SQL)
+        # Migrate existing DBs that lack new columns
+        _migrate(conn)
+        conn.execute(f"PRAGMA user_version={schema_fingerprint}")
     return conn
 
 

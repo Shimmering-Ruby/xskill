@@ -53,6 +53,9 @@ class _Ctx:
     allow_anonymous_user: bool = True
     register_dir: Callable[[Path, str], None] | None = None
     skillhub = None
+    # /sync 画像刷新的同 client 在途去重（慢 embedding 后端下重复 tick 不排队重算）
+    profile_refresh_lock: threading.Lock = threading.Lock()
+    profile_refresh_inflight: set[str] = set()
 
 
 _ctx = _Ctx()
@@ -504,11 +507,22 @@ def team_sync(
     except Exception:  # pylint: disable=broad-exception-caught
         eng = None
     if eng is not None:
-        try:
-            from xskill.recommend.client_interest import ClientInterest
-            eng.update_user_interest(ClientInterest(client_id))
-        except Exception:  # pylint: disable=broad-exception-caught
-            logger.debug("profile refresh for %s skipped", client_id, exc_info=True)
+        with _ctx.profile_refresh_lock:
+            refresh_in_flight = client_id in _ctx.profile_refresh_inflight
+            if not refresh_in_flight:
+                _ctx.profile_refresh_inflight.add(client_id)
+        if refresh_in_flight:
+            logger.debug("profile refresh for %s already in flight, serving "
+                         "cached profile", client_id)
+        else:
+            try:
+                from xskill.recommend.client_interest import ClientInterest
+                eng.update_user_interest(ClientInterest(client_id))
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.debug("profile refresh for %s skipped", client_id, exc_info=True)
+            finally:
+                with _ctx.profile_refresh_lock:
+                    _ctx.profile_refresh_inflight.discard(client_id)
     # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
     # best-effort 读取(D8:超量在写入侧拒绝,这里读挂了退回无 prefs 分发,
     # 后台链路绝不因控制面阻塞)。user_key=user_name(D5),匿名 client 只吃全局。
