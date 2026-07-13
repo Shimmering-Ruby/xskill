@@ -1,8 +1,6 @@
-"""embed_store.py — 按内容哈希复用的 embedding 磁盘缓存。
+"""embed_store.py — 按 (embedding 模型, 文本 sha256) 复用向量的磁盘缓存。
 
-底层 ``EmbedClient`` 零缓存且单条延迟高，各索引重建点曾经每次全量重算。
-本类按 (embedding 模型, 文本 sha256) 复用向量：命中直接读盘，未命中分块
-现算并即时落盘——重启/中断后续算不回头；换 embedding 模型自动整体失效。
+命中直接读盘；未命中分块现算并即时落盘（中断续算不回头）；换模型整体失效。
 """
 from __future__ import annotations
 
@@ -43,7 +41,8 @@ class EmbedStore:
             self._vectors = vectors
 
     def _save(self) -> None:
-        temp_path = self.cache_path.with_suffix(".tmp")
+        # tmp 名带 pid：多进程写同一缓存时各写各的临时文件，replace 原子收尾。
+        temp_path = self.cache_path.with_suffix(f".tmp.{os.getpid()}")
         with open(temp_path, "wb") as cache_file:
             pickle.dump(
                 {"model": self.model_id, "vectors": self._vectors}, cache_file,

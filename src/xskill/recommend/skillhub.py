@@ -23,8 +23,7 @@ import numpy as np
 # 的三方 skill 画成散点 ▲（D6:不现算不造假）。结构对齐自产 ``.skill_index.pkl``。
 INDEX_CACHE_NAME = ".skillhub_index.pkl"
 
-# 三方 skill description 的向量复用缓存（EmbedStore 格式，与上面 dashboard
-# 只读缓存分开：一个是产物、一个是加速器，语义不同不混一个文件）。
+# 三方 skill description 的向量复用缓存（与 dashboard 只读产物分开存）。
 EMBED_CACHE_NAME = ".skillhub_embed_cache.pkl"
 
 from xskill.canary import aggregate_ux_by_version, load_ux_scores
