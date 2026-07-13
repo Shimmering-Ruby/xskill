@@ -38,3 +38,16 @@ def test_appjs_fetches_overview_endpoint():
     # 斜杠，对相对/绝对两种写法都成立。
     assert "api/v1/dashboard/overview" in js
     assert "api/v1/dashboard/by-domain" in js
+
+
+def test_appjs_routes_skillhub_detail_by_source():
+    """技能详情按 source 分流：三方(skillhub)技能调 skillhub ux 端点，
+    自产技能不受影响。断言存在 source==='skillhub' 分支与 skillhub ux
+    端点调用（版本聚合 + 关联原子）。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    # 基于 source 的分流判定
+    assert "source === 'skillhub'" in js
+    # 调三方 ux 端点(版本聚合分)与关联原子端点，而非自产 detail
+    assert "dashboard/skillhub/" in js
+    assert "/ux?days=" in js
+    assert "/ux/atoms?days=" in js
