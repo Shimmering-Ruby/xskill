@@ -314,10 +314,7 @@ def test_scatter_umap_method(tmp_path):
 
 
 def test_scatter_umap_many_points_no_blowup(tmp_path):
-    """回归:全批斥力项数随点数线性增长,曾在 n≈300 时首轮步长爆炸,把布局
-    甩飞到初始尺度几十倍远、三簇挤成一团重叠——真实 qwen 向量画像上观察到
-    的现象。这里造 3×100=300 点(命中 _SCATTER_MAX_POINTS 上限,不触发抽样)
-    复现该规模,断言三簇仍分得开、坐标不发散。"""
+    """回归:3×100=300 点(命中 _SCATTER_MAX_POINTS 上限,不触发抽样)下 UMAP 布局不发散,三簇仍分得开。"""
     pdb = tmp_path / "p.db"
     store = ProfileStore(pdb)
     rng = np.random.default_rng(1)
@@ -349,6 +346,36 @@ def test_scatter_umap_many_points_no_blowup(tmp_path):
     # 爆炸时单点会被甩到离质心几十倍远;正常收敛的全体坐标半径应与簇间距同量级。
     overall_radius = np.linalg.norm(xy - xy.mean(axis=0), axis=1)
     assert overall_radius.max() < 20.0 * np.median(overall_radius)
+
+
+def test_umap_direct_fleet_scale_clusters_separate():
+    """直调 _UMAP2D(绕过看板 300 点抽样上限):6 簇不均匀、更高维、n=520,全批斥力不随规模爆炸。"""
+    from xskill.dashboard.profile_viz import _UMAP2D
+    cluster_sizes = [180, 130, 90, 60, 40, 20]
+    dim = 32
+    rng = np.random.default_rng(3)
+    cluster_centers = np.eye(len(cluster_sizes), dim)
+    points, labels = [], []
+    for cluster_id, size in enumerate(cluster_sizes):
+        for _ in range(size):
+            vector = cluster_centers[cluster_id] + 0.20 * rng.standard_normal(dim)
+            points.append(vector / np.linalg.norm(vector))
+            labels.append(cluster_id)
+    points = np.asarray(points)
+    labels = np.asarray(labels)
+    coords = _UMAP2D(n_epochs=250).fit(points)
+    radius = np.linalg.norm(coords - coords.mean(axis=0), axis=1)
+    assert radius.max() < 40.0  # 爆炸态观测半径达三百余,收敛态应在数十以内
+    cluster_means = [coords[labels == cluster_id].mean(axis=0)
+                     for cluster_id in range(len(cluster_sizes))]
+    cluster_spreads = [np.linalg.norm(coords[labels == cluster_id] - cluster_means[cluster_id],
+                                      axis=1).mean() for cluster_id in range(len(cluster_sizes))]
+    for i in range(len(cluster_sizes)):
+        for j in range(i + 1, len(cluster_sizes)):
+            between = np.linalg.norm(cluster_means[i] - cluster_means[j])
+            assert between > 3.0 * max(cluster_spreads[i], cluster_spreads[j])
+    coords_again = _UMAP2D(n_epochs=250).fit(points)
+    assert np.allclose(coords, coords_again)
 
 
 def test_scatter_unknown_method_rejected(tmp_path):
