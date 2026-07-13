@@ -7,6 +7,9 @@ skill 漏计——审计 P0-1）。
 """
 from __future__ import annotations
 
+import copy
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -132,8 +135,102 @@ def _skillhub_entries(skillhub) -> list[dict]:
         include_vec=False, require_description=True)
 
 
-def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
+_SKILLS_CATALOG_TTL_SECONDS = 5.0
+_SKILLS_CATALOG_CACHE_MAX_ENTRIES = 128
+_skills_catalog_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_skills_catalog_flights: dict[tuple, "_CatalogFlight"] = {}
+_skills_catalog_cache_lock = threading.Lock()
+
+
+class _CatalogFlight:
+    """同一个清单缓存键只允许一个线程扫描磁盘。"""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+        self.rows: list[dict] | None = None
+
+
+def _copy_catalog_error(error: BaseException) -> BaseException:
+    """给等待线程独立的异常对象，避免并发改写同一个 traceback。"""
+    try:
+        cloned = copy.copy(error)
+    except Exception:  # pragma: no cover - 极少数自定义异常不可复制
+        try:
+            cloned = type(error)(*error.args)
+        except Exception:
+            cloned = RuntimeError(f"技能清单构建失败: {error}")
+    cloned.__traceback__ = None
+    cloned.__context__ = None
+    cloned.__cause__ = None
+    return cloned
+
+
+def _prune_skills_catalog_cache(now: float) -> None:
+    """在持锁状态下清理过期项并限制短时间内的不同缓存键数量。"""
+    for stale_key, (expires_at, _rows) in list(_skills_catalog_cache.items()):
+        if expires_at <= now:
+            _skills_catalog_cache.pop(stale_key, None)
+
+    limit = max(0, int(_SKILLS_CATALOG_CACHE_MAX_ENTRIES))
+    overflow = len(_skills_catalog_cache) - limit
+    if overflow > 0:
+        oldest = sorted(
+            _skills_catalog_cache,
+            key=lambda cache_key: _skills_catalog_cache[cache_key][0],
+        )[:overflow]
+        for stale_key in oldest:
+            _skills_catalog_cache.pop(stale_key, None)
+
+
+def _catalog_path_key(path: Path | str) -> str:
+    """生成目录缓存键；不要求目录已经存在。"""
+    p = Path(path).expanduser()
+    try:
+        return str(p.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return str(p.absolute())
+
+
+def _skillhub_cache_key(skillhub) -> tuple:
+    """只使用清单输出依赖的 SkillHub 配置/条目生成缓存键。"""
+    if skillhub is None:
+        return ("none",)
+    if isinstance(skillhub, list):
+        rows = []
+        for entry in skillhub:
+            rows.append(tuple(
+                repr(entry.get(field)) for field in (
+                    "display_name", "name", "source_path", "skill_id",
+                    "description", "use_count",
+                )
+            ))
+        return ("entries", tuple(sorted(rows)))
+
+    # dashboard 路由每次请求都会从配置新建 SkillHub。用目录和 enabled 作为
+    # 身份，才能让这些等价实例共享缓存；embed_client 不参与无向量清单扫描。
+    hub_dir = getattr(skillhub, "dir", None)
+    if hub_dir is not None:
+        return (
+            "skillhub", type(skillhub).__module__, type(skillhub).__qualname__,
+            bool(getattr(skillhub, "enabled", True)), _catalog_path_key(hub_dir),
+        )
+    try:
+        hash(skillhub)
+        identity = skillhub
+    except TypeError:
+        identity = id(skillhub)
+    return ("object", type(skillhub).__module__, type(skillhub).__qualname__, identity)
+
+
+def _skills_catalog_cache_key(skill_dir: Path, skillhub) -> tuple:
+    return (_catalog_path_key(skill_dir), _skillhub_cache_key(skillhub))
+
+
+def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]:
     """列出 skill 库里的所有 skill —— 纯分析式(读目录 + SKILL.md + .candidates.yml)。
+
+    该函数只执行一次磁盘扫描；:func:`skills_catalog` 负责缓存和合并并发调用。
 
     不依赖任何埋点事件,永远有内容(只要库里有 skill 目录)。每条含:
     name / state(baby|main|staging) / description / version / use_count / candidates,
@@ -202,6 +299,72 @@ def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
     hub_rows.sort(key=lambda s: (s["hub"], s["name"]))
     out.extend(hub_rows)
     return out
+
+
+def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
+    """返回短时缓存的技能清单，每次都给调用方独立的可修改副本。
+
+    缓存按自产目录与 SkillHub 输入隔离；过期后重新读取分支、SKILL.md 和
+    candidates。构建失败不会写入缓存，同键并发请求共享一次磁盘扫描。
+    """
+    key = _skills_catalog_cache_key(skill_dir, skillhub)
+    while True:
+        now = time.monotonic()
+        with _skills_catalog_cache_lock:
+            _prune_skills_catalog_cache(now)
+
+            cached = _skills_catalog_cache.get(key)
+            if cached is not None:
+                return copy.deepcopy(cached[1])
+
+            flight = _skills_catalog_flights.get(key)
+            if flight is None:
+                flight = _CatalogFlight()
+                _skills_catalog_flights[key] = flight
+                build = True
+            else:
+                build = False
+
+        if not build:
+            flight.done.wait()
+            if flight.error is not None:
+                raise _copy_catalog_error(flight.error)
+            # 直接使用本轮构建结果。即使它刚好过期或因容量限制被逐出，
+            # 已经合并到本轮的等待者也不应再发起一次相同扫描。
+            if flight.rows is not None:
+                return copy.deepcopy(flight.rows)
+            continue
+
+        try:
+            rows = _build_skills_catalog_uncached(skill_dir, skillhub=skillhub)
+            cached_rows = copy.deepcopy(rows)
+        except BaseException as exc:
+            with _skills_catalog_cache_lock:
+                flight.error = exc
+                if _skills_catalog_flights.get(key) is flight:
+                    _skills_catalog_flights.pop(key, None)
+                flight.done.set()
+            raise
+
+        with _skills_catalog_cache_lock:
+            try:
+                flight.rows = cached_rows
+                _skills_catalog_cache[key] = (
+                    time.monotonic() + _SKILLS_CATALOG_TTL_SECONDS,
+                    cached_rows,
+                )
+                _prune_skills_catalog_cache(time.monotonic())
+            except BaseException as exc:
+                # 即使缓存落盘阶段发生异常，也必须唤醒全部等待线程。
+                flight.rows = None
+                flight.error = exc
+                _skills_catalog_cache.pop(key, None)
+                raise
+            finally:
+                if _skills_catalog_flights.get(key) is flight:
+                    _skills_catalog_flights.pop(key, None)
+                flight.done.set()
+        return copy.deepcopy(cached_rows)
 
 
 class DashboardMetrics:

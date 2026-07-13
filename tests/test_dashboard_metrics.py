@@ -1,6 +1,13 @@
 """test_dashboard_metrics.py —— DashboardMetrics 衍生指标"""
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+import xskill.dashboard.metrics as dashboard_metrics
 from xskill.pipeline.registry import get_connection, harness_share, model_share
 from xskill.dashboard.metrics import DashboardMetrics, skills_catalog
 
@@ -248,6 +255,208 @@ def test_skills_catalog_accepts_entry_list(tmp_path):
     assert row["source"] == "skillhub" and row["hub"] == "team/x"
     assert row["skill_id"] == "x@abc123" and row["use_count"] == 5
     assert row["name"] == "x"
+
+
+def _write_catalog_skill(root, name, description, branch="main"):
+    skill = root / name
+    (skill / ".git" / "refs" / "heads").mkdir(parents=True)
+    (skill / ".git" / "refs" / "heads" / branch).write_text("sha\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n"
+        "metadata:\n  version: 1\n---\nbody\n",
+        encoding="utf-8",
+    )
+    return skill
+
+
+def test_skills_catalog_concurrent_calls_for_300_skills_scan_once(
+        tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    root.mkdir()
+    for i in range(300):
+        _write_catalog_skill(root, f"skill-{i:03d}", f"description {i}")
+
+    original = dashboard_metrics._build_skills_catalog_uncached
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dashboard_metrics, "_build_skills_catalog_uncached", counted)
+    barrier = threading.Barrier(32)
+
+    def load():
+        barrier.wait()
+        return skills_catalog(root)
+
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        results = list(pool.map(lambda _i: load(), range(32)))
+    assert calls == 1
+    assert all(len(rows) == 300 for rows in results)
+
+
+def test_skills_catalog_cache_ttl_reloads_refs_content_and_candidates(
+        tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    root.mkdir()
+    skill = _write_catalog_skill(root, "alpha", "version one", branch="main")
+    monkeypatch.setattr(dashboard_metrics, "_SKILLS_CATALOG_TTL_SECONDS", 0.02)
+
+    first = skills_catalog(root)[0]
+    (skill / ".git" / "refs" / "heads" / "staging").write_text("sha2\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: version two\n"
+        "metadata:\n  version: 2\n---\nbody\n",
+        encoding="utf-8",
+    )
+    (skill / ".candidates.yml").write_text(
+        "candidates:\n  - summary: one\n  - summary: two\n", encoding="utf-8")
+
+    still_cached = skills_catalog(root)[0]
+    assert (still_cached["state"], still_cached["description"], still_cached["candidates"]) == (
+        "main", "version one", 0)
+    time.sleep(0.04)
+    refreshed = skills_catalog(root)[0]
+    assert (refreshed["state"], refreshed["description"], refreshed["version"],
+            refreshed["candidates"]) == ("staging", "version two", 2, 2)
+    assert first == still_cached
+
+
+def test_skills_catalog_cache_isolates_roots_and_skillhub_inputs(tmp_path):
+    root_a = tmp_path / "a"; root_a.mkdir()
+    root_b = tmp_path / "b"; root_b.mkdir()
+    _write_catalog_skill(root_a, "same", "root a")
+    _write_catalog_skill(root_b, "same", "root b")
+    hub_a = [{"display_name": "hub-a", "source_path": "a/tool",
+              "skill_id": "hub-a@1", "description": "A"}]
+    hub_b = [{"display_name": "hub-b", "source_path": "b/tool",
+              "skill_id": "hub-b@2", "description": "B"}]
+
+    rows_a = skills_catalog(root_a, skillhub=hub_a)
+    rows_b = skills_catalog(root_b, skillhub=hub_b)
+    assert [(row["name"], row["description"]) for row in rows_a] == [
+        ("same", "root a"), ("hub-a", "A")]
+    assert [(row["name"], row["description"]) for row in rows_b] == [
+        ("same", "root b"), ("hub-b", "B")]
+
+
+def test_skills_catalog_equivalent_skillhub_instances_share_cache(
+        tmp_path, monkeypatch):
+    from xskill.recommend.skillhub import SkillHub
+
+    root = tmp_path / "skills"; root.mkdir()
+    hub_root = tmp_path / "hub"; hub_root.mkdir()
+    _write_catalog_skill(hub_root, "vendor", "third party")
+    first_hub = SkillHub(enabled=True, hub_dir=hub_root, embed_client=None)
+    second_hub = SkillHub(enabled=True, hub_dir=hub_root, embed_client=object())
+    original = dashboard_metrics._build_skills_catalog_uncached
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dashboard_metrics, "_build_skills_catalog_uncached", counted)
+    assert skills_catalog(root, skillhub=first_hub) == skills_catalog(
+        root, skillhub=second_hub)
+    assert calls == 1
+
+
+def test_skills_catalog_failed_build_does_not_poison_cache(tmp_path):
+    from xskill.recommend.skillhub import SkillHub
+
+    root = tmp_path / "skills"; root.mkdir()
+    hub_root = tmp_path / "hub"
+    hub = SkillHub(enabled=True, hub_dir=hub_root, embed_client=None)
+    with pytest.raises(FileNotFoundError):
+        skills_catalog(root, skillhub=hub)
+
+    _write_catalog_skill(hub_root, "vendor", "available now")
+    rows = skills_catalog(root, skillhub=hub)
+    assert [(row["name"], row["source"]) for row in rows] == [
+        ("vendor", "skillhub")]
+
+
+def test_skills_catalog_concurrent_failure_is_shared_and_cleans_flight(
+        tmp_path, monkeypatch):
+    root = tmp_path / "skills"; root.mkdir()
+    original = dashboard_metrics._build_skills_catalog_uncached
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def failing(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        entered.set()
+        assert release.wait(timeout=5)
+        raise FileNotFoundError("catalog unavailable")
+
+    monkeypatch.setattr(
+        dashboard_metrics, "_build_skills_catalog_uncached", failing)
+
+    def load_error():
+        try:
+            skills_catalog(root)
+        except BaseException as exc:  # 返回异常供主线程检查，不让 worker 中断
+            return exc
+        raise AssertionError("expected catalog failure")
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = [pool.submit(load_error) for _ in range(16)]
+        assert entered.wait(timeout=5)
+        time.sleep(0.05)
+        release.set()
+        errors = [future.result(timeout=5) for future in futures]
+
+    assert calls == 1
+    assert all(isinstance(error, FileNotFoundError) for error in errors)
+    assert len({id(error) for error in errors}) == len(errors)
+    key = dashboard_metrics._skills_catalog_cache_key(root, None)
+    assert key not in dashboard_metrics._skills_catalog_flights
+    assert key not in dashboard_metrics._skills_catalog_cache
+
+    monkeypatch.setattr(
+        dashboard_metrics, "_build_skills_catalog_uncached", original)
+    assert skills_catalog(root) == []
+
+
+def test_skills_catalog_cache_has_bounded_number_of_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard_metrics, "_SKILLS_CATALOG_CACHE_MAX_ENTRIES", 2)
+    with dashboard_metrics._skills_catalog_cache_lock:
+        dashboard_metrics._skills_catalog_cache.clear()
+        dashboard_metrics._skills_catalog_flights.clear()
+
+    for index in range(3):
+        root = tmp_path / f"skills-{index}"
+        root.mkdir()
+        _write_catalog_skill(root, f"skill-{index}", f"description {index}")
+        assert len(skills_catalog(root)) == 1
+
+    with dashboard_metrics._skills_catalog_cache_lock:
+        assert len(dashboard_metrics._skills_catalog_cache) == 2
+        assert not dashboard_metrics._skills_catalog_flights
+
+
+def test_skills_catalog_returns_independent_copies(tmp_path):
+    root = tmp_path / "skills"; root.mkdir()
+    _write_catalog_skill(root, "alpha", "original")
+    first = skills_catalog(root)
+    first[0]["description"] = "caller mutation"
+    first.append({"name": "injected"})
+
+    second = skills_catalog(root)
+    assert len(second) == 1
+    assert second[0]["name"] == "alpha"
+    assert second[0]["description"] == "original"
 
 
 def test_users_lists_team_clients(tmp_path):
