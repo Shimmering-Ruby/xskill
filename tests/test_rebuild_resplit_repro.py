@@ -100,7 +100,7 @@ def _full_cycle(tmp_path, *, server_mode, eco):
     assert len(store.list_by_traj("traj_x")) == 2
 
     # Pass 2: rebuild --force core
-    assert reset_trajectories(eco=eco, db_path=db) == 1
+    assert len(reset_trajectories(eco=eco, db_path=db)) == 1
     assert store.list_by_traj("traj_x") == [], "reset deletes atom files"
 
     # Pass 3: re-scan -> SHOULD re-split

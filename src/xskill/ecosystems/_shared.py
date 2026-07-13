@@ -937,11 +937,11 @@ class JsonlIngester:
                 # 旧残骸轨迹拆出的 atom / 索引 / DB 状态作废，从头重拆。
                 # 函数内 import：registry 依赖 config，模块级 import 会成环。
                 from xskill.pipeline.registry import reset_trajectories
-                n = reset_trajectories(traj_id=traj_id)
+                reset_row_ids = reset_trajectories(traj_id=traj_id)
                 logger.info(
                     "JsonlIngester(%s): source grew after bridge, re-bridged "
                     "%s (reset %d trajectory row(s))",
-                    self.spec.name, traj_id, n,
+                    self.spec.name, traj_id, len(reset_row_ids),
                 )
             submitted.append(result)
             seen.add(sid)

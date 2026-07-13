@@ -65,9 +65,9 @@ def test_reset_flips_status_to_discovered_and_zeros_offset(tmp_path, db_path):
     _d, wid = _seed_done_traj(tmp_path, db_path)
     assert "traj_ng_x.md" not in get_trajs_by_status(wid, "discovered", db_path=db_path)
 
-    n = reset_trajectories(eco="ngagent", db_path=db_path)
+    reset_ids = reset_trajectories(eco="ngagent", db_path=db_path)
 
-    assert n == 1
+    assert len(reset_ids) == 1
     assert "traj_ng_x.md" in get_trajs_by_status(wid, "discovered", db_path=db_path)
 
 
@@ -81,9 +81,9 @@ def test_reset_eco_filter_skips_other_ecosystems(tmp_path, db_path):
     discover_trajectories(wid2, other, db_path=db_path)
     update_traj_status(wid2, "traj_cc_y.md", "done", db_path=db_path)
 
-    n = reset_trajectories(eco="ngagent", db_path=db_path)
+    reset_ids = reset_trajectories(eco="ngagent", db_path=db_path)
 
-    assert n == 1
+    assert len(reset_ids) == 1
     assert "traj_cc_y.md" not in get_trajs_by_status(wid2, "discovered", db_path=db_path)
 
 
@@ -120,9 +120,9 @@ def test_reset_requeues_not_fit_and_clears_interest_fields(tmp_path, db_path):
         db_path=db_path,
     )
 
-    reset_count = reset_trajectories(eco="ngagent", db_path=db_path)
+    reset_ids = reset_trajectories(eco="ngagent", db_path=db_path)
 
-    assert reset_count == 1
+    assert len(reset_ids) == 1
     assert "traj_ng_x.md" in get_trajs_by_status(
         watch_dir_id, "discovered", db_path=db_path)
     conn = get_connection(db_path)
@@ -250,7 +250,7 @@ def test_rebuild_force_clears_derived_state_and_install_history(
             "skill_trigger_eval": 4,
         }
     )
-    reset_mock = Mock(return_value=0)
+    reset_mock = Mock(return_value=[])
     monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path)
     monkeypatch.setattr("xskill.config.get_skill_dir", Mock(return_value=skill_root))
     monkeypatch.setattr("xskill.runtime.read_status", Mock(return_value={"running": False}))
@@ -295,7 +295,7 @@ def test_rebuild_proceeds_when_models_match(monkeypatch):
     monkeypatch.setattr("xskill.runtime.config_models",
                         lambda: {"llm_model": "m"})
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **_ignored_keyword_arguments: 0)
+                        lambda **_ignored_keyword_arguments: [])
 
     assert cmd_rebuild(_rebuild_args(), None) == 0
 
@@ -306,7 +306,7 @@ def test_rebuild_ignore_flag_bypasses_mismatch(monkeypatch):
     monkeypatch.setattr("xskill.runtime.config_models",
                         lambda: {"llm_model": "new"})
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **_ignored_keyword_arguments: 0)
+                        lambda **_ignored_keyword_arguments: [])
 
     assert cmd_rebuild(_rebuild_args(ignore_model_mismatch=True), None) == 0
 
@@ -318,7 +318,7 @@ def test_rebuild_no_guard_when_daemon_not_running(monkeypatch):
     monkeypatch.setattr("xskill.runtime.config_models",
                         lambda: {"llm_model": "new"})
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **_ignored_keyword_arguments: 0)
+                        lambda **_ignored_keyword_arguments: [])
 
     assert cmd_rebuild(_rebuild_args(), None) == 0
 
@@ -330,10 +330,14 @@ def test_rebuild_writes_single_cold_start_signal(monkeypatch, tmp_path):
         lambda: {"running": False, "role": "server", "mode": "server"},
     )
     monkeypatch.setattr("xskill.pipeline.registry.reset_trajectories",
-                        lambda **_ignored_keyword_arguments: 0)
+                        lambda **_ignored_keyword_arguments: [7, 8])
 
     assert cmd_rebuild(_rebuild_args(), None) == 0
 
     assert (tmp_path / "COLD_START").exists()
     assert not (tmp_path / "COLD_START_REQUEST").exists()
     assert not (tmp_path / "COLD_START_FLUSH").exists()
+    from xskill.pipeline.cold_start import ColdStartSignal
+    snapshot_payload = ColdStartSignal(tmp_path).snapshot()
+    assert snapshot_payload is not None
+    assert snapshot_payload["trajectory_ids"] == [7, 8]

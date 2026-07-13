@@ -559,15 +559,18 @@ def cmd_rebuild(args, _xskill) -> int:
         else:
             print("--force: 安装历史为空")
 
-    trajectory_count = reset_trajectories(eco=args.eco, traj_id=args.traj)
-    print(f"rebuild: 重置 {trajectory_count} 条轨迹（已删 atom + index.pkl，将从头重拆）")
+    reset_trajectory_ids = reset_trajectories(eco=args.eco, traj_id=args.traj)
+    print(
+        f"rebuild: 重置 {len(reset_trajectory_ids)} 条轨迹"
+        "（已删 atom + index.pkl，将从头重拆）"
+    )
 
     from xskill.pipeline.cold_start import ColdStartSignal
     cold_start_signal = ColdStartSignal(XSKILL_HOME)
-    signal_path = cold_start_signal.create()
+    cold_start_signal.create(reset_trajectory_ids)
     print(
-        "cold-start: 已写入内部信号文件，watcher 会在本次 rebuild 处理完成后 flush "
-        f"({signal_path})"
+        "cold-start: 已写入本批轨迹快照信号，watcher 会在这批轨迹处理完成后 flush "
+        f"({cold_start_signal.file_path})"
     )
 
     if read_status().get("running"):

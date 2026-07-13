@@ -40,6 +40,7 @@ from xskill.pipeline.registry import (
     TrajectoryStatus,
     list_watch_dirs,
     discover_trajectories,
+    get_pending_traj_ids,
     get_trajs_by_status,
     mark_indexed,
     mark_skill_used,
@@ -301,46 +302,45 @@ class DirectoryWatcher:
             self._reconcile_skill_sides()
 
     def _run_skill_edit_step(self):
-        """Step 5 的冷启动感知封装。"""
+        """Step 5 的冷启动感知封装：hold 只等 rebuild 快照内轨迹到终态。"""
+        from xskill.pipeline.cold_start import COLD_START_MAX_HOLD_SECONDS
         cold_start_signal = self._cold_start_signal
-        if cold_start_signal.exists:
-            if cold_start_signal.ready_to_flush(
-                pipeline_idle=self._cold_start_pipeline_idle(),
-            ):
-                from xskill.skill import candidates
-                logger.info(
-                    "冷启动批量 flush 触发 → SkillEdit (threshold=%d)",
-                    candidates.ATOM_PROMOTION_THRESHOLD,
-                )
-                self._check_pending_skill_edits(
-                    threshold=candidates.ATOM_PROMOTION_THRESHOLD,
-                )
-                cold_start_signal.consume()
-            # COLD_START 已到但流水线尚未空闲：hold，本轮不写正文。
+        if not cold_start_signal.exists:
+            self._check_pending_skill_edits()
             return
-        self._check_pending_skill_edits()
-
-    def _cold_start_pipeline_idle(self) -> bool:
-        """当前 watcher 没有待处理轨迹或后台任务时，cold-start 可 flush。
-
-        ``self._futures`` 是 split/embed/cluster/skill_edit 共用的同一个飞行
-        中任务表——非空即不空闲，天然把"有 SkillEdit future 在飞"也计入，
-        不需要对 stage="skill_edit" 单独判断。
-        """
-        if self._futures:
-            return False
-        pending_statuses = (
-            "discovered", "updated", "splitting", "split_done",
-            "indexed", "clustering",
+        snapshot_payload = cold_start_signal.snapshot()
+        if snapshot_payload is None:
+            # ≤0.6.11 的空 touch 信号文件：现场补录快照，存量 rebuild 照样收敛。
+            snapshot_payload = cold_start_signal.create(
+                get_pending_traj_ids(**self._db_kw()),
+            )
+            logger.info(
+                "冷启动遗留信号无快照，已按当前 pending 轨迹补录（%d 条）",
+                len(snapshot_payload["trajectory_ids"]),
+            )
+        snapshot_pending_ids = get_pending_traj_ids(
+            snapshot_payload["trajectory_ids"], **self._db_kw(),
         )
-        for watch_dir_entry in list_watch_dirs(**self._db_kw()):
-            watch_dir_id = watch_dir_entry["id"]
-            for status in pending_statuses:
-                if get_trajs_by_status(
-                    watch_dir_id, status, limit=1, **self._db_kw(),
-                ):
-                    return False
-        return True
+        hold_age_seconds = (
+            time.time() - float(snapshot_payload.get("created_at", 0.0))
+        )
+        if snapshot_pending_ids and hold_age_seconds <= COLD_START_MAX_HOLD_SECONDS:
+            return
+        if snapshot_pending_ids:
+            logger.warning(
+                "冷启动 hold 超过 %ds 仍有 %d 条快照轨迹未到终态，强制 flush",
+                COLD_START_MAX_HOLD_SECONDS, len(snapshot_pending_ids),
+            )
+        from xskill.skill import candidates
+        logger.info(
+            "冷启动批量 flush 触发 → SkillEdit (threshold=%d, snapshot=%d 条)",
+            candidates.ATOM_PROMOTION_THRESHOLD,
+            len(snapshot_payload["trajectory_ids"]),
+        )
+        self._check_pending_skill_edits(
+            threshold=candidates.ATOM_PROMOTION_THRESHOLD,
+        )
+        cold_start_signal.consume()
 
     def _check_pending_skill_edits(self, threshold=None):
         """遍历每个 skill 目录调 SkillEditAgent.maybe_run()。
