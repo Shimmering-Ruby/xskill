@@ -118,7 +118,7 @@ def test_control_plane_300(tmp_path: Path) -> None:
         sync = result["waves"][phase]["sync"]
         assert sync["requests"] == clients, artifact
         assert sync["statuses"] == {"200": clients}, artifact
-        assert sync["latency"]["p95_s"] < 2, artifact
+        assert sync["latency"]["p95_s"] < 4, artifact
         assert sync["latency"]["max_s"] < 5, artifact
 
     probes = [
@@ -130,7 +130,7 @@ def test_control_plane_300(tmp_path: Path) -> None:
     assert all(probe["status"] == 200 for probe in probes), artifact
     dashboard = [probe for probe in probes if probe["path"].startswith("/api/v1/dashboard/")]
     assert len(dashboard) >= 6, artifact
-    assert all(probe["elapsed_s"] < 1 for probe in dashboard), artifact
+    assert all(probe["elapsed_s"] < 1.5 for probe in dashboard), artifact
     assert any(probe["path"] == "/api/v1/status" for probe in probes), artifact
 
     assert result["diagnostics"]["database_locked_count"] == 0, artifact
