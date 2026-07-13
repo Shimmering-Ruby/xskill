@@ -45,6 +45,7 @@ class TestProfileRefreshConfig:
     def test_template_contains_profile_refresh_defaults(self):
         assert "profile_refresh_workers: 4" in CONFIG_TEMPLATE
         assert "profile_refresh_queue_size: 1024" in CONFIG_TEMPLATE
+        assert "thread_pool_tokens: 80" in CONFIG_TEMPLATE
 
 
 # ── recommend_config ──────────────────────────────────────────────

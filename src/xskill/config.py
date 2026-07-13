@@ -158,7 +158,7 @@ skill_opt:
 
 # ===== Server (uvicorn/FastAPI runtime knobs) =====
 server:
-  thread_pool_tokens: 300          # anyio 同步路由线程池容量（兼容旧配置）
+  thread_pool_tokens: 80           # anyio 同步路由线程池容量（画像刷新使用独立 worker）
   profile_refresh_workers: 4       # 用户画像后台刷新固定并发数
   profile_refresh_queue_size: 1024 # 待刷新 client 的有界队列容量
   profile_refresh_shutdown_timeout: 5 # 停机等待画像 worker 的最长秒数

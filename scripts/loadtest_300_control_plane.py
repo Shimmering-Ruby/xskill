@@ -1267,7 +1267,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skills", type=int, default=300)
     parser.add_argument("--clients", type=int, default=300)
     parser.add_argument("--max-concurrent", type=int, default=30)
-    parser.add_argument("--thread-pool-tokens", type=int, default=300)
+    parser.add_argument("--thread-pool-tokens", type=int, default=80)
     parser.add_argument("--profile-refresh-workers", type=int, default=30)
     parser.add_argument("--profile-refresh-queue-size", type=int, default=1024)
     parser.add_argument("--profile-refresh-shutdown-timeout", type=float, default=10.0)

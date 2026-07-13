@@ -153,8 +153,9 @@ def test_rate_bucket_wait_aborts_on_shutdown():
 def test_startup_raises_thread_pool_capacity():
     """所有 def 路由(search/resolve/team_sync/整个 dashboard)共享 anyio
     默认线程池(40)。embedding 后端慢时 /sync 单请求占线程数分钟,40 被
-    打满 → 网页整体失联。startup 必须把容量抬到 server.thread_pool_tokens
-    (默认 300)。只能在 startup 里设——create_app 时还没有事件循环,
+    打满 → 网页整体失联。startup 必须把容量设成 server.thread_pool_tokens
+    (默认 80，显式旧配置仍可设为 300)。只能在 startup 里设——create_app
+    时还没有事件循环，
     current_default_thread_limiter 会抛 AsyncLibraryNotFoundError。"""
     from xskill.api import app as app_mod
 

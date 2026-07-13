@@ -914,7 +914,7 @@ def create_app(home_root: Path | str | None = None,
         # limiter 必须在 startup 的事件循环内设置。
         import anyio.to_thread
         anyio.to_thread.current_default_thread_limiter().total_tokens = int(
-            _config.get("server", {}).get("thread_pool_tokens", 300))
+            _config.get("server", {}).get("thread_pool_tokens", 80))
 
         # 配置错误必须让 team server 启动失败，不能在下方 best-effort
         # 上下文初始化中被吞掉。

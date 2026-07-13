@@ -15,10 +15,13 @@ slot 结构 = 80 ranked + 20 recommended：
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
-from xskill.canary import has_staging, main_sha, pick_side, staging_sha
+from xskill.canary import main_sha, pick_side, staging_sha
 from xskill.skill.skill import Skill
 from xskill.skill.repo import SkillRepo
 from xskill.team.shared.protocol import SkillSlot, SyncResponse
@@ -28,6 +31,136 @@ _logger = logging.getLogger("xskill.team.manifest")
 # §5 SkillRecommendEngine 单例（team server init 时 set_recommend_engine 注入）。
 # 为 None 时退回既有 pick_side + RECOMMENDER 画像路径（非 team / 测试场景）。
 _engine = None
+
+
+@dataclass(frozen=True)
+class _CatalogSnapshot:
+    """一次 skill 仓扫描的不可变结果。"""
+
+    skills: tuple[Skill, ...]
+    refs: dict[str, tuple[str, str | None]]
+    built_at: float
+
+
+@dataclass
+class _CatalogEntry:
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    snapshot: _CatalogSnapshot | None = None
+    refreshing: bool = False
+    generation: int = 0
+    last_error: BaseException | None = None
+    error_generation: int = 0
+
+
+class _ManifestCatalogCache:
+    """按 skill 根目录隔离的短 TTL、single-flight 仓快照缓存。
+
+    过期刷新失败时不回退到旧快照；异常也不会替换最后一次成功结果。下次
+    请求会重新尝试刷新，因此旧结果不会被无限返回。
+    """
+
+    def __init__(
+        self, *, ttl_seconds: float = 1.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.clock = clock
+        self._entries: dict[str, _CatalogEntry] = {}
+        self._entries_lock = threading.Lock()
+
+    @staticmethod
+    def _key(skill_dir: Path) -> str:
+        return str(skill_dir.expanduser().resolve())
+
+    def _entry(self, skill_dir: Path) -> _CatalogEntry:
+        key = self._key(skill_dir)
+        with self._entries_lock:
+            return self._entries.setdefault(key, _CatalogEntry())
+
+    def get(self, skill_dir: Path) -> _CatalogSnapshot:
+        entry = self._entry(skill_dir)
+        with entry.condition:
+            while True:
+                now = self.clock()
+                if (
+                    entry.snapshot is not None
+                    and now - entry.snapshot.built_at < self.ttl_seconds
+                ):
+                    return entry.snapshot
+                if not entry.refreshing:
+                    entry.refreshing = True
+                    attempt_generation = entry.generation + 1
+                    break
+                waited_generation = entry.generation
+                while entry.refreshing and entry.generation == waited_generation:
+                    entry.condition.wait()
+                if (
+                    entry.generation > waited_generation
+                    and entry.error_generation == entry.generation
+                    and entry.last_error is not None
+                ):
+                    raise entry.last_error
+
+        try:
+            snapshot = self._scan(skill_dir)
+        except BaseException as exc:
+            with entry.condition:
+                entry.generation = attempt_generation
+                entry.last_error = exc
+                entry.error_generation = attempt_generation
+                entry.refreshing = False
+                entry.condition.notify_all()
+            raise
+
+        with entry.condition:
+            entry.snapshot = snapshot
+            entry.generation = attempt_generation
+            entry.last_error = None
+            entry.error_generation = 0
+            entry.refreshing = False
+            entry.condition.notify_all()
+            return snapshot
+
+    def _scan(self, skill_dir: Path) -> _CatalogSnapshot:
+        refs: dict[str, tuple[str, str | None]] = {}
+        skills: list[Skill] = []
+        for skill in SkillRepo(skill_dir):
+            current_main = main_sha(skill.path)
+            if not current_main:
+                continue
+            refs[skill.name] = (current_main, staging_sha(skill.path))
+            skills.append(skill)
+        skills.sort(
+            key=lambda skill: _rank_key(skill, main_ref=refs[skill.name][0]),
+            reverse=True,
+        )
+        return _CatalogSnapshot(
+            skills=tuple(skills), refs=refs, built_at=self.clock(),
+        )
+
+    def clear(self, skill_dir: Path | None = None) -> None:
+        with self._entries_lock:
+            if skill_dir is None:
+                self._entries.clear()
+            else:
+                self._entries.pop(self._key(skill_dir), None)
+
+
+_catalog_cache = _ManifestCatalogCache()
+
+
+def invalidate_manifest_cache(skill_dir: Path | str | None = None) -> None:
+    """显式失效 manifest 仓快照；不传路径时清空全部根目录。"""
+    _catalog_cache.clear(None if skill_dir is None else Path(skill_dir))
+
+
+def _reset_manifest_cache_for_tests(
+    *, ttl_seconds: float = 1.0,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """测试钩子：替换缓存，以便注入时钟并隔离用例。"""
+    global _catalog_cache
+    _catalog_cache = _ManifestCatalogCache(ttl_seconds=ttl_seconds, clock=clock)
 
 
 def set_recommend_engine(eng) -> None:
@@ -41,14 +174,24 @@ def get_recommend_engine():
     return _engine
 
 
-def _rank_key(skill: Skill) -> tuple[float, int]:
+def _rank_key(skill: Skill, *, main_ref: str | None = None) -> tuple[float, int]:
     """排序键：(main 侧近 30 天 ux 均分, use_count)，都缺则 (0.0, 0)。"""
-    avg = skill.ux_avg(side="main", days=30)
+    if main_ref is None:
+        avg = skill.ux_avg(side="main", days=30)
+    else:
+        rows = skill.recent_ux_scores(side="main", days=30)
+        scores = [
+            row.get("score") for row in rows
+            if row.get("commit_sha") == main_ref
+            and isinstance(row.get("score"), (int, float))
+        ]
+        avg = sum(scores) / len(scores) if scores else None
     return (avg if avg is not None else 0.0, skill.use_count)
 
 
 def _resolve_slot(
     skill: Skill | dict, client_id: str, probability: float, bucket: str,
+    refs: dict[str, tuple[str, str | None]] | None = None,
 ) -> SkillSlot | None:
     """对一个 skill 现算它对该 client 的 side + sha。"""
     if isinstance(skill, dict) and skill.get("source") == "skillhub":
@@ -67,16 +210,22 @@ def _resolve_slot(
             display_name=skill.get("display_name"),
             source_path=skill.get("source_path"),
         )
-    if has_staging(skill.path):
+    cached_main, cached_staging = (
+        refs[skill.name] if refs is not None else
+        (main_sha(skill.path) or "", staging_sha(skill.path))
+    )
+    if cached_staging:
         if _engine is not None:
             from xskill.recommend.client_user import ClientUser
-            side = _engine.resolve_side(skill, ClientUser(client_id))
+            side = _engine.resolve_side(
+                skill, ClientUser(client_id), refs=(cached_main, cached_staging),
+            )
         else:
             side = pick_side(client_id, skill.name, probability)
-        sha = staging_sha(skill.path) if side == "staging" else main_sha(skill.path)
+        sha = cached_staging if side == "staging" else cached_main
     else:
         side = "main"
-        sha = main_sha(skill.path)
+        sha = cached_main
     if not sha:
         raise RuntimeError(f"skill {skill.name!r}: cannot resolve sha for side={side}")
     return SkillSlot(skill_name=skill.name, side=side, sha=sha, bucket=bucket)
@@ -118,15 +267,17 @@ def build_manifest(
       排序往下接着取——这不是 fallback，是画像不存在时的正确定义。
     """
     skill_dir = Path(skill_dir)
+    if total_slots <= 0:
+        # 控制面压测和显式禁用分发的部署不需要触碰 skill 仓；否则短 TTL
+        # 过期时仍会让一批无槽位请求等待一次无意义的全量扫描。
+        return SyncResponse(slots=[], server_time=time.time())
     prefs = prefs or {"pinned": [], "blocked": set()}
     retired = retired or set()
     excluded = set(prefs.get("blocked") or set()) | retired
 
-    repo = SkillRepo(skill_dir)
-    distributable = [
-        s for s in repo if main_sha(s.path) and s.name not in excluded
-    ]
-    skills = sorted(distributable, key=_rank_key, reverse=True)
+    catalog = _catalog_cache.get(skill_dir)
+    distributable = [s for s in catalog.skills if s.name not in excluded]
+    skills = distributable
     by_name = {s.name: s for s in distributable}
 
     # pinned 占位:不存在/尚不可分发(无 main)/已下线的 pin 跳过——读路径
@@ -151,6 +302,8 @@ def build_manifest(
         ux_ordered=non_pinned,
         reco_slots=reco_slots,
         traj_root=traj_root,
+        candidate_pool=list(catalog.skills),
+        candidate_refs=catalog.refs,
     )
 
     slots: list[SkillSlot] = []
@@ -161,7 +314,9 @@ def build_manifest(
             bucket = "ranked"
         else:
             bucket = "recommended"
-        slot = _resolve_slot(skill, client_id, probability, bucket)
+        slot = _resolve_slot(
+            skill, client_id, probability, bucket, refs=catalog.refs,
+        )
         if slot is not None:
             slots.append(slot)
     # 埋点：只记画像推荐位(recommended bucket)——推荐触发率衡量的就是这部分命中。
@@ -187,6 +342,8 @@ def _pick_recommended(
     ux_ordered: list[Skill],
     reco_slots: int,
     traj_root: Path | str | None,
+    candidate_pool: list[Skill] | None = None,
+    candidate_refs: dict[str, tuple[str, str | None]] | None = None,
 ) -> list[Skill]:
     """选 ``recommended`` bucket 的 skill。
 
@@ -211,6 +368,7 @@ def _pick_recommended(
         if user.client_interest is not None and user.client_interest.feature_tensor is not None:
             picked = _engine.get_skill_for_client(
                 user, reco_slots, exclude_names=ranked_names,
+                candidate_pool=candidate_pool, candidate_refs=candidate_refs,
             )
             # get_skill_for_client 已记录推荐 + resolve side；只取 reco_slots 个
             return picked[:reco_slots]

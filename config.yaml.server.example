@@ -21,7 +21,7 @@ embedding:
 
 # ===== Server runtime =====
 server:
-  thread_pool_tokens: 300          # 同步 HTTP 路由的 anyio 线程池容量
+  thread_pool_tokens: 80           # 同步 HTTP 路由的 anyio 线程池容量
   profile_refresh_workers: 4       # 画像刷新使用的独立固定 worker 数
   profile_refresh_queue_size: 1024 # 待刷新 client 的有界队列容量
   profile_refresh_shutdown_timeout: 5 # 停机最长等待画像 worker 的秒数

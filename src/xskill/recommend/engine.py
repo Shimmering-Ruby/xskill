@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
-from xskill.canary import CanaryConfig, has_staging, main_sha, pick_side, staging_sha
+from xskill.canary import CanaryConfig, main_sha, pick_side, staging_sha
 from xskill.config import recommend_config
 from xskill.pipeline.atom import AtomTaskStore
 from xskill.recommend.profile_store import ProfileStore
@@ -98,7 +98,9 @@ class SkillRecommendEngine:
             self._skillhub_cache = (fp, self.skillhub.index())
         return self._skillhub_cache[1]
 
-    def _combined_relevance(self) -> tuple[list[str], np.ndarray, dict[str, bool]]:
+    def _combined_relevance(
+        self, distributable_skills: Optional[list["Skill"]] = None,
+    ) -> tuple[list[str], np.ndarray, dict[str, bool]]:
         """合并检索池：可分发 skill 的 desc 向量 + 三方 skill 向量。
 
         返回 ``(names, embeddings, is_skillhub)``。三方 skill 标记 True（仅相关性位）。
@@ -113,7 +115,12 @@ class SkillRecommendEngine:
             repo_names = []
             dim = len(hub_entries[0]["vec"]) if hub_entries else 0
             repo_embs = np.zeros((0, dim), dtype=float)
-        distributable = {s.name for s in self._distributable_skills()}
+        pool = (
+            distributable_skills
+            if distributable_skills is not None
+            else self._distributable_skills()
+        )
+        distributable = {s.name for s in pool}
         # 仅保留可分发 skill（排除 baby / 已删）
         keep = [i for i, n in enumerate(repo_names) if n in distributable]
         names = [repo_names[i] for i in keep]
@@ -153,6 +160,24 @@ class SkillRecommendEngine:
     def _distributable_skills(self) -> list["Skill"]:
         """可分发 skill = 有 main 分支（baby-only 不入池）。"""
         return [s for s in self._repo() if main_sha(s.path)]
+
+    @staticmethod
+    def _quality_key(
+        skill: "Skill", refs: tuple[str, str | None] | None = None,
+    ) -> tuple[float, int]:
+        """复用 manifest 已读 ref 计算质量排序，避免再次查询 Git。"""
+        if refs is None:
+            avg = skill.ux_avg(side="main", days=30)
+        else:
+            main_ref = refs[0]
+            rows = skill.recent_ux_scores(side="main", days=30)
+            scores = [
+                row.get("score") for row in rows
+                if row.get("commit_sha") == main_ref
+                and isinstance(row.get("score"), (int, float))
+            ]
+            avg = sum(scores) / len(scores) if scores else None
+        return (avg if avg is not None else 0.0, skill.use_count)
 
     # ── 用户 atom 派生 ────────────────────────────────────────────
     def _client_store_root(self, user_id: str) -> Path:
@@ -324,21 +349,34 @@ class SkillRecommendEngine:
     def get_skill_for_client(
         self, client_user: "ClientUser", skill_num: int,
         *, exclude_names: Optional[set[str]] = None,
+        candidate_pool: Optional[list["Skill"]] = None,
+        candidate_refs: Optional[dict[str, tuple[str, str | None]]] = None,
     ) -> list["Skill"]:
         """80% 质量 + 20% 相关性，质量不足相关性回填；记录推荐 + resolve side。
 
         ``exclude_names``：从候选池排除的 skill 名（如已占 ranked 槽位的），供
         ``_pick_recommended`` 在 ranked 之外选 recommended 位用。
         """
-        pool = self._distributable_skills()
+        source_pool = (
+            list(candidate_pool)
+            if candidate_pool is not None
+            else self._distributable_skills()
+        )
+        pool = source_pool
         if exclude_names:
             pool = [s for s in pool if s.name not in exclude_names]
 
         quality_ratio = self.rcfg["quality_ratio"]
         qn = min(math.ceil(skill_num * quality_ratio), len(pool))
+        quality_keys = {
+            s.name: self._quality_key(
+                s, candidate_refs.get(s.name) if candidate_refs is not None else None,
+            )
+            for s in pool
+        }
         quality = sorted(
             pool,
-            key=lambda s: (s.ux_avg(side="main", days=30) or 0.0, s.use_count),
+            key=lambda s: quality_keys[s.name],
             reverse=True,
         )[:qn]
         quality_names = {s.name for s in quality}
@@ -346,7 +384,7 @@ class SkillRecommendEngine:
         relevance: list["Skill"] = []
         ci = client_user.client_interest
         if ci is not None and ci.feature_tensor is not None:
-            names, embs, is_hub = self._combined_relevance()
+            names, embs, is_hub = self._combined_relevance(source_pool)
             by_name = {s.name: s for s in pool}  # pool 已排除 exclude_names
             picked = set(quality_names)
             for center in ci.feature_tensor:
@@ -358,6 +396,8 @@ class SkillRecommendEngine:
                 order = np.argsort(-sims)
                 for i in order:
                     nm = names[i]
+                    if exclude_names and nm in exclude_names:
+                        continue
                     if nm in picked:
                         continue
                     if is_hub.get(nm):
@@ -378,7 +418,7 @@ class SkillRecommendEngine:
         if len(chosen) < skill_num:
             for s in sorted(
                 pool,
-                key=lambda s: (s.ux_avg(side="main", days=30) or 0.0, s.use_count),
+                key=lambda s: quality_keys[s.name],
                 reverse=True,
             ):
                 if len(chosen) >= skill_num:
@@ -403,8 +443,12 @@ class SkillRecommendEngine:
                     "source_path": s["source_path"],
                 }
             else:
-                side = self.resolve_side(s, client_user)
-                sha = staging_sha(s.path) if side == "staging" else (main_sha(s.path) or "")
+                cached = candidate_refs.get(s.name) if candidate_refs is not None else None
+                side = self.resolve_side(s, client_user, refs=cached)
+                if cached is not None:
+                    sha = cached[1] if side == "staging" else cached[0]
+                else:
+                    sha = staging_sha(s.path) if side == "staging" else (main_sha(s.path) or "")
                 skill_name = s.name
                 rec = {"skill": skill_name, "branch": side, "hash": sha}
             self.reco_store.record(
@@ -418,7 +462,10 @@ class SkillRecommendEngine:
         from xskill.canary import recent_scores
         return len(recent_scores(skill_dir, side=side, commit_sha=sha, n=self.staging_need + 1))
 
-    def resolve_side(self, skill: "Skill", client_user: "ClientUser") -> str:
+    def resolve_side(
+        self, skill: "Skill", client_user: "ClientUser",
+        *, refs: tuple[str, str | None] | None = None,
+    ) -> str:
         """staging 优先达量：未达量→staging；staging 达量 main 未达量→main；双侧达量→pick_side。
 
         双侧达量时用 ``pick_side(user_id, skill_name, probability)`` 做确定性分流
@@ -429,10 +476,13 @@ class SkillRecommendEngine:
         就是该 skill 的最可能用户——故 staging 未达量时直接给 staging 即满足 spec D6 的
         「最可能用户优先消费 staging」。跨用户的显式时间序排序留作后续优化。
         """
-        if not has_staging(skill.path):
+        if refs is None:
+            m_sha = main_sha(skill.path) or ""
+            s_sha = staging_sha(skill.path)
+        else:
+            m_sha, s_sha = refs
+        if not s_sha:
             return "main"
-        s_sha = staging_sha(skill.path) or ""
-        m_sha = main_sha(skill.path) or ""
         staging_n = self._side_count(skill.path, "staging", s_sha)
         if staging_n < self.staging_need:
             return "staging"

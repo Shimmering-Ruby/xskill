@@ -16,6 +16,7 @@ from xskill.canary import append_ux_score, main_sha, staging_sha
 from xskill.recommend.client_interest import ClientInterest
 from xskill.recommend.client_user import ClientUser
 from xskill.recommend.engine import SkillRecommendEngine
+from xskill.skill.repo import SkillRepo
 
 
 def _git(args, cwd):
@@ -110,6 +111,40 @@ class TestPool:
         eng = _engine(tmp_path, skill_dir, tmp_path / "traj")
         pool = eng._distributable_skills()
         assert {s.name for s in pool} == {"s0"}
+
+    def test_supplied_manifest_pool_avoids_second_repo_scan(self, tmp_path, monkeypatch):
+        """暖画像推荐复用 manifest 候选池和 refs，不再次遍历仓或查询 git。"""
+        skill_dir = tmp_path / "skills"
+        refs = {}
+        for name in ("s0", "s1", "s2"):
+            path, sha = _make_main_skill(skill_dir, name)
+            refs[name] = (sha, None)
+        _write_index(skill_dir, ["s0", "s1", "s2"], dim=5)
+        eng = _engine(tmp_path, skill_dir, tmp_path / "traj")
+        pool = list(SkillRepo(skill_dir))
+        user = ClientUser(
+            "u1", client_interest=ClientInterest(
+                "u1", feature_tensor=np.asarray([[1, 0, 0, 0, 0]], dtype=float),
+                mean_tensor=np.asarray([1, 0, 0, 0, 0], dtype=float),
+            ),
+        )
+
+        def unexpected_scan():
+            raise AssertionError("manifest 候选池已提供，不应再次扫描 SkillRepo")
+
+        monkeypatch.setattr(eng, "_distributable_skills", unexpected_scan)
+        import xskill.skill.skill as skill_module
+        monkeypatch.setattr(
+            skill_module._canary, "main_sha",
+            lambda _path: (_ for _ in ()).throw(
+                AssertionError("manifest refs 已提供，不应再次查询 Git")
+            ),
+        )
+        chosen = eng.get_skill_for_client(
+            user, 2, candidate_pool=pool, candidate_refs=refs,
+        )
+
+        assert len(chosen) == 2
 
 
 # ── update_user_interest ─────────────────────────────────────────
