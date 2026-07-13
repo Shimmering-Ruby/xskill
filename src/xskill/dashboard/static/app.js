@@ -1334,12 +1334,18 @@ function convexHull(pts) {
   }
   return lower.slice(0, -1).concat(upper.slice(0, -1));
 }
+// 散点降维算法:URL 路径含 umap → 默认 UMAP(dashboarddemoumap 子路径),否则 t-SNE。
+// 页内切换按钮实时改这个变量并重画,同一份数据直观对比两种投影。
+let SCATTER_METHOD = location.pathname.includes('umap') ? 'umap' : 'tsne';
+let _lastProfileUid = null;
+const METHOD_LABEL = { tsne: 't-SNE', umap: 'UMAP' };
 async function openUserProfile(uid) {
+  _lastProfileUid = uid;
   const box = document.getElementById('user-profile');
   if (!box) return;
   box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">加载 ${esc(uid)} 的画像…</div>`;
   let d;
-  try { d = await j('api/v1/dashboard/user/' + encodeURIComponent(uid) + '/scatter'); }
+  try { d = await j('api/v1/dashboard/user/' + encodeURIComponent(uid) + '/scatter?method=' + SCATTER_METHOD); }
   catch (e) {
     box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400 text-xs">${esc(uid)}:${esc(e.message)}</div>`;
     return;
@@ -1396,11 +1402,16 @@ async function openUserProfile(uid) {
   }).join('');
   const legend = (d.clusters || []).map(cl =>
     `<span class="inline-flex items-center gap-1 text-[11px] font-medium" style="color:${CLUSTER_COLORS[cl.cluster % CLUSTER_COLORS.length]}">💡${esc(cl.label)}</span>`).join('');
+  const cur = d.method || SCATTER_METHOD;
+  const seg = ['tsne', 'umap'].map(m =>
+    `<button class="scatter-method px-2 py-0.5 rounded-md text-[11px] font-medium ${m === cur ? 'bg-teal-600 text-white' : 'text-slate-500 hover:bg-slate-50'}" data-method="${m}">${METHOD_LABEL[m]}</button>`).join('');
   box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
     <div class="flex items-baseline justify-between flex-wrap gap-2">
       <h2 class="font-semibold text-sm flex items-center gap-2">${avatar(uid)} ${esc(uid)} 的兴趣画像
-        <span class="font-normal text-[11px] text-slate-400">t-SNE 2D 投影 · 悬停原子预览,点击跳详情</span></h2>
-      <div class="flex gap-3 flex-wrap items-center">${legend}
+        <span class="font-normal text-[11px] text-slate-400">${METHOD_LABEL[cur]} 2D 投影 · 悬停原子预览,点击跳详情</span></h2>
+      <div class="flex gap-3 flex-wrap items-center">
+        <span class="inline-flex items-center gap-1 ring-1 ring-slate-200 rounded-lg px-1 py-0.5">${seg}</span>
+        ${legend}
         <span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><svg width="11" height="11"><path d="M5.5 1 l4.5 8 h-9 z" fill="#0f172a"/></svg>SKILL:技能名</span></div>
     </div>
     <svg viewBox="0 0 ${W} ${H}" class="w-full mt-2" style="max-height:440px" id="scatter-svg">
@@ -1411,6 +1422,13 @@ async function openUserProfile(uid) {
   </div>`;
   box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
+// 散点算法切换:t-SNE ↔ UMAP,同一份数据换降维算法重画
+document.addEventListener('click', e => {
+  const btn = e.target.closest && e.target.closest('.scatter-method');
+  if (!btn || btn.dataset.method === SCATTER_METHOD) return;
+  SCATTER_METHOD = btn.dataset.method;
+  if (_lastProfileUid) openUserProfile(_lastProfileUid).catch(console.error);
+});
 // 散点 hover 预览卡(自定义 tooltip,跟随鼠标)
 document.addEventListener('mousemove', e => {
   const tip = document.getElementById('scatter-tip');

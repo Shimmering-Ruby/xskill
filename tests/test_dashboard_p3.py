@@ -249,6 +249,32 @@ def test_scatter_clusters_and_labels(tmp_path):
     assert between > 1.5 * within
 
 
+def test_scatter_umap_method(tmp_path):
+    """UMAP 投影:同一份数据换降维算法,簇仍分得开、确定性、method 回显 umap。"""
+    pdb = tmp_path / "p.db"
+    _seed_profile(pdb)
+    viz = ProfileViz(pdb)
+    sc = viz.user_scatter("alice", method="umap")
+    assert sc["method"] == "umap"
+    assert len(sc["points"]) == 6 and len(sc["centers"]) == 2
+    xy = np.array([[p["x"], p["y"]] for p in sc["points"]])
+    ga, gb = xy[:3].mean(axis=0), xy[3:].mean(axis=0)
+    within = max(np.linalg.norm(xy[:3] - ga, axis=1).mean(),
+                 np.linalg.norm(xy[3:] - gb, axis=1).mean())
+    between = np.linalg.norm(ga - gb)
+    assert between > 1.5 * within
+    # 确定性:无随机数,两次坐标一致
+    xy2 = np.array([[p["x"], p["y"]] for p in viz.user_scatter("alice", method="umap")["points"]])
+    assert np.allclose(xy, xy2)
+
+
+def test_scatter_unknown_method_rejected(tmp_path):
+    pdb = tmp_path / "p.db"
+    _seed_profile(pdb)
+    with pytest.raises(ValueError):
+        ProfileViz(pdb).user_scatter("alice", method="pca")
+
+
 def test_scatter_cold_start_and_missing(tmp_path):
     pdb = tmp_path / "p.db"
     store = _seed_profile(pdb)
@@ -325,6 +351,13 @@ def test_scatter_endpoint(tmp_path):
     _seed_profile(profile_db_for(db))
     r = c.get("/api/v1/dashboard/user/alice/scatter")
     assert r.status_code == 200 and len(r.json()["points"]) == 6
+    assert r.json()["method"] == "tsne"  # 默认 t-SNE
+    # method=umap 换算法,同一批数据
+    ru = c.get("/api/v1/dashboard/user/alice/scatter?method=umap")
+    assert ru.status_code == 200 and ru.json()["method"] == "umap"
+    assert len(ru.json()["points"]) == 6
+    # 未知算法 → 400
+    assert c.get("/api/v1/dashboard/user/alice/scatter?method=pca").status_code == 400
     assert c.get("/api/v1/dashboard/user/ghost/scatter").status_code == 404
 
 
@@ -414,6 +447,9 @@ def test_frontend_shell_has_p3_components():
     assert "'Notification' in window" in js  # HTTPS 能力分层探测
     assert "sc-hull" in js and "convexHull" in js  # 散点簇凸包描边
     assert "💡" in js and "SKILL:" in js  # 兴趣点灯泡+tag 词图例 / SKILL: 前缀
+    # t-SNE/UMAP 切换:URL 路径检测 + 切换按钮 + method query param
+    assert "SCATTER_METHOD" in js and "scatter-method" in js
+    assert "method=" in js and "umap" in js.lower()
     # 新增 Tailwind 类已进编译产物(BUILD.md 流程),不能只写在 JS 里没编译
     for cls in ("first\\:mt-0", ".space-y-1>"):
         assert cls in html, f"class {cls} not compiled into twcss"

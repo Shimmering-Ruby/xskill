@@ -36,6 +36,28 @@ def profile_db_for(db_path: Optional[Path]) -> Path:
     return XSKILL_HOME / "team_profile.db"
 
 
+_PCA_PREDIM = 50  # 高维 embedding 进降维算法前的 PCA 预降维目标维度
+
+
+def _preprocess_embeddings(x: np.ndarray, pca_dim: int = _PCA_PREDIM) -> np.ndarray:
+    """高维文本 embedding 的标准前置（t-SNE / UMAP 共用）:
+
+    - **各向异性修正**:文本 embedding 全体共享一个强"公共方向"（任意两条
+      文本余弦普遍 0.5+ 的底噪来源）,减去全体均值再逐行重归一化,语义差异
+      才主导 pairwise 距离;
+    - **PCA 预降维到 ≤``pca_dim`` 维**:去掉长尾噪声维度,pairwise 距离更能
+      反映主要语义结构,计算也更快（2048 维原始空间直接算距离噪声占比高）。
+    """
+    x = x - x.mean(axis=0)
+    norms = np.linalg.norm(x, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    x = x / norms
+    if x.shape[1] > pca_dim and x.shape[0] > 2:
+        _, _, vt = np.linalg.svd(x, full_matrices=False)
+        x = x @ vt[:pca_dim].T
+    return x
+
+
 class _TSNE2D:
     """经典 t-SNE（Van der Maaten & Hinton, 2008），纯 numpy、零外部依赖。
 
@@ -44,13 +66,7 @@ class _TSNE2D:
     PCA 初始化（无随机数生成，全程确定性）:同一批向量每次调用坐标一致
     （截图/复现稳定,不依赖不可控的随机布局）。
 
-    对高维文本 embedding 加了标准前置 trick（sklearn/UMAP 处理这类
-    feature 的同款做法）:
-    - **各向异性修正**:文本 embedding 全体共享一个强"公共方向"（任意两条
-      文本余弦普遍 0.5+ 的底噪来源）,减去全体均值再逐行重归一化,语义差异
-      才主导 pairwise 距离;
-    - **PCA 预降维到 ≤50 维**:去掉长尾噪声维度,pairwise 距离更能反映
-      主要语义结构,计算也更快（2048 维原始空间直接算距离噪声占比高）。
+    前置各向异性修正 + PCA 预降维见 ``_preprocess_embeddings``。
     exaggeration 用 4x/100 轮——在真实 demo 数据上按 tag 分组网格实测,
     4x/100 的簇间/簇内比是 sklearn 默认 12x/250 的两倍多（几十点的小样本
     量下重放大会把布局压坏,大数据集的默认参数不适用）。
@@ -59,7 +75,6 @@ class _TSNE2D:
     n<=2 时没有"邻域结构"可言，直接给一条由数据本身决定的确定性直线。
     """
 
-    _PCA_DIM = 50            # 预降维目标维度（sklearn 文档推荐的同款量级）
     _EXAGGERATION = 4.0      # early exaggeration 系数（小样本实测优于 12）
     _EXAGGERATION_ITER = 100  # exaggeration 阶段轮数
     _MOMENTUM_SWITCH = 250   # 动量 0.5→0.8 的切换轮(论文标准,与放大阶段解耦)
@@ -68,25 +83,13 @@ class _TSNE2D:
         self._perplexity = perplexity
         self._n_iter = n_iter
 
-    @classmethod
-    def _preprocess(cls, x: np.ndarray) -> np.ndarray:
-        """各向异性修正（中心化+重归一化）+ PCA 预降维（见类 docstring）。"""
-        x = x - x.mean(axis=0)
-        norms = np.linalg.norm(x, axis=1, keepdims=True)
-        norms[norms == 0] = 1
-        x = x / norms
-        if x.shape[1] > cls._PCA_DIM and x.shape[0] > 2:
-            _, _, vt = np.linalg.svd(x, full_matrices=False)
-            x = x @ vt[:cls._PCA_DIM].T
-        return x
-
     def fit(self, vectors: np.ndarray) -> np.ndarray:
         """返回 ``(n, 2)`` 低维坐标。"""
         x = np.asarray(vectors, dtype=float)
         n = x.shape[0]
         if n <= 2:
             return self._degenerate_layout(x)
-        x = self._preprocess(x)
+        x = _preprocess_embeddings(x)
         perplexity = min(self._perplexity, max(1.0, (n - 1) / 3))
         p = self._joint_probabilities(x, perplexity)
         p_early = p * self._EXAGGERATION  # early exaggeration:放大簇间距
@@ -174,6 +177,146 @@ class _TSNE2D:
         return q, num
 
 
+class _UMAP2D:
+    """UMAP（McInnes, Healy & Melville, 2018），纯 numpy、零外部依赖。
+
+    与 t-SNE 的核心区别:UMAP 建的是**模糊单纯复形**（fuzzy simplicial set）
+    ——先对每个点用平滑 kNN 距离（局部连通半径 ``rho`` + 带宽 ``sigma``）算
+    邻接隶属度,对称化成模糊并集图,再最小化高低维两张模糊图之间的**交叉熵**
+    （吸引力沿边、斥力靠负采样）。相比 t-SNE 的 KL 散度,交叉熵项让 UMAP 更
+    保全局结构、簇更紧凑分离,这也是别人拿它可视化 MNIST feature 效果好的原因。
+
+    小样本（几十点）下用**全批梯度**代替 umap-learn 的随机负采样——点少时
+    全批既确定又够快,且直接优化同一套交叉熵目标（``a``/``b`` 曲线拟合
+    ``min_dist``/``spread``,吸引/斥力系数用参考实现同款公式）。不追求与
+    umap-learn 逐位一致（那份靠 Numba+随机负采样），追求的是算法本身一致。
+
+    确定性:谱初始化（图拉普拉斯特征向量,退化时回退 PCA 初始化）,全程无
+    随机数——同一批向量每次坐标一致。
+    """
+
+    def __init__(self, *, n_neighbors: int = 15, min_dist: float = 0.1,
+                 spread: float = 1.0, n_epochs: int = 500,
+                 gamma: float = 1.0, init_alpha: float = 1.0):
+        self._n_neighbors = n_neighbors
+        self._min_dist = min_dist
+        self._spread = spread
+        self._n_epochs = n_epochs
+        self._gamma = gamma
+        self._init_alpha = init_alpha
+
+    def fit(self, vectors: np.ndarray) -> np.ndarray:
+        """返回 ``(n, 2)`` 低维坐标。"""
+        x = np.asarray(vectors, dtype=float)
+        n = x.shape[0]
+        if n <= 2:
+            return _TSNE2D._degenerate_layout(x)
+        x = _preprocess_embeddings(x)
+        graph = self._fuzzy_simplicial_set(x)
+        a, b = self._fit_ab(self._min_dist, self._spread)
+        y = self._spectral_init(graph)
+        return self._optimize(y, graph, a, b)
+
+    # ── 高维模糊图 ────────────────────────────────────────────────
+    def _fuzzy_simplicial_set(self, x: np.ndarray) -> np.ndarray:
+        """平滑 kNN 隶属度 + 模糊并集对称化,返回 (n,n) 加权邻接。"""
+        n = x.shape[0]
+        k = min(self._n_neighbors, n - 1)
+        sq = _TSNE2D._pairwise_sq_dists(x)
+        dist = np.sqrt(np.maximum(sq, 0.0))
+        membership = np.zeros((n, n))
+        target = np.log2(k) if k > 1 else 1.0
+        for i in range(n):
+            order = np.argsort(dist[i])
+            neighbors = [j for j in order if j != i][:k]
+            dneigh = dist[i, neighbors]
+            rho = float(dneigh[dneigh > 0].min()) if np.any(dneigh > 0) else 0.0
+            sigma = self._smooth_knn_sigma(dneigh, rho, target)
+            membership[i, neighbors] = np.exp(
+                -np.maximum(dneigh - rho, 0.0) / sigma)
+        # 模糊并集（probabilistic t-conorm）: P = A + Aᵀ − A∘Aᵀ
+        return membership + membership.T - membership * membership.T
+
+    @staticmethod
+    def _smooth_knn_sigma(dneigh: np.ndarray, rho: float, target: float,
+                          tol: float = 1e-5, max_iter: int = 64) -> float:
+        """二分搜索带宽 sigma,使 Σ exp(−(d−rho)₊/sigma) 命中 log2(k)。"""
+        lo, hi, sigma = 0.0, np.inf, 1.0
+        d = np.maximum(dneigh - rho, 0.0)
+        for _ in range(max_iter):
+            psum = float(np.exp(-d / sigma).sum())
+            if abs(psum - target) < tol:
+                break
+            if psum > target:
+                hi = sigma
+                sigma = (lo + hi) / 2
+            else:
+                lo = sigma
+                sigma = sigma * 2 if hi == np.inf else (lo + hi) / 2
+        return max(sigma, 1e-3)
+
+    # ── a,b 曲线拟合 min_dist/spread ─────────────────────────────
+    @staticmethod
+    def _fit_ab(min_dist: float, spread: float) -> tuple[float, float]:
+        """拟合 1/(1+a·d^{2b}) 逼近目标隶属函数 ψ(d)（grid + 局部精修,确定性）。"""
+        xs = np.linspace(0, 3 * spread, 300)
+        psi = np.where(xs <= min_dist, 1.0, np.exp(-(xs - min_dist) / spread))
+        a_grid = np.geomspace(0.05, 8.0, 60)
+        b_grid = np.linspace(0.3, 1.6, 60)
+        best, best_sse = (1.0, 1.0), np.inf
+        for a in a_grid:
+            for b in b_grid:
+                pred = 1.0 / (1.0 + a * np.power(xs, 2 * b))
+                sse = float(np.sum((pred - psi) ** 2))
+                if sse < best_sse:
+                    best_sse, best = sse, (float(a), float(b))
+        return best
+
+    # ── 谱初始化 ─────────────────────────────────────────────────
+    @staticmethod
+    def _spectral_init(graph: np.ndarray) -> np.ndarray:
+        """归一化图拉普拉斯的第 2、3 特征向量;退化→PCA 初始化。"""
+        n = graph.shape[0]
+        deg = graph.sum(axis=1)
+        deg[deg == 0] = 1e-12
+        d_inv_sqrt = 1.0 / np.sqrt(deg)
+        lap = np.eye(n) - (d_inv_sqrt[:, None] * graph * d_inv_sqrt[None, :])
+        try:
+            _vals, vecs = np.linalg.eigh((lap + lap.T) / 2)
+            y = vecs[:, 1:3]
+            if y.shape[1] < 2 or float(np.abs(y).max()) < 1e-9:
+                raise np.linalg.LinAlgError("degenerate spectral init")
+        except np.linalg.LinAlgError:
+            return _TSNE2D._pca_init(graph) * 1e4  # 回退:图当特征做 PCA
+        scale = float(np.abs(y).max())
+        return y / scale * 10.0  # 缩放到 ±10（umap 同款初始尺度）
+
+    # ── 交叉熵布局（全批）────────────────────────────────────────
+    def _optimize(self, y: np.ndarray, graph: np.ndarray,
+                  a: float, b: float) -> np.ndarray:
+        n = y.shape[0]
+        neg = 1.0 - graph
+        np.fill_diagonal(neg, 0.0)
+        for epoch in range(self._n_epochs):
+            alpha = self._init_alpha * (1.0 - epoch / self._n_epochs)
+            diff = y[:, None, :] - y[None, :, :]     # (n,n,2)
+            d2 = np.sum(diff ** 2, axis=2)           # (n,n)
+            pos = d2 > 0
+            d2b = np.zeros((n, n))
+            d2b[pos] = np.power(d2[pos], b)
+            denom = a * d2b + 1.0
+            # 吸引力系数（沿边,权重=模糊隶属度）
+            att = np.zeros((n, n))
+            att[pos] = (-2.0 * a * b * np.power(d2[pos], b - 1.0)) / denom[pos]
+            # 斥力系数（负采样,权重=非隶属度）
+            rep = np.zeros((n, n))
+            rep[pos] = (2.0 * self._gamma * b) / ((0.001 + d2[pos]) * denom[pos])
+            coeff = graph * att + neg * rep          # (n,n)
+            step = np.clip(coeff[:, :, None] * diff, -4.0, 4.0).sum(axis=1)
+            y = y + alpha * step
+        return y - y.mean(axis=0)
+
+
 def _skill_index_vecs(skill_dir: Optional[Path]) -> dict[str, np.ndarray]:
     """读 ``<skill_dir>/.skill_index.pkl`` 的已缓存 skill embedding。
     索引不存在/不可读 → 空(散点图不画 skill 三角,D6 不现算)。"""
@@ -207,14 +350,20 @@ class ProfileViz:
 
     # ── §2.3 画像散点 ────────────────────────────────────────────
 
-    def user_scatter(self, user_key: str) -> dict:
-        """t-SNE 2D 散点数据。无画像行 → KeyError（端点转 404）;有行无点
-        （冷启动）→ ``points=[]`` + ``note``,显式标注不造假。
+    _PROJECTORS = {"tsne": _TSNE2D, "umap": _UMAP2D}
 
-        points/centers/skill 向量一次性联合投影（t-SNE 没有 PCA 那种线性
+    def user_scatter(self, user_key: str, method: str = "tsne") -> dict:
+        """降维 2D 散点数据。``method`` ∈ {tsne, umap}（默认 tsne）。无画像行 →
+        KeyError（端点转 404）;有行无点（冷启动）→ ``points=[]`` + ``note``,
+        显式标注不造假。
+
+        points/centers/skill 向量一次性联合投影（两种算法都没有 PCA 那种线性
         basis 可以对新点复用——邻域结构必须从投影一开始就联合建立,分开投影
         会让簇位置互相对不上）。
         """
+        projector_cls = self._PROJECTORS.get(method)
+        if projector_cls is None:
+            raise ValueError(f"未知投影算法 {method!r}（可选 tsne/umap）")
         profile = self._store.load(user_key)
         stored = self._store.load_points(user_key)
         if profile is None or stored is None:
@@ -222,6 +371,7 @@ class ProfileViz:
         if stored["points"] is None or not len(stored["meta"]):
             return {"user": user_key, "updated_at": stored["updated_at"],
                     "points": [], "centers": [], "skills": [], "clusters": [],
+                    "method": method,
                     "note": "画像冷启动:该用户还没有可投影的原子"}
 
         points = np.asarray(stored["points"], dtype=float)
@@ -244,7 +394,7 @@ class ProfileViz:
         if skill_entries:
             blocks.append(np.vstack([v for _, _, v in skill_entries]))
         combined = np.vstack(blocks)
-        coords_all = _TSNE2D().fit(combined)
+        coords_all = projector_cls().fit(combined)
         coords = coords_all[:len(points)]
         center_coords = coords_all[len(points):len(points) + len(centers)]
         skill_coords = coords_all[len(points) + len(centers):]
@@ -298,7 +448,7 @@ class ProfileViz:
                         for i in range(len(center_coords))],
             "clusters": clusters,
             "skills": skills,
-            "method": "tsne",
+            "method": method,
         }
 
     # ── §2.5 admin 用户聚类 graph ────────────────────────────────
