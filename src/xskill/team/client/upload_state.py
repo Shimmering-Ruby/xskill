@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+from xskill._sqlite_connect import connect_with_lock
+
 
 class TrajectoryUploadStateStore:
     """Persist per-trajectory upload state for one team server."""
@@ -24,7 +26,7 @@ class TrajectoryUploadStateStore:
         self.home_root = Path(home_root) if home_root else Path.home()
         self._now = time_fn
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn = connect_with_lock(sqlite3.connect, str(self.db_path))
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
         self._migrate_legacy_json_once()

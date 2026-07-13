@@ -20,6 +20,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from xskill._sqlite_connect import connect_with_lock
+
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +115,7 @@ class ClientRegistry:
         self._load_client_snapshot()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10)
+        conn = connect_with_lock(sqlite3.connect, str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 10000")
         conn.execute("PRAGMA synchronous = NORMAL")

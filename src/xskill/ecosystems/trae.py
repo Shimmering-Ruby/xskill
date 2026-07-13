@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from xskill._sqlite_connect import connect_with_lock
 from xskill.ecosystems._fallback import install_dir
 from xskill.ecosystems._shared import (
     _install_all_with,
@@ -224,7 +225,11 @@ def detect_trae_record(home_root: Path) -> dict | None:
 
 
 def _open_vscdb_readonly(db_path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
+    return connect_with_lock(
+        sqlite3.connect,
+        f"file:{db_path.resolve()}?mode=ro",
+        uri=True,
+    )
 
 
 def _query_chat_blob(conn: sqlite3.Connection) -> tuple[dict | None, str]:

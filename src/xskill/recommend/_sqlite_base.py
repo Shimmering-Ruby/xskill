@@ -8,6 +8,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from xskill._sqlite_connect import connect_with_lock
+
 
 _DB_LOCKS_GUARD = threading.Lock()
 _WAL_LOCKS: dict[Path, threading.Lock] = {}
@@ -45,7 +47,7 @@ class _SqliteStore:
         self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10)
+        conn = connect_with_lock(sqlite3.connect, str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         # WAL 允许画像刷新写入时，/sync、看板等读取方继续工作。busy_timeout
         # 必须逐连接设置；synchronous 也是连接级设置，不能只在建库时执行一次。

@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+from xskill._sqlite_connect import connect_with_lock
 from xskill.ecosystems._fallback import (
     InstallMode, _is_link_or_junction, install_dir,
 )
@@ -417,7 +418,7 @@ class SqliteIngester:
         # uri=True 必须；URI 中 mode=ro 等价于 SQLITE_OPEN_READONLY，
         # immutable=1 是 SQLite >= 3.8 的扩展（Python 3.7+ stdlib 都带）。
         uri = f"file:{db_path}?mode=ro&immutable=1"
-        return sqlite3.connect(uri, uri=True)
+        return connect_with_lock(sqlite3.connect, uri, uri=True)
 
     @staticmethod
     def _parse_json_col(data_text: str) -> dict:

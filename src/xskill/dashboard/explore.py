@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from xskill._sqlite_connect import connect_with_lock
 from xskill.pipeline.registry import get_connection
 from xskill.dashboard.metrics import _resolve_local_root, load_usage_records
 
@@ -303,7 +304,7 @@ def users_status(db_path: Optional[Path], *,
     if not clients_db.is_file():
         return {"users": [], "online": 0,
                 "reason": "no team_clients.db (not a team server)"}
-    cconn = sqlite3.connect(str(clients_db))
+    cconn = connect_with_lock(sqlite3.connect, str(clients_db))
     cconn.row_factory = sqlite3.Row
     try:
         ccols = {r[1] for r in cconn.execute("PRAGMA table_info(clients)")}

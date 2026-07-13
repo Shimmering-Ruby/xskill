@@ -25,6 +25,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from xskill._sqlite_connect import connect_with_lock
 from xskill.config import get_registry_db_path
 from xskill.types import WatchDir
 
@@ -233,7 +234,8 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     if db_path is None:
         db_path = get_registry_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=10)
+    db_key = db_path.expanduser().resolve()
+    conn = connect_with_lock(sqlite3.connect, str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
     # ``journal_mode=WAL`` is a persistent database setting, not a per-
     # connection option.  Reissuing the assignment on every telemetry write
@@ -241,7 +243,6 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     # lock.  Reading the current mode is lock-free once WAL is active; only a
     # new/legacy database needs the mutating pragma.
     conn.execute("PRAGMA busy_timeout=10000")
-    db_key = db_path.expanduser().resolve()
     wal_lock = _registry_db_lock(_REGISTRY_WAL_LOCKS, db_key)
     schema_lock = _registry_db_lock(_REGISTRY_SCHEMA_LOCKS, db_key)
     try:

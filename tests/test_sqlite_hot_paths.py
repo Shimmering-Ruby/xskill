@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import time
 
 import numpy as np
+import pytest
 
 
 class _TrackedConnection:
@@ -45,6 +47,182 @@ def _tracking_connect(monkeypatch, sqlite_module):
 def _journal_mode_assignments(statements: list[str]) -> list[str]:
     """只统计修改 journal_mode 的 PRAGMA，不把状态查询算进去。"""
     return [sql for sql in statements if sql == "pragma journal_mode=wal"]
+
+
+class _ConcurrencyProbe:
+    """Record peak concurrency in a small, deterministic timing window."""
+
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def enter(self) -> None:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+
+    def leave(self) -> None:
+        with self._lock:
+            self.active -= 1
+
+
+class _ExecuteProbeConnection:
+    def __init__(self, connection, probe: _ConcurrencyProbe):
+        self._connection = connection
+        self._probe = probe
+
+    def execute(self, sql, *args, **kwargs):
+        self._probe.enter()
+        try:
+            time.sleep(0.01)
+            return self._connection.execute(sql, *args, **kwargs)
+        finally:
+            self._probe.leave()
+
+    @property
+    def row_factory(self):
+        return self._connection.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value):
+        self._connection.row_factory = value
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def _slow_connect_probe(monkeypatch, sqlite_module):
+    original_connect = sqlite_module.connect
+    connect_probe = _ConcurrencyProbe()
+    execute_probe = _ConcurrencyProbe()
+
+    def connect(*args, **kwargs):
+        connect_probe.enter()
+        try:
+            time.sleep(0.01)
+            connection = original_connect(*args, **kwargs)
+        finally:
+            connect_probe.leave()
+        return _ExecuteProbeConnection(connection, execute_probe)
+
+    monkeypatch.setattr(sqlite_module, "connect", connect)
+    return connect_probe, execute_probe
+
+
+def test_connect_open_lock_is_released_when_connect_raises():
+    """A failed open must not block the next SQLite connection attempt."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    expected = RuntimeError("mock connect failure")
+
+    def fail_connect():
+        raise expected
+
+    with pytest.raises(RuntimeError) as exc_info:
+        connect_with_lock(fail_connect)
+    assert exc_info.value is expected
+
+    marker = object()
+    assert connect_with_lock(lambda: marker) is marker
+
+
+def test_profile_connect_open_is_serial_but_sql_remains_concurrent(
+    tmp_path, monkeypatch,
+):
+    """30 profile workers only serialise connect(), not connection usage."""
+    from xskill.recommend import _sqlite_base
+    from xskill.recommend.profile_store import ProfileStore
+
+    store = ProfileStore(tmp_path / "profiles.db")
+    connect_probe, execute_probe = _slow_connect_probe(
+        monkeypatch, _sqlite_base.sqlite3,
+    )
+    barrier = threading.Barrier(30)
+
+    def load_profile(index: int) -> None:
+        barrier.wait(timeout=10)
+        assert store.load(f"client-{index:03d}") is None
+
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        list(executor.map(load_profile, range(30)))
+
+    assert connect_probe.max_active == 1
+    assert execute_probe.max_active > 1
+
+
+def test_registry_connect_open_is_serial_but_sql_remains_concurrent(
+    tmp_path, monkeypatch,
+):
+    """Registry connection bursts use the same narrow connect-only lock."""
+    from xskill.pipeline import registry
+
+    db_path = tmp_path / "registry.db"
+    registry.get_connection(db_path).close()
+    connect_probe, execute_probe = _slow_connect_probe(monkeypatch, registry.sqlite3)
+    barrier = threading.Barrier(30)
+
+    def open_registry(_index: int) -> None:
+        barrier.wait(timeout=10)
+        conn = registry.get_connection(db_path)
+        try:
+            assert conn.execute("SELECT 1").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        list(executor.map(open_registry, range(30)))
+
+    assert connect_probe.max_active == 1
+    assert execute_probe.max_active > 1
+
+
+def test_server_sqlite_call_sites_share_process_wide_connect_open_lock(
+    tmp_path, monkeypatch,
+):
+    """Profile, registry, client auth and dashboard share one open guard."""
+    from xskill.dashboard.explore import users_status
+    from xskill.pipeline import registry
+    from xskill.recommend import _sqlite_base
+    from xskill.recommend.profile_store import ProfileStore
+    from xskill.team.server.client_registry import ClientRegistry
+
+    profile_store = ProfileStore(tmp_path / "profiles.db")
+    registry_path = tmp_path / "registry.db"
+    registry.get_connection(registry_path).close()
+    client_registry = ClientRegistry(tmp_path / "team_clients.db")
+    # All call sites import the same sqlite3 module, so one probe observes
+    # every database-open path in this server workload.
+    connect_probe, execute_probe = _slow_connect_probe(
+        monkeypatch, _sqlite_base.sqlite3,
+    )
+    barrier = threading.Barrier(40)
+
+    def open_from_server_modules(index: int) -> None:
+        barrier.wait(timeout=10)
+        if index % 4 == 0:
+            assert profile_store.load(f"client-{index:03d}") is None
+            return
+        if index % 4 == 1:
+            conn = registry.get_connection(registry_path)
+        elif index % 4 == 2:
+            conn = client_registry._conn()
+        else:
+            assert users_status(registry_path)["users"] == []
+            return
+        try:
+            assert conn.execute("SELECT 1").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=40) as executor:
+            list(executor.map(open_from_server_modules, range(40)))
+    finally:
+        client_registry.close()
+
+    assert connect_probe.max_active == 1
+    assert execute_probe.max_active > 1
 
 
 def test_registry_new_db_concurrent_open_assigns_wal_once(tmp_path, monkeypatch):

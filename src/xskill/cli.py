@@ -17,6 +17,7 @@ import logging
 import sys
 
 from xskill import __version__
+from xskill._sqlite_connect import connect_with_lock
 from xskill.config import set_overrides
 from xskill.ecosystems import SQLITE_SPEC_BY_ECO
 
@@ -103,7 +104,7 @@ def _standalone_watch_dir_count() -> int:
     db = get_registry_db_path()
     if not db.is_file():
         return 0
-    conn = sqlite3.connect(str(db))
+    conn = connect_with_lock(sqlite3.connect, str(db))
     try:
         has_table = conn.execute(
             "SELECT name FROM sqlite_master "
