@@ -80,9 +80,10 @@ class AtomTaskStore:
     - **不用 SQLite**: traj 数量级 < 数千；文件读写直接、调试方便、跨平台兼容。
     - **每 traj 一个子目录**: 让 watcher 按 traj 粒度做增量处理，``list_by_traj``
       不需要全表扫。
-    - **向量索引整批重建**: TaskAgent 每给一条 traj 拆出新 atom 后由 watcher
-      触发一次 ``rebuild_vector_index``；增量重建对正确性没好处只增加复杂度，
-      暂不做（embed batch API 也支持千条以内的吞吐）。
+    - **向量索引增量重建**: TaskAgent 每给一条 traj 拆出新 atom 后由 watcher
+      触发一次 ``rebuild_vector_index``；按 ``atom_id`` 复用旧 index.pkl 中同
+      模型的向量，只对新原子调 embedding（换模型则整体重算，护栏见方法内），
+      避免攒了上万原子的 client 新增几条就全量重 embed。
     """
 
     INDEX_FILE = "index.pkl"
@@ -173,25 +174,64 @@ class AtomTaskStore:
 
     # ── vector index ──────────────────────────────────────────────
 
+    def _load_vector_cache(self, model: str) -> dict:
+        """增量 embedding 复用源：``{atom_id: 归一化向量(D,)}``。
+
+        仅当已落盘 index.pkl 的 ``model`` 字段与当前 ``model`` 一致才返回缓存
+        （换 embedding 模型 → 旧向量与当前模型不同源作废，返回空 dict 强制整体
+        重算，护栏在此不混用不同模型的向量）。无索引文件 / 结构缺字段 → 空 dict。
+        """
+        p = self._index_path()
+        if not p.is_file():
+            return {}
+        with open(p, "rb") as f:
+            data = pickle.load(f)
+        if (data.get("model") or "") != (model or ""):
+            return {}
+        atom_ids = data.get("atom_ids") or []
+        embeddings = data.get("embeddings")
+        if embeddings is None:
+            return {}
+        return {
+            aid: embeddings[i]
+            for i, aid in enumerate(atom_ids)
+            if i < len(embeddings) and aid
+        }
+
     def rebuild_vector_index(self, embed_client) -> None:
-        """整批 encode 所有 atom 的 ``summary or intent`` → L2 归一 → 落 index.pkl。
+        """增量重建索引：复用旧 index.pkl 中同模型的向量，只对新原子调 embedding。
+
+        - 旧索引 ``model`` 与当前 ``embed_client.model`` 一致时，按 ``atom_id``
+          复用其向量（atom 内容随 id 不可变，复用安全）；换模型则整体重算。
+        - 只对**没在缓存里的** atom_id 调 ``encode_batch``，其余复用缓存向量。
+        - 新索引只含当前 ``all_atoms()`` 的原子——被删除/reset 的原子自然不残留。
+        - 复用向量本就归一化落盘；新算向量照旧 L2 归一。最终 embeddings 行顺序
+          与 atom_ids、与 ``all_atoms()`` 顺序严格对齐。
 
         无 atom 时直接返回（不写空索引文件——``vector_search`` 自己处理无索引情况）。
         """
         atoms = list(self.all_atoms())
         if not atoms:
             return
-        texts = [a.summary or a.intent for a in atoms]
-        vecs = embed_client.encode_batch(texts)
-        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-        norms[norms == 0] = 1
-        vecs = vecs / norms
+        model = getattr(embed_client, "model", "")
+        cache = self._load_vector_cache(model)
+        missing = [a for a in atoms if a.atom_id not in cache]
+        if missing:
+            texts = [a.summary or a.intent for a in missing]
+            fresh = np.asarray(embed_client.encode_batch(texts))
+            norms = np.linalg.norm(fresh, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            fresh = fresh / norms
+            cache = dict(cache)
+            for a, v in zip(missing, fresh):
+                cache[a.atom_id] = v
+        vecs = np.asarray([cache[a.atom_id] for a in atoms])
         self.root.mkdir(parents=True, exist_ok=True)
         with open(self._index_path(), "wb") as f:
             pickle.dump({
                 "atom_ids": [a.atom_id for a in atoms],
                 "embeddings": vecs,
-                "model": getattr(embed_client, "model", ""),
+                "model": model,
                 "dim": int(vecs.shape[1]),
             }, f)
 
