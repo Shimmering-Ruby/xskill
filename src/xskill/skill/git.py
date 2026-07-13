@@ -1667,6 +1667,66 @@ def commit_update_main_branch(skill_dir: str, message: str) -> bool:
     return True
 
 
+def commit_progressive_turn(skill_dir: str, turn_branch: str, message: str) -> bool:
+    """SkillEditAgent 多轮渐进式消化用：把当前工作区状态 commit 到一个新建的
+    turn 分支上（从当前 HEAD 派生,工作区不动——等价 ``checkout -b`` 无 sha 形态），
+    HEAD 落在新分支上供下一轮读取/续写。
+
+    与 ``commit_baby_to_main_branch`` 等终态 commit 的区别：turn 分支只是中间
+    态书签,不代表任何终态发布,也不做分支改名/校验当前分支必须是 baby/main。
+    该函数不检查当前分支——调用方（``SkillEditAgent._run``）负责保证时序正确。
+
+    返回 False 当且仅当 turn_branch 已存在（不应发生,调用方按递增 turn 号
+    生成分支名）。commit 本身允许空提交（本轮 agent 可能什么都没改）。
+    """
+    with skill_repo_lock(skill_dir):
+        with _open_repo(skill_dir) as repo:
+            if _has_branch(repo, turn_branch):
+                logger.warning("commit_progressive_turn 拒绝：分支已存在 %s", turn_branch)
+                return False
+            code, err = _checkout_branch(repo, turn_branch, create=True)
+            if code != 0:
+                logger.warning("commit_progressive_turn checkout 失败: %s", err)
+                return False
+            _stage_all(repo, Path(skill_dir))
+            sha, err = _do_commit(repo, message, allow_empty=True)
+            if sha is None:
+                logger.warning("commit_progressive_turn commit 失败: %s", err)
+                return False
+    return True
+
+
+def checkout_head_ref_only(skill_dir: str, branch: str) -> None:
+    """把 HEAD symbolic ref 指回 ``branch``,**不**动工作区/index。
+
+    多轮渐进式消化收尾用：最后一轮开跑前,把 HEAD 从最后一个 turn 分支切回
+    原始分支（baby/main），但保留 turn 分支演化出的工作区内容——这样现成的
+    终态 commit 工具（校验"当前必须在 baby/main"）可以原样调用,commit 时
+    ``_stage_all`` 会把 turn 分支上积累的全部改动当成"原分支的未提交改动"
+    一并收进这一次终态 commit。
+    """
+    with skill_repo_lock(skill_dir):
+        with _open_repo(skill_dir) as repo:
+            repo.refs.set_symbolic_ref(b"HEAD", _ref_for_branch(branch))
+
+
+def list_turn_branches(skill_dir: str, base_branch: str | None = None) -> list[str]:
+    """列出该 skill 仓库里的 turn 分支（形如 ``<base>_turn<N>``）。
+
+    ``base_branch`` 给定时只匹配该 base 派生的turn 分支；``None`` 时匹配任意
+    base 的 turn 分支——SkillEditAgent 崩溃恢复扫描用（不知道上次跑到哪个
+    base 就崩了）。
+    """
+    import re
+
+    pattern = (
+        re.compile(rf"^{re.escape(base_branch)}_turn\d+$")
+        if base_branch else re.compile(r"^.+_turn\d+$")
+    )
+    with _open_repo(skill_dir) as repo:
+        return [b for b in _list_branches(repo) if pattern.match(b)]
+
+
 def ensure_repo(skill_dir: str):
     """确保 skill_dir 是一个 git 仓库，在 main 分支上。"""
     p = Path(skill_dir)

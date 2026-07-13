@@ -39,6 +39,13 @@ FUZZY_PREFIX = 60
 # 单 atom 给 10 分立即触发——cluster agent 的提示词鼓励"非常确信时打高分"。
 ATOM_PROMOTION_THRESHOLD = 10
 
+# SkillEditAgent 单轮最多消化的候选数。buffer 攒满阈值时可能已经堆到几十上百
+# 条（xskill rebuild --force 重放全部历史 / 团队突然活跃），一次性塞进单个
+# agent.run() 会话会让证据读取/compact 无限拉长，且整条流水线扫描循环会被
+# 这一个技能的整理过程卡死。超过这个数就切成多批，每批一轮独立的 agent 会话，
+# 轮与轮之间用 git turn 分支承接进度（见 skill_edit_agent.py）。
+SKILL_EDIT_BATCH_SIZE = 20
+
 
 # ═══════════════════════════════════════════════════════════════════
 # I/O
@@ -212,6 +219,22 @@ def clear_candidates(skill_dir: Path) -> None:
     直接追加。
     """
     save_candidates(skill_dir, {"candidates": []})
+
+
+def remove_candidates(skill_dir: Path, atom_ids: set[str]) -> None:
+    """按 atom_id 集合从 buffer 中摘除条目,其余原样保留。
+
+    SkillEditAgent 多轮渐进式消化用：只摘除本次 maybe_run 开始时快照到的
+    atom_id,消化期间 cluster 并发 add 进来的新候选不受影响,留给下一次
+    maybe_run 处理。取代 ``clear_candidates`` 的整文件清空——那样会把消化
+    期间新增的候选一并静默丢掉。
+    """
+    data = load_candidates(skill_dir)
+    remaining = [
+        c for c in data.get("candidates", []) or []
+        if c.get("atom_id") not in atom_ids
+    ]
+    save_candidates(skill_dir, {**data, "candidates": remaining})
 
 
 def find_atom_in_any_skill(skill_dir: Path, atom_id: str) -> str | None:
