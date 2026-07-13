@@ -83,6 +83,7 @@ class TestColdStartFlush:
         watcher = _make_watcher(tmp_path, skill_root)
 
         watcher._run_skill_edit_step()
+        watcher._drain_futures(stage="skill_edit")
 
         assert current_branch(str(skill_directory)) == "baby"
         assert candidates.load_candidates(skill_directory)["candidates"]
@@ -96,11 +97,13 @@ class TestColdStartFlush:
 
         watcher._cold_start_pipeline_idle = lambda: False
         watcher._run_skill_edit_step()
+        watcher._drain_futures(stage="skill_edit")
         assert current_branch(str(skill_directory)) == "baby"
         assert candidates.load_candidates(skill_directory)["candidates"]
 
         watcher._cold_start_pipeline_idle = lambda: True
         watcher._run_skill_edit_step()
+        watcher._drain_futures(stage="skill_edit")
         assert current_branch(str(skill_directory)) == "main"
         assert candidates.load_candidates(skill_directory)["candidates"] == []
         assert not (tmp_path / COLD_START_FILENAME).exists()
