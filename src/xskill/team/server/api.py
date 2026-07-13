@@ -78,12 +78,18 @@ def init_team_context(
     # create_app/TestClient 可在同一进程内反复初始化。新上下文接管前
     # 先有界停止旧服务，避免留下持有旧 engine 的 daemon 线程。
     previous = _ctx.profile_refresh_service
+    previous_registry = _ctx.client_registry
     if previous is not None and previous is not profile_refresh_service:
         try:
             previous.stop(timeout=5.0)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning("failed to stop previous profile refresh service",
                            exc_info=True)
+    if previous_registry is not None and previous_registry is not client_registry:
+        try:
+            previous_registry.close()
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("failed to close previous client registry", exc_info=True)
     _ctx.join_token = join_token
     _ctx.client_registry = client_registry
     _ctx.skill_dir = Path(skill_dir)
@@ -104,6 +110,7 @@ def clear_team_context(*, profile_refresh_shutdown_timeout: float = 5.0) -> bool
     registry/路径等引用。返回画像 worker 是否在时限内全部退出。
     """
     service = _ctx.profile_refresh_service
+    registry = _ctx.client_registry
     stopped = True
     if service is not None:
         try:
@@ -111,6 +118,12 @@ def clear_team_context(*, profile_refresh_shutdown_timeout: float = 5.0) -> bool
         except Exception:  # pylint: disable=broad-exception-caught
             stopped = False
             logger.warning("failed to stop profile refresh service", exc_info=True)
+    if registry is not None:
+        try:
+            stopped = bool(registry.close()) and stopped
+        except Exception:  # pylint: disable=broad-exception-caught
+            stopped = False
+            logger.warning("failed to close client registry", exc_info=True)
     _ctx.join_token = ""
     _ctx.client_registry = None
     _ctx.skill_dir = None

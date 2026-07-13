@@ -97,6 +97,101 @@ def test_unknown_client_rejected(client):
     assert r.status_code == 403
 
 
+def test_sync_auth_uses_current_token_and_delete_revokes_immediately(client):
+    registered = client.post(
+        "/api/v1/team/register",
+        json={"token": "secret-token", "client_label": "alice", "hostname": "a"},
+    )
+    cid = registered.json()["client_id"]
+    registry = server_api._ctx.client_registry
+    assert registry is not None
+
+    wrong = client.get(
+        "/api/v1/team/sync",
+        headers={"X-Xskill-Token": "wrong", "X-Xskill-Client": cid},
+    )
+    assert wrong.status_code == 401
+
+    # 配置重载后旧 token 必须立刻失效；同一个 registry 不应被关闭。
+    server_api.init_team_context(
+        join_token="rotated-token",
+        client_registry=registry,
+        skill_dir=server_api._ctx.skill_dir,
+        traj_root=server_api._ctx.traj_root,
+        probability=server_api._ctx.probability,
+        ranked_slots=server_api._ctx.ranked_slots,
+        total_slots=server_api._ctx.total_slots,
+        register_dir=server_api._ctx.register_dir,
+        allow_anonymous_user=server_api._ctx.allow_anonymous_user,
+        skillhub=server_api._ctx.skillhub,
+        profile_refresh_service=server_api._ctx.profile_refresh_service,
+    )
+    old_token = client.get(
+        "/api/v1/team/sync",
+        headers={"X-Xskill-Token": "secret-token", "X-Xskill-Client": cid},
+    )
+    assert old_token.status_code == 401
+    current = client.get(
+        "/api/v1/team/sync",
+        headers={"X-Xskill-Token": "rotated-token", "X-Xskill-Client": cid},
+    )
+    assert current.status_code == 200
+
+    assert registry.delete(cid) is True
+    revoked = client.get(
+        "/api/v1/team/sync",
+        headers={"X-Xskill-Token": "rotated-token", "X-Xskill-Client": cid},
+    )
+    assert revoked.status_code == 403
+
+
+def test_reinitializing_context_flushes_and_closes_previous_registry(
+    client, tmp_path, monkeypatch,
+):
+    previous = server_api._ctx.client_registry
+    assert previous is not None
+    cid = previous.register(label="pending", hostname="old", client_version="1.0")
+    monkeypatch.setattr(
+        previous, "_schedule_touch_flush_locked", lambda _delay: None,
+    )
+    assert previous.authenticate_and_touch(cid, "2.0") is True
+
+    replacement = ClientRegistry(tmp_path / "replacement.db")
+    server_api.init_team_context(
+        join_token="replacement-token",
+        client_registry=replacement,
+        skill_dir=server_api._ctx.skill_dir,
+        traj_root=server_api._ctx.traj_root,
+        probability=server_api._ctx.probability,
+        ranked_slots=server_api._ctx.ranked_slots,
+        total_slots=server_api._ctx.total_slots,
+        register_dir=server_api._ctx.register_dir,
+        allow_anonymous_user=server_api._ctx.allow_anonymous_user,
+        skillhub=server_api._ctx.skillhub,
+        profile_refresh_service=server_api._ctx.profile_refresh_service,
+    )
+
+    assert previous.authenticate_and_touch(cid) is False
+    assert previous._pending_touches == {}
+    assert previous.get(cid)["client_version"] == "2.0"
+    # 同一个 registry 的配置刷新只轮换 token，不误关当前实例。
+    server_api.init_team_context(
+        join_token="replacement-token-2",
+        client_registry=replacement,
+        skill_dir=server_api._ctx.skill_dir,
+        traj_root=server_api._ctx.traj_root,
+        probability=server_api._ctx.probability,
+        ranked_slots=server_api._ctx.ranked_slots,
+        total_slots=server_api._ctx.total_slots,
+        register_dir=server_api._ctx.register_dir,
+        allow_anonymous_user=server_api._ctx.allow_anonymous_user,
+        skillhub=server_api._ctx.skillhub,
+        profile_refresh_service=server_api._ctx.profile_refresh_service,
+    )
+    replacement_id = replacement.register(label="still-open")
+    assert replacement.authenticate_and_touch(replacement_id) is True
+
+
 def test_version_reports_matching_server_wheel(client, tmp_path, monkeypatch):
     whl_dir = tmp_path / "whls"
     whl_dir.mkdir()

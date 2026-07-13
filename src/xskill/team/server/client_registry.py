@@ -10,13 +10,24 @@ pick_side）② 上传轨迹的落盘分桶（clients/<client_id>/sessions/）�
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import secrets
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
+
+# 认证请求只把 last_seen 合并到内存；短暂延迟后由一个事务批量写回。
+# 这个窗口足以把同一波并发合并起来，同时远小于 last_seen 的秒级精度。
+_TOUCH_FLUSH_DELAY_SECONDS = 0.05
+_TOUCH_RETRY_DELAY_SECONDS = 0.25
+_TOUCH_CLOSE_ATTEMPTS = 3
 
 
 def _normalize_user_name(name: str) -> str:
@@ -86,13 +97,20 @@ def _now() -> str:
 
 
 class ClientRegistry:
-    """SQLite 支撑的 client 注册表。每次操作开新连接（规模小，几十个 client）。"""
+    """SQLite 支撑的 client 注册表；认证读快照，触达按短窗口批量写回。"""
 
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_lock = threading.RLock()
+        self._state_lock = threading.RLock()
+        self._touch_flush_lock = threading.Lock()
+        self._client_ids: set[str] = set()
+        self._pending_touches: dict[str, tuple[str, str | None]] = {}
+        self._touch_timer: threading.Timer | None = None
+        self._closed = False
         self._init_schema()
+        self._load_client_snapshot()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=10)
@@ -124,6 +142,30 @@ class ClientRegistry:
             finally:
                 conn.close()
 
+    def _load_client_snapshot(self) -> None:
+        """从持久化注册表加载认证快照（服务重启时恢复）。"""
+        conn = self._conn()
+        try:
+            client_ids = {
+                row["client_id"]
+                for row in conn.execute("SELECT client_id FROM clients")
+            }
+        finally:
+            conn.close()
+        with self._state_lock:
+            self._client_ids = client_ids
+
+    def _remember_client(self, client_id: str) -> None:
+        with self._state_lock:
+            if not self._closed:
+                self._client_ids.add(client_id)
+
+    def _raise_if_closed(self) -> None:
+        """拒绝关闭后的新注册。"""
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("client registry is closed")
+
     def register(
         self, *,
         label: str = "",
@@ -149,12 +191,14 @@ class ClientRegistry:
         指纹查找仅在 hostname 或 label 至少一个非空时启用，防止匿名 client
         互相误匹配。
         """
+        self._raise_if_closed()
         # 优先级 ① — user_name 派生确定性 id（--name 权威身份）
         if user_name:
             norm = _normalize_user_name(user_name)
             client_id = client_id_from_name(user_name)
             now = _now()
             with self._write_lock:
+                self._raise_if_closed()
                 conn = self._conn()
                 try:
                     existing = conn.execute(
@@ -178,20 +222,27 @@ class ClientRegistry:
                     conn.commit()
                 finally:
                     conn.close()
+                # 数据库写入与认证快照发布共用 write -> state 的锁顺序。
+                # delete/close 因而不可能插入在这两步之间，让已删除 client
+                # 被重新放回内存索引。
+                self._remember_client(client_id)
             return client_id
         # 优先级 ② — claimed_client_id 命中
         if claimed_client_id and self.exists(claimed_client_id):
             self.touch(claimed_client_id, version=client_version or None)
+            self._raise_if_closed()
             return claimed_client_id
         # 优先级 ③ — (hostname, label) 指纹回查
         existing = self._find_by_fingerprint(hostname=hostname, label=label)
         if existing:
             self.touch(existing, version=client_version or None)
+            self._raise_if_closed()
             return existing
         # 优先级 ④ — 发新 uuid
         client_id = uuid.uuid4().hex
         now = _now()
         with self._write_lock:
+            self._raise_if_closed()
             conn = self._conn()
             try:
                 conn.execute(
@@ -203,6 +254,7 @@ class ClientRegistry:
                 conn.commit()
             finally:
                 conn.close()
+            self._remember_client(client_id)
         return client_id
 
     def _find_by_fingerprint(
@@ -291,44 +343,186 @@ class ClientRegistry:
             conn.close()
 
     def exists(self, client_id: str) -> bool:
-        conn = self._conn()
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM clients WHERE client_id=?", (client_id,)
-            ).fetchone()
-            return row is not None
-        finally:
-            conn.close()
+        with self._state_lock:
+            return not self._closed and client_id in self._client_ids
 
     def touch(self, client_id: str, *, version: str | None = None) -> None:
         """更新 last_seen（P2-2.10:携带 version 时顺带 upsert client_version）。
 
         client_id 不存在则静默 no-op。version=None（旧 client 未上报）不清
-        既有值。"""
-        self.authenticate_and_touch(client_id, version)
+        既有值。显式 touch 保持同步落库语义；高频认证走下方的批量写回。"""
+        # 与批量 flush 串行，确保较早排队的认证版本不会在显式 touch 之后
+        # 反向覆盖；state lock 覆盖数据库写入，使同步 touch 与并发认证有明确
+        # 的先后顺序。
+        with self._touch_flush_lock:
+            with self._write_lock:
+                with self._state_lock:
+                    if self._closed:
+                        return
+                    conn = self._conn()
+                    try:
+                        if version:
+                            cursor = conn.execute(
+                                "UPDATE clients SET last_seen=?, client_version=?"
+                                " WHERE client_id=?",
+                                (_now(), version, client_id),
+                            )
+                        else:
+                            cursor = conn.execute(
+                                "UPDATE clients SET last_seen=? WHERE client_id=?",
+                                (_now(), client_id),
+                            )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    # 所有尚未被 flush 取走的触达都早于本次同步写入。
+                    self._pending_touches.pop(client_id, None)
+                    if cursor.rowcount > 0:
+                        self._client_ids.add(client_id)
+                    else:
+                        self._client_ids.discard(client_id)
 
     def authenticate_and_touch(
         self, client_id: str, version: str | None = None,
     ) -> bool:
-        """原子确认 client 存在并更新 last_seen；不存在时返回 False。"""
+        """确认 client 存在，并把 last_seen/version 合并后异步批量写回。
+
+        认证判断与删除共用同一把内存状态锁：``delete`` 返回后，后续请求会
+        立即失败。持久化只更新现有行，不会把已经删除的 client 重新插入。
+        """
+        now = _now()
+        with self._state_lock:
+            if self._closed or client_id not in self._client_ids:
+                return False
+            previous = self._pending_touches.get(client_id)
+            previous_version = previous[1] if previous else None
+            self._pending_touches[client_id] = (
+                now,
+                version or previous_version,
+            )
+            self._schedule_touch_flush_locked(_TOUCH_FLUSH_DELAY_SECONDS)
+            return True
+
+    def _schedule_touch_flush_locked(self, delay: float) -> None:
+        """state lock 已持有时，确保最多只有一个待执行的批量写回。"""
+        if self._closed or self._touch_timer is not None:
+            return
+        timer = threading.Timer(delay, self._flush_pending_touches)
+        timer.name = "xskill-client-touch-flush"
+        timer.daemon = True
+        self._touch_timer = timer
+        timer.start()
+
+    @staticmethod
+    def _merge_touch(
+        older: tuple[str, str | None], newer: tuple[str, str | None],
+    ) -> tuple[str, str | None]:
+        """合并两次触达：保留较新时间，version 只增量覆盖、不被空值清除。"""
+        return (max(older[0], newer[0]), newer[1] or older[1])
+
+    def _persist_touch_batch(
+        self, pending: dict[str, tuple[str, str | None]],
+    ) -> None:
+        if not pending:
+            return
+        rows = [
+            (last_seen, version, version, client_id)
+            for client_id, (last_seen, version) in pending.items()
+        ]
         with self._write_lock:
             conn = self._conn()
             try:
-                if version:
-                    cursor = conn.execute(
-                        "UPDATE clients SET last_seen=?, client_version=?"
-                        " WHERE client_id=?",
-                        (_now(), version, client_id),
-                    )
-                else:
-                    cursor = conn.execute(
-                        "UPDATE clients SET last_seen=? WHERE client_id=?",
-                        (_now(), client_id),
-                    )
+                conn.executemany(
+                    "UPDATE clients SET last_seen=?,"
+                    " client_version=CASE WHEN ? IS NOT NULL"
+                    " THEN ? ELSE client_version END"
+                    " WHERE client_id=?",
+                    rows,
+                )
                 conn.commit()
-                return cursor.rowcount > 0
             finally:
                 conn.close()
+
+    def _flush_pending_touches(self) -> bool:
+        """取走当前触达并用单事务写回；失败则保留并延迟重试。"""
+        with self._touch_flush_lock:
+            with self._state_lock:
+                timer = self._touch_timer
+                self._touch_timer = None
+                if timer is not None and timer is not threading.current_thread():
+                    timer.cancel()
+                pending = self._pending_touches
+                self._pending_touches = {}
+                # 已被删除的 id 不应再参与持久化。
+                pending = {
+                    client_id: touch
+                    for client_id, touch in pending.items()
+                    if client_id in self._client_ids
+                }
+            try:
+                self._persist_touch_batch(pending)
+                return True
+            except sqlite3.Error:
+                logger.warning("failed to persist client last_seen batch", exc_info=True)
+                with self._state_lock:
+                    for client_id, touch in pending.items():
+                        if client_id not in self._client_ids:
+                            continue
+                        newer = self._pending_touches.get(client_id)
+                        self._pending_touches[client_id] = (
+                            self._merge_touch(touch, newer) if newer else touch
+                        )
+                    if not self._closed:
+                        self._schedule_touch_flush_locked(
+                            _TOUCH_RETRY_DELAY_SECONDS,
+                        )
+                return False
+
+    def flush_pending_touches(self) -> bool:
+        """立即持久化已合并的触达，供生命周期关闭和确定性测试使用。"""
+        return self._flush_pending_touches()
+
+    def delete(self, client_id: str) -> bool:
+        """删除 client；方法返回后认证快照与待写回触达均已失效。"""
+        with self._write_lock:
+            conn = self._conn()
+            try:
+                cursor = conn.execute(
+                    "DELETE FROM clients WHERE client_id=?", (client_id,)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            with self._state_lock:
+                self._client_ids.discard(client_id)
+                self._pending_touches.pop(client_id, None)
+        return cursor.rowcount > 0
+
+    def close(self) -> bool:
+        """停止新的认证并同步写完已经接收的 last_seen 触达。"""
+        # write -> state 与 register/delete/touch 保持一致。close 获得 write
+        # lock 后，之前开始的注册已完整发布到快照；之后的注册会看到 closed。
+        with self._write_lock:
+            with self._state_lock:
+                self._closed = True
+                timer = self._touch_timer
+                self._touch_timer = None
+                if timer is not None:
+                    timer.cancel()
+
+        # Timer.cancel() 不等待已经进入回调的线程。先 join，既避免关闭后遗留
+        # touch 线程，也让随后 flush 看见失败回调放回的 pending。
+        if timer is not None and timer is not threading.current_thread():
+            timer.join()
+
+        # 关闭态不会再创建重试 Timer，所以在调用线程内做有限次重试。
+        # 每次失败时 _flush_pending_touches 都会把完整批次合并回 pending。
+        for attempt in range(_TOUCH_CLOSE_ATTEMPTS):
+            if self._flush_pending_touches():
+                return True
+            if attempt + 1 < _TOUCH_CLOSE_ATTEMPTS:
+                time.sleep(_TOUCH_RETRY_DELAY_SECONDS)
+        return False
 
     def get(self, client_id: str) -> dict | None:
         conn = self._conn()
