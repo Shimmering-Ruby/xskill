@@ -132,6 +132,118 @@ class TestVectorIndex:
         assert hits == []
 
 
+class _SpyEmbed(_FakeEmbed):
+    """记录每次 ``encode_batch`` 输入文本，用于断言增量复用只 embed 新原子。"""
+
+    def __init__(self, model: str = "fake"):
+        self.model = model
+        self.batches: list[list[str]] = []
+
+    def encode_batch(self, texts: list[str]) -> np.ndarray:
+        self.batches.append(list(texts))
+        return super().encode_batch(texts)
+
+
+def _read_index(tmp_path: Path) -> dict:
+    import pickle
+    with open(tmp_path / "cc-sessions" / "index.pkl", "rb") as f:
+        return pickle.load(f)
+
+
+class TestVectorIndexIncremental:
+    def test_first_rebuild_embeds_all(self, tmp_path):
+        store = _store(tmp_path)
+        embed = _SpyEmbed()
+        for i in range(3):
+            store.save(_atom(atom_id=f"atom_t_000{i}", traj_id="t",
+                             offset_start=i * 10, offset_end=(i + 1) * 10,
+                             summary=f"do thing {i}"))
+        store.rebuild_vector_index(embed)
+        # 首次：一次 batch 覆盖全部 3 个原子
+        assert embed.batches == [["do thing 0", "do thing 1", "do thing 2"]]
+        idx = _read_index(tmp_path)
+        assert idx["atom_ids"] == ["atom_t_0000", "atom_t_0001", "atom_t_0002"]
+
+    def test_added_atom_only_embeds_the_new_one(self, tmp_path):
+        store = _store(tmp_path)
+        embed = _SpyEmbed()
+        for i in range(2):
+            store.save(_atom(atom_id=f"atom_t_000{i}", traj_id="t",
+                             offset_start=i * 10, offset_end=(i + 1) * 10,
+                             summary=f"do thing {i}"))
+        store.rebuild_vector_index(embed)
+        embed.batches.clear()
+        # 新增第 3 个原子后再 rebuild：只 embed 新原子，其余复用缓存
+        store.save(_atom(atom_id="atom_t_0002", traj_id="t",
+                         offset_start=20, offset_end=30, summary="do thing 2"))
+        store.rebuild_vector_index(embed)
+        assert embed.batches == [["do thing 2"]]
+        idx = _read_index(tmp_path)
+        assert idx["atom_ids"] == [
+            "atom_t_0000", "atom_t_0001", "atom_t_0002"]
+
+    def test_reused_rows_match_full_rebuild(self, tmp_path):
+        # 增量拼出来的向量与整批重算逐行一致（行顺序对齐 all_atoms()）
+        store = _store(tmp_path)
+        for i in range(2):
+            store.save(_atom(atom_id=f"atom_t_000{i}", traj_id="t",
+                             offset_start=i * 10, offset_end=(i + 1) * 10,
+                             summary=f"do thing {i}"))
+        store.rebuild_vector_index(_SpyEmbed())
+        store.save(_atom(atom_id="atom_t_0002", traj_id="t",
+                         offset_start=20, offset_end=30, summary="do thing 2"))
+        store.rebuild_vector_index(_SpyEmbed())
+        incremental = _read_index(tmp_path)["embeddings"]
+
+        # 另建等价 store 一次性整批重建作为基准
+        ref_store = AtomTaskStore(root=tmp_path / "ref")
+        for i in range(3):
+            ref_store.save(_atom(atom_id=f"atom_t_000{i}", traj_id="t",
+                                 offset_start=i * 10, offset_end=(i + 1) * 10,
+                                 summary=f"do thing {i}"))
+        ref_store.rebuild_vector_index(_SpyEmbed())
+        import pickle
+        with open(tmp_path / "ref" / "index.pkl", "rb") as f:
+            full = pickle.load(f)["embeddings"]
+        assert np.allclose(incremental, full)
+
+    def test_model_change_reembeds_all(self, tmp_path):
+        store = _store(tmp_path)
+        for i in range(2):
+            store.save(_atom(atom_id=f"atom_t_000{i}", traj_id="t",
+                             offset_start=i * 10, offset_end=(i + 1) * 10,
+                             summary=f"do thing {i}"))
+        store.rebuild_vector_index(_SpyEmbed(model="fake"))
+        # 换 embedding 模型：旧向量作废，全部重算
+        embed2 = _SpyEmbed(model="other")
+        store.rebuild_vector_index(embed2)
+        assert embed2.batches == [["do thing 0", "do thing 1"]]
+        assert _read_index(tmp_path)["model"] == "other"
+
+    def test_deleted_atom_dropped_from_index(self, tmp_path):
+        store = _store(tmp_path)
+        for i in range(3):
+            store.save(_atom(atom_id=f"atom_t_000{i}", traj_id="t",
+                             offset_start=i * 10, offset_end=(i + 1) * 10,
+                             summary=f"do thing {i}"))
+        store.rebuild_vector_index(_SpyEmbed())
+        # 删掉一个原子文件后 rebuild：索引里不再有它
+        (tmp_path / "cc-sessions" / "t" / "tasks" /
+         "atom_t_0001.json").unlink()
+        embed = _SpyEmbed()
+        store.rebuild_vector_index(embed)
+        idx = _read_index(tmp_path)
+        assert idx["atom_ids"] == ["atom_t_0000", "atom_t_0002"]
+        # 复用命中，无需再 embed 任何原子
+        assert embed.batches == []
+        assert idx["embeddings"].shape[0] == 2
+
+    def test_empty_store_writes_no_file(self, tmp_path):
+        store = _store(tmp_path)
+        store.rebuild_vector_index(_SpyEmbed())
+        assert not (tmp_path / "cc-sessions" / "index.pkl").exists()
+
+
 class TestAllAtoms:
     def test_iterates_across_trajs(self, tmp_path):
         store = _store(tmp_path)

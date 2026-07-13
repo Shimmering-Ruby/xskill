@@ -175,6 +175,12 @@ const STATE_BADGE = {
 const stateBadge = s =>
   `<span class="px-2 py-0.5 rounded-md text-[11px] font-medium ${STATE_BADGE[s] || STATE_BADGE.unknown}">${esc(s)}</span>`;
 
+// 来源徽章：skillhub 三方技能标醒目的"第三方"并显示 hub 来源；自产技能标淡色"自产"。
+const sourceBadge = s => s.source === 'skillhub'
+  ? `<span class="ml-2 inline-block px-2 py-0.5 rounded-md text-[11px] font-medium bg-indigo-100 text-indigo-700">第三方 · skillhub</span>`
+    + (s.hub ? `<span class="ml-2 inline-block text-[11px] text-slate-400">${esc(s.hub)}</span>` : '')
+  : `<span class="ml-2 inline-block px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-500">自产</span>`;
+
 async function loadSkills() {
   const d = await jc('api/v1/dashboard/skills');
   const bs = d.by_state || {};
@@ -182,7 +188,7 @@ async function loadSkills() {
   put('skills.summary', `共 ${d.total} 个${parts ? ' · ' + parts : ''}`);
   rows('skills-body', (d.skills || []).map(s =>
     `<tr class="hover:bg-slate-50 cursor-pointer" data-skill-row="${esc(s.name)}">`
-    + `<td class="py-2.5 font-medium text-teal-700">${esc(s.name)}</td>`
+    + `<td class="py-2.5 font-medium text-teal-700">${esc(s.name)}${sourceBadge(s)}</td>`
     + `<td>${stateBadge(s.state)}</td>`
     + `<td class="text-slate-500 max-w-[480px] truncate" title="${esc(s.description)}">${esc(s.description) || '—'}</td>`
     + `<td class="text-right tabular-nums">v${esc(s.version)}</td>`
@@ -369,10 +375,25 @@ function renderDiff(diff) {
 }
 
 let _curSkill = null;
+// 判定某 skill 属于自产(native)还是三方(skillhub)——从技能库列表载荷取
+// source 字段(列表由另一路渲染，本函数只读)。jc 已缓存该端点，无额外请求。
+// 拿不到 source / 请求失败 → 安全兜底按自产走，绝不因缺字段崩。
+async function skillSource(name) {
+  try {
+    const d = await jc('api/v1/dashboard/skills');
+    const hit = (d.skills || []).find(s => s.name === name);
+    return (hit && hit.source === 'skillhub') ? 'skillhub' : 'native';
+  } catch (_e) {
+    return 'native';
+  }
+}
+
 async function openSkill(name) {
   _curSkill = name;
   const box = document.getElementById('skill-detail');
   box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">加载 ${esc(name)} …</div>`;
+  // 三方 skill 无 git / staging，走 skillhub 专用端点(自产 detail 对其 404)。
+  if (await skillSource(name) === 'skillhub') { await renderSkillhubDetail(name, box); return; }
   const [dR, gR, uR, lR, tR] = await Promise.allSettled([
     jc('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/detail'),
     jc('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/graph'),
@@ -489,6 +510,80 @@ async function openSkill(name) {
   </div>`;
   box.scrollIntoView({ behavior: 'smooth' });
   loadTriggerPanel(name).catch(console.error);
+}
+
+// 三方(skillhub)技能详情：无 git / 无灰度 staging / 无进化路径，只有按
+// content_sha 版本聚合的 ux 均分与关联打分原子。故不渲染自产才有的
+// 进化路径 / staging 灰度 / 晋升 / 离线探针版块，仅展示三方可得的评分事实。
+async function renderSkillhubDetail(name, box) {
+  const [vR, aR] = await Promise.allSettled([
+    jc('api/v1/dashboard/skillhub/' + encodeURIComponent(name) + '/ux?days=30'),
+    jc('api/v1/dashboard/skillhub/' + encodeURIComponent(name) + '/ux/atoms?days=30'),
+  ]);
+  if (vR.status === 'rejected') {
+    box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-rose-600">加载失败：${esc(vR.reason)}</div>`;
+    return;
+  }
+  const d = vR.value;
+  const at = aR.status === 'fulfilled' ? aR.value : { scores: [], atom_lookup: 'unavailable' };
+  const versions = d.versions || [];
+  const curSha = (d.current_version && d.current_version.content_sha) || '';
+  const totalSamples = versions.reduce((n, v) => n + (v.count || 0), 0);
+
+  const vrows = versions.map(v => {
+    const isCur = curSha && v.commit_sha === curSha;
+    return `<tr><td class="py-2"><code class="text-[11px]">${esc((v.commit_sha || '').slice(0, 8))}</code>`
+      + `${isCur ? ' <span class="px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 ring-1 ring-sky-200 text-[10px] font-medium">当前</span>' : ''}</td>`
+      + `<td class="text-right tabular-nums">${v.count}</td>`
+      + `<td class="text-right tabular-nums">${ux(v.avg)}</td>`
+      + `<td class="text-slate-500 pl-4">${fdate(v.first_scored_at).slice(0, 10)}</td>`
+      + `<td class="text-slate-500 pl-4">${fdate(v.last_scored_at).slice(0, 10)}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="py-2 text-slate-400">还没有 ux 打分数据</td></tr>';
+
+  const scores = at.scores || [];
+  const atomUnavailable = (at.atom_lookup !== 'ok');
+  const arows = scores.map(s =>
+    `<div class="py-2.5">
+      <div class="flex items-center justify-between gap-2">
+        <span class="flex items-center gap-2 min-w-0">
+          <code class="text-[11px] text-slate-400 shrink-0">${esc((s.commit_sha || '').slice(0, 7))}</code>
+          <span class="text-[11px] text-slate-400 truncate">${esc(s.user_model) || '—'} · ${fdate(s.scored_at).slice(0, 10)}</span>
+        </span>
+        <span class="px-2 py-0.5 rounded-md bg-teal-50 text-teal-700 text-[11px] font-semibold tabular-nums shrink-0">${s.score != null ? esc(s.score) : '—'}</span>
+      </div>
+      ${s.reasons ? `<div class="text-[11px] text-slate-500 mt-1">${esc(s.reasons)}</div>` : ''}
+    </div>`).join('') || '<div class="py-2 text-slate-400 text-xs">还没有关联打分原子</div>';
+
+  box.innerHTML = `
+  <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+    <div class="text-xs text-slate-400 mb-1.5">技能库 <span class="mx-1">/</span> <span class="text-slate-600">${esc(name)}</span></div>
+    <div class="flex items-start justify-between gap-3 flex-wrap">
+      <div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <h2 class="text-lg font-bold tracking-tight">${esc(name)}</h2>
+          <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 ring-1 ring-sky-200 text-xs font-medium text-sky-700">第三方 · skillhub</span>
+        </div>
+        <div class="text-slate-500 text-xs mt-1">按 content_sha 版本聚合 · 累计样本 <b class="text-slate-800 tabular-nums">${totalSamples}</b> 次
+          ${curSha ? `· 当前版本 <code class="text-[11px] text-slate-400">${esc(curSha.slice(0, 8))}</code>` : ''}</div>
+      </div>
+      <div class="text-[11px] text-slate-400 max-w-[280px]">三方技能无 git / 无灰度 staging，故无进化路径、晋升与灰度裁决版块。</div>
+    </div>
+
+    <div class="grid grid-cols-12 gap-4 mt-4">
+      <div class="col-span-12 lg:col-span-7">
+        <h3 class="font-semibold text-sm">版本统计 <span class="font-normal text-[11px] text-slate-400 ml-1">content_sha 聚合 · 样本 / UX / 首末打分</span></h3>
+        <div class="overflow-x-auto"><table class="w-full mt-1 text-[12.5px]">
+          <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100"><th class="text-left font-medium py-2">版本</th><th class="text-right font-medium">样本</th><th class="text-right font-medium">UX</th><th class="text-left font-medium pl-4">首次</th><th class="text-left font-medium pl-4">末次</th></tr></thead>
+          <tbody class="divide-y divide-slate-50">${vrows}</tbody></table></div>
+      </div>
+      <div class="col-span-12 lg:col-span-5 rounded-2xl ring-1 ring-slate-200 p-5">
+        <h3 class="font-semibold text-sm">关联打分原子 <span class="font-normal text-[11px] text-slate-400 ml-1">${scores.length} 条</span></h3>
+        ${atomUnavailable ? '<div class="text-[11px] text-slate-400 mt-1">非团队服务器模式，原子内容不可反查（仅评分）</div>' : ''}
+        <div class="mt-1 divide-y divide-slate-100 max-h-80 overflow-y-auto">${arows}</div>
+      </div>
+    </div>
+  </div>`;
+  box.scrollIntoView({ behavior: 'smooth' });
 }
 
 // 离线探针触发率面板（描述质量信号；区别于"总触发"的线上真实使用率）
@@ -1396,8 +1491,11 @@ async function openUserProfile(uid) {
   const skEls = (d.skills || []).map(s => {
     const c = sc(s);
     const short = s.name.length > 14 ? s.name.slice(0, 13) + '…' : s.name;
+    const hub = s.source === 'skillhub';         // 三方 skill 区分:琥珀色 ▲ + tooltip 标"第三方"
+    const fill = hub ? '#d97706' : '#0f172a';
+    const tip = `${hub ? '第三方 ' : ''}SKILL:${esc(s.name)} · 触发 ${esc(s.use_count)} 次`;
     return `<g class="skill-jump cursor-pointer" data-skill="${esc(s.name)}">
-      <path d="M${c.x.toFixed(1)} ${(c.y - 7).toFixed(1)} l6.2 11 h-12.4 z" fill="#0f172a"><title>SKILL:${esc(s.name)} · 触发 ${esc(s.use_count)} 次</title></path>
+      <path d="M${c.x.toFixed(1)} ${(c.y - 7).toFixed(1)} l6.2 11 h-12.4 z" fill="${fill}"><title>${tip}</title></path>
       <text x="${c.x.toFixed(1)}" y="${(c.y + 17).toFixed(1)}" font-size="9.5" font-weight="600" fill="#334155" text-anchor="middle">SKILL:${esc(short)}</text></g>`;
   }).join('');
   const legend = (d.clusters || []).map(cl =>

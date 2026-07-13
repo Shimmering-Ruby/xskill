@@ -171,6 +171,85 @@ def test_skills_catalog_empty_dir(tmp_path):
     assert skills_catalog(tmp_path / "nope") == []
 
 
+def test_skills_catalog_native_source_tag(tmp_path):
+    """向后兼容：不传 skillhub 时,自产条目统一带 source='native',无 skillhub 混入。"""
+    from xskill.skill.git import init_skill_repo_on_baby
+    sd = tmp_path / "skill"; sd.mkdir()
+    init_skill_repo_on_baby(str(sd / "wip-skill"), name="wip-skill", description="草稿")
+    cat = skills_catalog(sd)
+    assert len(cat) == 1
+    assert cat[0]["source"] == "native"
+    assert all(s.get("source") != "skillhub" for s in cat)
+
+
+def _make_skillhub(tmp_path, name, description, sub="vendor/tool"):
+    """构造启用态 SkillHub：hub_dir 下放一个三方 SKILL.md（embed_client 无需真实,
+    技能库列表走 include_vec=False 分支）。"""
+    from xskill.recommend.skillhub import SkillHub
+    hub_dir = tmp_path / "hub"
+    skdir = hub_dir / sub
+    skdir.mkdir(parents=True)
+    (skdir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n正文\n", encoding="utf-8")
+    return SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+
+
+def test_skills_catalog_merges_skillhub(tmp_path):
+    """技能库列表既含自产(native)又含三方(skillhub)条目,字段符合契约。"""
+    from xskill.skill.git import init_skill_repo_on_baby, commit_baby_to_main_branch
+    sd = tmp_path / "skill"; sd.mkdir()
+    init_skill_repo_on_baby(str(sd / "ready-skill"), name="ready-skill", description="正式描述")
+    commit_baby_to_main_branch(str(sd / "ready-skill"), "graduate")
+    hub = _make_skillhub(tmp_path, "vendor-skill", "三方能力描述", sub="vendor/tool")
+
+    cat = skills_catalog(sd, skillhub=hub)
+    by_source: dict = {}
+    for s in cat:
+        by_source.setdefault(s["source"], []).append(s)
+    assert set(by_source) == {"native", "skillhub"}
+
+    native = by_source["native"][0]
+    assert native["name"] == "ready-skill" and native["state"] == "main"
+
+    hub_row = by_source["skillhub"][0]
+    assert hub_row["name"] == "vendor-skill"          # 展示名取 display_name
+    assert hub_row["state"] == "skillhub"             # 无 git 分支
+    assert hub_row["hub"] == "vendor/tool"            # skillhub 目录下相对路径
+    assert hub_row["skill_id"].startswith("vendor-skill@")  # name@path_hash
+    assert "三方能力描述" in hub_row["description"]
+    assert hub_row["use_count"] == 0                  # 无使用记录 → 0
+    # 自产排在三方之前
+    assert cat.index(native) < cat.index(hub_row)
+
+
+def test_skills_catalog_skillhub_none_is_noop(tmp_path):
+    """skillhub=None（缺省/禁用）→ no-op：只有自产,不报错。"""
+    from xskill.skill.git import init_skill_repo_on_baby
+    sd = tmp_path / "skill"; sd.mkdir()
+    init_skill_repo_on_baby(str(sd / "wip"), name="wip", description="d")
+    assert skills_catalog(sd, skillhub=None) == skills_catalog(sd)
+    # 禁用态 SkillHub 也应 no-op（其 _entries 内部判 enabled）
+    from xskill.recommend.skillhub import SkillHub
+    disabled = SkillHub(enabled=False, hub_dir=tmp_path / "nohub", embed_client=None)
+    cat = skills_catalog(sd, skillhub=disabled)
+    assert all(s["source"] == "native" for s in cat)
+
+
+def test_skills_catalog_accepts_entry_list(tmp_path):
+    """skillhub 入参也可直接是条目列表（契约：SkillHub 对象或 entries）。"""
+    entries = [{
+        "source": "skillhub", "name": "x@abc123", "skill_id": "x@abc123",
+        "display_name": "x", "source_path": "team/x", "description": "e",
+        "use_count": 5,
+    }]
+    cat = skills_catalog(tmp_path / "nope", skillhub=entries)
+    assert len(cat) == 1
+    row = cat[0]
+    assert row["source"] == "skillhub" and row["hub"] == "team/x"
+    assert row["skill_id"] == "x@abc123" and row["use_count"] == 5
+    assert row["name"] == "x"
+
+
 def test_users_lists_team_clients(tmp_path):
     db = tmp_path / "u.db"
     conn = get_connection(db)
