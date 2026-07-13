@@ -1212,6 +1212,7 @@ class DirectoryWatcher:
         if skill_sub is None:
             return
         ac = AtomCanary(skill_dir=skill_sub)
+        new_scores: list[float] = []
         for atom in atoms:
             try:
                 result = score_atom(
@@ -1219,12 +1220,13 @@ class DirectoryWatcher:
                 )
                 if result["score"] is None:
                     continue
-                ac.append(
+                if ac.append(
                     atom_id=atom.atom_id, skill_name=skill_name,
                     side=side, commit_sha=commit_sha,
                     score=result["score"], reasons=result["reasons"],
                     user_model=atom.source_model,
-                )
+                ):
+                    new_scores.append(float(result["score"]))
                 self._stats["scores"] += 1
             except Exception:
                 logger.exception("score_atom failed: %s/%s",
@@ -1234,6 +1236,10 @@ class DirectoryWatcher:
         # _check_canary_decisions() 独立轮询，保证灰度系统自治不依赖
         # traj 触发。这里只负责打分落盘。
         mark_skill_used(wd_id, fname, skill_name, side, **kw)
+        if new_scores:
+            self._emit_feedback_event(
+                wd_id, fname, skill_name=skill_name, traj_id=traj_id,
+                scores=new_scores, side=side, sha=commit_sha, **kw)
 
     def _resolve_skill_for_scoring(
         self, skill_name: str, header: dict,
@@ -1301,6 +1307,8 @@ class DirectoryWatcher:
         eligible = eligible_models(model_share(**kw), canary_cfg.scope_top_n) or None
         hub = SkillHub.from_config(self.config, self.embed_client)
         used_any = False
+        # 事件扇出按 (traj, skill) 聚合(D7:同一轨迹多 atom 命中同一 skill 只发一条)
+        new_by_skill: dict[str, dict] = {}
         for atom in atoms:
             for skill_name in (atom.used_skills or []):
                 skill_sub, side, sha = self._resolve_server_skill(
@@ -1313,17 +1321,26 @@ class DirectoryWatcher:
                     result = score_atom(llm=self.llm, atom=atom, side=side)
                     if result["score"] is None:
                         continue
-                    AtomCanary(skill_dir=skill_sub).append(
+                    if AtomCanary(skill_dir=skill_sub).append(
                         atom_id=atom.atom_id, skill_name=skill_name,
                         side=side, commit_sha=sha,
                         score=result["score"], reasons=result["reasons"],
                         user_model=atom.source_model,
-                    )
+                    ):
+                        entry = new_by_skill.setdefault(
+                            skill_name,
+                            {"scores": [], "side": side, "sha": sha})
+                        entry["scores"].append(float(result["score"]))
                     self._stats["scores"] += 1
                     used_any = True
                 except Exception:
                     logger.exception("CS score_atom failed: %s/%s/%s",
                                      fname, atom.atom_id, skill_name)
+        for skill_name, entry in new_by_skill.items():
+            self._emit_feedback_event(
+                wd_id, fname, skill_name=skill_name, traj_id=traj_id,
+                scores=entry["scores"], side=entry["side"],
+                sha=entry["sha"], **kw)
         if used_any:
             logger.info("CS attribution done: %s (client=%s)", fname, client_id)
 
@@ -1355,6 +1372,35 @@ class DirectoryWatcher:
         if hub_sub is None:
             return None, "", ""
         return hub_sub, "main", hub.content_sha(skill_name) or ""
+
+    @staticmethod
+    def _emit_feedback_event(wd_id, fname, *, skill_name, traj_id, scores,
+                             side, sha, **kw):
+        """打分落盘后发 feedback 事件(P3-3.1,D7)。
+
+        旁路 telemetry:发送失败绝不阻断打分主链路（与
+        ``record_canary_decision`` 同款约定）。actor = 该 traj 的
+        ``user_key``(D5)——EventStore 会把 actor 从通知对象里排除
+        （本人触发本人贡献的 skill 不通知）。
+        """
+        try:
+            from xskill.events import EventStore
+            from xskill.pipeline.registry import get_connection
+            conn = get_connection(kw.get("db_path"))
+            try:
+                row = conn.execute(
+                    "SELECT user_key FROM trajectories"
+                    " WHERE watch_dir_id=? AND filename=?",
+                    (wd_id, fname)).fetchone()
+            finally:
+                conn.close()
+            EventStore(kw.get("db_path")).emit_feedback(
+                actor=(row["user_key"] or "") if row else "",
+                skill=skill_name, traj_id=traj_id,
+                score_avg=sum(scores) / len(scores), n_atoms=len(scores),
+                side=side, sha=sha)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("feedback event emit skipped", exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════

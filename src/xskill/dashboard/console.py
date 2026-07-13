@@ -148,6 +148,17 @@ def reco_trigger_for_users(*, db_path: Optional[Path], skill_dir: Path,
     return out
 
 
+def _emit_pin_event(db_path: Optional[Path], *, actor: str, skill: str,
+                    target_user: str, scope: str) -> None:
+    """P3-3.1 埋点:skill 被 pin。旁路——pref 已落库,事件失败不 500 请求。"""
+    try:
+        from xskill.events import EventStore
+        EventStore(db_path).emit_pin(actor=actor, skill=skill,
+                                     target_user=target_user, scope=scope)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("pin event emit skipped", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # 请求模型
 # ---------------------------------------------------------------------------
@@ -168,6 +179,10 @@ class AdminPrefRequest(BaseModel):
 
 class DeleteSkillRequest(BaseModel):
     confirm_name: str      # 二次确认:必须输入 skill 名
+
+
+class EventsReadRequest(BaseModel):
+    last_id: int           # 已读游标推进到的事件 id(只前进不后退)
 
 
 class ConfigPayload(BaseModel):
@@ -276,6 +291,9 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         except PinQuotaExceeded as e:
             # D8/2.4d:超量在写入侧拒绝——409 冲突,永不进 sync 路径
             raise HTTPException(status_code=409, detail=str(e)) from e
+        if req.action == "pin":
+            _emit_pin_event(db_path, actor=user, skill=req.skill_name,
+                            target_user=user, scope="user")
         return {"ok": True}
 
     @router.get("/my/contributions")
@@ -344,6 +362,35 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             registry=ctx.client_registry)
         return {"user": ident["user"], "rows": table.get(ident["user"], [])}
 
+    # ── 事件流（P3-3.1/3.2:通知 + 世界消息。Q6:登录可见,只读实例不挂）──
+
+    @router.get("/events")
+    def events(scope: str = "world", limit: int = 50,
+               before_id: Optional[int] = None, ident=Depends(require_user)):
+        """scope=world 世界消息 feed;scope=me 发给我的通知(带已读标记)。"""
+        from xskill.events import EventStore
+        store = EventStore(db_path)
+        if scope == "me":
+            return {"scope": "me",
+                    "events": store.for_user(ident["user"], limit=limit,
+                                             before_id=before_id),
+                    "unread": store.unread_count(ident["user"])}
+        return {"scope": "world",
+                "events": store.world_feed(limit=limit, before_id=before_id)}
+
+    @router.get("/events/unread")
+    def events_unread(ident=Depends(require_user)):
+        """铃铛未读数(全局组件轮询用,轻量)。"""
+        from xskill.events import EventStore
+        return {"count": EventStore(db_path).unread_count(ident["user"])}
+
+    @router.post("/events/read")
+    def events_read(req: EventsReadRequest, ident=Depends(require_user)):
+        """推进已读游标(打开铃铛下拉时把当前最大 id 标已读)。"""
+        from xskill.events import EventStore
+        EventStore(db_path).mark_read(ident["user"], req.last_id)
+        return {"ok": True}
+
     # ── 管理（admin,2.5/2.4c） ───────────────────────────────────────
 
     @router.get("/admin/users-matrix")
@@ -406,7 +453,22 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                            max_pinned=_total_slots(), db_path=db_path)
         except PinQuotaExceeded as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+        if req.action == "pin":
+            _emit_pin_event(
+                db_path, actor=ident["user"], skill=req.skill_name,
+                target_user=req.user_key,
+                scope="global" if req.user_key == GLOBAL_PREF_KEY else "admin")
         return {"ok": True}
+
+    @router.get("/admin/cluster-graph")
+    def admin_cluster_graph(_=Depends(require_admin)):
+        """用户聚类 graph（§2.5,P3-3.5）:mean_tensor 相似度连边,前端 force 布局。"""
+        from xskill.dashboard.profile_viz import ProfileViz, profile_db_for
+        pdb = profile_db_for(db_path)
+        if not pdb.is_file():
+            raise HTTPException(status_code=404,
+                                detail="画像库不存在(还没有任何用户画像)")
+        return ProfileViz(pdb, db_path=db_path).cluster_graph()
 
     @router.get("/admin/skills")
     def admin_skills(_=Depends(require_admin)):

@@ -499,3 +499,20 @@ def _register_explorer_endpoints(router: APIRouter, db_path: Optional[Path],
         """用户连接状态看板（图⑧，P1 读侧；版本列 P2 点亮）。"""
         from xskill.dashboard.explore import users_status
         return users_status(db_path)
+
+    @router.get("/api/v1/dashboard/user/{user_key}/scatter")
+    def user_scatter_ep(user_key: str, method: str = "tsne") -> dict:
+        """画像散点（图③,P3-3.4）:原子点降维投影 + 兴趣中心 + skill 向量。
+        ``method`` ∈ {tsne, umap}——同一批向量、同款前置,换降维算法对比效果。"""
+        from xskill.dashboard.profile_viz import ProfileViz, profile_db_for
+        pdb = profile_db_for(db_path)
+        if not pdb.is_file():
+            raise HTTPException(status_code=404,
+                                detail="画像库不存在(team 模式未启用或还没有画像)")
+        try:
+            return ProfileViz(pdb, skill_dir=skill_dir,
+                              db_path=db_path).user_scatter(user_key, method=method)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e

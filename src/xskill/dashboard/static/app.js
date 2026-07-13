@@ -853,6 +853,8 @@ document.addEventListener('click', async e => {
   if (pinTr) {
     _pinnedUid = (_pinnedUid === pinTr.dataset.uid) ? null : pinTr.dataset.uid;
     highlightUser(_pinnedUid);
+    // P3:点行同时打开画像详情(散点)
+    openUserProfile(pinTr.dataset.uid).catch(console.error);
   }
 });
 
@@ -905,7 +907,7 @@ function applyIdent() {
 async function initIdent() {
   try { IDENT = await j('/api/v1/dashboard/me'); } catch { IDENT = null; }
   applyIdent();
-  if (IDENT) loadMy().catch(console.error);
+  if (IDENT) { loadMy().catch(console.error); initEvents(); }
   if (IDENT && IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
 }
 
@@ -923,6 +925,7 @@ document.getElementById('login-submit').addEventListener('click', async () => {
     _lm.classList.add('hidden');
     applyIdent();
     loadMy().catch(console.error);
+    initEvents();
     if (IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
   } catch (e) { err.textContent = e.message; }
 });
@@ -995,6 +998,7 @@ document.addEventListener('click', async e => {
 // ── 管理 ────────────────────────────────────────────────────────
 async function loadAdmin() {
   if (!IDENT || IDENT.role !== 'admin') return;
+  loadClusterGraph().catch(console.error);
   const [um, sk] = await Promise.all([
     j('/api/v1/dashboard/admin/users-matrix'),
     j('/api/v1/dashboard/admin/skills'),
@@ -1109,3 +1113,412 @@ document.getElementById('cfg-validate').addEventListener('click', () => cfgActio
 document.getElementById('cfg-reload').addEventListener('click', () => cfgAction('reload'));
 
 initIdent().catch(console.error);
+
+// ═════════════ P3:事件流(铃铛/toast/系统通知/世界消息) + 画像可视化 ═════════════
+
+// ── 事件语义渲染:铃铛/toast/世界消息共用同一措辞口径 ──────────────
+const BAND_CLS = { '好评': 'bg-emerald-100 text-emerald-700', '差劲': 'bg-rose-100 text-rose-700', '一般': 'bg-slate-100 text-slate-600' };
+const CANARY_TXT = {
+  promoted: ['晋升', 'bg-emerald-100 text-emerald-700'],
+  rejected: ['回滚', 'bg-rose-100 text-rose-700'],
+  timeout_discarded: ['超时丢弃', 'bg-amber-100 text-amber-700'],
+};
+function evParts(ev) {
+  const p = ev.payload || {};
+  const chip = `<span class="skill-jump px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 text-[11px] font-medium cursor-pointer" data-skill="${esc(ev.skill)}">${esc(ev.skill)}</span>`;
+  if (ev.kind === 'feedback') {
+    const badge = `<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${BAND_CLS[p.band] || BAND_CLS['一般']}">${esc(p.band || '')}</span>`;
+    return { html: `${esc(ev.actor || '匿名')} 触发了 ${chip} ${badge} <span class="text-slate-400">均分 ${esc(p.score_avg)} · ${esc(p.n_atoms)} 原子</span>`,
+             plain: `${ev.actor || '匿名'} 触发了 ${ev.skill}:${p.band}(均分 ${p.score_avg})` };
+  }
+  if (ev.kind === 'push_edit') {
+    const diff = p.ref_sha ? ` <a href="javascript:void(0)" class="ev-diff text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${esc(ev.skill)}" data-sha="${esc(p.ref_sha)}">看 diff</a>` : '';
+    return { html: `${esc(ev.actor)} 手改了 ${chip} <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700">修改意见</span> <span class="text-slate-400">${esc(p.branch || '')}</span>${diff}`,
+             plain: `${ev.actor} 对 ${ev.skill} 提交了修改意见` };
+  }
+  if (ev.kind === 'canary') {
+    const [t, cls] = CANARY_TXT[p.action] || [p.action, 'bg-slate-100 text-slate-600'];
+    return { html: `${chip} 灰度裁决 <span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${cls}">${esc(t)}</span> <span class="text-slate-400">staging ${esc(p.staging_avg)} vs main ${esc(p.main_avg)}</span>`,
+             plain: `${ev.skill} 灰度${t}` };
+  }
+  if (ev.kind === 'pin') {
+    const tgt = p.scope === 'global' ? '全局' : (p.target_user && p.target_user !== ev.actor ? `给 ${p.target_user}` : '');
+    return { html: `${esc(ev.actor)} pin 了 ${chip} <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 text-violet-700">pin${tgt ? '·' + esc(tgt) : ''}</span>`,
+             plain: `${ev.actor} pin 了 ${ev.skill}${tgt ? '(' + tgt + ')' : ''}` };
+  }
+  return { html: esc(ev.kind), plain: ev.kind };
+}
+// sqlite datetime('now') 是 UTC——补 Z 再本地化
+const evDate = ev => new Date(String(ev.ts || '').replace(' ', 'T') + 'Z');
+function relTime(ev) {
+  const m = Math.max(0, (Date.now() - evDate(ev).getTime()) / 60000);
+  if (m < 1) return '刚刚';
+  if (m < 60) return Math.floor(m) + ' 分钟前';
+  if (m < 1440) return Math.floor(m / 60) + ' 小时前';
+  return fdate(evDate(ev).toISOString());
+}
+
+// ── 全局铃铛 + 轮询 + toast + 浏览器系统通知(D10:HTTPS 增强) ─────
+let _evMaxSeen = 0, _evPollTimer = null, _evPrimed = false;
+const EV_POLL_MS = 30000;
+
+function initEvents() {
+  if (_evPollTimer) return;
+  pollEvents().catch(console.error);
+  _evPollTimer = setInterval(() => pollEvents().catch(console.error), EV_POLL_MS);
+  loadWorldFeed().catch(console.error);
+}
+
+async function pollEvents() {
+  if (!IDENT) return;
+  const d = await j('/api/v1/dashboard/events?scope=me&limit=10');
+  const badge = document.getElementById('bell-badge');
+  if (badge) {
+    badge.classList.toggle('hidden', !d.unread);
+    badge.textContent = d.unread > 99 ? '99+' : d.unread;
+  }
+  const fresh = (d.events || []).filter(ev => ev.id > _evMaxSeen && !ev.read);
+  const maxId = Math.max(_evMaxSeen, ...(d.events || []).map(ev => ev.id));
+  if (maxId > _evMaxSeen) _evMaxSeen = maxId;
+  // 首次轮询只对齐水位不弹——刷新页面不该把历史未读全弹一遍
+  if (!_evPrimed) { _evPrimed = true; return; }
+  fresh.slice(0, 3).reverse().forEach(ev => { toast(ev); sysNotify(ev); });
+}
+
+function toast(ev) {
+  const box = document.getElementById('toasts');
+  if (!box) return;
+  const { html } = evParts(ev);
+  const el = document.createElement('div');
+  el.className = 'toast bg-white rounded-2xl ring-1 ring-slate-200 px-4 py-3 text-xs flex items-start gap-2';
+  el.innerHTML = `${avatar(ev.actor || 'xs', 'sm')}<div class="min-w-0 flex-1">${html}<div class="text-[10.5px] text-slate-400 mt-0.5">${relTime(ev)}</div></div>
+    <button class="toast-x text-slate-300 hover:bg-slate-50 rounded px-1 shrink-0">✕</button>`;
+  box.appendChild(el);
+  el.querySelector('.toast-x').addEventListener('click', () => el.remove());
+  setTimeout(() => el.remove(), 8000);
+}
+
+// Web Notifications 仅在 secure context 存在(内网 http 下 API 不存在,D10)。
+// 这是能力分层:基线=铃铛+toast;HTTPS 部署才有系统级通知,入口在铃铛下拉。
+function sysNotify(ev) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!document.hidden) return; // 页面在前台时 toast 已足够,不重复打扰
+  const n = new Notification('xskill 控制台', { body: evParts(ev).plain, tag: 'xskill-ev-' + ev.id });
+  n.onclick = () => { window.focus(); if (ev.skill) location.hash = 'skill/' + encodeURIComponent(ev.skill); n.close(); };
+}
+function updateSysNotifBtn() {
+  const b = document.getElementById('bell-sysnotif');
+  if (!b) return;
+  b.classList.remove('hidden');
+  if (!('Notification' in window)) { b.textContent = '系统通知需 HTTPS 部署'; b.disabled = true; return; }
+  if (Notification.permission === 'granted') { b.textContent = '✓ 系统通知已开启'; b.disabled = true; }
+  else if (Notification.permission === 'denied') { b.textContent = '系统通知被浏览器拒绝'; b.disabled = true; }
+  else {
+    b.textContent = '开启系统通知'; b.disabled = false;
+    b.onclick = () => Notification.requestPermission().then(updateSysNotifBtn);
+  }
+}
+
+async function openBell() {
+  const dd = document.getElementById('bell-dd');
+  dd.classList.remove('hidden');
+  updateSysNotifBtn();
+  const list = document.getElementById('bell-list');
+  let d;
+  try { d = await j('/api/v1/dashboard/events?scope=me&limit=20'); }
+  catch (e) { list.innerHTML = `<span class="text-[11px] text-rose-600 px-1">${esc(e.message)}</span>`; return; }
+  list.innerHTML = (d.events || []).map(ev => `
+    <div class="px-2 py-2 rounded-lg ${ev.read ? '' : 'bg-teal-50/40'} hover:bg-slate-50 text-xs flex items-start gap-2">
+      ${avatar(ev.actor || 'xs', 'sm')}
+      <div class="min-w-0 flex-1">${evParts(ev).html}
+        <div class="text-[10.5px] text-slate-400 mt-0.5">${relTime(ev)}</div></div>
+    </div>`).join('') || '<div class="text-[11px] text-slate-400 px-1 py-2">还没有通知</div>';
+  const maxId = Math.max(0, ...(d.events || []).map(ev => ev.id));
+  if (maxId) {
+    await jpost('/api/v1/dashboard/events/read', { last_id: maxId }).catch(() => {});
+    const badge = document.getElementById('bell-badge');
+    if (badge) badge.classList.add('hidden');
+  }
+}
+document.getElementById('bell-btn').addEventListener('click', e => {
+  e.stopPropagation();
+  const dd = document.getElementById('bell-dd');
+  if (dd.classList.contains('hidden')) openBell().catch(console.error);
+  else dd.classList.add('hidden');
+});
+document.addEventListener('click', e => {
+  const dd = document.getElementById('bell-dd');
+  if (dd && !dd.classList.contains('hidden') && !e.target.closest('#bell-wrap')) dd.classList.add('hidden');
+});
+// push-edit"看 diff":跳 skill 页后把该分支引用的 diff 灌进预览区
+document.addEventListener('click', async e => {
+  const ed = e.target.closest('.ev-diff');
+  if (!ed) return;
+  location.hash = 'skill/' + encodeURIComponent(ed.dataset.skill);
+  for (let i = 0; i < 20; i++) { // 等 openSkill 渲染出预览容器
+    await new Promise(r => setTimeout(r, 250));
+    const pv = document.getElementById('skill-preview');
+    if (pv) {
+      pv.innerHTML = '<span class="text-slate-400 text-xs">加载修改意见 diff…</span>';
+      try {
+        const r = await j('api/v1/dashboard/skill/' + encodeURIComponent(ed.dataset.skill) + '/diff?sha=' + encodeURIComponent(ed.dataset.sha));
+        pv.innerHTML = renderDiff(r.diff);
+      } catch (err) { pv.innerHTML = `<span class="text-rose-600 text-xs">${esc(err.message)}</span>`; }
+      pv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      return;
+    }
+  }
+});
+
+// ── 世界消息 feed(卡片式,按天分组;Q6 登录可见) ──────────────────
+let _feedBefore = null, _feedLastDay = null;
+function dayLabel(d) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const day = new Date(d); day.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - day) / 86400000);
+  return diff <= 0 ? '今天' : diff === 1 ? '昨天' : `${day.getMonth() + 1}-${String(day.getDate()).padStart(2, '0')}`;
+}
+async function loadWorldFeed(more) {
+  const el = document.getElementById('world-feed');
+  if (!el || !IDENT) return;
+  const q = '/api/v1/dashboard/events?scope=world&limit=30' + (more && _feedBefore ? '&before_id=' + _feedBefore : '');
+  let d;
+  try { d = await j(q); }
+  catch (e) { el.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`; return; }
+  const evs = d.events || [];
+  if (!more) { el.innerHTML = ''; _feedLastDay = null; }
+  if (!evs.length && !more) { el.innerHTML = '<span class="text-slate-400 text-xs">还没有团队动态</span>'; return; }
+  const frag = document.createElement('div');
+  evs.forEach(ev => {
+    const dl = dayLabel(evDate(ev));
+    if (dl !== _feedLastDay) {
+      frag.insertAdjacentHTML('beforeend', `<div class="text-[10.5px] text-slate-400 font-medium mt-3 mb-1.5 first:mt-0">${esc(dl)}</div>`);
+      _feedLastDay = dl;
+    }
+    frag.insertAdjacentHTML('beforeend', `
+      <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50 mb-1.5 text-xs">
+        ${avatar(ev.actor || 'xs', 'sm')}
+        <div class="min-w-0 flex-1">${evParts(ev).html}</div>
+        <span class="text-[10.5px] text-slate-400 shrink-0" title="${esc(ev.ts)} UTC">${relTime(ev)}</span>
+      </div>`);
+  });
+  el.appendChild(frag);
+  if (evs.length) _feedBefore = evs[evs.length - 1].id;
+  const moreBtn = document.getElementById('feed-more');
+  if (moreBtn) moreBtn.classList.toggle('hidden', evs.length < 30);
+}
+const _feedMoreBtn = document.getElementById('feed-more');
+if (_feedMoreBtn) _feedMoreBtn.addEventListener('click', () => loadWorldFeed(true).catch(console.error));
+
+// ── 画像散点(图③):t-SNE 投影(邻域保持,簇分离比线性 PCA 明显),原子=圆点按簇着色,中心=◆,skill=▲ ──
+const CLUSTER_COLORS = ['#0d9488', '#6366f1', '#f59e0b', '#f43f5e', '#0ea5e9'];
+function scScale(pts, W, H, pad) {
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const sx = x1 > x0 ? (W - 2 * pad) / (x1 - x0) : 0, sy = y1 > y0 ? (H - 2 * pad) / (y1 - y0) : 0;
+  return p => ({ x: pad + (sx ? (p.x - x0) * sx : (W - 2 * pad) / 2), y: pad + (sy ? (p.y - y0) * sy : (H - 2 * pad) / 2) });
+}
+// 凸包(Andrew 单调链):簇描边轮廓用,点数十的量级
+function convexHull(pts) {
+  if (pts.length < 3) return pts.slice();
+  const s = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [], upper = [];
+  for (const p of s) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  for (const p of s.reverse()) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
+// 散点降维算法:URL 路径含 umap → 默认 UMAP(dashboarddemoumap 子路径),否则 t-SNE。
+// 页内切换按钮实时改这个变量并重画,同一份数据直观对比两种投影。
+let SCATTER_METHOD = location.pathname.includes('umap') ? 'umap' : 'tsne';
+let _lastProfileUid = null;
+const METHOD_LABEL = { tsne: 't-SNE', umap: 'UMAP' };
+async function openUserProfile(uid) {
+  _lastProfileUid = uid;
+  const box = document.getElementById('user-profile');
+  if (!box) return;
+  box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">加载 ${esc(uid)} 的画像…</div>`;
+  let d;
+  try { d = await j('api/v1/dashboard/user/' + encodeURIComponent(uid) + '/scatter?method=' + SCATTER_METHOD); }
+  catch (e) {
+    box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400 text-xs">${esc(uid)}:${esc(e.message)}</div>`;
+    return;
+  }
+  if (!(d.points || []).length) {
+    box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+      <h2 class="font-semibold text-sm">${esc(uid)} 的兴趣画像</h2>
+      <div class="mt-2 text-xs text-slate-400">${esc(d.note || '暂无可投影的原子')}</div></div>`;
+    return;
+  }
+  const W = 680, H = 400, pad = 34;
+  const all = [...d.points, ...(d.centers || []), ...(d.skills || [])];
+  const sc = scScale(all, W, H, pad);
+  // 簇描边:每簇 ≥3 点画凸包轮廓(半透明填充+同簇色描边),类群一眼可辨
+  const byCluster = {};
+  d.points.forEach(p => { (byCluster[p.cluster] = byCluster[p.cluster] || []).push(sc(p)); });
+  const hullEls = Object.entries(byCluster).map(([cl, pts]) => {
+    const hull = convexHull(pts);
+    if (hull.length < 3) return '';
+    const col = CLUSTER_COLORS[cl % CLUSTER_COLORS.length];
+    const cx = hull.reduce((s, p) => s + p.x, 0) / hull.length;
+    const cy = hull.reduce((s, p) => s + p.y, 0) / hull.length;
+    const path = hull.map((p, i) => {  // 从质心向外扩 12px,轮廓不贴着点画
+      const dx = p.x - cx, dy = p.y - cy, m = Math.sqrt(dx * dx + dy * dy) || 1;
+      const x = p.x + dx / m * 12, y = p.y + dy / m * 12;
+      return `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(' ') + ' Z';
+    return `<path class="sc-hull" d="${path}" fill="${col}" fill-opacity="0.07"
+      stroke="${col}" stroke-opacity="0.45" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="5 4"/>`;
+  }).join('');
+  const ptEls = d.points.map(p => {
+    const c = sc(p), col = CLUSTER_COLORS[p.cluster % CLUSTER_COLORS.length];
+    return `<circle class="sc-pt atom-jump cursor-pointer" data-atom="${esc(p.atom_id)}"
+      data-tip="${esc(p.atom_id)}|${esc(p.summary)}|${p.ux != null ? esc(p.ux) : '—'}"
+      cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="5" fill="${col}" fill-opacity="0.72"/>`;
+  }).join('');
+  // 兴趣中心:💡 + 簇的 tag 词直接标在图上(匹配 tag 词汇,一眼读懂这簇是什么)
+  const labByCluster = Object.fromEntries((d.clusters || []).map(cl => [cl.cluster, cl.label]));
+  const ctEls = (d.centers || []).map(ct => {
+    const c = sc(ct), col = CLUSTER_COLORS[ct.cluster % CLUSTER_COLORS.length];
+    const lab = labByCluster[ct.cluster] || `簇 ${ct.cluster}`;
+    return `<g class="sc-center">
+      <circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="11" fill="${col}" fill-opacity="0.14" stroke="${col}" stroke-width="1.5"/>
+      <text x="${c.x.toFixed(1)}" y="${(c.y + 4.5).toFixed(1)}" font-size="12" text-anchor="middle">💡</text>
+      <text x="${c.x.toFixed(1)}" y="${(c.y + 26).toFixed(1)}" font-size="10.5" font-weight="700" fill="${col}" text-anchor="middle">${esc(lab)}</text>
+      <title>兴趣点 · ${esc(lab)}</title></g>`;
+  }).join('');
+  const skEls = (d.skills || []).map(s => {
+    const c = sc(s);
+    const short = s.name.length > 14 ? s.name.slice(0, 13) + '…' : s.name;
+    return `<g class="skill-jump cursor-pointer" data-skill="${esc(s.name)}">
+      <path d="M${c.x.toFixed(1)} ${(c.y - 7).toFixed(1)} l6.2 11 h-12.4 z" fill="#0f172a"><title>SKILL:${esc(s.name)} · 触发 ${esc(s.use_count)} 次</title></path>
+      <text x="${c.x.toFixed(1)}" y="${(c.y + 17).toFixed(1)}" font-size="9.5" font-weight="600" fill="#334155" text-anchor="middle">SKILL:${esc(short)}</text></g>`;
+  }).join('');
+  const legend = (d.clusters || []).map(cl =>
+    `<span class="inline-flex items-center gap-1 text-[11px] font-medium" style="color:${CLUSTER_COLORS[cl.cluster % CLUSTER_COLORS.length]}">💡${esc(cl.label)}</span>`).join('');
+  const cur = d.method || SCATTER_METHOD;
+  const seg = ['tsne', 'umap'].map(m =>
+    `<button class="scatter-method px-2 py-0.5 rounded-md text-[11px] font-medium ${m === cur ? 'bg-teal-600 text-white' : 'text-slate-500 hover:bg-slate-50'}" data-method="${m}">${METHOD_LABEL[m]}</button>`).join('');
+  box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
+    <div class="flex items-baseline justify-between flex-wrap gap-2">
+      <h2 class="font-semibold text-sm flex items-center gap-2">${avatar(uid)} ${esc(uid)} 的兴趣画像
+        <span class="font-normal text-[11px] text-slate-400">${METHOD_LABEL[cur]} 2D 投影 · 悬停原子预览,点击跳详情</span></h2>
+      <div class="flex gap-3 flex-wrap items-center">
+        <span class="inline-flex items-center gap-1 ring-1 ring-slate-200 rounded-lg px-1 py-0.5">${seg}</span>
+        ${legend}
+        <span class="inline-flex items-center gap-1.5 text-[11px] text-slate-600"><svg width="11" height="11"><path d="M5.5 1 l4.5 8 h-9 z" fill="#0f172a"/></svg>SKILL:技能名</span></div>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" class="w-full mt-2" style="max-height:440px" id="scatter-svg">
+      <rect x="0" y="0" width="${W}" height="${H}" rx="14" fill="#f8fafc"/>
+      ${hullEls}${ptEls}${ctEls}${skEls}
+    </svg>
+    <div class="text-[10.5px] text-slate-400 mt-1.5">画像更新于 ${fdate(d.updated_at)} · ${d.sampled ? `显示 ${d.shown}/${d.total} 个原子（按兴趣中心分层抽样）` : `${d.points.length} 个原子点`}${(d.skills || []).length ? '' : ' · skill 向量索引缺失,不显示 ▲(不现算)'}</div>
+  </div>`;
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+// 散点算法切换:t-SNE ↔ UMAP,同一份数据换降维算法重画
+document.addEventListener('click', e => {
+  const btn = e.target.closest && e.target.closest('.scatter-method');
+  if (!btn || btn.dataset.method === SCATTER_METHOD) return;
+  SCATTER_METHOD = btn.dataset.method;
+  if (_lastProfileUid) openUserProfile(_lastProfileUid).catch(console.error);
+});
+// 散点 hover 预览卡(自定义 tooltip,跟随鼠标)
+document.addEventListener('mousemove', e => {
+  const tip = document.getElementById('scatter-tip');
+  if (!tip) return;
+  const pt = e.target.closest && e.target.closest('.sc-pt');
+  if (!pt) { tip.classList.add('hidden'); return; }
+  const [aid, summary, uxv] = (pt.dataset.tip || '').split('|');
+  tip.innerHTML = `<div class="font-mono text-[10px] text-slate-400">${esc(aid)}</div>
+    <div class="mt-0.5">${esc(summary) || '—'}</div>
+    <div class="mt-0.5 text-slate-400">ux ${esc(uxv)}</div>`;
+  tip.style.left = (e.clientX + 14) + 'px';
+  tip.style.top = (e.clientY + 14) + 'px';
+  tip.classList.remove('hidden');
+});
+
+// ── admin 画像聚类 graph(手写 force-directed,用户十的量级) ──────
+function forceLayout(nodes, edges, W, H) {
+  const n = nodes.length;
+  nodes.forEach((nd, i) => {  // 确定性初始化:圆周排布(无随机,布局可复现)
+    const a = i / n * 2 * Math.PI;
+    nd.x = W / 2 + Math.cos(a) * Math.min(W, H) / 3.4;
+    nd.y = H / 2 + Math.sin(a) * Math.min(W, H) / 3.4;
+  });
+  const at = Object.fromEntries(nodes.map((nd, i) => [nd.user, i]));
+  const ITER = 260, K = 100;
+  for (let it = 0; it < ITER; it++) {
+    const t = 1 - it / ITER;
+    const fx = new Array(n).fill(0), fy = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {  // 斥力
+      const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
+      const d2 = dx * dx + dy * dy || 1, d = Math.sqrt(d2);
+      const f = K * K / d2 * 6;
+      fx[i] += dx / d * f; fy[i] += dy / d * f;
+      fx[j] -= dx / d * f; fy[j] -= dy / d * f;
+    }
+    edges.forEach(e2 => {  // 弹簧:相似度越高理想边越短
+      const i = at[e2.source], j2 = at[e2.target];
+      if (i == null || j2 == null) return;
+      const dx = nodes[j2].x - nodes[i].x, dy = nodes[j2].y - nodes[i].y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const ideal = K * (1.7 - e2.sim);
+      const f = (d - ideal) * 0.05;
+      fx[i] += dx / d * f; fy[i] += dy / d * f;
+      fx[j2] -= dx / d * f; fy[j2] -= dy / d * f;
+    });
+    nodes.forEach((nd, i) => {  // 向心 + 步长退火
+      fx[i] += (W / 2 - nd.x) * 0.015; fy[i] += (H / 2 - nd.y) * 0.015;
+      const cap = 8 * t + 0.5, m = Math.sqrt(fx[i] * fx[i] + fy[i] * fy[i]) || 1;
+      nd.x += fx[i] / m * Math.min(m, cap);
+      nd.y += fy[i] / m * Math.min(m, cap);
+      nd.x = Math.max(40, Math.min(W - 40, nd.x));
+      nd.y = Math.max(28, Math.min(H - 28, nd.y));
+    });
+  }
+}
+async function loadClusterGraph() {
+  const el = document.getElementById('cluster-graph');
+  if (!el || !IDENT || IDENT.role !== 'admin') return;
+  let g;
+  try { g = await j('/api/v1/dashboard/admin/cluster-graph'); }
+  catch (e) { el.innerHTML = `<span class="text-slate-400 text-xs">${esc(e.message)}</span>`; return; }
+  if (!(g.nodes || []).length) { el.innerHTML = '<span class="text-slate-400 text-xs">还没有任何用户画像</span>'; return; }
+  const W = 680, H = 380;
+  forceLayout(g.nodes, g.edges || [], W, H);
+  const at = Object.fromEntries(g.nodes.map(nd => [nd.user, nd]));
+  const edgeEls = (g.edges || []).map(e2 => {
+    const a = at[e2.source], b = at[e2.target];
+    const wpx = 1.5 + (e2.sim - g.threshold) / Math.max(0.001, 1 - g.threshold) * 6;
+    const tipTxt = `相似度 ${e2.sim}${e2.common_tags.length ? ' · 共同标签:' + e2.common_tags.join('/') : ''}${e2.common_skills.length ? ' · 共同 skill:' + e2.common_skills.join('/') : ''}`;
+    return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"
+      stroke="#5eead4" stroke-width="${wpx.toFixed(1)}" stroke-linecap="round" class="cursor-help"><title>${esc(tipTxt)}</title></line>`;
+  }).join('');
+  const maxAtoms = Math.max(1, ...g.nodes.map(nd => nd.atoms));
+  const nodeEls = g.nodes.map(nd => {
+    const r = 10 + Math.sqrt(nd.atoms / maxAtoms) * 14;
+    const fill = nd.isolated ? '#cbd5e1' : '#0d9488';
+    const tipTxt = `${nd.user} · ${nd.atoms} 原子${nd.top_tags.length ? ' · ' + nd.top_tags.join('/') : ''}${nd.isolated ? ' · 冷启动(无相似用户)' : ''}`;
+    return `<g class="cg-node cursor-pointer" data-user="${esc(nd.user)}">
+      <circle cx="${nd.x.toFixed(1)}" cy="${nd.y.toFixed(1)}" r="${r.toFixed(1)}" fill="${fill}" fill-opacity="0.88"><title>${esc(tipTxt)}</title></circle>
+      <text x="${nd.x.toFixed(1)}" y="${(nd.y + 4).toFixed(1)}" font-size="10" fill="#fff" text-anchor="middle" font-weight="600">${esc(String(nd.user).slice(0, 2))}</text>
+      <text x="${nd.x.toFixed(1)}" y="${(nd.y + r + 12).toFixed(1)}" font-size="9.5" fill="${nd.isolated ? '#94a3b8' : '#475569'}" text-anchor="middle">${esc(nd.user)}${nd.isolated ? ' · 冷启动' : ''}</text>
+    </g>`;
+  }).join('');
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:420px">
+    <rect x="0" y="0" width="${W}" height="${H}" rx="14" fill="#f8fafc"/>${edgeEls}${nodeEls}</svg>
+    <div class="text-[10.5px] text-slate-400 mt-1.5">点节点看该用户画像散点 · 边阈值 ${g.threshold}</div>`;
+}
+document.addEventListener('click', e => {
+  const nd = e.target.closest('.cg-node');
+  if (!nd) return;
+  location.hash = '#users';
+  openUserProfile(nd.dataset.user).catch(console.error);
+});

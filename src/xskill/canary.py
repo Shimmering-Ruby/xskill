@@ -607,6 +607,13 @@ def _record_decision(skill_dir, action: str, main_avg: float, staging_avg: float
             main_sha=main_sha or "", staging_sha=staging_sha or "")
     except Exception:  # pylint: disable=broad-exception-caught
         logger.debug("canary decision telemetry skipped", exc_info=True)
+    try:
+        from xskill.events import EventStore
+        EventStore().emit_canary(
+            skill=Path(skill_dir).name, action=action,
+            main_avg=float(main_avg or 0), staging_avg=float(staging_avg or 0))
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("canary event emit skipped", exc_info=True)
 
 
 # ═══════════════════════════════════════════════════════════════════
