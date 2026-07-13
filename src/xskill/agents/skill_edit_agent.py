@@ -14,8 +14,20 @@ agent 写完 SKILL.md / scripts / references 后**必须**调以下两个 commit
   - baby 分支：调 ``commit_baby_to_main(skill_name, message)`` 完成首版
   - main 分支：调 ``commit_to_staging(skill_name, message)`` 产出灰度候选
 
-落盘成功（SKILL.md mtime 推进 + 非空）→ 清空 candidates buffer + 立即
-install_to_claude_code 让 CC 立刻看到新版本。
+落盘成功（SKILL.md mtime 推进 + 非空 + 分支真推进）→ 从 buffer 摘除本次
+快照到的 atom_id + 立即 install_to_claude_code 让 CC 立刻看到新版本。
+
+多轮渐进式消化（buffer 超过 ``SKILL_EDIT_BATCH_SIZE`` 条候选时）：
+一次 ``maybe_run`` 对 buffer 做一次快照,按 ``(weightscore 降序, atom_id 升序)``
+切成多批,每批一轮**全新上下文**的 ``agent.run()``（不带前一轮的对话历史，
+与 TaskAgent 弃窗单趟同一设计哲学，见 ``context_budget.py``）。除最后一轮外
+每轮结束后由**宿主 Python 代码**（不是 agent）把改动 commit 到一个新建的
+``<branch>_turn<N>`` 分支承接进度；中间轮的 agent 完全不会拿到任何终态
+commit 工具——分支推进对它不可见也不可调用，是结构性保证而非约定。最后一轮
+开跑前宿主代码把 HEAD 切回原分支（工作区不动），agent 此时才拿到终态 commit
+工具，一次 commit 落地全部批次的累计改动。成功后清理所有遗留 turn 分支；
+若发现残留 turn 分支（上次崩溃/失败），不续传，直接重置重来（详见
+``SkillEditAgent._recover_crashed_turns``）。
 """
 from __future__ import annotations
 
@@ -343,10 +355,13 @@ class SkillEditAgent:
              - .ux_scores.jsonl 必须至少有 1 条 side=main → 证明 main 真有人用
              - 否则保留 candidates 等用户用过 main 再触发
 
-        全过 → 跑 agent → 验证 SKILL.md mtime 推进 + 非空 → 清 candidates。
-        agent 没落盘 SKILL.md → 保留 candidates 等下轮重试（Bug 2 修复）。
+        全过 → 跑 agent（可能多轮渐进式） → 验证 SKILL.md mtime 推进 + 非空 +
+        分支真推进 → 从 buffer 摘除本次快照的 atom_id。
+        agent 没落盘 SKILL.md，或分支没真推进 → 保留 candidates 等下轮重试。
         """
         from xskill.skill.git import current_branch, run_git
+
+        self._recover_crashed_turns()
 
         # 守门 1（改）：staging 存在时，候选累计 ws ≥ jam_threshold 则越过灰度强砍；
         # 未达到阈值时维持原先 hold 行为。
@@ -396,10 +411,18 @@ class SkillEditAgent:
             if code == 0:
                 main_sha_before = out.strip()
 
+        # 快照：本次消化范围 = 当前 buffer 里的这些 atom_id。多轮渐进式消化
+        # 期间 cluster 并发 add 进来的新候选不在这个集合里，不受影响，留给
+        # 下一次 maybe_run 处理（避免竞争/饿死）。
+        snapshot_atom_ids = {
+            c.get("atom_id") for c in ready if c.get("atom_id")
+        }
+
         try:
-            self._run(ready, current_branch_name=cur, jam=jam)
+            run_ok = self._run(ready, current_branch_name=cur, jam=jam)
         except Exception:
             logger.exception("SkillEditAgent _run failed: %s", self.skill_dir.name)
+            run_ok = False
 
         # 实测落盘：mtime 推进 + 非空 = agent 真写了
         wrote = (
@@ -434,6 +457,15 @@ class SkillEditAgent:
             )
             return False
 
+        if not run_ok:
+            logger.warning(
+                "SkillEditAgent _run 未完整跑完终态提交（多轮渐进式消化中途失败/"
+                "崩溃）: %s — 保留 candidates，下轮 maybe_run 会清残留 turn 分支"
+                "重新开始",
+                self.skill_dir.name,
+            )
+            return False
+
         if jam:
             from xskill.canary import discard_staging
 
@@ -453,12 +485,14 @@ class SkillEditAgent:
                     self.skill_dir.name,
                 )
                 return False
+            self._cleanup_turn_branches("main")
 
         # commit 工具的成功效应（baby→main 或 main→staging）通过当前分支变化
-        # 自然反映，不需要在这里做额外检查
-        C.clear_candidates(self.skill_dir)
-        logger.info("SkillEditAgent done + candidates cleared: %s",
-                    self.skill_dir.name)
+        # 自然反映，不需要在这里做额外检查（非 jam 路径的 turn 分支已在
+        # ``_run`` 尾部的终态校验通过后就地清理）
+        C.remove_candidates(self.skill_dir, snapshot_atom_ids)
+        logger.info("SkillEditAgent done + %d candidate(s) removed: %s",
+                    len(snapshot_atom_ids), self.skill_dir.name)
         return True
 
     def _main_has_ux_score(self) -> bool:
@@ -473,96 +507,256 @@ class SkillEditAgent:
             return False
         return any(s.get("side") == "main" for s in scores)
 
-    def _run(self, ready: list[dict], current_branch_name: str, jam: bool = False) -> None:
+    # ───────────────────────────────────────────────────────────────
+    # 崩溃恢复 + turn 分支生命周期
+    # ───────────────────────────────────────────────────────────────
+
+    def _recover_crashed_turns(self) -> None:
+        """``maybe_run`` 入口第一件事：发现残留 turn 分支就判定上次跑到一半
+        崩溃/失败，简单粗暴重置——不续传。
+
+        buffer 从未在多轮消化中途被清空（只有全部批次成功才 remove），所以
+        重置只丢弃 turn 分支上的半成品工作区改动，不丢候选。
+        """
+        import re
+
+        from xskill.skill.git import current_branch, list_turn_branches, run_git
+
+        turn_branches = list_turn_branches(str(self.skill_dir), base_branch=None)
+        if not turn_branches:
+            return
+
+        cur = current_branch(str(self.skill_dir))
+        bases = {re.sub(r"_turn\d+$", "", b) for b in turn_branches}
+        reset_target = cur if cur in ("baby", "main") else (
+            sorted(bases)[0] if bases else "main"
+        )
+        logger.warning(
+            "SkillEditAgent 发现残留 turn 分支 %s（skill=%s）——判定上次崩溃/"
+            "失败，重置到 %r 重新开始整条链条",
+            turn_branches, self.skill_dir.name, reset_target,
+        )
+        run_git(["checkout", reset_target], cwd=str(self.skill_dir))
+        run_git(["branch", "-D", *turn_branches], cwd=str(self.skill_dir))
+
+    def _cleanup_turn_branches(self, base_branch: str) -> None:
+        """成功收尾后删除该 base 派生的所有遗留 turn 分支（空列表时零开销）。"""
+        from xskill.skill.git import list_turn_branches, run_git
+
+        turn_branches = list_turn_branches(str(self.skill_dir), base_branch)
+        if turn_branches:
+            run_git(["branch", "-D", *turn_branches], cwd=str(self.skill_dir))
+
+    # ───────────────────────────────────────────────────────────────
+    # 批次切分
+    # ───────────────────────────────────────────────────────────────
+
+    def _make_batches(self, ready: list[dict]) -> list[list[dict]]:
+        """按 (weightscore 降序, atom_id 升序) 稳定排序后,切成
+        ``SKILL_EDIT_BATCH_SIZE`` 条一批。"""
+        ordered = sorted(
+            ready,
+            key=lambda c: (-int(c.get("weightscore", 0) or 0), str(c.get("atom_id", ""))),
+        )
+        size = C.SKILL_EDIT_BATCH_SIZE
+        return [ordered[i:i + size] for i in range(0, len(ordered), size)]
+
+    def _round_info_lines(self, turn_idx: int, num_batches: int) -> list[str]:
+        """单批（num_batches<=1）不插入任何轮次说明——prompt 文本与消化前
+        逐字一致,零行为差异。"""
+        if num_batches <= 1:
+            return []
+        if turn_idx == 1:
+            note = (
+                f"这是渐进式编辑第 1/{num_batches} 轮：candidates buffer 过大，"
+                f"已按 {C.SKILL_EDIT_BATCH_SIZE} 条一批切分为 {num_batches} 轮处理，"
+                "本轮只处理下面列出的这一批候选。"
+            )
+        else:
+            note = (
+                f"这是渐进式编辑第 {turn_idx}/{num_batches} 轮：当前 SKILL.md 已经"
+                "融合了前面几批候选的内容，请先读现状（SkillRead / read_file）再"
+                "基于本轮候选继续编辑，不要覆盖丢弃前面几轮已经写好的内容。"
+            )
+        return ["", note]
+
+    def _trace_run(self, agent: Any, user_msg: str, *, log_suffix: str) -> None:
+        """跑一轮 agent.run() 并把逐轮 CoT/工具调用记到
+        logs/agents/skill_edit_agents/skills/<skill><suffix>_<ts>.log。"""
+        import time as _time
+        from xskill.agents.agent_trace import trace_to
+        from xskill.config import get_logs_dir
+
+        _ts = _time.strftime("%Y%m%d-%H%M%S")
+        sink = (
+            get_logs_dir() / "agents" / "skill_edit_agents" / "skills"
+            / f"{self.skill_dir.name}{log_suffix}_{_ts}.log"
+        )
+        with trace_to(sink):
+            agent.run(user_msg)
+
+    # ───────────────────────────────────────────────────────────────
+    # 多轮消化主循环
+    # ───────────────────────────────────────────────────────────────
+
+    def _run(self, ready: list[dict], current_branch_name: str, jam: bool = False) -> bool:
+        """跑完整条（可能多轮的）消化链。
+
+        返回 True = 终态 commit 完整跑完（baby→main / main 直接更新走
+        staging / jam 强砍合并）且 turn 分支已清理；False/异常 = 某一环节
+        失败——调用方保留 candidates，下轮 ``maybe_run`` 触发崩溃恢复重来。
+        """
+        from xskill.skill import git as skillgit
+        from xskill.skill.git import current_branch as _current_branch
+        from xskill.skill.git import run_git as _run_git
+
+        batches = self._make_batches(ready)
+        num_batches = len(batches)
+        if num_batches == 0:
+            return False
+
+        for turn_idx, batch in enumerate(batches, start=1):
+            is_last = turn_idx == num_batches
+            if is_last and num_batches > 1:
+                # 最后一轮开跑前把 HEAD 切回原分支（工作区不动，仍是最后一个
+                # turn 分支演化出的内容）——终态 commit 工具的分支校验才能过。
+                skillgit.checkout_head_ref_only(
+                    str(self.skill_dir), current_branch_name,
+                )
+            if jam:
+                self._run_jam_round(
+                    batch, turn_idx=turn_idx, num_batches=num_batches, is_last=is_last,
+                )
+            else:
+                self._run_normal_round(
+                    batch, current_branch_name=current_branch_name,
+                    turn_idx=turn_idx, num_batches=num_batches, is_last=is_last,
+                )
+            if not is_last:
+                turn_branch = f"{current_branch_name}_turn{turn_idx}"
+                skillgit.commit_progressive_turn(
+                    str(self.skill_dir), turn_branch,
+                    f"skilledit progressive turn {turn_idx}/{num_batches} "
+                    f"({len(batch)} atoms, not final)",
+                )
+
+        if jam:
+            # jam 的终态校验（main sha 是否真推进）+ discard_staging + turn 分支
+            # 清理都在 maybe_run 里做（它已经拿着 main_sha_before 了）。这里只
+            # 负责把多轮循环跑完，不重复判定。
+            return True
+
+        final_branch = _current_branch(str(self.skill_dir))
+        if current_branch_name == "baby":
+            ok = final_branch == "main"
+        else:
+            staging_ok = _run_git(
+                ["rev-parse", "--verify", "staging"], cwd=str(self.skill_dir),
+            )[0] == 0
+            ok = staging_ok and final_branch == "main"
+        if ok:
+            self._cleanup_turn_branches(current_branch_name)
+        return ok
+
+    def _run_jam_round(
+        self, batch: list[dict], *, turn_idx: int, num_batches: int, is_last: bool,
+    ) -> None:
+        from xskill.agents import agent_tools
+
+        skill_md = self.skill_dir / "SKILL.md"
+        staging_body = (
+            self.skill_dir.parent / ".canary" / self.skill_dir.name / "SKILL.md"
+        )
+        if not staging_body.is_file():
+            from xskill.canary import materialize_staging
+            materialize_staging(self.skill_dir, self.skill_dir.parent / ".canary")
+        if not staging_body.is_file():
+            raise RuntimeError(
+                f"jam-merge: staging body for {self.skill_dir.name} could not be "
+                "materialized; refusing to merge and discard"
+            )
+
+        lines = [
+            MERGE_DISCIPLINE_BLOCK,
+            *self._round_info_lines(turn_idx, num_batches),
+            "",
+            f"skill_name: {self.skill_dir.name}（**main 分支 · 轨迹堰塞强砍合并**）",
+            f"现有 main 正文：用 skill_read('{self.skill_dir.name}') 读。",
+            f"staging 正文路径（用 read_file 读）：{staging_body}",
+            *self._skill_tree_context_lines(),
+            "# 待合并候选（按 weightscore 倒序）",
+        ]
+        for c in sorted(batch, key=lambda x: x.get("weightscore", 0), reverse=True):
+            note = c.get("note", "")
+            lines.append(
+                f"- atom_id={c['atom_id']}  weightscore={c['weightscore']}"
+                + (f"  note: {note}" if note else "")
+            )
+        lines += [
+            "",
+            f"目标 skill 目录: {self.skill_dir}",
+            f"目标 SKILL.md 路径: {skill_md}",
+        ]
+        scenario_block = "\n".join(lines)
+        sysprompt = build_system_prompt(scenario_block=scenario_block, branch_now="main")
+
+        tools = [
+            agent_tools.atom_task_read,
+            agent_tools.read_traj,
+            agent_tools.skill_read,
+            agent_tools.read_file,
+            agent_tools.list_files,
+            agent_tools.write_file,
+        ]
+        if is_last:
+            tools.append(agent_tools.commit_update_main)
+
+        agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
+        suffix = "_jam" if num_batches <= 1 else f"_jam_turn{turn_idx}"
+        self._trace_run(agent, scenario_block, log_suffix=suffix)
+
+    def _run_normal_round(
+        self, batch: list[dict], *, current_branch_name: str,
+        turn_idx: int, num_batches: int, is_last: bool,
+    ) -> None:
         from xskill.agents import agent_tools
         from xskill.skill.frontmatter import parse as fm_parse
 
-        if jam:
-            from xskill.canary import materialize_staging
-
-            skill_md = self.skill_dir / "SKILL.md"
-            staging_body = (
-                self.skill_dir.parent / ".canary" / self.skill_dir.name / "SKILL.md"
-            )
-            if not staging_body.is_file():
-                materialize_staging(self.skill_dir, self.skill_dir.parent / ".canary")
-            if not staging_body.is_file():
-                raise RuntimeError(
-                    f"jam-merge: staging body for {self.skill_dir.name} could not be "
-                    "materialized; refusing to merge and discard"
-                )
-
-            lines = [
-                MERGE_DISCIPLINE_BLOCK,
-                "",
-                f"skill_name: {self.skill_dir.name}（**main 分支 · 轨迹堰塞强砍合并**）",
-                f"现有 main 正文：用 skill_read('{self.skill_dir.name}') 读。",
-                f"staging 正文路径（用 read_file 读）：{staging_body}",
-                *self._skill_tree_context_lines(),
-                "# 待合并候选（按 weightscore 倒序）",
-            ]
-            for c in sorted(ready, key=lambda x: x.get("weightscore", 0), reverse=True):
-                note = c.get("note", "")
-                lines.append(
-                    f"- atom_id={c['atom_id']}  weightscore={c['weightscore']}"
-                    + (f"  note: {note}" if note else "")
-                )
-            lines += [
-                "",
-                f"目标 skill 目录: {self.skill_dir}",
-                f"目标 SKILL.md 路径: {skill_md}",
-            ]
-            scenario_block = "\n".join(lines)
-            sysprompt = build_system_prompt(
-                scenario_block=scenario_block,
-                branch_now="main",
-            )
-            agent = self.agno_agent_factory(
-                instructions=[sysprompt],
-                tools=[
-                    agent_tools.atom_task_read,
-                    agent_tools.read_traj,
-                    agent_tools.skill_read,
-                    agent_tools.read_file,
-                    agent_tools.list_files,
-                    agent_tools.write_file,
-                    agent_tools.commit_update_main,
-                ],
-            )
-            import time as _time
-            from xskill.agents.agent_trace import trace_to
-            from xskill.config import get_logs_dir
-
-            _ts = _time.strftime("%Y%m%d-%H%M%S")
-            sink = (
-                get_logs_dir() / "agents" / "skill_edit_agents" / "skills"
-                / f"{self.skill_dir.name}_jam_{_ts}.log"
-            )
-            with trace_to(sink):
-                agent.run(scenario_block)
-            return
-
-        # 构造 scenario_block + branch_now 给 prompt 用
         skill_md = self.skill_dir / "SKILL.md"
         scenario_lines: list[str] = []
         if current_branch_name == "baby":
             scenario_lines.append(
                 "skill_name: " + self.skill_dir.name + "（**baby 分支**——首次出版本）"
             )
-            scenario_lines.append(
-                "写完 SKILL.md 后调 ``commit_baby_to_main(skill_name, message)`` "
-                "graduate 到 main 分支。"
-            )
+            scenario_lines.extend(self._round_info_lines(turn_idx, num_batches))
+            if is_last:
+                scenario_lines.append(
+                    "写完 SKILL.md 后调 ``commit_baby_to_main(skill_name, message)`` "
+                    "graduate 到 main 分支。"
+                )
+            else:
+                scenario_lines.append(
+                    "本轮没有提供任何 commit 工具——分支推进由系统在全部批次渐进式"
+                    "消化完成后自动处理，你只需要把本轮候选编辑进 SKILL.md。"
+                )
         else:
             scenario_lines.append(
                 "skill_name: " + self.skill_dir.name + "（**main 分支** —— 更新现有 skill）"
             )
-            scenario_lines.append(
-                "写完 SKILL.md 后调 ``commit_to_staging(skill_name, message)`` "
-                "把更新作为灰度候选 commit 到 staging。"
-            )
+            scenario_lines.extend(self._round_info_lines(turn_idx, num_batches))
+            if is_last:
+                scenario_lines.append(
+                    "写完 SKILL.md 后调 ``commit_to_staging(skill_name, message)`` "
+                    "把更新作为灰度候选 commit 到 staging。"
+                )
+            else:
+                scenario_lines.append(
+                    "本轮没有提供任何 commit 工具——分支推进由系统在全部批次渐进式"
+                    "消化完成后自动处理，你只需要把本轮候选编辑进 SKILL.md。"
+                )
 
-        # 现有 SKILL.md 是 stub (baby 时) 或正式版 (main 时)
+        # 现有 SKILL.md 是 stub (baby 时) 或正式版 (main 时)；多轮消化中间态时
+        # 是前几轮已经融合过候选的正文。
         if skill_md.is_file():
             try:
                 fm, _ = fm_parse(skill_md.read_text(encoding="utf-8"))
@@ -576,9 +770,7 @@ class SkillEditAgent:
         scenario_lines.extend(self._skill_tree_context_lines())
         scenario_lines.append("")
         scenario_lines.append("# 待整理 candidates（按 weightscore 倒序）")
-        for c in sorted(
-            ready, key=lambda x: x.get("weightscore", 0), reverse=True,
-        ):
+        for c in sorted(batch, key=lambda x: x.get("weightscore", 0), reverse=True):
             note = c.get("note", "")
             ext = f"  note: {note}" if note else ""
             scenario_lines.append(
@@ -595,25 +787,20 @@ class SkillEditAgent:
         )
         user_msg = scenario_block  # 同时也作为 user 消息（agno 两端都看）
 
-        agent = self.agno_agent_factory(
-            instructions=[sysprompt],
-            tools=[
-                agent_tools.atom_task_read,
-                agent_tools.read_traj,
-                agent_tools.skill_read,
-                agent_tools.read_file,
-                agent_tools.list_files,
-                agent_tools.write_file,
-                agent_tools.commit_baby_to_main,
-                agent_tools.commit_to_staging,
-            ],
-        )
-        # 逐轮 CoT/工具调用 → logs/agents/skill_edit_agents/skills/<skill>_<ts>.log
-        import time as _time
-        from xskill.agents.agent_trace import trace_to
-        from xskill.config import get_logs_dir
-        _ts = _time.strftime("%Y%m%d-%H%M%S")
-        sink = (get_logs_dir() / "agents" / "skill_edit_agents" / "skills"
-                / f"{self.skill_dir.name}_{_ts}.log")
-        with trace_to(sink):
-            agent.run(user_msg)
+        tools = [
+            agent_tools.atom_task_read,
+            agent_tools.read_traj,
+            agent_tools.skill_read,
+            agent_tools.read_file,
+            agent_tools.list_files,
+            agent_tools.write_file,
+        ]
+        if is_last:
+            if current_branch_name == "baby":
+                tools.append(agent_tools.commit_baby_to_main)
+            else:
+                tools.append(agent_tools.commit_to_staging)
+
+        agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
+        suffix = "" if num_batches <= 1 else f"_turn{turn_idx}"
+        self._trace_run(agent, user_msg, log_suffix=suffix)

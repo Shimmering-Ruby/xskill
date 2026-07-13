@@ -170,6 +170,7 @@ def test_runner_passes_jam_threshold(monkeypatch, tmp_path):
     }
     w = _make_watcher_with_config(tmp_path, skill_root, factory, config)
     w._check_pending_skill_edits()
+    w._drain_futures(stage="skill_edit")
 
     assert captured.get("jam_threshold") == 33, (
         f"jam_threshold was not wired from config; captured={captured!r}"
@@ -197,6 +198,9 @@ class TestSkillEditParallel:
 
         t0 = time.time()
         watcher._check_pending_skill_edits()
+        # SkillEdit 现在是像 split/cluster 一样的非阻塞 future 提交——
+        # _check_pending_skill_edits() 立即返回,真正的完成要 drain。
+        watcher._drain_futures(stage="skill_edit")
         elapsed = time.time() - t0
         # 若串行退化，barrier 永远凑不齐 → 每个 wait 撞 20s timeout → 远超阈值。
         # 真并发：一波凑齐后秒回。给宽松上限避免 CI 抖动误判。
@@ -237,6 +241,7 @@ class TestSkillEditParallel:
                 factory = _make_barrier_agno(1, noop)
             w = _make_watcher(sub, skill_root, factory, max_concurrent=max_conc)
             w._check_pending_skill_edits()
+            w._drain_futures(stage="skill_edit")
             graduated = {s: current_branch(str(d)) for s, d in dirs.items()}
             bodies = {s: (d / "SKILL.md").read_text(encoding="utf-8")
                       for s, d in dirs.items()}

@@ -27,7 +27,7 @@ import asyncio
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, Future, as_completed
+from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 
 from xskill.config import (
@@ -321,7 +321,12 @@ class DirectoryWatcher:
         self._check_pending_skill_edits()
 
     def _cold_start_pipeline_idle(self) -> bool:
-        """当前 watcher 没有待处理轨迹或后台任务时，cold-start 可 flush。"""
+        """当前 watcher 没有待处理轨迹或后台任务时，cold-start 可 flush。
+
+        ``self._futures`` 是 split/embed/cluster/skill_edit 共用的同一个飞行
+        中任务表——非空即不空闲，天然把"有 SkillEdit future 在飞"也计入，
+        不需要对 stage="skill_edit" 单独判断。
+        """
         if self._futures:
             return False
         pending_statuses = (
@@ -388,7 +393,7 @@ class DirectoryWatcher:
         agent_tools.init_skill_authoring_tool_context(
             self.skill_dir, self.skill_dir, self.config,
         )
-        # ── 跨技能并行写正文 ──
+        # ── 跨技能并行写正文，且不阻塞扫描循环 ──
         # 每个 skill 文件夹是独立 git 仓（skill/git.py 各自 git init），仓锁
         # _repo_lock_for(repo_dir) 是 per-skill 的 → 不同技能 = 不同锁 = 零冲突，
         # 跨技能并发安全。agent_tools 的配置单例在循环外已用同一个 skill
@@ -397,9 +402,13 @@ class DirectoryWatcher:
         # 实参解析目标子目录（target = skill_dir / slug），不依赖任何 per-skill
         # 全局态。因此把每个技能的 maybe_run() 丢进线程池并发跑是安全的。
         #
-        # 仅并行 LLM 写正文（maybe_run）这一段；结果收齐后回主线程串行做
-        # _stats 自增 + 即时 install——避免对无锁的 self._stats 做并发自增，
-        # install 是廉价的文件系统活，串行无碍。
+        # 不在这里 as_completed 等待：SkillEditAgent 现在支持多轮渐进式消化，
+        # 单个 skill 的 maybe_run() 可能跑到小时级（buffer 攒了几十上百批候选
+        # 时）。像 split/cluster 一样把每个 skill 的 maybe_run() 提交进
+        # self._futures（stage="skill_edit"），本方法立即返回；结果由
+        # ``_harvest``（每轮 scan 开头）收割 + 做 _stats 自增/即时 install。
+        # 同一个 skill 同时只允许一个 skill_edit future 在飞，避免同一 skill
+        # 被并发跑两个 maybe_run（第二个进来时前一个多半仍在改 candidates/git）。
         skill_dirs = [
             d for d in sorted(self.skill_dir.iterdir())
             if d.is_dir() and not d.name.startswith(".")
@@ -427,24 +436,51 @@ class DirectoryWatcher:
                 logger.exception("SkillEditAgent failed: %s", d.name)
                 return d, False
 
-        futures = {self._pool.submit(_run_one, d): d for d in skill_dirs}
-        promoted: list = []
-        for fut in as_completed(futures):
-            d, ok = fut.result()
-            if ok:
-                promoted.append(d)
+        skill_edit_in_flight = {
+            info.get("skill_dir") for info in self._futures.values()
+            if info.get("stage") == "skill_edit"
+        }
+        for d in skill_dirs:
+            if d in skill_edit_in_flight:
+                continue
+            fut = self._pool.submit(_run_one, d)
+            self._futures[fut] = {"stage": "skill_edit", "skill_dir": d}
 
-        # 回主线程串行汇总：_stats 自增（无锁，必须单线程）+ 即时 install。
-        for d in promoted:
-            self._stats["skills_edited"] += 1
-            logger.info("SkillEditAgent promoted: %s", d.name)
-            # 即时 install 让 Claude Code 立刻看到新生成的 SKILL.md
-            # 不必等 daemon 重启。install_to_claude_code 现在走 symlink，
-            # 后续 xskill 改 SKILL.md 也会被 CC 立即感知。
-            try:
-                self._install_skill_to_all_detected(d)
-            except Exception:
-                logger.exception("install after SkillEdit failed: %s", d.name)
+    def _on_skill_edit_done(self, result) -> None:
+        """``_harvest`` 收割 stage="skill_edit" future 用：_stats 自增 + 即时
+        install。回主线程串行做（避免对无锁的 self._stats 并发自增）。"""
+        d, ok = result
+        if not ok:
+            return
+        self._stats["skills_edited"] += 1
+        logger.info("SkillEditAgent promoted: %s", d.name)
+        # 即时 install 让 Claude Code 立刻看到新生成的 SKILL.md，不必等
+        # daemon 重启。install_to_claude_code 现在走 symlink，后续 xskill
+        # 改 SKILL.md 也会被 CC 立即感知。
+        try:
+            self._install_skill_to_all_detected(d)
+        except Exception:
+            logger.exception("install after SkillEdit failed: %s", d.name)
+
+    def _drain_futures(self, stage: str | None = None, timeout: float = 30.0) -> None:
+        """阻塞等到 ``self._futures`` 里指定 stage（``None`` = 全部）的 future
+        都跑完并被 ``_harvest`` 收割。
+
+        生产扫描循环从不调用本方法——SkillEdit 移出内联执行就是为了不阻塞
+        扫描；这里存在纯粹是给测试/优雅关停一个"等它跑完"的钩子，不必重新
+        发明"轮询 self._futures 直到清空"这套逻辑。
+        """
+        deadline = time.time() + timeout
+        while True:
+            pending = [
+                fut for fut, info in self._futures.items()
+                if stage is None or info.get("stage") == stage
+            ]
+            if not pending:
+                return
+            for fut in pending:
+                fut.result(timeout=max(0.01, deadline - time.time()))
+            self._harvest()
 
     def _resolve_target_root(self):
         """target_root 优先级：
@@ -744,6 +780,18 @@ class DirectoryWatcher:
                         "cluster batch failed (%d atoms); atoms stay unlanded, "
                         "will re-pool next scan: %s",
                         len(info.get("atom_ids") or []), e,
+                    )
+                continue
+            if stage == "skill_edit":
+                # SkillEditAgent.maybe_run() 自己吞异常返回 (d, False)——正常
+                # 不会走到 except，这里兜底仅防池化层面的意外（cancel 等）。
+                try:
+                    self._on_skill_edit_done(fut.result(timeout=0))
+                except Exception:
+                    self._stats["errors"] += 1
+                    logger.exception(
+                        "skill_edit future failed: %s",
+                        info.get("skill_dir"),
                     )
                 continue
             wd_id, fname = info["wd_id"], info["fname"]
