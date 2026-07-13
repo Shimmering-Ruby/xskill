@@ -249,6 +249,51 @@ def test_scatter_clusters_and_labels(tmp_path):
     assert between > 1.5 * within
 
 
+def test_stratified_sample_keeps_small_cluster():
+    from xskill.dashboard.profile_viz import _stratified_sample_indices
+    # 990 个属簇0、10 个属簇1(小簇);抽到 cap=100 也不能把小簇整个抽没
+    assignment = np.array([0] * 990 + [1] * 10)
+    sel = _stratified_sample_indices(assignment, 100)
+    assert len(sel) <= 100 + 2  # ≤5 簇,配额总和约等于 cap
+    assert {int(assignment[i]) for i in sel} == {0, 1}
+    assert sel == sorted(sel)  # 升序
+    # n<=cap → 全返回,不抽样
+    assert _stratified_sample_indices(np.array([0, 1, 0]), 100) == [0, 1, 2]
+
+
+def test_scatter_stratified_sampling(tmp_path):
+    """点数超上限 → 按兴趣中心分层抽样,shown≤cap、标 sampled、三簇都留代表点。"""
+    from xskill.dashboard.profile_viz import _SCATTER_MAX_POINTS
+    pdb = tmp_path / "p.db"
+    store = ProfileStore(pdb)
+    rng = np.random.default_rng(0)
+    dim = 8
+    centers = np.eye(3, dim)
+    pts, meta = [], []
+    for c in range(3):
+        for k in range(200):  # 3×200 = 600 > cap
+            v = centers[c] + 0.15 * rng.standard_normal(dim)
+            v = v / np.linalg.norm(v)
+            pts.append(v)
+            meta.append({"atom_id": f"a_{c}_{k}", "summary": f"s{c}{k}",
+                         "ux": 7, "tags": [f"t{c}"]})
+    pts = np.asarray(pts)
+    store.upsert("u", feature_tensor=centers, mean_tensor=pts.mean(0),
+                 used_skills=[], points=pts, point_meta=meta)
+    sc = ProfileViz(pdb).user_scatter("u")
+    assert sc["sampled"] is True and sc["total"] == 600
+    assert sc["shown"] == len(sc["points"]) <= _SCATTER_MAX_POINTS
+    assert len(sc["centers"]) == 3  # 兴趣中心全保留
+    assert {p["cluster"] for p in sc["points"]} == {0, 1, 2}  # 三簇都有代表点
+
+
+def test_scatter_no_sampling_under_cap(tmp_path):
+    pdb = tmp_path / "p.db"
+    _seed_profile(pdb)
+    sc = ProfileViz(pdb).user_scatter("alice")
+    assert sc["sampled"] is False and sc["total"] == 6 and sc["shown"] == 6
+
+
 def test_scatter_umap_method(tmp_path):
     """UMAP 投影:同一份数据换降维算法,簇仍分得开、确定性、method 回显 umap。"""
     pdb = tmp_path / "p.db"

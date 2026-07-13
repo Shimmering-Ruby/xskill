@@ -1418,7 +1418,7 @@ async function openUserProfile(uid) {
       <rect x="0" y="0" width="${W}" height="${H}" rx="14" fill="#f8fafc"/>
       ${hullEls}${ptEls}${ctEls}${skEls}
     </svg>
-    <div class="text-[10.5px] text-slate-400 mt-1.5">画像更新于 ${fdate(d.updated_at)} · ${d.points.length} 个原子点${(d.skills || []).length ? '' : ' · skill 向量索引缺失,不显示 ▲(不现算)'}</div>
+    <div class="text-[10.5px] text-slate-400 mt-1.5">画像更新于 ${fdate(d.updated_at)} · ${d.sampled ? `显示 ${d.shown}/${d.total} 个原子（按兴趣中心分层抽样）` : `${d.points.length} 个原子点`}${(d.skills || []).length ? '' : ' · skill 向量索引缺失,不显示 ▲(不现算)'}</div>
   </div>`;
   box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }

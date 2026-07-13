@@ -165,6 +165,64 @@ class TestUpdateUserInterest:
         assert got["meta"][0]["ux"] == 8
         assert got["points"].shape[0] == len(got["meta"])  # 行对齐不变量
 
+    def test_incremental_embedding_only_new_atoms(self, tmp_path):
+        """增量:新增原子只 embed 新的那条,老原子按 atom_id 复用落盘向量。"""
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        traj_root = tmp_path / "traj"
+        sessions = traj_root / "clients" / "u1" / "sessions"
+        _write_atom(sessions, "traj_1", "atom_traj_1_0001",
+                    summary="fix django migration", used_skills=[], ux_score=8)
+        eng = _engine(tmp_path, skill_dir, traj_root)
+
+        embedded: list[list[str]] = []
+        real_batch = eng.embed_client.encode_batch
+        eng.embed_client.encode_batch = lambda texts: (embedded.append(list(texts))
+                                                        or real_batch(texts))
+        eng.update_user_interest(ClientInterest("u1"))
+        assert embedded == [["fix django migration"]]  # 首次:全部
+
+        # 新增一条原子 → 只 embed 新的
+        _write_atom(sessions, "traj_1", "atom_traj_1_0002",
+                    summary="tune nginx cache", used_skills=[], ux_score=6)
+        embedded.clear()
+        eng.update_user_interest(ClientInterest("u1"))
+        assert embedded == [["tune nginx cache"]]  # 只算新原子,老的复用
+        got = eng.profile_store.load_points("u1")
+        assert [m["atom_id"] for m in got["meta"]] == \
+            ["atom_traj_1_0001", "atom_traj_1_0002"]
+
+    def test_model_change_forces_full_reembed(self, tmp_path):
+        """换 embedding 模型 → 缓存向量作废,整体重算(护栏)。"""
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        traj_root = tmp_path / "traj"
+        sessions = traj_root / "clients" / "u1" / "sessions"
+        _write_atom(sessions, "traj_1", "atom_traj_1_0001",
+                    summary="a", used_skills=[], ux_score=8)
+        _write_atom(sessions, "traj_1", "atom_traj_1_0002",
+                    summary="b", used_skills=[], ux_score=6)
+        eng = _engine(tmp_path, skill_dir, traj_root)
+        eng.embed_client.model = "m1"
+        eng.update_user_interest(ClientInterest("u1"))
+
+        embedded: list[list[str]] = []
+        real_batch = eng.embed_client.encode_batch
+        eng.embed_client.encode_batch = lambda texts: (embedded.append(list(texts))
+                                                        or real_batch(texts))
+        # 同模型再跑(强制指纹失效:清 in-memory 缓存)→ 全复用,不 embed
+        eng._profile_fp_cache.clear()
+        eng.update_user_interest(ClientInterest("u1"))
+        assert embedded == []  # 模型一致 + 无新原子 → 零 embedding
+        # 换模型 → 全量重算
+        eng._profile_fp_cache.clear()
+        eng.embed_client.model = "m2"
+        embedded.clear()
+        eng.update_user_interest(ClientInterest("u1"))
+        assert embedded == [["a", "b"]]
+
 
 # ── get_skill_for_client 80/20 + 回填 ─────────────────────────────
 

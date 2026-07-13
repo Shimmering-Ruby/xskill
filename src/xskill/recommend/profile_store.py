@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS client_interest (
     used_skills     TEXT DEFAULT '[]',
     points          BLOB,
     point_meta      TEXT DEFAULT '[]',
+    embed_model     TEXT DEFAULT '',
     updated_at      TEXT NOT NULL
 );
 """
@@ -48,6 +49,9 @@ class ProfileStore(_SqliteStore):
         if "point_meta" not in cols:
             conn.execute(
                 "ALTER TABLE client_interest ADD COLUMN point_meta TEXT DEFAULT '[]'")
+        if "embed_model" not in cols:
+            conn.execute(
+                "ALTER TABLE client_interest ADD COLUMN embed_model TEXT DEFAULT ''")
 
     def upsert(
         self,
@@ -58,9 +62,12 @@ class ProfileStore(_SqliteStore):
         used_skills: list[dict],
         points: Optional[np.ndarray] = None,
         point_meta: Optional[list[dict]] = None,
+        embed_model: str = "",
     ) -> None:
         """写画像。``points``/``point_meta`` 与 feature_tensor 同一次计算产出,
-        必须一起传（散点图与聚类中心不同源会画出撒谎的图）;冷启动都为 None。"""
+        必须一起传（散点图与聚类中心不同源会画出撒谎的图）;冷启动都为 None。
+        ``embed_model`` 记录算 points 用的 embedding 模型——增量复用向量前据此
+        做护栏（换模型 → 旧向量作废，整体重算）。"""
         if (points is None) != (not point_meta):
             raise ValueError("points 与 point_meta 必须同时给出或同时为空")
         if points is not None and len(point_meta) != int(points.shape[0]):
@@ -75,18 +82,45 @@ class ProfileStore(_SqliteStore):
         try:
             conn.execute(
                 "INSERT INTO client_interest (user_id, feature_tensor, mean_tensor,"
-                " used_skills, points, point_meta, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " used_skills, points, point_meta, embed_model, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(user_id) DO UPDATE SET"
                 " feature_tensor=excluded.feature_tensor,"
                 " mean_tensor=excluded.mean_tensor,"
                 " used_skills=excluded.used_skills,"
                 " points=excluded.points,"
                 " point_meta=excluded.point_meta,"
+                " embed_model=excluded.embed_model,"
                 " updated_at=excluded.updated_at",
-                (user_id, ft_blob, mt_blob, used_json, pt_blob, meta_json, _now()),
+                (user_id, ft_blob, mt_blob, used_json, pt_blob, meta_json,
+                 embed_model, _now()),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def load_vector_cache(self, user_id: str, embed_model: str) -> dict:
+        """增量 embedding 复用源:``{atom_id: 向量(D,)}``。
+
+        仅当已落盘的 ``embed_model`` 与当前一致才返回（换模型 → 空,强制整体
+        重算,不混用不同模型的向量）。无画像/无 points → 空 dict。
+        """
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT points, point_meta, embed_model FROM client_interest"
+                " WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if row is None or not row["points"]:
+                return {}
+            if (row["embed_model"] or "") != (embed_model or ""):
+                return {}  # 模型护栏:旧向量与当前模型不同源,作废
+            pts = pickle.loads(row["points"])
+            meta = json.loads(row["point_meta"] or "[]")
+            return {m.get("atom_id"): pts[i]
+                    for i, m in enumerate(meta)
+                    if i < len(pts) and m.get("atom_id")}
         finally:
             conn.close()
 

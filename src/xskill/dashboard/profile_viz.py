@@ -37,6 +37,29 @@ def profile_db_for(db_path: Optional[Path]) -> Path:
 
 
 _PCA_PREDIM = 50  # 高维 embedding 进降维算法前的 PCA 预降维目标维度
+_SCATTER_MAX_POINTS = 300  # 散点单次投影的原子数上限(超出按兴趣中心分层抽样)
+
+
+def _stratified_sample_indices(assignment: np.ndarray, cap: int) -> list[int]:
+    """按簇（兴趣中心归属）分层抽样,返回选中的原始下标（升序,确定性无随机）。
+
+    每簇配额 ∝ 簇大小且至少 1（小簇不被整个抽没,兴趣分布不失真）;簇内用
+    均匀取样跨整个簇铺开,而非只取前几个。``assignment`` 的簇数 = 兴趣中心数
+    （≤5）,故配额总和 ≈ cap。
+    """
+    n = len(assignment)
+    if n <= cap:
+        return list(range(n))
+    clusters: dict[int, list[int]] = {}
+    for i, c in enumerate(assignment):
+        clusters.setdefault(int(c), []).append(i)
+    selected: list[int] = []
+    for idxs in clusters.values():
+        size = len(idxs)
+        quota = max(1, int(cap * size / n))
+        picks = np.unique(np.linspace(0, size - 1, quota).round().astype(int))
+        selected.extend(idxs[p] for p in picks)
+    return sorted(selected)
 
 
 def _preprocess_embeddings(x: np.ndarray, pca_dim: int = _PCA_PREDIM) -> np.ndarray:
@@ -390,6 +413,22 @@ class ProfileViz:
                 continue  # 索引没有该 skill 的缓存向量 → 不画(D6),不现算
             skill_entries.append((name, entry.get("use_count", 0), vec))
 
+        # 簇归属:最近兴趣中心(高维余弦,向量均已 L2 归一——投影前算,分层抽样也据它)
+        if len(centers):
+            assignment = np.argmax(points @ centers.T, axis=1)
+        else:
+            assignment = np.zeros(len(meta), dtype=int)
+
+        # 点数超上限 → 按兴趣中心分层抽样(每簇留代表点),把投影成本压在上限内。
+        # 兴趣中心 ◆/skill ▲ 永远全保留;页面显式标注"显示 N/M",不假装全画了。
+        total = len(points)
+        sampled = total > _SCATTER_MAX_POINTS
+        if sampled:
+            sel = _stratified_sample_indices(assignment, _SCATTER_MAX_POINTS)
+            points = points[sel]
+            meta = [meta[i] for i in sel]
+            assignment = assignment[sel]
+
         blocks = [points, centers]
         if skill_entries:
             blocks.append(np.vstack([v for _, _, v in skill_entries]))
@@ -398,12 +437,6 @@ class ProfileViz:
         coords = coords_all[:len(points)]
         center_coords = coords_all[len(points):len(points) + len(centers)]
         skill_coords = coords_all[len(points) + len(centers):]
-
-        # 簇归属:最近兴趣中心(高维余弦,向量均已 L2 归一——与 2D 投影无关,更可信)
-        if len(centers):
-            assignment = np.argmax(points @ centers.T, axis=1)
-        else:
-            assignment = np.zeros(len(meta), dtype=int)
 
         out_points = []
         cluster_tags: dict[int, Counter] = {}
@@ -449,6 +482,9 @@ class ProfileViz:
             "clusters": clusters,
             "skills": skills,
             "method": method,
+            "total": total,          # 该用户原子总数
+            "shown": len(out_points),  # 实际投影/渲染的点数
+            "sampled": sampled,      # True → 已分层抽样,页面标注"显示 N/M"
         }
 
     # ── §2.5 admin 用户聚类 graph ────────────────────────────────

@@ -208,9 +208,7 @@ class SkillRecommendEngine:
                 user_id, feature_tensor=None, mean_tensor=None, used_skills=used_skills,
             )
             return
-        vecs = _normalize_rows(np.asarray(
-            self.embed_client.encode_batch([a.summary for a in atoms]), dtype=float,
-        ))
+        vecs = self._embed_atoms_incremental(user_id, atoms)
         client_interest.reset_points(vecs)
         ft = client_interest.feature_tensor
         mt = client_interest.mean_tensor
@@ -221,7 +219,28 @@ class SkillRecommendEngine:
         self.profile_store.upsert(
             user_id, feature_tensor=ft, mean_tensor=mt, used_skills=used_skills,
             points=vecs, point_meta=point_meta,
+            embed_model=getattr(self.embed_client, "model", ""),
         )
+
+    def _embed_atoms_incremental(self, user_id: str, atoms: list) -> np.ndarray:
+        """只对没缓存过的原子调 embedding,其余按 ``atom_id`` 复用上次落盘的向量。
+
+        atom 内容随 ``atom_id`` 不变（轨迹入库后原子不可变）,故按 id 复用安全；
+        换 embedding 模型时 ``load_vector_cache`` 返回空 → 整体重算（护栏在存储层）。
+        避免一个攒了上万原子的用户每次新增几条就全量重 embed。
+        """
+        model = getattr(self.embed_client, "model", "")
+        cache = self.profile_store.load_vector_cache(user_id, model)
+        missing = [a for a in atoms if a.atom_id not in cache]
+        if missing:
+            fresh = _normalize_rows(np.asarray(
+                self.embed_client.encode_batch([a.summary for a in missing]),
+                dtype=float,
+            ))
+            cache = dict(cache)
+            for a, v in zip(missing, fresh):
+                cache[a.atom_id] = v
+        return np.asarray([cache[a.atom_id] for a in atoms], dtype=float)
 
     # ── 5.3 get_skill_for_client ─────────────────────────────────
     def get_skill_for_client(
