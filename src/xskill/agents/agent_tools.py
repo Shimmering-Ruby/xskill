@@ -11,7 +11,7 @@ those from config at their own boundary.
 
 from __future__ import annotations
 
-import json, logging, tempfile
+import json, logging, re, shutil, subprocess, tempfile
 from datetime import date, datetime
 from pathlib import Path
 
@@ -37,6 +37,7 @@ class AgentToolConfig:
         self._atom_skill_dir: Path | None = None
         self._atom_store = None
         self._default_traj_root: Path | None = None
+        self.grep_fallback_warned = False
 
     def configure_skill_authoring(
         self, skill_dir, data_dir, config,
@@ -144,6 +145,33 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+SENSITIVE_FILENAMES = {
+    "config.yaml", "team_client.json", "team_clients.db", "dashboard_secret.json",
+}
+SENSITIVE_NAME_TOKENS = {"secret", "token", "credential", "key", "password"}
+
+
+def _allowed_read_roots() -> list[Path]:
+    """探索类工具（read_file / list_files / grep_files）共用的只读根集合。"""
+    from xskill.config import XSKILL_HOME
+    roots: list[Path] = []
+    configured_root = agent_tool_config.skill_dir or agent_tool_config.atom_skill_dir
+    if configured_root is not None:
+        roots.append(Path(configured_root).parent.resolve())
+    roots.append(XSKILL_HOME.resolve())
+    roots.append((Path(tempfile.gettempdir()) / "xskill" / "skilleditagent").resolve())
+    return list(dict.fromkeys(roots))
+
+
+def _is_sensitive_file(path: Path) -> bool:
+    """密钥类文件不给 agent 读——skill 正文会分发全团队，蒸进去即泄密。"""
+    lower_name = path.name.lower()
+    if lower_name in SENSITIVE_FILENAMES:
+        return True
+    name_tokens = set(re.split(r"[^a-z0-9]+", lower_name))
+    return bool(name_tokens & SENSITIVE_NAME_TOKENS)
+
+
 def _sanitize_frontmatter_dates(fm: dict) -> dict:
     """不让 LLM 写的日期字段污染 frontmatter。
     - created: 必须是合法 ISO date 且 ≤ 今天；否则替换成今天（保留历史 created 优先）
@@ -226,15 +254,15 @@ def search_similar_trajs(query: str, top_k: int = 5, filter: str = "all") -> str
 
 @tool(name="read_file")
 def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
-    """Read a file under the skill workspace or /tmp spill area.
+    """Read a file under the skill workspace, ~/.xskill, or the /tmp spill area.
 
-    SkillEditAgent may receive trimmed tool results that point at files under
-    /tmp/xskill/skilleditagent. Use read_file(spill_path, offset, limit) to
-    reload those raw tool results in line windows when the short placeholder is
-    insufficient.
+    Use with list_files / grep_files output: they return paths this tool can
+    read directly. Spill files under /tmp/xskill/skilleditagent hold trimmed
+    raw tool results; reload them in line windows when placeholders are not
+    enough. Secret-bearing files (config.yaml, *token*, *key*, ...) are refused.
 
     Args:
-        path: File path under the skill workspace or /tmp/xskill/skilleditagent (spill dir).
+        path: File path under an allowed read root.
         offset: 1-based start line.
         limit: Number of lines to read from offset.
     """
@@ -249,12 +277,7 @@ def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
         return f"error: limit must be >= 1 (got {line_limit})"
 
     p = Path(path)
-    configured_root = agent_tool_config.skill_dir or agent_tool_config.atom_skill_dir
-    roots: list[Path] = []
-    if configured_root is not None:
-        roots.append(Path(configured_root).parent.resolve())
-    roots.append((Path(tempfile.gettempdir()) / "xskill" / "skilleditagent").resolve())
-    roots = list(dict.fromkeys(roots))
+    roots = _allowed_read_roots()
     resolved = p.resolve()
     try:
         allowed = any(_is_relative_to(resolved, root) for root in roots)
@@ -268,6 +291,8 @@ def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
             f"resolved_path: {resolved}\n"
             f"allowed_roots:\n{allowed_block}"
         )
+    if _is_sensitive_file(resolved):
+        return f"error: sensitive file, not readable by agent ({path})"
 
     if not resolved.exists():
         return f"error: file not found ({path})"
@@ -703,15 +728,48 @@ def new_skill_folder(skill_name: str, description: str) -> str:
 
 @tool(name="skill_read")
 def skill_read(skill_name: str) -> str:
-    """读 skill 的 SKILL.md；没有则返回 placeholder 提示。"""
+    """读 skill 的 SKILL.md 正文 + 目录内其余文件树（路径可直接喂 read_file）。"""
     skill_dir = agent_tool_config.atom_skill_dir
     if skill_dir is None:
         return "error: atom task tool context not initialized"
     slug = _slugify(skill_name)
-    p = skill_dir / slug / "SKILL.md"
-    if not p.is_file():
-        return f"(skill {slug} has no SKILL.md yet — only candidates buffer)"
-    return p.read_text(encoding="utf-8")
+    skill_path = (skill_dir / slug).resolve()
+    header = f"skill_dir: {skill_path}"
+    try:
+        from xskill.skill.git import current_branch
+        header += f"   (branch: {current_branch(str(skill_path))})"
+    except Exception:
+        pass
+    markdown_path = skill_path / "SKILL.md"
+    if markdown_path.is_file():
+        markdown_text = markdown_path.read_text(encoding="utf-8")
+        body = (f"--- SKILL.md ({len(markdown_text.splitlines())} lines) ---\n"
+                f"{markdown_text}")
+    else:
+        body = f"(skill {slug} has no SKILL.md yet — only candidates buffer)"
+    tree_lines: list[str] = []
+    if skill_path.is_dir():
+        for file_path in sorted(skill_path.rglob("*")):
+            relative_path = file_path.relative_to(skill_path)
+            if relative_path.parts[0] == ".git" or len(relative_path.parts) > 4:
+                continue
+            if not file_path.is_file() or relative_path.as_posix() == "SKILL.md":
+                continue
+            size_kb = file_path.stat().st_size / 1024
+            annotation = ("  (用 list_candidates 读)"
+                          if relative_path.name == "candidates.yml" else "")
+            tree_lines.append(
+                f"{relative_path.as_posix()}  ({size_kb:.1f} KB){annotation}",
+            )
+            if len(tree_lines) >= 100:
+                tree_lines.append("(+more, use list_files)")
+                break
+    if not tree_lines:
+        return f"{header}\n{body}"
+    files_block = "\n".join(tree_lines)
+    return (f"{header}\n{body}\n"
+            f"--- other files（相对 {skill_path}；用 read_file(绝对路径) 精读）---\n"
+            f"{files_block}")
 
 
 @tool(name="add_task_to_skill")
@@ -932,26 +990,114 @@ def make_task_agent_tools(
 def list_files(path: str) -> str:
     """列目录下的文件 / 子目录，返回可直接传给 read_file 的完整路径。
 
-    给 SkillEditAgent 用来摸清当前 skill 已有什么文件（避免重复写、便于增量
-    更新）。路径必须在 skill_dir 范围内；越界返回 error。
+    可列 skill 仓、~/.xskill、/tmp spill 三个只读根内的任意目录——摸清 skill
+    已有文件、轨迹 / atom 数据布局都用它。越界返回 error。
     """
-    p = Path(path)
-    skill_root = agent_tool_config.atom_skill_dir if agent_tool_config.atom_skill_dir is not None else agent_tool_config.skill_dir
-    if skill_root is None:
-        return "error: skill_dir context not initialized"
-    try:
-        p.resolve().relative_to(skill_root.resolve())
-    except ValueError:
-        return f"error: list_files restricted to skill_dir (tried: {path})"
-    if not p.is_dir():
+    target_directory = Path(path).resolve()
+    roots = _allowed_read_roots()
+    if not any(_is_relative_to(target_directory, root) for root in roots):
+        allowed_block = ", ".join(str(root) for root in roots)
+        return f"error: list_files restricted to {allowed_block} (tried: {path})"
+    if not target_directory.is_dir():
         return f"error: not a directory: {path}"
-    entries = sorted(p.iterdir())
+    entries = sorted(target_directory.iterdir())
     if not entries:
         return "(empty)"
     return "\n".join(
         f"{'[dir] ' if e.is_dir() else '[file] '}{e.resolve()}{'/' if e.is_dir() else ''}"
         for e in entries
     )
+
+
+@tool(name="grep_files")
+def grep_files(pattern: str, path: str = "", glob: str = "",
+               max_results: int = 100) -> str:
+    """在允许的只读根内全文检索，返回「文件:行号:内容」，路径可直接喂 read_file。
+
+    Args:
+        pattern: 正则表达式（ripgrep / grep -E 语法）。
+        path: 检索根目录，缺省为 skill 仓所在根；须在允许的只读根内。
+        glob: 可选文件名过滤，如 "*.md"。
+        max_results: 命中行数上限（1-500）。
+    """
+    max_results = max(1, min(int(max_results), 500))
+    roots = _allowed_read_roots()
+    search_root = (Path(path) if path else roots[0]).resolve()
+    if not any(_is_relative_to(search_root, root) for root in roots):
+        allowed_block = ", ".join(str(root) for root in roots)
+        return f"error: grep_files restricted to {allowed_block} (tried: {path})"
+    if not search_root.exists():
+        return f"error: path not found ({path})"
+
+    if shutil.which("rg"):
+        engine = "rg"
+        command = ["rg", "-n", "--no-heading", "--color", "never", "--smart-case"]
+        if glob:
+            command += ["--glob", glob]
+        command += ["-e", pattern, str(search_root)]
+    elif shutil.which("grep"):
+        engine = "grep (ripgrep 不可用，已降级；建议安装 rg 提速)"
+        command = ["grep", "-rnIE"]
+        if glob:
+            command += [f"--include={glob}"]
+        command += ["-e", pattern, str(search_root)]
+    else:
+        engine = "python (ripgrep/grep 均不可用，已降级纯扫描)"
+        command = None
+    if command is None or engine != "rg":
+        if not agent_tool_config.grep_fallback_warned:
+            agent_tool_config.grep_fallback_warned = True
+            logger.warning("grep_files: ripgrep 不可用，降级为 %s",
+                           "grep" if command else "python 纯扫描")
+
+    if command is not None:
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return "error: grep timed out after 30s — narrow path/glob"
+        # rg/grep 退出码：0=命中，1=无命中，≥2=真错误
+        if completed.returncode > 1:
+            return f"error: {engine} failed: {completed.stderr.strip()[:500]}"
+        output_lines = completed.stdout.splitlines()
+    else:
+        try:
+            compiled_pattern = re.compile(pattern)
+        except re.error as regex_error:
+            return f"error: invalid pattern: {regex_error}"
+        output_lines = []
+        scanned_count = 0
+        for file_path in search_root.rglob(glob or "*"):
+            if not file_path.is_file() or ".git" in file_path.parts:
+                continue
+            scanned_count += 1
+            if scanned_count > 2000 or len(output_lines) >= max_results:
+                break
+            try:
+                file_text = file_path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for line_number, line_text in enumerate(file_text.splitlines(), 1):
+                if compiled_pattern.search(line_text):
+                    output_lines.append(f"{file_path}:{line_number}:{line_text}")
+
+    hit_line_pattern = re.compile(r"^(.*?):(\d+):")
+    filtered_lines: list[str] = []
+    for output_line in output_lines:
+        hit_match = hit_line_pattern.match(output_line)
+        if hit_match and _is_sensitive_file(Path(hit_match.group(1))):
+            continue
+        filtered_lines.append(output_line)
+        if len(filtered_lines) >= max_results:
+            break
+    header = f"engine: {engine}\nroot: {search_root}\n"
+    if not filtered_lines:
+        return header + f"(no matches for {pattern!r})"
+    body = "\n".join(filtered_lines)
+    if len(body) > 10000:
+        body = body[:10000] + "\n... (truncated — narrow pattern/glob or lower max_results)"
+    return header + body
 
 
 # ═══════════════════════════════════════════════════════════════════
