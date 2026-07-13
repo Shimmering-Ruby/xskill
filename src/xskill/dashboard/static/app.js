@@ -1491,8 +1491,11 @@ async function openUserProfile(uid) {
   const skEls = (d.skills || []).map(s => {
     const c = sc(s);
     const short = s.name.length > 14 ? s.name.slice(0, 13) + '…' : s.name;
+    const hub = s.source === 'skillhub';         // 三方 skill 区分:琥珀色 ▲ + tooltip 标"第三方"
+    const fill = hub ? '#d97706' : '#0f172a';
+    const tip = `${hub ? '第三方 ' : ''}SKILL:${esc(s.name)} · 触发 ${esc(s.use_count)} 次`;
     return `<g class="skill-jump cursor-pointer" data-skill="${esc(s.name)}">
-      <path d="M${c.x.toFixed(1)} ${(c.y - 7).toFixed(1)} l6.2 11 h-12.4 z" fill="#0f172a"><title>SKILL:${esc(s.name)} · 触发 ${esc(s.use_count)} 次</title></path>
+      <path d="M${c.x.toFixed(1)} ${(c.y - 7).toFixed(1)} l6.2 11 h-12.4 z" fill="${fill}"><title>${tip}</title></path>
       <text x="${c.x.toFixed(1)}" y="${(c.y + 17).toFixed(1)}" font-size="9.5" font-weight="600" fill="#334155" text-anchor="middle">SKILL:${esc(short)}</text></g>`;
   }).join('');
   const legend = (d.clusters || []).map(cl =>

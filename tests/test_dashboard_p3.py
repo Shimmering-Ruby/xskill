@@ -351,6 +351,103 @@ def test_scatter_skill_vec_only_from_index(tmp_path):
     assert ProfileViz(pdb, skill_dir=skills).user_scatter("alice")["skills"] == []
 
 
+# ── 3.4bis 三方(skillhub)skill ▲ + source 契约 ────────────────────────
+
+class _FakeEmbed:
+    """dashboard 无 embed_client;这里只给 SkillHub 落盘缓存用(维度对齐 points=4)。"""
+
+    def __init__(self, dim=4):
+        self.dim = dim
+        self.model = "fake-embed"
+
+    def encode(self, text):
+        v = np.zeros(self.dim, dtype=float)
+        for i, ch in enumerate(text):
+            v[i % self.dim] += ord(ch) % 97
+        return v
+
+
+def _write_hub_skill(hub_dir: Path, rel: str, desc: str):
+    d = hub_dir / rel
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {rel}\ndescription: {desc}\n---\n# {rel}\n", encoding="utf-8")
+
+
+def _seed_alice_with_skills(pdb: Path, used_skills: list[dict]):
+    """alice 两簇各 3 点(dim=4),used_skills 自定,便于挂三方 skill。"""
+    store = ProfileStore(pdb)
+    a = np.array([[1, 0.05 * i, 0, 0] for i in range(3)], dtype=float)
+    b = np.array([[0.05 * i, 1, 0, 0] for i in range(3)], dtype=float)
+    pts = np.vstack([a, b])
+    pts /= np.linalg.norm(pts, axis=1, keepdims=True)
+    centers = np.vstack([a.mean(0), b.mean(0)])
+    centers /= np.linalg.norm(centers, axis=1, keepdims=True)
+    meta = [{"atom_id": f"atom_{i}", "summary": f"s{i}", "ux": 8,
+             "tags": ["git"] if i < 3 else ["docker"]} for i in range(6)]
+    store.upsert("alice", feature_tensor=centers, mean_tensor=pts.mean(0),
+                 used_skills=used_skills, points=pts, point_meta=meta)
+
+
+def test_skillhub_index_for_locates_sibling(tmp_path):
+    """三方缓存旁推定位:registry 同级 skillhub_skills/.skillhub_index.pkl。"""
+    from xskill.dashboard.profile_viz import skillhub_index_for
+    p = skillhub_index_for(tmp_path / "registry.db")
+    assert p == tmp_path / "skillhub_skills" / ".skillhub_index.pkl"
+
+
+def test_scatter_marks_skillhub_source(tmp_path):
+    """SkillHub.index() 落盘缓存 → 用户用过的三方 skill 画成 ▲、带 source=skillhub、
+    有坐标;自产 skill 仍 source=native(不回归)。writer↔reader 契约端到端。"""
+    from xskill.recommend.skillhub import SkillHub
+    pdb = tmp_path / "p.db"
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "linter", "python lint helper")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=_FakeEmbed(dim=4))
+    hub_id = hub.index()[0]["name"]
+    assert hub.index_cache_path.is_file()  # 算向量的同时落盘缓存(供 dashboard 读)
+    _seed_alice_with_skills(pdb, [{"name": "sk1", "use_count": 3},
+                                  {"name": hub_id, "use_count": 5}])
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / ".skill_index.pkl").write_bytes(pickle.dumps(
+        {"skill_names": ["sk1"], "embeddings": np.array([[0.7, 0.7, 0, 0]], dtype=float)}))
+    out = ProfileViz(pdb, skill_dir=skills,
+                     skillhub_index=hub.index_cache_path).user_scatter("alice")["skills"]
+    by = {s["name"]: s for s in out}
+    assert set(by) == {"sk1", hub_id}
+    assert by["sk1"]["source"] == "native"
+    assert by[hub_id]["source"] == "skillhub"
+    assert by[hub_id]["use_count"] == 5
+    for s in out:  # 都有坐标
+        assert isinstance(s["x"], float) and isinstance(s["y"], float)
+
+
+def test_scatter_skillhub_missing_cache_not_drawn(tmp_path):
+    """D6:三方缓存缺失 → 三方 skill 不出现、不报错、不现算;自产 ▲ 不回归。"""
+    pdb = tmp_path / "p.db"
+    _seed_alice_with_skills(pdb, [{"name": "sk1", "use_count": 3},
+                                  {"name": "ghosthub@zzz", "use_count": 2}])
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / ".skill_index.pkl").write_bytes(pickle.dumps(
+        {"skill_names": ["sk1"], "embeddings": np.array([[0.7, 0.7, 0, 0]], dtype=float)}))
+    out = ProfileViz(pdb, skill_dir=skills,
+                     skillhub_index=tmp_path / "nope.pkl").user_scatter("alice")["skills"]
+    assert [s["name"] for s in out] == ["sk1"]
+    assert out[0]["source"] == "native"
+
+
+def test_scatter_skillhub_dim_mismatch_skipped(tmp_path):
+    """三方缓存维度与 points 不一致(换过 embedding 模型)→ 跳过,不画,不报错。"""
+    pdb = tmp_path / "p.db"
+    _seed_alice_with_skills(pdb, [{"name": "hub@x", "use_count": 1}])
+    cache = tmp_path / "hub.pkl"
+    cache.write_bytes(pickle.dumps(
+        {"skill_names": ["hub@x"], "embeddings": np.ones((1, 7)), "model": "m"}))
+    assert ProfileViz(pdb, skillhub_index=cache).user_scatter("alice")["skills"] == []
+
+
 # ── 3.5 聚类 graph ───────────────────────────────────────────────────
 
 def test_cluster_graph_edges_and_isolated(tmp_path):

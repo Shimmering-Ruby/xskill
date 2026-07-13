@@ -11,11 +11,17 @@
 from __future__ import annotations
 
 import hashlib
+import pickle
 import re
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+
+# dashboard 可读的三方 skill 向量缓存文件名（落在 skillhub 目录内，dot 前缀故不被
+# ``rglob("SKILL.md")`` 扫到）。dashboard 端无 embed_client，只能读此缓存把用户用过
+# 的三方 skill 画成散点 ▲（D6:不现算不造假）。结构对齐自产 ``.skill_index.pkl``。
+INDEX_CACHE_NAME = ".skillhub_index.pkl"
 
 from xskill.canary import aggregate_ux_by_version, load_ux_scores
 from xskill.config import skillhub_config
@@ -105,13 +111,40 @@ class SkillHub:
             for entry in self._entries(include_vec=False, require_description=True)
         )
 
+    @property
+    def index_cache_path(self) -> Path:
+        """dashboard 可读的三方 skill 向量缓存路径（``<skillhub_dir>/.skillhub_index.pkl``）。"""
+        return self.dir / INDEX_CACHE_NAME
+
     def index(self) -> list[dict]:
         """返回三方 skill 索引。禁用 → 空 list；启用但目录缺失 → raise。
 
         skill 以 ``skillhub.dir`` 下任意层级中包含 ``SKILL.md`` 的目录为单位。
         ``name`` / ``skill_id`` 是稳定分发身份，展示名放 ``display_name``。
+
+        算好向量的同时落盘一份 dashboard 可读缓存（画像散点靠它画三方 skill ▲，
+        dashboard 端无 embed_client 不能现算，D6）。只在启用且有三方 skill 时写。
         """
-        return self._entries(include_vec=True, require_description=True)
+        entries = self._entries(include_vec=True, require_description=True)
+        if entries:
+            self._persist_index(entries)
+        return entries
+
+    def _persist_index(self, entries: list[dict]) -> None:
+        """把已算好的三方 skill 向量落盘成 dashboard 可读缓存。
+
+        结构对齐自产 ``.skill_index.pkl``（``skill_names`` / ``embeddings`` /
+        ``model``），profile_viz 只读不写、读不到就不画（D6，不现算不造假）。
+        """
+        names = [entry["name"] for entry in entries]
+        embeddings = np.vstack([np.asarray(entry["vec"], dtype=float) for entry in entries])
+        data = {
+            "skill_names": names,
+            "embeddings": embeddings,
+            "model": getattr(self.embed_client, "model", None),
+        }
+        with open(self.index_cache_path, "wb") as index_file:
+            pickle.dump(data, index_file)
 
     def entry(self, name: str) -> dict | None:
         """按 skill_id / source_path / 唯一 display_name 找当前磁盘上的 skill。"""

@@ -36,6 +36,21 @@ def profile_db_for(db_path: Optional[Path]) -> Path:
     return XSKILL_HOME / "team_profile.db"
 
 
+def skillhub_index_for(db_path: Optional[Path]) -> Path:
+    """三方 skill 向量缓存 ``<skillhub_dir>/.skillhub_index.pkl`` 的旁推定位。
+
+    该缓存由 ``SkillHub.index()`` 算好向量时落盘（自产 skill 有 ``.skill_index.pkl``，
+    三方 skill 走这份）——dashboard 端无 embed_client，只能读缓存把用户用过的三方
+    skill 画成散点 ▲（D6:读不到不画,绝不现算）。定位约定同 ``profile_db_for``:
+    独立只读实例（显式 db_path）按 registry 同级的 ``skillhub_skills`` 旁推,serve
+    内置挂载（db_path=None）走 config 的 ``skillhub.dir``。
+    """
+    if db_path is not None:
+        return Path(db_path).parent / "skillhub_skills" / ".skillhub_index.pkl"
+    from xskill.config import get_config, skillhub_config
+    return skillhub_config(get_config())["dir"] / ".skillhub_index.pkl"
+
+
 _PCA_PREDIM = 50  # 高维 embedding 进降维算法前的 PCA 预降维目标维度
 _SCATTER_MAX_POINTS = 300  # 散点单次投影的原子数上限(超出按兴趣中心分层抽样)
 
@@ -362,14 +377,38 @@ def _skill_index_vecs(skill_dir: Optional[Path]) -> dict[str, np.ndarray]:
         return {}
 
 
+def _skillhub_index_vecs(cache_path: Optional[Path]) -> dict[str, np.ndarray]:
+    """读三方 skill 向量缓存（``skillhub.index()`` 落盘,结构对齐自产索引）。
+    缓存不存在/不可读 → 空(散点图不画三方 skill 三角,D6 不现算)。"""
+    if not cache_path:
+        return {}
+    cache_path = Path(cache_path)
+    if not cache_path.is_file():
+        return {}
+    try:
+        with open(cache_path, "rb") as f:
+            idx = pickle.load(f)
+        names = idx.get("skill_names") or []
+        embeddings = idx.get("embeddings")
+        if embeddings is None:
+            return {}
+        return {n: np.asarray(embeddings[i], dtype=float)
+                for i, n in enumerate(names)}
+    except (OSError, pickle.UnpicklingError, ValueError, IndexError):
+        logger.warning("skillhub index unreadable: %s", cache_path, exc_info=True)
+        return {}
+
+
 class ProfileViz:
     """画像可视化数据装配（读 ProfileStore + skill 索引,纯 numpy,无 LLM）。"""
 
     def __init__(self, profile_db: Path, *, skill_dir: Optional[Path] = None,
-                 db_path: Optional[Path] = None):
+                 db_path: Optional[Path] = None,
+                 skillhub_index: Optional[Path] = None):
         self._store = ProfileStore(profile_db)
         self._skill_dir = skill_dir
         self._db_path = db_path
+        self._skillhub_index = skillhub_index  # 三方 skill 向量缓存路径(读不到→不画)
 
     # ── §2.3 画像散点 ────────────────────────────────────────────
 
@@ -404,14 +443,22 @@ class ProfileViz:
         centers = (np.asarray(centers, dtype=float) if centers is not None
                    else np.zeros((0, points.shape[1])))
 
-        skill_vecs = _skill_index_vecs(self._skill_dir)
-        skill_entries = []
+        # 自产 skill 向量取自 .skill_index.pkl,三方(skillhub)取自 skillhub 缓存;
+        # 同名以自产优先。两个缓存都拿不到 → 不画(D6),绝不现场调 embedding。
+        native_vecs = _skill_index_vecs(self._skill_dir)
+        hub_vecs = _skillhub_index_vecs(self._skillhub_index)
+        skill_entries = []  # (name, use_count, vec, source)
         for entry in profile.get("used_skills") or []:
             name = entry.get("name") or ""
-            vec = skill_vecs.get(name)
-            if vec is None or vec.shape[0] != points.shape[1]:
-                continue  # 索引没有该 skill 的缓存向量 → 不画(D6),不现算
-            skill_entries.append((name, entry.get("use_count", 0), vec))
+            if name in native_vecs:
+                vec, source = native_vecs[name], "native"
+            elif name in hub_vecs:
+                vec, source = hub_vecs[name], "skillhub"
+            else:
+                continue  # 两个缓存都没有该 skill 的向量 → 不画(D6),不现算
+            if vec.shape[0] != points.shape[1]:
+                continue  # 维度不一致(换过 embedding 模型)→ 不画,不报错
+            skill_entries.append((name, entry.get("use_count", 0), vec, source))
 
         # 簇归属:最近兴趣中心(高维余弦,向量均已 L2 归一——投影前算,分层抽样也据它)
         if len(centers):
@@ -431,7 +478,7 @@ class ProfileViz:
 
         blocks = [points, centers]
         if skill_entries:
-            blocks.append(np.vstack([v for _, _, v in skill_entries]))
+            blocks.append(np.vstack([v for _, _, v, _ in skill_entries]))
         combined = np.vstack(blocks)
         coords_all = projector_cls().fit(combined)
         coords = coords_all[:len(points)]
@@ -467,8 +514,9 @@ class ProfileViz:
             {"name": name,
              "x": round(float(skill_coords[i, 0]), 4),
              "y": round(float(skill_coords[i, 1]), 4),
-             "use_count": use_count}
-            for i, (name, use_count, _vec) in enumerate(skill_entries)
+             "use_count": use_count,
+             "source": source}  # 共同数据契约:native / skillhub(据向量来自哪个缓存)
+            for i, (name, use_count, _vec, source) in enumerate(skill_entries)
         ]
 
         return {
