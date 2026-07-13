@@ -27,12 +27,16 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger("xskill.dashboard.auth")
 
 SESSION_COOKIE = "xskill_session"
 SESSION_TTL_SECONDS = 7 * 24 * 3600
+
+# 免密登录链接的时效：够用户从终端复制点开，不够链接泄露后被长期滥用。
+LOGIN_LINK_TTL_SECONDS = 600
 
 
 # ---------------------------------------------------------------------------
@@ -73,24 +77,21 @@ class SessionSigner:
     def __init__(self, secret: str):
         self._key = secret.encode()
 
-    def sign(self, user: str, role: str, *, ttl: int = SESSION_TTL_SECONDS) -> str:
-        payload = json.dumps(
-            {"u": user, "r": role, "exp": int(time.time()) + ttl},
-            separators=(",", ":"),
-        ).encode()
-        sig = hmac.new(self._key, payload, hashlib.sha256).digest()
-        return f"{_b64e(payload)}.{_b64e(sig)}"
+    def _signed(self, payload_dict: dict) -> str:
+        payload = json.dumps(payload_dict, separators=(",", ":")).encode()
+        signature = hmac.new(self._key, payload, hashlib.sha256).digest()
+        return f"{_b64e(payload)}.{_b64e(signature)}"
 
-    def verify(self, token: str) -> Optional[dict]:
-        """合法且未过期 → {"user":…, "role":…}；否则 None。"""
+    def _verified(self, token: str) -> Optional[dict]:
+        """签名合法且未过期 → payload dict；否则 None。"""
         try:
             p64, s64 = token.split(".", 1)
             payload = _b64d(p64)
-            sig = _b64d(s64)
+            signature = _b64d(s64)
         except (ValueError, TypeError):
             return None
         want = hmac.new(self._key, payload, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, want):
+        if not hmac.compare_digest(signature, want):
             return None
         try:
             data = json.loads(payload)
@@ -98,7 +99,32 @@ class SessionSigner:
             return None
         if int(data.get("exp", 0)) < time.time():
             return None
+        return data
+
+    def sign(self, user: str, role: str, *, ttl: int = SESSION_TTL_SECONDS) -> str:
+        return self._signed({"u": user, "r": role, "exp": int(time.time()) + ttl})
+
+    def verify(self, token: str) -> Optional[dict]:
+        """合法且未过期 → {"user":…, "role":…}；否则 None。"""
+        data = self._verified(token)
+        # 一次性登录链接 token 不得当会话 cookie 用（未过兑换闸就无单次性保证）。
+        if data is None or data.get("ott"):
+            return None
         return {"user": data.get("u", ""), "role": data.get("r", "")}
+
+    def sign_login_link(self, user: str, *,
+                        ttl: int = LOGIN_LINK_TTL_SECONDS) -> str:
+        return self._signed({
+            "u": user, "r": "user", "ott": secrets.token_hex(8),
+            "exp": int(time.time()) + ttl,
+        })
+
+    def verify_login_link(self, token: str) -> Optional[dict]:
+        """合法、未过期且带 ott 标记 → {"user", "link_id"}；否则 None。"""
+        data = self._verified(token)
+        if data is None or not data.get("ott"):
+            return None
+        return {"user": data.get("u", ""), "link_id": str(data["ott"])}
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +136,9 @@ class _AuthContext:
         self.signer: SessionSigner | None = None
         self.admins: list[str] = []
         self.admin_password: str = ""
+        # link_id → 过期时刻。单次性依赖单进程（uvicorn 单 worker）；重启清空
+        # 意味着已兑换链接在剩余时效内可再兑换一次，多 worker 部署前须挪持久层。
+        self.redeemed_link_ids: dict[str, float] = {}
         # 零参 callable → ClientRegistry | None。用 provider 而非实例:
         # mount_dashboard 在 create_app 时跑,而 ClientRegistry 在 app startup
         # 才创建(team ctx 初始化),登录时才解引用。
@@ -127,6 +156,17 @@ def configure_auth(*, secret: str, admins: list[str], admin_password: str,
     _ctx.admins = [a.strip() for a in admins if a and a.strip()]
     _ctx.admin_password = admin_password or ""
     _ctx.registry_provider = registry_provider
+
+
+def issue_login_link_token(user_name: str) -> Optional[str]:
+    """给命名用户签发一次性登录链接 token；auth 未配置（dashboard 关）→ None。
+
+    供 team server 的 ``/api/v1/team/dashboard_link`` 调用；角色恒 user——
+    admin 必须走口令登录（Q2a），免密链接不发放 admin 会话。
+    """
+    if _ctx.signer is None:
+        return None
+    return _ctx.signer.sign_login_link(user_name)
 
 
 def _identity_from_request(request: Request) -> Optional[dict]:
@@ -183,6 +223,35 @@ def build_auth_router() -> APIRouter:
             max_age=SESSION_TTL_SECONDS, httponly=True, samesite="lax",
         )
         return {"user": user, "role": role}
+
+    @router.get("/login/link")
+    def login_link(t: str):
+        """兑换一次性登录链接：种会话 cookie 并 303 跳看板首页。"""
+        if _ctx.signer is None:
+            raise HTTPException(status_code=503, detail="auth not configured")
+        link_data = _ctx.signer.verify_login_link(t)
+        if link_data is None:
+            raise HTTPException(
+                status_code=401,
+                detail="链接无效或已过期，请重新执行 xskill dashboard",
+            )
+        now = time.time()
+        _ctx.redeemed_link_ids = {
+            link_id: expiry
+            for link_id, expiry in _ctx.redeemed_link_ids.items() if expiry > now
+        }
+        if link_data["link_id"] in _ctx.redeemed_link_ids:
+            raise HTTPException(
+                status_code=401,
+                detail="链接已被使用，请重新执行 xskill dashboard",
+            )
+        _ctx.redeemed_link_ids[link_data["link_id"]] = now + LOGIN_LINK_TTL_SECONDS
+        redirect = RedirectResponse("/", status_code=303)
+        redirect.set_cookie(
+            SESSION_COOKIE, _ctx.signer.sign(link_data["user"], "user"),
+            max_age=SESSION_TTL_SECONDS, httponly=True, samesite="lax",
+        )
+        return redirect
 
     @router.post("/logout")
     def logout(response: Response):
