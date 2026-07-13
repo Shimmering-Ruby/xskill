@@ -45,7 +45,8 @@ class TestReadRoots:
     def test_read_file_denies_sensitive_files(self, tmp_path, monkeypatch):
         xskill_home, _skill_dir = _setup_home(tmp_path, monkeypatch)
         for sensitive_name in (
-            "config.yaml", "team_client.json", "my_api_key.txt", "join-token.log",
+            "config.yaml", "team_client.json", "team_server.json",
+            "my_api_key.txt", "join-token.log",
         ):
             sensitive_file = xskill_home / sensitive_name
             sensitive_file.write_text("s3cret\n", encoding="utf-8")
@@ -147,6 +148,24 @@ class TestGrepFiles:
         assert "engine: python" in out
         assert "traj_a.md:2:" in out
         assert "api_key.txt" not in out
+
+    def test_python_fallback_filters_symlinked_sensitive_file(
+        self, tmp_path, monkeypatch,
+    ):
+        xskill_home, _skill_dir = _setup_home(tmp_path, monkeypatch)
+        corpus_dir = xskill_home / "cc_sessions"
+        corpus_dir.mkdir()
+        secret_file = xskill_home / "config.yaml"
+        secret_file.write_text("llm_api_key: SECRET_VALUE\n", encoding="utf-8")
+        (corpus_dir / "notes.md").symlink_to(secret_file)
+        monkeypatch.setattr(agent_tools.shutil, "which", lambda name: None)
+
+        out = agent_tools.grep_files.entrypoint(
+            "SECRET_VALUE", path=str(corpus_dir),
+        )
+
+        assert "llm_api_key" not in out, "符号链接不得绕过敏感过滤"
+        assert "notes.md:1" not in out
 
     def test_no_matches_reports_engine(self, tmp_path, monkeypatch):
         xskill_home, _skill_dir = _setup_home(tmp_path, monkeypatch)

@@ -11,7 +11,7 @@ those from config at their own boundary.
 
 from __future__ import annotations
 
-import json, logging, re, shutil, subprocess, tempfile
+import json, logging, os, re, shutil, subprocess, tempfile
 from datetime import date, datetime
 from pathlib import Path
 
@@ -145,10 +145,13 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-SENSITIVE_FILENAMES = {
-    "config.yaml", "team_client.json", "team_clients.db", "dashboard_secret.json",
-}
-SENSITIVE_NAME_TOKENS = {"secret", "token", "credential", "key", "password"}
+SENSITIVE_FILENAMES = frozenset({
+    "config.yaml", "team_client.json", "team_server.json", "team_clients.db",
+    "dashboard_secret.json",
+})
+SENSITIVE_NAME_TOKENS = frozenset({
+    "secret", "token", "credential", "key", "password",
+})
 
 
 def _allowed_read_roots() -> list[Path]:
@@ -749,21 +752,25 @@ def skill_read(skill_name: str) -> str:
         body = f"(skill {slug} has no SKILL.md yet — only candidates buffer)"
     tree_lines: list[str] = []
     if skill_path.is_dir():
-        for file_path in sorted(skill_path.rglob("*")):
-            relative_path = file_path.relative_to(skill_path)
-            if relative_path.parts[0] == ".git" or len(relative_path.parts) > 4:
-                continue
-            if not file_path.is_file() or relative_path.as_posix() == "SKILL.md":
-                continue
-            size_kb = file_path.stat().st_size / 1024
-            annotation = ("  (用 list_candidates 读)"
-                          if relative_path.name == "candidates.yml" else "")
-            tree_lines.append(
-                f"{relative_path.as_posix()}  ({size_kb:.1f} KB){annotation}",
+        for current_dir, dir_names, file_names in os.walk(skill_path):
+            walk_depth = len(Path(current_dir).relative_to(skill_path).parts)
+            # 剪枝进不去 .git / 第 4 层以下，避免白遍历上千 git 对象。
+            dir_names[:] = sorted(
+                name for name in dir_names if name != ".git" and walk_depth < 3
             )
-            if len(tree_lines) >= 100:
-                tree_lines.append("(+more, use list_files)")
-                break
+            for file_name in sorted(file_names):
+                file_path = Path(current_dir) / file_name
+                relative_path = file_path.relative_to(skill_path)
+                if relative_path.as_posix() == "SKILL.md":
+                    continue
+                size_kb = file_path.stat().st_size / 1024
+                annotation = ("  (用 list_candidates 读)"
+                              if relative_path.name == "candidates.yml" else "")
+                tree_lines.append(
+                    f"{relative_path.as_posix()}  ({size_kb:.1f} KB){annotation}",
+                )
+        if len(tree_lines) > 100:
+            tree_lines = tree_lines[:100] + ["(+more, use list_files)"]
     if not tree_lines:
         return f"{header}\n{body}"
     files_block = "\n".join(tree_lines)
@@ -1086,7 +1093,8 @@ def grep_files(pattern: str, path: str = "", glob: str = "",
     filtered_lines: list[str] = []
     for output_line in output_lines:
         hit_match = hit_line_pattern.match(output_line)
-        if hit_match and _is_sensitive_file(Path(hit_match.group(1))):
+        # resolve() 后再判敏感：防符号链接用无害文件名包装密钥文件绕过过滤。
+        if hit_match and _is_sensitive_file(Path(hit_match.group(1)).resolve()):
             continue
         filtered_lines.append(output_line)
         if len(filtered_lines) >= max_results:
