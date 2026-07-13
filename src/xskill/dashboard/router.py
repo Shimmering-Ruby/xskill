@@ -515,11 +515,30 @@ def _register_explorer_endpoints(router: APIRouter, db_path: Optional[Path],
         if not pdb.is_file():
             raise HTTPException(status_code=404,
                                 detail="画像库不存在(team 模式未启用或还没有画像)")
+        profile_viz = ProfileViz(pdb, skill_dir=skill_dir, db_path=db_path,
+                                 skillhub_index=skillhub_index_for(db_path))
         try:
-            return ProfileViz(pdb, skill_dir=skill_dir, db_path=db_path,
-                              skillhub_index=skillhub_index_for(db_path)
-                              ).user_scatter(user_key, method=method)
-        except KeyError as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
+            return profile_viz.user_scatter(user_key, method=method)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        except KeyError as e:
+            # 画像按 client_id 存,而看板行的 uid 对命名用户是 user_name(#97)
+            # ——按名反查 client_id 重试,匿名/未知名字保持 404。
+            from xskill.config import get_registry_db_path
+            from xskill.team.server.client_registry import ClientRegistry
+            db_dir = Path(db_path).parent if db_path else get_registry_db_path().parent
+            clients_db = db_dir / "team_clients.db"
+            resolved_client_id = None
+            if clients_db.is_file():
+                try:
+                    resolved_client_id = ClientRegistry(
+                        clients_db).find_by_user_name(user_key)
+                except ValueError:
+                    resolved_client_id = None
+            if not resolved_client_id or resolved_client_id == user_key:
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            try:
+                return profile_viz.user_scatter(resolved_client_id, method=method)
+            except KeyError as retry_error:
+                raise HTTPException(
+                    status_code=404, detail=str(retry_error)) from retry_error

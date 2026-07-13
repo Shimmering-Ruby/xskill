@@ -612,3 +612,37 @@ def test_cluster_graph_endpoint_admin_only(console_env):
     r = boss.get("/api/v1/dashboard/admin/cluster-graph")
     assert r.status_code == 200
     assert {n["user"] for n in r.json()["nodes"]} == {"alice", "bob", "carol"}
+
+
+def test_scatter_endpoint_resolves_user_name_to_client_id(tmp_path):
+    """#97:画像按 client_id 存,看板行 uid 对命名用户是 user_name——端点须按名回退。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from xskill.dashboard.router import build_dashboard_router
+    from xskill.team.server.client_registry import ClientRegistry
+
+    registry_db = tmp_path / "registry.db"
+    registry_db.touch()
+    named_client_id = ClientRegistry(
+        tmp_path / "team_clients.db").register(user_name="m00947023")
+    profile_store = ProfileStore(tmp_path / "team_profile.db")
+    pts = np.eye(4, dtype=float)[:3]
+    meta = [{"atom_id": f"atom_x_{i:04d}", "summary": "s", "traj_id": "x",
+             "ts": ""} for i in range(3)]
+    profile_store.upsert(named_client_id, feature_tensor=pts[:1],
+                         mean_tensor=pts.mean(0),
+                         used_skills=[], points=pts, point_meta=meta)
+
+    app = FastAPI()
+    app.include_router(build_dashboard_router(db_path=registry_db))
+    client = TestClient(app)
+
+    by_name = client.get("/api/v1/dashboard/user/m00947023/scatter?method=tsne")
+    assert by_name.status_code == 200, by_name.text
+    assert len(by_name.json()["points"]) == 3
+
+    by_client_id = client.get(f"/api/v1/dashboard/user/{named_client_id}/scatter")
+    assert by_client_id.status_code == 200
+
+    unknown = client.get("/api/v1/dashboard/user/nobody/scatter")
+    assert unknown.status_code == 404
