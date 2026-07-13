@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import gc
+import sqlite3
 import threading
 import time
 
@@ -110,27 +112,382 @@ def _slow_connect_probe(monkeypatch, sqlite_module):
     return connect_probe, execute_probe
 
 
+class _FakeCursorOperation:
+    def __init__(self, probe: _ConcurrencyProbe):
+        self._probe = probe
+
+    def fetchone(self):
+        self._probe.enter()
+        try:
+            time.sleep(0.03)
+            return (1,)
+        finally:
+            self._probe.leave()
+
+    def close(self):
+        return None
+
+
+class _FakeConnectionOperation:
+    def __init__(
+        self,
+        probe: _ConcurrencyProbe,
+    ):
+        self._probe = probe
+        self.closed = threading.Event()
+
+    def execute(self, *_args, **_kwargs):
+        return _FakeCursorOperation(self._probe)
+
+    def close(self):
+        self._probe.enter()
+        try:
+            time.sleep(0.03)
+            self.closed.set()
+        finally:
+            self._probe.leave()
+
+
+def test_close_fetch_and_connect_cannot_overlap():
+    """Reproduce the native close/fetch/connect lock order without deadlock."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    probe = _ConcurrencyProbe()
+    barrier = threading.Barrier(3)
+    fetch_raw = _FakeConnectionOperation(probe)
+    close_raw = _FakeConnectionOperation(probe)
+    fetch_conn = connect_with_lock(lambda **_kwargs: fetch_raw)
+    close_conn = connect_with_lock(lambda **_kwargs: close_raw)
+    cursor = fetch_conn.execute("SELECT 1")
+
+    def fetch_during_operations():
+        barrier.wait(timeout=10)
+        return cursor.fetchone()
+
+    def close_during_operations():
+        barrier.wait(timeout=10)
+        return close_conn.close()
+
+    def connect_during_operations():
+        barrier.wait(timeout=10)
+
+        def slow_connect(**_kwargs):
+            probe.enter()
+            try:
+                time.sleep(0.03)
+                return _FakeConnectionOperation(probe)
+            finally:
+                probe.leave()
+
+        return connect_with_lock(slow_connect)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        fetch_future = executor.submit(fetch_during_operations)
+        close_future = executor.submit(close_during_operations)
+        connect_future = executor.submit(connect_during_operations)
+        assert fetch_future.result(timeout=10) == (1,)
+        close_future.result(timeout=10)
+        connected = connect_future.result(timeout=10)
+
+    assert probe.max_active == 1
+    # Do not leave proxy finalizers to affect a later concurrency assertion.
+    cursor.close()
+    fetch_conn.close()
+    connected.close()
+
+
+def test_connection_proxy_gc_closes_under_the_operation_lock():
+    """Fallback proxy finalization cannot overlap another SQLite C call."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    probe = _ConcurrencyProbe()
+    raw = _FakeConnectionOperation(probe)
+    holder = [connect_with_lock(lambda **_kwargs: raw)]
+    started = threading.Event()
+
+    def slow_connect(**_kwargs):
+        probe.enter()
+        started.set()
+        try:
+            time.sleep(0.05)
+            return _FakeConnectionOperation(probe)
+        finally:
+            probe.leave()
+
+    def release_last_reference():
+        assert started.wait(timeout=10)
+        holder.pop()
+        gc.collect()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        connect_future = executor.submit(connect_with_lock, slow_connect)
+        gc_future = executor.submit(release_last_reference)
+        connected = connect_future.result(timeout=10)
+        gc_future.result(timeout=10)
+
+    assert raw.closed.wait(timeout=10)
+    assert probe.max_active == 1
+    connected.close()
+
+
+def test_native_connection_and_cursor_api_remains_compatible():
+    """The production factory preserves common sqlite3 types and semantics."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    conn = connect_with_lock(sqlite3.connect, ":memory:")
+    assert isinstance(conn, sqlite3.Connection)
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE sample (value INTEGER)")
+
+    cursor = conn.cursor()
+    assert isinstance(cursor, sqlite3.Cursor)
+    assert cursor.connection is conn
+    assert cursor.execute("SELECT 1 AS value") is cursor
+    assert cursor.fetchone()["value"] == 1
+    assert [row["value"] for row in conn.execute("SELECT 2 AS value")] == [2]
+
+    with pytest.raises(RuntimeError):
+        with conn as entered:
+            assert entered is conn
+            conn.execute("INSERT INTO sample VALUES (3)")
+            raise RuntimeError("rollback")
+    assert conn.execute("SELECT count(*) FROM sample").fetchone()[0] == 0
+    conn.close()
+
+
+def test_sqlite_operation_lock_is_reentrant_for_user_callbacks():
+    """SQLite callbacks may safely use another guarded connection in-thread."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    outer = connect_with_lock(sqlite3.connect, ":memory:")
+    nested = connect_with_lock(sqlite3.connect, ":memory:")
+    try:
+        outer.execute("CREATE TABLE active_transaction (value INTEGER)")
+        outer.execute("INSERT INTO active_transaction VALUES (1)")
+        outer.create_function(
+            "nested_value",
+            0,
+            lambda: nested.execute("SELECT 7").fetchone()[0],
+        )
+        assert outer.execute("SELECT nested_value()").fetchone()[0] == 7
+        outer.rollback()
+    finally:
+        outer.close()
+        nested.close()
+
+
+def test_write_transaction_keeps_guard_until_commit(tmp_path):
+    """A waiting writer cannot block the first writer from committing."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    db_path = tmp_path / "transactions.db"
+    first = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    second = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    first.execute("CREATE TABLE writes (value INTEGER)")
+    first.execute("INSERT INTO writes VALUES (1)")
+    second_started = threading.Event()
+    second_finished = threading.Event()
+
+    def write_second():
+        second_started.set()
+        second.execute("INSERT INTO writes VALUES (2)")
+        second.commit()
+        second_finished.set()
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(write_second)
+            assert second_started.wait(timeout=5)
+            assert not second_finished.wait(timeout=0.05)
+            first.commit()
+            future.result(timeout=5)
+        assert first.execute(
+            "SELECT value FROM writes ORDER BY value"
+        ).fetchall() == [(1,), (2,)]
+    finally:
+        first.close()
+        second.close()
+
+
+def test_write_transaction_can_be_committed_from_another_thread(tmp_path):
+    """check_same_thread=False may transfer a live transaction safely."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    db_path = tmp_path / "cross-thread-commit.db"
+    conn = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    other = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    conn.execute("CREATE TABLE writes (value INTEGER)")
+    conn.execute("INSERT INTO writes VALUES (1)")
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(conn.commit).result(timeout=5)
+        other.execute("INSERT INTO writes VALUES (2)")
+        other.commit()
+        assert conn.execute(
+            "SELECT value FROM writes ORDER BY value"
+        ).fetchall() == [(1,), (2,)]
+    finally:
+        conn.close()
+        other.close()
+
+
+def test_wrong_thread_programming_error_does_not_drop_transaction_guard(tmp_path):
+    """An invalid cross-thread call neither hangs nor exposes a live writer."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    db_path = tmp_path / "wrong-thread.db"
+    conn = connect_with_lock(sqlite3.connect, str(db_path), timeout=1)
+    other = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    conn.execute("CREATE TABLE writes (value INTEGER)")
+    conn.execute("INSERT INTO writes VALUES (1)")
+
+    def write_other():
+        other.execute("INSERT INTO writes VALUES (2)")
+        other.commit()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            invalid = executor.submit(conn.execute, "SELECT 1")
+            with pytest.raises(sqlite3.ProgrammingError):
+                invalid.result(timeout=5)
+
+            waiting_writer = executor.submit(write_other)
+            time.sleep(0.05)
+            assert not waiting_writer.done()
+            conn.rollback()
+            waiting_writer.result(timeout=5)
+    finally:
+        conn.close()
+        other.close()
+
+
+def test_constraint_error_keeps_guard_until_rollback(tmp_path):
+    """A failed statement can leave SQLite's transaction active."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    db_path = tmp_path / "constraint.db"
+    first = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    second = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    first.execute("CREATE TABLE writes (value INTEGER UNIQUE)")
+    first.execute("INSERT INTO writes VALUES (1)")
+    first.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        first.execute("INSERT INTO writes VALUES (1)")
+    assert first.in_transaction
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            waiting_writer = executor.submit(
+                second.execute, "INSERT INTO writes VALUES (2)"
+            )
+            time.sleep(0.05)
+            assert not waiting_writer.done()
+            first.rollback()
+            waiting_writer.result(timeout=5)
+        second.commit()
+    finally:
+        first.close()
+        second.close()
+
+
+def test_fallback_proxy_balances_nested_transaction_guards(tmp_path):
+    """Instrumentation wrappers must release proxy and native guard levels."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    statements: list[str] = []
+    statements_lock = threading.Lock()
+
+    def wrapped_connect(*args, **kwargs):
+        return _TrackedConnection(
+            sqlite3.connect(*args, **kwargs), statements, statements_lock,
+        )
+
+    db_path = tmp_path / "wrapped.db"
+    wrapped = connect_with_lock(
+        wrapped_connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    other = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    wrapped.execute("CREATE TABLE writes (value INTEGER)")
+    wrapped.execute("INSERT INTO writes VALUES (1)")
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(wrapped.commit).result(timeout=5)
+        other.execute("INSERT INTO writes VALUES (2)")
+        other.commit()
+        assert wrapped.execute("SELECT count(*) FROM writes").fetchone()[0] == 2
+    finally:
+        wrapped.close()
+        other.close()
+
+
+def test_cross_thread_gc_of_active_connection_releases_guard(tmp_path):
+    """Finalizing an unreachable connection cannot retain the global guard."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    db_path = tmp_path / "gc-active.db"
+    holder = [connect_with_lock(sqlite3.connect, str(db_path), timeout=1)]
+    holder[0].execute("CREATE TABLE writes (value INTEGER)")
+    cursor = holder[0].execute("INSERT INTO writes VALUES (1)")
+    cursor.close()
+    del cursor
+
+    def release_last_reference():
+        doomed = holder.pop()
+        del doomed
+        gc.collect()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(release_last_reference).result(timeout=5)
+
+    conn = connect_with_lock(sqlite3.connect, str(db_path), timeout=1)
+    try:
+        assert conn.execute("SELECT count(*) FROM writes").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_connect_open_lock_is_released_when_connect_raises():
     """A failed open must not block the next SQLite connection attempt."""
     from xskill._sqlite_connect import connect_with_lock
 
     expected = RuntimeError("mock connect failure")
 
-    def fail_connect():
+    def fail_connect(**_kwargs):
         raise expected
 
     with pytest.raises(RuntimeError) as exc_info:
         connect_with_lock(fail_connect)
     assert exc_info.value is expected
 
-    marker = object()
-    assert connect_with_lock(lambda: marker) is marker
+    conn = connect_with_lock(sqlite3.connect, ":memory:")
+    try:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
-def test_profile_connect_open_is_serial_but_sql_remains_concurrent(
+def test_profile_sqlite_c_operations_are_process_wide_serial(
     tmp_path, monkeypatch,
 ):
-    """30 profile workers only serialise connect(), not connection usage."""
+    """30 profile workers serialize both connect and SQLite execution."""
     from xskill.recommend import _sqlite_base
     from xskill.recommend.profile_store import ProfileStore
 
@@ -148,13 +505,13 @@ def test_profile_connect_open_is_serial_but_sql_remains_concurrent(
         list(executor.map(load_profile, range(30)))
 
     assert connect_probe.max_active == 1
-    assert execute_probe.max_active > 1
+    assert execute_probe.max_active == 1
 
 
-def test_registry_connect_open_is_serial_but_sql_remains_concurrent(
+def test_registry_sqlite_c_operations_are_process_wide_serial(
     tmp_path, monkeypatch,
 ):
-    """Registry connection bursts use the same narrow connect-only lock."""
+    """Registry connection bursts use the same process-wide operation lock."""
     from xskill.pipeline import registry
 
     db_path = tmp_path / "registry.db"
@@ -174,7 +531,7 @@ def test_registry_connect_open_is_serial_but_sql_remains_concurrent(
         list(executor.map(open_registry, range(30)))
 
     assert connect_probe.max_active == 1
-    assert execute_probe.max_active > 1
+    assert execute_probe.max_active == 1
 
 
 def test_server_sqlite_call_sites_share_process_wide_connect_open_lock(
@@ -222,7 +579,7 @@ def test_server_sqlite_call_sites_share_process_wide_connect_open_lock(
         client_registry.close()
 
     assert connect_probe.max_active == 1
-    assert execute_probe.max_active > 1
+    assert execute_probe.max_active == 1
 
 
 def test_registry_new_db_concurrent_open_assigns_wal_once(tmp_path, monkeypatch):
