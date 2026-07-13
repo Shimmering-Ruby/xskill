@@ -47,6 +47,17 @@ class ProcessAction(str, Enum):
     CLUSTERED = "clustered"
     NOT_FIT = "not_fit"
 
+
+# 流水线尚未处理完的状态；不含 error（重试由 max_retries 有界，耗尽即终态）。
+PENDING_TRAJECTORY_STATUSES = (
+    TrajectoryStatus.DISCOVERED.value,
+    TrajectoryStatus.UPDATED.value,
+    TrajectoryStatus.SPLITTING.value,
+    TrajectoryStatus.SPLIT_DONE.value,
+    TrajectoryStatus.INDEXED.value,
+    TrajectoryStatus.CLUSTERING.value,
+)
+
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
@@ -1347,7 +1358,7 @@ def reset_trajectories(
     eco: Optional[str] = None,
     traj_id: Optional[str] = None,
     db_path: Optional[Path] = None,
-) -> int:
+) -> list[int]:
     """删除已拆 atom + 重置状态，让 watcher 从头重拆（``xskill rebuild`` 用）。
 
     **关键正确性点**：TaskAgent 的续接点取自 atom **文件**
@@ -1367,7 +1378,7 @@ def reset_trajectories(
         traj_id: 只重置该轨迹（按文件名 stem 匹配）；None=不按轨迹过滤。
 
     Returns:
-        被重置的轨迹行数。
+        被重置的轨迹 id 列表（cold-start 快照即由此而来）。
     """
     conn = get_connection(db_path)
     try:
@@ -1416,7 +1427,7 @@ def reset_trajectories(
             index_path = Path(directory_path) / "index.pkl"
             if index_path.is_file():
                 index_path.unlink()
-        return len(trajectory_rows)
+        return [trajectory_row["id"] for trajectory_row in trajectory_rows]
     finally:
         conn.close()
 
@@ -1442,6 +1453,36 @@ def get_trajs_by_status(
             sql += f" LIMIT {limit}"
         rows = conn.execute(sql, params).fetchall()
         return [r["filename"] for r in rows]
+    finally:
+        conn.close()
+
+
+def get_pending_traj_ids(
+    trajectory_ids: Optional[list[int]] = None,
+    *,
+    db_path: Optional[Path] = None,
+) -> list[int]:
+    """返回处于 pending 状态的轨迹 id；``trajectory_ids=None`` 时查全库。"""
+    conn = get_connection(db_path)
+    try:
+        status_placeholders = ",".join("?" * len(PENDING_TRAJECTORY_STATUSES))
+        base_sql = (
+            f"SELECT id FROM trajectories WHERE status IN ({status_placeholders})"
+        )
+        if trajectory_ids is None:
+            rows = conn.execute(base_sql, PENDING_TRAJECTORY_STATUSES).fetchall()
+            return [row["id"] for row in rows]
+        pending_ids: list[int] = []
+        # 分块进 IN 子句：老版本 SQLite 绑定变量上限只有 999。
+        for chunk_start in range(0, len(trajectory_ids), 500):
+            chunk = trajectory_ids[chunk_start:chunk_start + 500]
+            id_placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                base_sql + f" AND id IN ({id_placeholders})",
+                (*PENDING_TRAJECTORY_STATUSES, *chunk),
+            ).fetchall()
+            pending_ids += [row["id"] for row in rows]
+        return pending_ids
     finally:
         conn.close()
 
