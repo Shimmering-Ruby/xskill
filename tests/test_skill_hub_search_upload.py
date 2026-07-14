@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from xskill import cli
+from xskill.ecosystems._fallback import _install_meta_path, install_dir
 from xskill.recommend.skillhub import SkillHub
 from xskill.team.client.search_slots import SearchSlots
 from xskill.team.server import api as server_api
@@ -267,6 +268,12 @@ def _fake_archive(name: str) -> bytes:
     return buf.getvalue()
 
 
+def _enable_link_and_copy_ecosystems(home: Path) -> None:
+    """启用 Claude Code（link）和 OpenClaw（copy）检测。"""
+    (home / ".claude" / "projects").mkdir(parents=True)
+    (home / ".openclaw" / "agents").mkdir(parents=True)
+
+
 def test_search_slots_marker_ledger_and_rolling_eviction(tmp_path):
     slots = SearchSlots(xskill_home=tmp_path / "xhome",
                         home_root=tmp_path / "home", capacity=3)
@@ -283,6 +290,135 @@ def test_search_slots_marker_ledger_and_rolling_eviction(tmp_path):
         "s1@0000000000ff", "s2@0000000000ff", "s3@0000000000ff"]
     assert not (slots.slots_dir / "s0@0000000000ff").exists()  # 最旧被淘汰
     assert (slots.slots_dir / "s3@0000000000ff" / "SKILL.md").is_file()
+
+
+def test_search_slot_eviction_records_and_removes_link_and_copy_targets(tmp_path):
+    home = tmp_path / "home"
+    _enable_link_and_copy_ecosystems(home)
+    slots = SearchSlots(xskill_home=tmp_path / "xhome",
+                        home_root=home, capacity=1)
+
+    old = slots.install(_fake_result("old"), _fake_archive("old"), query="q")
+    old_id = old.name
+    link_dest = home / ".claude" / "skills" / old_id
+    copy_dest = home / ".agents" / "skills" / old_id
+
+    records = slots.entries()[0]["installations"]
+    assert {(Path(r["target"]), r["mode"], Path(r["source"])) for r in records} == {
+        (link_dest, "symlink", old),
+        (copy_dest, "copy", old),
+    }
+
+    slots.install(_fake_result("new"), _fake_archive("new"), query="q")
+
+    assert not link_dest.exists() and not link_dest.is_symlink()
+    assert not copy_dest.exists()
+    assert not _install_meta_path(link_dest).exists()
+    assert not _install_meta_path(copy_dest).exists()
+
+
+def test_search_slot_eviction_supports_legacy_ledger_without_installations(tmp_path):
+    home = tmp_path / "home"
+    _enable_link_and_copy_ecosystems(home)
+    slots = SearchSlots(xskill_home=tmp_path / "xhome",
+                        home_root=home, capacity=1)
+
+    old = slots.install(_fake_result("legacy"), _fake_archive("legacy"), query="q")
+    old_id = old.name
+    ledger = slots.entries()
+    ledger[0].pop("installations", None)
+    slots.ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+    _install_meta_path(home / ".agents" / "skills" / old_id).unlink()
+
+    slots.install(_fake_result("new"), _fake_archive("new"), query="q")
+
+    assert not (home / ".claude" / "skills" / old_id).exists()
+    assert not (home / ".agents" / "skills" / old_id).exists()
+
+
+def test_search_slot_eviction_preserves_targets_taken_over_by_another_source(tmp_path):
+    home = tmp_path / "home"
+    _enable_link_and_copy_ecosystems(home)
+    slots = SearchSlots(xskill_home=tmp_path / "xhome",
+                        home_root=home, capacity=1)
+
+    old = slots.install(_fake_result("shared"), _fake_archive("shared"), query="q")
+    old_id = old.name
+    link_dest = home / ".claude" / "skills" / old_id
+    copy_dest = home / ".agents" / "skills" / old_id
+    takeover = tmp_path / "sync" / old_id
+    takeover.mkdir(parents=True)
+    (takeover / "SKILL.md").write_text("owned by sync\n", encoding="utf-8")
+    install_dir(takeover, link_dest, force_mode="symlink", auto_reset=True)
+    install_dir(takeover, copy_dest, force_mode="copy", auto_reset=True)
+
+    slots.install(_fake_result("new"), _fake_archive("new"), query="q")
+
+    assert link_dest.resolve() == takeover.resolve()
+    assert (copy_dest / "SKILL.md").read_text(encoding="utf-8") == "owned by sync\n"
+    assert json.loads(_install_meta_path(link_dest).read_text(encoding="utf-8"))[
+        "source"
+    ] == str(takeover.resolve())
+    assert json.loads(_install_meta_path(copy_dest).read_text(encoding="utf-8"))[
+        "source"
+    ] == str(takeover.resolve())
+
+
+def test_search_slot_records_every_detected_ecosystem_target(tmp_path):
+    home = tmp_path / "home"
+    _enable_link_and_copy_ecosystems(home)
+    (home / ".codex" / "sessions").mkdir(parents=True)
+    (home / ".cac" / "projects").mkdir(parents=True)
+    (home / ".cursor" / "projects").mkdir(parents=True)
+    opencode_db = home / ".local" / "share" / "opencode" / "opencode.db"
+    opencode_db.parent.mkdir(parents=True)
+    opencode_db.touch()
+    ngagent_db = opencode_db.parent / "db" / "ngagent.db"
+    ngagent_db.parent.mkdir()
+    ngagent_db.touch()
+    (home / ".trae-cn").mkdir()
+    (home / ".trae").mkdir()
+    slots = SearchSlots(xskill_home=tmp_path / "xhome", home_root=home)
+
+    installed = slots.install(
+        _fake_result("all-targets"), _fake_archive("all-targets"), query="q",
+    )
+
+    records = slots.entries()[0]["installations"]
+    by_target = {Path(r["target"]): (r["mode"], Path(r["source"])) for r in records}
+    skill_id = installed.name
+    assert by_target == {
+        home / ".claude" / "skills" / skill_id: ("symlink", installed),
+        home / ".agents" / "skills" / skill_id: ("copy", installed),
+        home / ".cac" / "skills" / skill_id: ("symlink", installed),
+        home / ".config" / "opencode" / "skills" / skill_id: ("copy", installed),
+        home / ".cursor" / "skills" / skill_id: ("symlink", installed),
+        home / ".trae-cn" / "skills" / skill_id: ("symlink", installed),
+        home / ".trae" / "skills" / skill_id: ("symlink", installed),
+    }
+
+
+def test_search_slot_trae_windows_copy_targets_are_recorded_and_evicted(
+    tmp_path, monkeypatch,
+):
+    home = tmp_path / "home"
+    (home / ".trae-cn").mkdir(parents=True)
+    (home / ".trae").mkdir()
+    monkeypatch.setattr("xskill.ecosystems.trae.sys.platform", "win32")
+    slots = SearchSlots(xskill_home=tmp_path / "xhome",
+                        home_root=home, capacity=1)
+
+    old = slots.install(_fake_result("win"), _fake_archive("win"), query="q")
+    records = slots.entries()[0]["installations"]
+    assert {(Path(r["target"]), r["mode"], Path(r["source"])) for r in records} == {
+        (home / ".trae-cn" / "skills" / old.name, "copy", old),
+        (home / ".trae" / "skills" / old.name, "copy", old),
+    }
+
+    slots.install(_fake_result("new"), _fake_archive("new"), query="q")
+
+    assert not (home / ".trae-cn" / "skills" / old.name).exists()
+    assert not (home / ".trae" / "skills" / old.name).exists()
 
 
 def test_search_slots_rehit_moves_to_newest_without_duplicate(tmp_path):

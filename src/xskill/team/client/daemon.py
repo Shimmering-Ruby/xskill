@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import shutil
 import threading
 import zipfile
@@ -282,13 +283,15 @@ class TeamClient:
         for repo_dir in sorted(self.skill_dir.iterdir()):
             if not repo_dir.is_dir() or repo_dir.name in keep:
                 continue
-            # 先摘生态里的安装（symlink），再删本地仓
-            self._uninstall_from_ecosystems(repo_dir.name)
+            # 先摘掉仍指向该 working copy 的生态安装，再删本地仓
+            self._uninstall_from_ecosystems(repo_dir)
             shutil.rmtree(repo_dir, ignore_errors=True)
             logger.info("cleanup removed stale skill: %s", repo_dir.name)
 
-    def _uninstall_from_ecosystems(self, skill_name: str) -> None:
-        uninstall_skill_from_ecosystems(skill_name, home_root=self.home_root)
+    def _uninstall_from_ecosystems(self, repo_dir: Path) -> None:
+        uninstall_skill_from_ecosystems(
+            repo_dir.name, home_root=self.home_root, source_dir=repo_dir,
+        )
 
     # ── 守护循环 ─────────────────────────────────────────────────
     def _tick(self) -> None:
@@ -386,7 +389,84 @@ def apply_skillhub_archive(
     tmp_dir.replace(dest_dir)
 
 
-def install_skill_to_ecosystems(repo_dir: Path, *, home_root: Path) -> None:
+def _valid_skill_name(skill_name: str) -> bool:
+    """安装目标名必须是单个路径段，不能逃出各生态的 skills 根目录。"""
+    return bool(skill_name) and skill_name not in {".", ".."} \
+        and "/" not in skill_name and "\\" not in skill_name \
+        and "\x00" not in skill_name
+
+
+def _targets_for_ecosystem(ecosystem: str, skill_name: str,
+                           home_root: Path) -> list[Path]:
+    """返回一个安装器本次可能写入的全部目标（Trae 可能有两个）。"""
+    from xskill.ecosystems import (
+        _agents_skills_path, _cc_skills_path, _cursor_skills_path,
+        _nga3_skills_path, _ngagent_skills_path, _trae_skills_roots,
+    )
+
+    shared = _agents_skills_path(home_root) / skill_name
+    roots = {
+        "claude_code": [_cc_skills_path(home_root) / skill_name],
+        "codex": [shared],
+        "opencode": [shared],
+        "openclaw": [shared],
+        "ngagent": [_ngagent_skills_path(home_root) / skill_name],
+        "nga3": [_nga3_skills_path(home_root) / skill_name],
+        "cursor": [_cursor_skills_path(home_root) / skill_name],
+        "trae": [root / skill_name for root in _trae_skills_roots(home_root)],
+    }
+    return roots.get(ecosystem, [])
+
+
+def _all_install_targets(skill_name: str, home_root: Path) -> list[Path]:
+    """返回当前所有安装器使用的目标；不依赖生态当前是否仍可探测。"""
+    from xskill.ecosystems import (
+        _agents_skills_path, _cc_skills_path, _cursor_skills_path,
+        _nga3_skills_path, _ngagent_skills_path,
+    )
+
+    roots = [
+        _cc_skills_path(home_root),
+        _agents_skills_path(home_root),
+        _nga3_skills_path(home_root),
+        _ngagent_skills_path(home_root),
+        _cursor_skills_path(home_root),
+        home_root / ".trae-cn" / "skills",
+        home_root / ".trae" / "skills",
+    ]
+    return [root / skill_name for root in roots]
+
+
+def _lexical_path_key(path: Path) -> str:
+    """不跟随 symlink 的绝对路径键，用于目标 allowlist 和去重。"""
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+
+def _source_path_key(path: Path) -> str:
+    """跟随 link 后的源路径键；Windows 上同时折叠大小写。"""
+    return os.path.normcase(str(path.resolve(strict=False)))
+
+
+def _installed_mode(dest: Path) -> str | None:
+    from xskill.ecosystems._fallback import (
+        _install_meta_path, _is_link_or_junction,
+    )
+
+    if dest.is_symlink():
+        return "symlink"
+    if _is_link_or_junction(dest):
+        return "junction"
+    if not dest.exists():
+        return None
+    try:
+        meta = json.loads(_install_meta_path(dest).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    mode = meta.get("mode") if isinstance(meta, dict) else None
+    return mode if mode in {"symlink", "junction", "copy"} else "copy"
+
+
+def install_skill_to_ecosystems(repo_dir: Path, *, home_root: Path) -> list[dict]:
     """把一个已就位的 skill 目录装到本机所有检测到的生态。
 
     working tree 已是最终内容，一律用 side='main' 语义（= 链接 / 拷贝整个
@@ -399,6 +479,11 @@ def install_skill_to_ecosystems(repo_dir: Path, *, home_root: Path) -> None:
         install_to_codex, install_to_nga3, install_to_opencode, install_to_ngagent,
         install_to_openclaw, install_to_cursor, install_to_trae,
     )
+    repo_dir = Path(repo_dir).resolve()
+    home_root = Path(home_root).resolve(strict=False)
+    if not _valid_skill_name(repo_dir.name):
+        raise ValueError(f"invalid skill directory name: {repo_dir.name!r}")
+
     installer = {
         "claude_code": install_to_claude_code,
         "codex": install_to_codex,
@@ -409,25 +494,143 @@ def install_skill_to_ecosystems(repo_dir: Path, *, home_root: Path) -> None:
         "cursor": install_to_cursor,
         "trae": install_to_trae,
     }
+    installed: dict[str, dict] = {}
     for det in detect_known_ecosystems(home_root=home_root):
-        fn = installer.get(det["ecosystem"])
+        ecosystem = det["ecosystem"]
+        fn = installer.get(ecosystem)
         if fn is None:
             continue
         try:
             fn(repo_dir, target_root=home_root, side="main")
-            logger.info("installed %s to %s", repo_dir.name, det["ecosystem"])
+            for target in _targets_for_ecosystem(
+                ecosystem, repo_dir.name, home_root,
+            ):
+                mode = _installed_mode(target)
+                if mode is None:
+                    continue
+                key = _lexical_path_key(target)
+                installed[key] = {
+                    "ecosystem": ecosystem,
+                    "target": str(Path(key)),
+                    "mode": mode,
+                    "source": str(repo_dir),
+                }
+            logger.info("installed %s to %s", repo_dir.name, ecosystem)
         except Exception:
             logger.warning("install %s to %s failed",
-                           repo_dir.name, det["ecosystem"], exc_info=True)
+                           repo_dir.name, ecosystem, exc_info=True)
+    return list(installed.values())
 
 
-def uninstall_skill_from_ecosystems(skill_name: str, *, home_root: Path) -> None:
-    """摘掉生态目录里指向该 skill 的 symlink（copy 型安装不动，保守起见）。"""
-    from xskill.ecosystems import _cc_skills_path, _agents_skills_path
-    for root_fn in (_cc_skills_path, _agents_skills_path):
-        dest = root_fn(home_root) / skill_name
-        if dest.is_symlink():
-            try:
-                dest.unlink()
-            except OSError:
-                logger.warning("failed to unlink %s", dest, exc_info=True)
+def _matching_copied_marker(dest: Path, source_dir: Path) -> bool:
+    """兼容旧 copy 安装：源和目标的来源标记完全一致才视为仍属该源。"""
+    for marker_name in (".xskill_search.json", ".xskill_skillhub.json"):
+        source_marker = source_dir / marker_name
+        dest_marker = dest / marker_name
+        if not source_marker.is_file() or not dest_marker.is_file():
+            continue
+        try:
+            source_meta = json.loads(source_marker.read_text(encoding="utf-8"))
+            dest_meta = json.loads(dest_marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(source_meta, dict) and source_meta == dest_meta:
+            return True
+    return False
+
+
+def _target_owned_by_source(dest: Path, source_dir: Path) -> bool:
+    """根据当前文件系统状态判断目标是否仍由指定源安装。"""
+    from xskill.ecosystems._fallback import (
+        _install_meta_path, _is_link_or_junction,
+    )
+
+    if _is_link_or_junction(dest):
+        try:
+            return _source_path_key(dest) == _source_path_key(source_dir)
+        except OSError:
+            return False
+    if not dest.is_dir():
+        return False
+
+    meta_path = _install_meta_path(dest)
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(meta, dict) or meta.get("mode") != "copy":
+            return False
+        raw_source = meta.get("source")
+        if not isinstance(raw_source, str) or not Path(raw_source).is_absolute():
+            return False
+        return _source_path_key(Path(raw_source)) == _source_path_key(source_dir)
+
+    return _matching_copied_marker(dest, source_dir)
+
+
+def _remove_owned_install_target(dest: Path) -> bool:
+    """junction-aware 删除目标；成功后才删除相邻 install meta。"""
+    from xskill.ecosystems._fallback import (
+        _install_meta_path, _is_link_or_junction,
+    )
+
+    try:
+        if _is_link_or_junction(dest) or dest.is_file():
+            dest.unlink()
+        elif dest.is_dir():
+            shutil.rmtree(dest)
+        else:
+            return False
+    except OSError:
+        logger.warning("failed to remove owned install target %s", dest,
+                       exc_info=True)
+        return False
+
+    if dest.exists() or _is_link_or_junction(dest):
+        logger.warning("owned install target still exists after removal: %s", dest)
+        return False
+    try:
+        _install_meta_path(dest).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("failed to remove install metadata for %s", dest,
+                       exc_info=True)
+    return True
+
+
+def uninstall_skill_from_ecosystems(
+    skill_name: str, *, home_root: Path, source_dir: Path | None = None,
+    installations: list[dict] | None = None,
+) -> list[Path]:
+    """仅清理当前仍由 ``source_dir`` 拥有的所有生态安装目标。
+
+    ``installations`` 是 search 台账里的实际安装快照。当前安装器目标仍会完整
+    扫描，以兼容没有该字段的旧台账；快照中的目标必须命中 allowlist，不能把
+    损坏或篡改的台账路径变成删除入口。
+    """
+    if not _valid_skill_name(skill_name) or source_dir is None:
+        return []
+    home_root = Path(home_root).resolve(strict=False)
+    source_dir = Path(source_dir).resolve(strict=False)
+    allowed = {
+        _lexical_path_key(path): path
+        for path in _all_install_targets(skill_name, home_root)
+    }
+    if isinstance(installations, list):
+        for record in installations:
+            if not isinstance(record, dict) or not isinstance(
+                record.get("target"), str,
+            ):
+                continue
+            key = _lexical_path_key(Path(record["target"]))
+            if key not in allowed:
+                logger.warning("ignored install target outside ecosystem roots: %s",
+                               record["target"])
+
+    removed: list[Path] = []
+    for dest in allowed.values():
+        if not _target_owned_by_source(dest, source_dir):
+            continue
+        if _remove_owned_install_target(dest):
+            removed.append(dest)
+    return removed

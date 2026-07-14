@@ -3,7 +3,7 @@
 search 命中的 skill 落 ``~/.xskill/search_skills/<skill_id>/``，与 sync 管理的
 ``~/.xskill/skill/`` 分开——daemon 的 cleanup 按 manifest 清理那边，不碰这里。
 台账 ``~/.xskill/search_slots.json`` 按最近命中排序，超过容量淘汰最旧的
-（同时摘掉生态里的 symlink 安装）。每个槽位目录里有 ``.xskill_search.json``
+（同时摘掉仍由该槽位拥有的生态安装）。每个槽位目录里有 ``.xskill_search.json``
 标记（sha / 查询词 / 时间），与 sync 的 ``.xskill_skillhub.json`` 区分来源。
 """
 from __future__ import annotations
@@ -24,6 +24,13 @@ logger = logging.getLogger("xskill.team.client")
 
 SEARCH_SLOT_CAPACITY = 10
 SEARCH_MARKER_NAME = ".xskill_search.json"
+
+
+def _valid_slot_id(skill_id: str) -> bool:
+    """槽位 id 必须是单个路径段。"""
+    return bool(skill_id) and skill_id not in {".", ".."} \
+        and "/" not in skill_id and "\\" not in skill_id \
+        and "\x00" not in skill_id
 
 
 class SearchSlots:
@@ -47,7 +54,10 @@ class SearchSlots:
 
     def install(self, result: dict, archive_bytes: bytes, *, query: str) -> Path:
         """落盘一个 search 命中的 skill，装进生态并滚动淘汰。返回绝对路径。"""
-        dest_dir = self.slots_dir / result["skill_id"]
+        skill_id = result.get("skill_id")
+        if not isinstance(skill_id, str) or not _valid_slot_id(skill_id):
+            raise ValueError(f"invalid search skill_id: {skill_id!r}")
+        dest_dir = self.slots_dir / skill_id
         searched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         apply_skillhub_archive(
             archive_bytes, dest_dir,
@@ -57,25 +67,33 @@ class SearchSlots:
             marker_name=SEARCH_MARKER_NAME,
             extra_meta={"query": query, "searched_at": searched_at},
         )
-        install_skill_to_ecosystems(dest_dir, home_root=self.home_root)
+        installations = install_skill_to_ecosystems(
+            dest_dir, home_root=self.home_root,
+        )
         slots = [slot for slot in self.entries()
-                 if slot.get("skill_id") != result["skill_id"]]
+                 if slot.get("skill_id") != skill_id]
         slots.append({
-            "skill_id": result["skill_id"],
+            "skill_id": skill_id,
             "display_name": result.get("display_name"),
             "description": result.get("description"),
             "sha": result["content_sha"],
             "query": query,
             "searched_at": searched_at,
+            "installations": installations,
         })
         evicted, kept = slots[:-self.capacity], slots[-self.capacity:]
         for stale in evicted:
-            stale_id = str(stale.get("skill_id") or "")
-            stale_dir = self.slots_dir / stale_id
-            # 台账损坏出来的空 id 会让 stale_dir == slots_dir，绝不能 rmtree
-            if not stale_id or stale_dir == self.slots_dir:
+            stale_id = stale.get("skill_id")
+            if not isinstance(stale_id, str) or not _valid_slot_id(stale_id):
+                logger.warning("ignored invalid search slot id: %r", stale_id)
                 continue
-            uninstall_skill_from_ecosystems(stale_id, home_root=self.home_root)
+            stale_dir = self.slots_dir / stale_id
+            uninstall_skill_from_ecosystems(
+                stale_id,
+                home_root=self.home_root,
+                source_dir=stale_dir,
+                installations=stale.get("installations"),
+            )
             shutil.rmtree(stale_dir, ignore_errors=True)
             logger.info("search slot evicted: %s", stale_id)
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
