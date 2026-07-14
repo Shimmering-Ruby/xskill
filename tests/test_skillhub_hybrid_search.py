@@ -273,6 +273,22 @@ def test_search_final_result_cache_expires(tmp_path, monkeypatch):
     assert rank_calls == 2
 
 
+def test_cached_search_uses_only_current_in_memory_snapshot(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    expected = hub.search("alpha", limit=5)
+
+    def fail_search_index_build():
+        raise AssertionError("hot cache lookup must not scan or rebuild the index")
+
+    monkeypatch.setattr(hub, "_search_index_bundle", fail_search_index_build)
+    assert hub.cached_search("alpha", limit=5) == expected
+
+    hub._scan_snapshot_expires_at = 0.0
+    assert hub.cached_search("alpha", limit=5) is None
+
+
 # ── 语义通道降级三条路 ─────────────────────────────────────────
 
 def test_semantic_degrades_when_embed_client_is_none(tmp_path):
@@ -444,6 +460,27 @@ def test_endpoint_adds_source_ux_and_match_fields(tmp_path):
     assert top["source"] == "skillhub"
     assert top["ux_avg"] is None
     assert top["match"] == {"bm25_rank": 1, "semantic_rank": None}
+
+
+def test_endpoint_serves_hot_result_without_anyio_worker(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "docker-helper", "docker-helper",
+                     "Manage docker containers")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    http = _make_team_client(tmp_path, skillhub=hub)
+    _cid, headers = _register(http)
+    first = http.get("/api/v1/team/skill_hub/search",
+                     params={"query": "docker"}, headers=headers)
+    assert first.status_code == 200
+
+    async def fail_worker(*_args, **_kwargs):
+        raise AssertionError("hot result must not enter the AnyIO worker pool")
+
+    monkeypatch.setattr(server_api, "run_in_threadpool", fail_worker)
+    second = http.get("/api/v1/team/skill_hub/search",
+                      params={"query": "docker"}, headers=headers)
+    assert second.status_code == 200
+    assert second.json() == first.json()
 
 
 def test_endpoint_source_marks_uploader(tmp_path):
