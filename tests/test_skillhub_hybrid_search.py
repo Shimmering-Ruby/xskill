@@ -1,7 +1,7 @@
-"""test_skillhub_hybrid_search.py — Part A 混合检索：BM25 + 语义 RRF 融合 + 三护栏。
+"""test_skillhub_hybrid_search.py — Part A 混合检索：BM25 + 语义 RRF 融合及保护机制。
 
 覆盖：bigram 分词、BM25 排序性与 name>description 权重、RRF 融合、语义通道降级
-三条路（client None / 信号量满 / 超时）、query LRU 命中与 fingerprint 失效、
+三条路（client None / 信号量满 / 超时）、失败冷却、query LRU 命中与 fingerprint 失效、
 max_embed=0 关闭语义、端点新字段（source/ux_avg/match）、upload 后 corpus 补 embed。
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from xskill.recommend import skillhub as skillhub_module
 from xskill.recommend.skillhub import EMBED_CACHE_NAME, SkillHub, _tokenize
 from xskill.team.server import api as server_api
 from xskill.team.server.client_registry import ClientRegistry, safe_dir_name
@@ -36,11 +37,14 @@ class ControlledEmbed:
         self.vectors_by_text = vectors_by_text
         self.encode_delay = encode_delay
         self.encode_calls: list[str] = []
+        self.fail = False
 
     def encode(self, text: str) -> np.ndarray:
         self.encode_calls.append(text)
         if self.encode_delay:
             time.sleep(self.encode_delay)
+        if self.fail:
+            raise RuntimeError("embedding backend unavailable")
         return np.asarray(self.vectors_by_text[text], dtype=float)
 
     def encode_batch(self, texts: list[str]) -> np.ndarray:
@@ -127,6 +131,26 @@ def test_rrf_tie_break_prefers_higher_ux_then_skill_id(tmp_path):
         "m-high", "z-low", "a-none"]
 
 
+def test_search_reuses_cached_ux_values(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha-one", "alpha shared")
+    _write_hub_skill(hub_dir, "b", "alpha-two", "alpha shared")
+    loaded_paths: list[Path] = []
+
+    def fake_load_ux_scores(path):
+        loaded_paths.append(Path(path))
+        return []
+
+    monkeypatch.setattr(skillhub_module, "load_ux_scores", fake_load_ux_scores)
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    first = hub.search("alpha", limit=5)
+    second = hub.search("alpha", limit=5)
+
+    assert len(first) == len(second) == 2
+    assert len(loaded_paths) == 2
+    assert all(result["ux_avg"] is None for result in second)
+
+
 # ── 语义通道降级三条路 ─────────────────────────────────────────
 
 def test_semantic_degrades_when_embed_client_is_none(tmp_path):
@@ -187,6 +211,32 @@ def test_concurrent_same_query_uses_one_embedding_request(tmp_path):
 
     assert client.encode_calls == ["alpha"]
     assert all(result for result in results)
+
+
+def test_embed_failure_cooldown_skips_repeated_backend_calls(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "gamma one")
+    client = ControlledEmbed({
+        "gamma one": [1.0, 0.0],
+        "alpha": [1.0, 0.0],
+        "beta": [0.0, 1.0],
+    })
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=client,
+                   search_max_embed=1)
+    _prime_corpus_cache(hub)
+    monkeypatch.setattr(skillhub_module, "QUERY_EMBED_FAILURE_COOLDOWN_SECONDS", 0.02)
+
+    client.fail = True
+    first = hub.search("alpha", limit=5)
+    second = hub.search("beta", limit=5)
+    assert client.encode_calls == ["alpha"]
+    assert first and all(result["semantic_rank"] is None for result in first)
+    assert second == []
+
+    time.sleep(0.03)
+    client.fail = False
+    hub.search("beta", limit=5)
+    assert client.encode_calls == ["alpha", "beta"]
 
 
 # ── query LRU：命中零调用 + fingerprint 失效 ────────────────────

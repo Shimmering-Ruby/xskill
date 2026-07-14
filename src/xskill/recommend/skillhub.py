@@ -44,6 +44,8 @@ BM25_K1 = 1.2
 BM25_B = 0.75
 RRF_RANK_CONSTANT = 60
 QUERY_VECTOR_CACHE_CAPACITY = 256
+QUERY_EMBED_FAILURE_COOLDOWN_SECONDS = 5.0
+UX_AVG_CACHE_TTL_SECONDS = 60.0
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:
@@ -94,7 +96,8 @@ class SkillHub:
         # 混合检索索引：随 fingerprint 变化整体重建，在扫描 single-flight 之外自成一锁。
         self._search_index: dict | None = None
         self._search_index_lock = threading.Lock()
-        # query embed 三护栏：非阻塞信号量 + 独立短超时线程 + fingerprint 感知 LRU。
+        # query embed 四护栏：非阻塞信号量 + 独立短超时线程 + fingerprint 感知 LRU
+        # + 后端失败短时冷却。
         self._query_embed_semaphore = threading.Semaphore(max(self.search_max_embed, 0))
         self._query_embed_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._query_embed_executor_lock = threading.Lock()
@@ -102,6 +105,11 @@ class SkillHub:
         self._query_vector_cache_lock = threading.Lock()
         self._query_embed_inflight: set[str] = set()
         self._corpus_embed_inflight: set[str] = set()
+        self._query_embed_retry_after = 0.0
+        self._ux_avg_cache: dict[
+            tuple[str, int], tuple[float, str, float | None]
+        ] = {}
+        self._ux_avg_cache_lock = threading.Lock()
 
     @classmethod
     def from_config(cls, config: dict, embed_client) -> "SkillHub":
@@ -280,6 +288,7 @@ class SkillHub:
             result_entry = dict(entries[entry_index])
             result_entry["bm25_rank"] = bm25_rank_by_index.get(entry_index)
             result_entry["semantic_rank"] = semantic_rank_by_index.get(entry_index)
+            result_entry["ux_avg"] = self._ux_avg_for_entry(result_entry)
             results.append(result_entry)
         return results
 
@@ -303,7 +312,7 @@ class SkillHub:
             run = by_score_then_id[run_start:run_end]
             if len(run) > 1:
                 run.sort(key=lambda entry_index: (
-                    -self._ux_sort_key(entries[entry_index]["skill_id"]),
+                    -self._ux_sort_key(entries[entry_index]),
                     entries[entry_index]["skill_id"],
                 ))
             ordered_indices.extend(run)
@@ -312,9 +321,13 @@ class SkillHub:
             run_start = run_end
         return ordered_indices[:limit]
 
-    def _ux_sort_key(self, skill_id: str) -> float:
+    def _ux_sort_key(self, entry: dict) -> float:
         """ux_avg 用作 tie-break 的数值键；无评分视为最低（-inf）。"""
-        ux_value = self.ux_avg(skill_id)
+        if "path" in entry and "content_sha" in entry:
+            ux_value = self._ux_avg_for_entry(entry)
+        else:
+            # 保留给测试和第三方调用方构造的最小 entry。
+            ux_value = self.ux_avg(entry["skill_id"])
         return ux_value if ux_value is not None else float("-inf")
 
     def _bm25_ranks(self, index_bundle: dict, query_tokens: list[str]) -> dict[int, int]:
@@ -370,7 +383,7 @@ class SkillHub:
 
     def _embed_query(self, normalized_query: str,
                      fingerprint: tuple) -> np.ndarray | None:
-        """query 向量三护栏：LRU 命中零调用；信号量非阻塞抢不到即降级；短超时即降级。"""
+        """query 向量护栏：LRU、并发上限、短超时，以及后端失败短时冷却。"""
         if self.embed_client is None or self.search_max_embed <= 0:
             return None
         with self._query_vector_cache_lock:
@@ -380,6 +393,8 @@ class SkillHub:
                 return cached[1]
             elif cached is not None:
                 del self._query_vector_cache[normalized_query]
+            if time.monotonic() < self._query_embed_retry_after:
+                return None
             if normalized_query in self._query_embed_inflight:
                 return None
         if not self._query_embed_semaphore.acquire(blocking=False):
@@ -404,13 +419,25 @@ class SkillHub:
         except Exception:
             with self._query_vector_cache_lock:
                 self._query_embed_inflight.discard(normalized_query)
+                self._query_embed_retry_after = max(
+                    self._query_embed_retry_after,
+                    time.monotonic() + QUERY_EMBED_FAILURE_COOLDOWN_SECONDS,
+                )
             self._query_embed_semaphore.release()
             logger.warning("skillhub semantic search degraded to BM25: submit failed",
                            exc_info=True)
             return None
         try:
-            return future.result(timeout=self.search_timeout_s)
+            query_vector = future.result(timeout=self.search_timeout_s)
+            with self._query_vector_cache_lock:
+                self._query_embed_retry_after = 0.0
+            return query_vector
         except Exception as embed_error:  # 超时/API 异常只降级语义位，不冒泡到 search
+            with self._query_vector_cache_lock:
+                self._query_embed_retry_after = max(
+                    self._query_embed_retry_after,
+                    time.monotonic() + QUERY_EMBED_FAILURE_COOLDOWN_SECONDS,
+                )
             logger.warning(
                 "skillhub semantic search degraded to BM25: query embedding %s: %s",
                 type(embed_error).__name__, embed_error,
@@ -634,16 +661,43 @@ class SkillHub:
         按**当前版本 content_sha** 过滤（三方 skill 无 git，版本号 = SKILL.md
         内容哈希前 16 位）；旧版本的分留在 append-only 文件里不再混算。
         """
-        sha = self.content_sha(name)
-        if sha is None:
+        entry = self.entry(name)
+        if entry is None:
             return None
-        rows = self.recent_ux_scores(name, days=days)
-        scores = [r.get("score") for r in rows
-                  if r.get("commit_sha") == sha
-                  and isinstance(r.get("score"), (int, float))]
-        if not scores:
-            return None
-        return sum(scores) / len(scores)
+        return self._ux_avg_for_entry(entry, days=days)
+
+    def _ux_avg_for_entry(self, entry: dict, days: int = 30) -> float | None:
+        """按已解析 entry 读取近期均分，并用短 TTL 避免搜索热路径重复扫文件。"""
+        sha = str(entry["content_sha"])
+        cache_key = (str(entry["skill_id"]), int(days))
+        now = time.monotonic()
+        with self._ux_avg_cache_lock:
+            cached = self._ux_avg_cache.get(cache_key)
+            if cached is not None and now < cached[0] and cached[1] == sha:
+                return cached[2]
+
+            rows = load_ux_scores(Path(entry["path"]))
+            if days > 0:
+                cutoff = datetime.utcnow().timestamp() - days * 86400
+                recent_rows: list[dict] = []
+                for row in rows:
+                    scored_at = row.get("scored_at", "")
+                    try:
+                        if datetime.fromisoformat(scored_at.rstrip("Z")).timestamp() >= cutoff:
+                            recent_rows.append(row)
+                    except Exception:
+                        recent_rows.append(row)
+                rows = recent_rows
+            scores = [r.get("score") for r in rows
+                      if r.get("commit_sha") == sha
+                      and isinstance(r.get("score"), (int, float))]
+            value = sum(scores) / len(scores) if scores else None
+            self._ux_avg_cache[cache_key] = (
+                time.monotonic() + UX_AVG_CACHE_TTL_SECONDS,
+                sha,
+                value,
+            )
+            return value
 
     def ux_scores_by_version(self, name: str, days: int = 30) -> list[dict]:
         """按 ``commit_sha`` 分组聚合三方 skill ux 分（side 恒 ``main``）。
