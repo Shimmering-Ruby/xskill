@@ -39,6 +39,7 @@ HOT_QUERY_TERMS = (
 )
 ALL_QUERY_TERMS = PEAK_QUERY_TERMS + HOT_QUERY_TERMS
 WARM_QUERY_TERM = "自动化"
+SNAPSHOT_REFRESH_WAIT_S = 5.1
 
 
 def _dead_port_base_url() -> str:
@@ -352,6 +353,9 @@ async def _run_scenario_a_round(
         warm_results.append(warm_result)
         if warm_result["status"] != 200:
             raise RuntimeError(f"steady search cache warmup failed: {warm_result}")
+    # 预热本身可能耗时接近扫描快照的 5s TTL。先明确跨过 TTL，再在计时窗外
+    # 完成一次刷新，确保随后测量的确是新鲜且缓存热的稳态负载。
+    await asyncio.sleep(SNAPSHOT_REFRESH_WAIT_S)
     snapshot_refresh = await search_once(client, headers_list[0], WARM_QUERY_TERM)
     if snapshot_refresh["status"] != 200:
         raise RuntimeError(f"steady snapshot refresh failed: {snapshot_refresh}")
@@ -525,6 +529,7 @@ async def run_all_scenarios(
                 control_plane_harness._process_threads(server["process"].pid)
             )
         await asyncio.sleep(0.1)
+        await asyncio.sleep(SNAPSHOT_REFRESH_WAIT_S)
         snapshot_refresh = await search_once(
             client, headers_list[0], WARM_QUERY_TERM,
         )
