@@ -202,6 +202,9 @@ class _LockedCursor(sqlite3.Cursor):
 
     def __del__(self) -> None:
         try:
+            connection = sqlite3.Cursor.connection.__get__(self, type(self))
+            if getattr(connection, "_sqlite_closed", False):
+                return
             self._call(lambda: sqlite3.Cursor.close(self))
         except Exception:
             pass
@@ -209,6 +212,10 @@ class _LockedCursor(sqlite3.Cursor):
 
 class _LockedConnection(sqlite3.Connection):
     """Connection subclass separating SQL work from lifecycle operations."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._sqlite_closed = False
 
     def _sqlite_call(
         self, operation: Callable[[], Any], *, exclusive: bool = False,
@@ -256,8 +263,18 @@ class _LockedConnection(sqlite3.Connection):
         return self._sqlite_call(lambda: sqlite3.Connection.rollback(self))
 
     def close(self) -> Any:
+        if self._sqlite_closed:
+            return None
+
+        def close_once() -> Any:
+            if self._sqlite_closed:
+                return None
+            result = sqlite3.Connection.close(self)
+            self._sqlite_closed = True
+            return result
+
         return self._sqlite_call(
-            lambda: sqlite3.Connection.close(self), exclusive=True,
+            close_once, exclusive=True,
         )
 
     def backup(self, target: Any, *args: Any, **kwargs: Any) -> Any:
@@ -367,10 +384,10 @@ class _LockedConnection(sqlite3.Connection):
         return sqlite3.Connection.interrupt(self)
 
     def __del__(self) -> None:
+        if getattr(self, "_sqlite_closed", False):
+            return
         try:
-            self._sqlite_call(
-                lambda: sqlite3.Connection.close(self), exclusive=True,
-            )
+            self.close()
         except Exception:
             pass
 
@@ -425,6 +442,11 @@ if _pysqlite3 is not None:
 
         def __del__(self) -> None:
             try:
+                connection = _pysqlite3.Cursor.connection.__get__(
+                    self, type(self),
+                )
+                if getattr(connection, "_sqlite_closed", False):
+                    return
                 self._call(lambda: _pysqlite3.Cursor.close(self))
             except Exception:
                 pass
@@ -434,6 +456,10 @@ if _pysqlite3 is not None:
         """Equivalent connection guard for the optional pysqlite3 DB-API."""
 
         _sqlite_call = _LockedConnection._sqlite_call
+
+        def __init__(self, *args: Any, **kwargs: Any):
+            super().__init__(*args, **kwargs)
+            self._sqlite_closed = False
 
         def cursor(self, *args: Any, **kwargs: Any):
             factory = kwargs.pop("factory", _PysqliteLockedCursor)
@@ -485,8 +511,18 @@ if _pysqlite3 is not None:
             )
 
         def close(self) -> Any:
+            if self._sqlite_closed:
+                return None
+
+            def close_once() -> Any:
+                if self._sqlite_closed:
+                    return None
+                result = _pysqlite3.Connection.close(self)
+                self._sqlite_closed = True
+                return result
+
             return self._sqlite_call(
-                lambda: _pysqlite3.Connection.close(self), exclusive=True,
+                close_once, exclusive=True,
             )
 
         def create_function(self, *args: Any, **kwargs: Any) -> Any:
@@ -513,10 +549,10 @@ if _pysqlite3 is not None:
             return _pysqlite3.Connection.interrupt(self)
 
         def __del__(self) -> None:
+            if getattr(self, "_sqlite_closed", False):
+                return
             try:
-                self._sqlite_call(
-                    lambda: _pysqlite3.Connection.close(self), exclusive=True,
-                )
+                self.close()
             except Exception:
                 pass
 else:  # Keep the name available for factory-selection code and type checks.
@@ -583,6 +619,8 @@ class _SerializedCursor(Iterator[Any]):
         cursor = getattr(self, "_cursor", None)
         if connection is None or cursor is None:
             return
+        if getattr(connection, "_sqlite_closed", False):
+            return
         try:
             connection._sqlite_call(cursor.close)
         except Exception:
@@ -594,6 +632,7 @@ class _SerializedConnection:
 
     def __init__(self, connection: Any):
         object.__setattr__(self, "_connection", connection)
+        object.__setattr__(self, "_sqlite_closed", False)
 
     def _sqlite_call(
         self, operation: Callable[[], Any], *, exclusive: bool = False,
@@ -638,7 +677,17 @@ class _SerializedConnection:
         return self._sqlite_call(self._connection.rollback)
 
     def close(self) -> Any:
-        return self._sqlite_call(self._connection.close, exclusive=True)
+        if self._sqlite_closed:
+            return None
+
+        def close_once() -> Any:
+            if self._sqlite_closed:
+                return None
+            result = self._connection.close()
+            self._sqlite_closed = True
+            return result
+
+        return self._sqlite_call(close_once, exclusive=True)
 
     def __getattr__(self, name: str) -> Any:
         attribute = self._sqlite_call(lambda: getattr(self._connection, name))
@@ -669,10 +718,10 @@ class _SerializedConnection:
 
     def __del__(self) -> None:
         connection = getattr(self, "_connection", None)
-        if connection is None:
+        if connection is None or getattr(self, "_sqlite_closed", False):
             return
         try:
-            self._sqlite_call(connection.close, exclusive=True)
+            self.close()
         except Exception:
             pass
 

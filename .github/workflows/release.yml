@@ -7,6 +7,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -56,9 +57,36 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  skillhub-search-smoke:
+    name: skillhub search smoke (py3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install package with dev extras
+        run: pip install -e .[dev]
+      - name: Run skillhub search and dashboard/sync smoke gate
+        run: >-
+          pytest tests/stress/test_skillhub_search_smoke.py -v
+          --override-ini="addopts=" -m stress
+          --basetemp=.skillhub-search-artifacts
+      - name: Upload skillhub smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-skillhub-search-smoke-${{ github.run_id }}
+          path: .skillhub-search-artifacts/**
+          if-no-files-found: warn
+          retention-days: 30
+
   publish:
     name: build and publish
-    needs: [test, stress]
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, stress, skillhub-search-smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

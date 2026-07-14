@@ -424,6 +424,49 @@ def test_constraint_error_keeps_guard_until_rollback(tmp_path):
         second.close()
 
 
+def test_closed_connection_finalizer_does_not_block_live_rollback(tmp_path):
+    """Late GC of an already closed connection must not take the close gate."""
+    from xskill._sqlite_connect import connect_with_lock
+
+    stale = connect_with_lock(
+        sqlite3.connect,
+        str(tmp_path / "stale.db"),
+        check_same_thread=False,
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stale_future = executor.submit(stale.execute, "SELECT 1")
+        stale_future.result(timeout=5)
+    stale.close()
+    del stale
+
+    db_path = tmp_path / "active.db"
+    first = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    second = connect_with_lock(
+        sqlite3.connect, str(db_path), timeout=1, check_same_thread=False,
+    )
+    first.execute("CREATE TABLE writes (value INTEGER)")
+    first.execute("INSERT INTO writes VALUES (1)")
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            waiting_writer = executor.submit(
+                second.execute, "INSERT INTO writes VALUES (2)"
+            )
+            time.sleep(0.05)
+            assert not waiting_writer.done()
+            del stale_future
+            gc.collect()
+            first.rollback()
+            cursor = waiting_writer.result(timeout=5)
+            cursor.close()
+        second.commit()
+    finally:
+        first.close()
+        second.close()
+
+
 def test_fallback_proxy_balances_nested_transaction_guards(tmp_path):
     """Instrumentation wrappers must release proxy and native guard levels."""
     from xskill._sqlite_connect import connect_with_lock
