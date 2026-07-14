@@ -9,6 +9,7 @@ _tick 一轮：
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -336,14 +337,16 @@ def apply_skillhub_archive(
     """把非 git 的 skillhub skill zip 原子落到本地目录（带路径穿越防护）。
 
     sync reconcile 与 `xskill search` 槽位共用；后者用 ``marker_name`` /
-    ``extra_meta`` 换成自己的标记文件。marker sha 相同则跳过重写。
+    ``extra_meta`` 换成自己的标记文件。安装判断使用实际 zip 内容哈希，而不是仅覆盖
+    SKILL.md 的 ``expected_sha``，确保 scripts/references/assets 单独变化也会更新。
     """
     dest_dir = Path(dest_dir)
     meta_path = dest_dir / marker_name
+    archive_sha = hashlib.sha256(archive_bytes).hexdigest()
     if meta_path.is_file() and (dest_dir / "SKILL.md").is_file():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if meta.get("sha") == expected_sha:
+            if meta.get("archive_sha") == archive_sha:
                 return
         except (OSError, ValueError):
             pass
@@ -370,6 +373,7 @@ def apply_skillhub_archive(
         raise RuntimeError("skillhub archive missing SKILL.md")
     meta = {
         "sha": expected_sha,
+        "archive_sha": archive_sha,
         "display_name": display_name,
         "source_path": source_path,
     }

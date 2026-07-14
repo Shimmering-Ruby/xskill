@@ -9,6 +9,9 @@
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import numpy as np
 import pytest
 
@@ -113,3 +116,25 @@ def test_corrupt_cache_file_is_ignored(tmp_path):
 
     assert result.shape == (1, 4)
     assert embed_client.encoded == ["aa"]
+
+
+def test_concurrent_instances_merge_updates_without_losing_vectors(tmp_path):
+    cache_path = tmp_path / "cache.pkl"
+    first = EmbedStore(cache_path, _CountingEmbed())
+    second = EmbedStore(cache_path, _CountingEmbed())
+    ready = threading.Barrier(2)
+
+    def encode(store, text):
+        ready.wait()
+        store.encode_cached([text])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(encode, first, "first"),
+                   pool.submit(encode, second, "second")]
+        for future in futures:
+            future.result()
+
+    verifier = _CountingEmbed()
+    result = EmbedStore(cache_path, verifier).encode_cached(["first", "second"])
+    assert result.shape == (2, 4)
+    assert verifier.encoded == []

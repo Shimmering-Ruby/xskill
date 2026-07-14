@@ -140,11 +140,11 @@ On **macOS / Linux**, native persistence (launchd / systemd --user) is still on 
 #### Search / share skills on demand (skillhub)
 
 ```bash
-xskill search docker compose   # keyword-search the server skillhub; hits are pulled locally and installed
+xskill search docker compose   # BM25 + semantic search of the server skillhub; hits are installed locally
 xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
 ```
 
-`search` matches keywords only — independent of the recommendation profile — and prints each hit's name, description, and absolute local path. Pulled skills live in `~/.xskill/search_skills/` with a rolling cap of **10 slots** (least-recently-hit evicted). `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. Local semantic search has been removed from the CLI (no more `xskill search traj|skill <query>`); use the dashboard or the API (`POST /api/v1/skills/search`) to search local trajectories/skills instead.
+`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If the embedding service is unavailable it automatically falls back to BM25, and it prints each hit's name, description, source, score, and absolute local path. Pulled skills live in `~/.xskill/search_skills/` with a rolling cap of **10 slots** (least-recently-hit evicted). `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. Semantic search for local trajectories/skills has been removed from the CLI (no more `xskill search traj|skill <query>`); use the dashboard or the API (`POST /api/v1/skills/search`) instead.
 
 * * *
 

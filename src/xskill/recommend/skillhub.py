@@ -100,6 +100,8 @@ class SkillHub:
         self._query_embed_executor_lock = threading.Lock()
         self._query_vector_cache: OrderedDict[str, tuple[tuple, np.ndarray]] = OrderedDict()
         self._query_vector_cache_lock = threading.Lock()
+        self._query_embed_inflight: set[str] = set()
+        self._corpus_embed_inflight: set[str] = set()
 
     @classmethod
     def from_config(cls, config: dict, embed_client) -> "SkillHub":
@@ -378,15 +380,41 @@ class SkillHub:
                 return cached[1]
             elif cached is not None:
                 del self._query_vector_cache[normalized_query]
+            if normalized_query in self._query_embed_inflight:
+                return None
         if not self._query_embed_semaphore.acquire(blocking=False):
             return None
+        with self._query_vector_cache_lock:
+            # The cache or in-flight set may have changed between releasing the
+            # cache lock and acquiring the global embedding slot.
+            cached = self._query_vector_cache.get(normalized_query)
+            if cached is not None and cached[0] == fingerprint:
+                self._query_vector_cache.move_to_end(normalized_query)
+                self._query_embed_semaphore.release()
+                return cached[1]
+            if normalized_query in self._query_embed_inflight:
+                self._query_embed_semaphore.release()
+                return None
+            self._query_embed_inflight.add(normalized_query)
         # 超时后 embed 线程仍在跑（同步 60s httpx），信号量由该线程结束时释放，泄漏受 max_embed 约束。
-        future = self._query_embed_pool().submit(
-            self._encode_and_cache_query, normalized_query, fingerprint,
-        )
+        try:
+            future = self._query_embed_pool().submit(
+                self._encode_and_cache_query, normalized_query, fingerprint,
+            )
+        except Exception:
+            with self._query_vector_cache_lock:
+                self._query_embed_inflight.discard(normalized_query)
+            self._query_embed_semaphore.release()
+            logger.warning("skillhub semantic search degraded to BM25: submit failed",
+                           exc_info=True)
+            return None
         try:
             return future.result(timeout=self.search_timeout_s)
-        except Exception:  # 超时或 embed API 任何异常都只降级语义位，绝不冒泡到 search
+        except Exception as embed_error:  # 超时/API 异常只降级语义位，不冒泡到 search
+            logger.warning(
+                "skillhub semantic search degraded to BM25: query embedding %s: %s",
+                type(embed_error).__name__, embed_error,
+            )
             return None
 
     def _query_embed_pool(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -413,6 +441,60 @@ class SkillHub:
                     self._query_vector_cache.popitem(last=False)
             return query_vector
         finally:
+            with self._query_vector_cache_lock:
+                self._query_embed_inflight.discard(normalized_query)
+            self._query_embed_semaphore.release()
+
+    def backfill_description_embedding(self, description: str) -> bool:
+        """Best-effort, bounded corpus-vector backfill used after an upload.
+
+        It shares the same configured embedding slots and executor as query
+        embeddings. If all slots are busy, the upload stays successful and the
+        skill remains available through BM25 until the normal index refresh
+        fills its vector.
+        """
+        if (not description or self.embed_client is None
+                or self.search_max_embed <= 0):
+            return False
+        description_key = hashlib.sha256(description.encode("utf-8")).hexdigest()
+        with self._query_vector_cache_lock:
+            if description_key in self._corpus_embed_inflight:
+                return True
+        if not self._query_embed_semaphore.acquire(blocking=False):
+            return False
+        with self._query_vector_cache_lock:
+            if description_key in self._corpus_embed_inflight:
+                self._query_embed_semaphore.release()
+                return True
+            self._corpus_embed_inflight.add(description_key)
+        try:
+            self._query_embed_pool().submit(
+                self._encode_corpus_description, description, description_key,
+            )
+        except Exception:
+            with self._query_vector_cache_lock:
+                self._corpus_embed_inflight.discard(description_key)
+            self._query_embed_semaphore.release()
+            logger.warning("skillhub upload embedding backfill submit failed",
+                           exc_info=True)
+            return False
+        return True
+
+    def _encode_corpus_description(self, description: str,
+                                   description_key: str) -> None:
+        try:
+            EmbedStore(self.dir / EMBED_CACHE_NAME, self.embed_client).encode_cached(
+                [description],
+            )
+            # A search may have built an index while this vector was absent.
+            # Rebuild lazily on the next request so the new vector is visible.
+            with self._search_index_lock:
+                self._search_index = None
+        except Exception as embed_error:
+            logger.warning("skill_hub upload embed backfill failed: %s", embed_error)
+        finally:
+            with self._query_vector_cache_lock:
+                self._corpus_embed_inflight.discard(description_key)
             self._query_embed_semaphore.release()
 
     def _search_index_bundle(self) -> dict:
@@ -485,7 +567,12 @@ class SkillHub:
         if not self.enabled:
             return None
         if force_refresh:
-            self._scan_snapshot_expires_at = 0.0
+            # Upload replacement must bypass both the L1 TTL snapshot and the
+            # L3 mtime/size memo. Preserved timestamps or coarse filesystems can
+            # otherwise hide a same-size SKILL.md replacement.
+            with self._scan_lock:
+                self._scan_snapshot_expires_at = 0.0
+                self._file_memo.clear()
         matches: list[dict] = []
         for entry in self._entries(include_vec=False, require_description=False):
             if name in {

@@ -154,6 +154,23 @@ def test_force_refresh_bypasses_ttl(tmp_path):
     assert hub.entry("beta", force_refresh=True) is not None
 
 
+def test_force_refresh_bypasses_same_size_same_mtime_file_memo(tmp_path):
+    hub_dir = tmp_path / "hub"
+    skill_dir = _write_hub_skill(hub_dir, "alpha", "old")
+    hub = _make_hub(hub_dir, scan_ttl_seconds=60.0)
+    first = hub.entry("alpha")
+    skill_md = skill_dir / "SKILL.md"
+    original_stat = skill_md.stat()
+    replacement = skill_md.read_text(encoding="utf-8").replace("old", "new")
+    assert len(replacement.encode("utf-8")) == original_stat.st_size
+    skill_md.write_text(replacement, encoding="utf-8")
+    os.utime(skill_md, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    refreshed = hub.entry("alpha", force_refresh=True)
+    assert refreshed["description"] == "new"
+    assert refreshed["content_sha"] != first["content_sha"]
+
+
 def test_single_flight_concurrent_entry(tmp_path, monkeypatch):
     hub_dir = tmp_path / "hub"
     for index in range(5):

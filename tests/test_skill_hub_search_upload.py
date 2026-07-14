@@ -218,6 +218,39 @@ def test_upload_rejects_bad_archives(hub_env):
     assert not (hub_env.hub_dir.parent / "escape.txt").exists()
 
 
+def test_upload_rejects_archive_expanding_beyond_limit(hub_env, monkeypatch):
+    _cid, hdr = _register(hub_env.client)
+    monkeypatch.setattr(server_api, "_SKILL_ARCHIVE_MAX_TOTAL_BYTES", 64)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("SKILL.md",
+                    "---\nname: bomb\ndescription: bomb\n---\n" + "x" * 128)
+    response = hub_env.client.post(
+        "/api/v1/team/skill_hub/upload",
+        files={"file": ("bomb.zip", buf.getvalue(), "application/zip")},
+        headers=hdr,
+    )
+    assert response.status_code == 413
+
+
+def test_skillhub_bundle_is_deterministic_and_excludes_server_ux_metadata(tmp_path):
+    skill_dir = _write_hub_skill(tmp_path / "hub", "pack", "pack", "desc")
+    (skill_dir / "references").mkdir()
+    asset = skill_dir / "references" / "note.md"
+    asset.write_text("stable", encoding="utf-8")
+    ux_file = skill_dir / ".ux_scores.jsonl"
+    ux_file.write_text("first", encoding="utf-8")
+    first = server_api._make_skillhub_archive(skill_dir)
+
+    ux_file.write_text("changed server metadata", encoding="utf-8")
+    asset.touch()
+    second = server_api._make_skillhub_archive(skill_dir)
+    assert second == first
+
+    asset.write_text("new package content", encoding="utf-8")
+    assert server_api._make_skillhub_archive(skill_dir) != first
+
+
 # ── client: SearchSlots 滚动槽位 ────────────────────────────────
 
 def _fake_result(name: str) -> dict:
@@ -263,6 +296,31 @@ def test_search_slots_rehit_moves_to_newest_without_duplicate(tmp_path):
         "b@0000000000ff", "c@0000000000ff", "a@0000000000ff"]
     assert len(ledger) == 3
     assert ledger[-1]["query"] == "again"
+
+
+def test_search_slots_refreshes_auxiliary_files_when_skill_md_sha_is_unchanged(tmp_path):
+    slots = SearchSlots(xskill_home=tmp_path / "xhome",
+                        home_root=tmp_path / "home", capacity=3)
+    result = _fake_result("aux-refresh")
+
+    def archive_with_note(note: str) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("SKILL.md",
+                        "---\nname: aux-refresh\ndescription: d\n---\nbody\n")
+            zf.writestr("references/note.md", note)
+        return buf.getvalue()
+
+    installed = slots.install(result, archive_with_note("old"), query="q")
+    first_marker = json.loads((installed / ".xskill_search.json").read_text(
+        encoding="utf-8"))
+    slots.install(result, archive_with_note("new"), query="q")
+    second_marker = json.loads((installed / ".xskill_search.json").read_text(
+        encoding="utf-8"))
+
+    assert (installed / "references" / "note.md").read_text(encoding="utf-8") == "new"
+    assert first_marker["sha"] == second_marker["sha"] == result["content_sha"]
+    assert first_marker["archive_sha"] != second_marker["archive_sha"]
 
 
 def test_search_slots_default_capacity_is_ten(tmp_path):

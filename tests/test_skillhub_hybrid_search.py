@@ -9,7 +9,9 @@ from __future__ import annotations
 import io
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -165,6 +167,28 @@ def test_semantic_degrades_on_query_embed_timeout(tmp_path):
     assert results and all(result["semantic_rank"] is None for result in results)
 
 
+def test_concurrent_same_query_uses_one_embedding_request(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "gamma one")
+    client = ControlledEmbed({"gamma one": [1.0, 0.0], "alpha": [1.0, 0.0]},
+                             encode_delay=0.15)
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=client,
+                   search_max_embed=4)
+    _prime_corpus_cache(hub)
+    ready = threading.Barrier(8)
+
+    def search_once():
+        ready.wait()
+        return hub.search("alpha", limit=5)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = [future.result() for future in
+                   [pool.submit(search_once) for _ in range(8)]]
+
+    assert client.encode_calls == ["alpha"]
+    assert all(result for result in results)
+
+
 # ── query LRU：命中零调用 + fingerprint 失效 ────────────────────
 
 def test_query_lru_hit_then_invalidated_by_fingerprint(tmp_path):
@@ -298,3 +322,32 @@ def test_upload_backfills_corpus_embedding(tmp_path):
             break
         time.sleep(0.02)
     assert cached[0] is not None  # best-effort 补齐后向量进入 corpus 缓存
+
+
+def test_backfill_invalidates_search_index_built_before_vector_exists(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "gamma one")
+    client = ControlledEmbed({"gamma one": [1.0, 0.0], "alpha": [1.0, 0.0]})
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=client)
+
+    assert hub.search("alpha")[0]["semantic_rank"] is None
+    assert hub.backfill_description_embedding("gamma one") is True
+    for _attempt in range(100):
+        if hub._search_index is None:
+            break
+        time.sleep(0.02)
+
+    results = hub.search("alpha")
+    assert results[0]["semantic_rank"] == 1
+
+
+def test_upload_backfill_shares_configured_embedding_capacity(tmp_path):
+    hub_dir = tmp_path / "hub"
+    hub_dir.mkdir()
+    client = ControlledEmbed({"first": [1.0, 0.0], "second": [0.0, 1.0]},
+                             encode_delay=0.2)
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=client,
+                   search_max_embed=1)
+
+    assert hub.backfill_description_embedding("first") is True
+    assert hub.backfill_description_embedding("second") is False
