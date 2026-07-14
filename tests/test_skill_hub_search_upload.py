@@ -320,3 +320,106 @@ def test_cmd_upload_rejects_non_skill_dir(tmp_path, capsys):
     args = SimpleNamespace(path=str(tmp_path), json=False)
     assert cli.cmd_upload(args) == 2
     assert "SKILL.md" in capsys.readouterr().err
+
+
+# ── client: 网络异常兜底 + 展示字段 ─────────────────────────────
+
+class _FakeResp:
+    def __init__(self, status_code, *, json_data=None, content=b""):
+        self.status_code = status_code
+        self._json = json_data
+        self.content = content
+
+    def json(self):
+        return self._json
+
+
+def test_cmd_search_hub_network_error_returns_one_without_traceback(capsys):
+    import httpx
+
+    class _BoomHttp:
+        def get(self, *args, **kwargs):
+            raise httpx.ConnectError("connection refused")
+
+    args = SimpleNamespace(terms=["docker"], top_k=5, json=False)
+    rc = cli.cmd_search_hub(args, http=_BoomHttp(), headers={})
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "Traceback" not in err
+    assert "ConnectError" in err
+    assert "管理员" in err or "网络" in err
+
+
+def test_cmd_upload_network_error_returns_one_without_traceback(tmp_path, capsys):
+    import httpx
+
+    class _BoomHttp:
+        def post(self, *args, **kwargs):
+            raise httpx.ConnectTimeout("timed out")
+
+    src = tmp_path / "up-src"
+    src.mkdir()
+    (src / "SKILL.md").write_text(
+        "---\nname: net-skill\ndescription: d\n---\nbody\n", encoding="utf-8")
+    args = SimpleNamespace(path=str(src), json=False)
+    rc = cli.cmd_upload(args, http=_BoomHttp(), headers={})
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "Traceback" not in err
+    assert "ConnectTimeout" in err
+    assert "管理员" in err or "网络" in err
+
+
+def test_cmd_search_hub_renders_source_and_ux_defensively(tmp_path, monkeypatch,
+                                                          capsys):
+    class _FakeHttp:
+        def get(self, path, **kwargs):
+            if "search" in path:
+                return _FakeResp(200, json_data={"results": [
+                    {"skill_id": "with@ff", "display_name": "with-meta",
+                     "description": "has metadata", "content_sha": "aa",
+                     "source_path": "p1", "source": "上传者:alice",
+                     "ux_avg": 4.2, "match": {"field": "name"}},
+                    {"skill_id": "bare@ff", "display_name": "bare-meta",
+                     "description": "no metadata", "content_sha": "bb",
+                     "source_path": "p2"},
+                ]})
+            return _FakeResp(200, content=_fake_archive("x"))
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.SearchSlots",
+        lambda **kw: SearchSlots(xskill_home=tmp_path / "xh",
+                                 home_root=tmp_path / "h"))
+    args = SimpleNamespace(terms=["anything"], top_k=5, json=False)
+    assert cli.cmd_search_hub(args, http=_FakeHttp(), headers={}) == 0
+    out = capsys.readouterr().out
+    assert "ux 4.2" in out
+    assert "来源: 上传者:alice" in out
+    # 缺 source/ux_avg 的命中正常渲染，其名字行不带 ux/来源 后缀，不报错
+    bare_line = next(line for line in out.splitlines() if "bare-meta" in line)
+    assert "ux" not in bare_line and "来源" not in bare_line
+
+
+def test_cmd_search_hub_json_passes_through_all_fields(tmp_path, monkeypatch,
+                                                       capsys):
+    class _FakeHttp:
+        def get(self, path, **kwargs):
+            if "search" in path:
+                return _FakeResp(200, json_data={"results": [
+                    {"skill_id": "j@ff", "display_name": "json-skill",
+                     "description": "d", "content_sha": "cc", "source_path": "p",
+                     "source": "skillhub", "ux_avg": None,
+                     "match": {"field": "description"}},
+                ]})
+            return _FakeResp(200, content=_fake_archive("x"))
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.SearchSlots",
+        lambda **kw: SearchSlots(xskill_home=tmp_path / "xh",
+                                 home_root=tmp_path / "h"))
+    args = SimpleNamespace(terms=["anything"], top_k=5, json=True)
+    assert cli.cmd_search_hub(args, http=_FakeHttp(), headers={}) == 0
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["source"] == "skillhub"
+    assert row["match"] == {"field": "description"}
+    assert row["name"] == "json-skill" and row["path"]

@@ -5,7 +5,7 @@ cli.py — xskill 紧凑 CLI
 仅 5 个子命令（无 --no-watch / --no-ui / --skill-dir / --llm-* 这类散 flag）：
     xskill serve [--host] [--port]
     xskill registry add|remove|list <path>
-    xskill search traj|skill <query> [--top-k]
+    xskill search <关键词...> [--top-k]
 
 所有筛选/格式化交给 shell（grep/awk）。状态/配置全在 ~/.xskill/。
 """
@@ -543,37 +543,6 @@ def cmd_stats(args) -> int:
     return 0
 
 
-def cmd_search(args, xskill) -> int:
-    target = args.terms[0]
-    query = " ".join(args.terms[1:]).strip()
-    if not query:
-        print(f"error: 用法 xskill search {target} <query>", file=sys.stderr)
-        return 2
-    args.query = query
-    if target == "traj":
-        hits = xskill.search_trajectories(args.query, top_k=args.top_k)
-        for h in hits:
-            traj = h.trajectory
-            status = traj.status or "-"
-            skill_used = traj.skill_used or "-"
-            side = traj.canary_side or "-"
-            print(f"{h.similarity:.3f}\t{status}\t{skill_used}\t{side}\t{traj.path}")
-        return 0
-    if target == "skill":
-        hits = xskill.search_skills(args.query, top_k=args.top_k)
-        for h in hits:
-            s = h.skill
-            avg = s.ux_avg(side="main", days=30)
-            n = len([x for x in s.recent_ux_scores(side="main", days=30)
-                     if x.get("score") is not None])
-            ux_col = f"{avg:.1f}({n})" if avg is not None else "-"
-            canary = s.canary_status()
-            canary_col = "staging" if canary == "staging_active" else "-"
-            print(f"{h.similarity:.3f}\t{s.name}\t{s.use_count}\t{ux_col}\t{canary_col}")
-        return 0
-    return 1
-
-
 def _team_client_http_and_headers():
     """瘦客户端命令共用：读连接 state，返回 (httpx client, 鉴权头)。
 
@@ -606,6 +575,7 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
     按最近命中滚动淘汰。``http``/``headers`` 参数仅测试注入用。
     """
     import json as _json
+    import httpx
     from xskill.config import XSKILL_HOME
     from xskill.team.client.search_slots import SearchSlots
 
@@ -614,42 +584,52 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
         if http is None:
             return 1
     query = " ".join(args.terms).strip()
-    resp = http.get("/api/v1/team/skill_hub/search",
-                    params={"query": query, "limit": args.top_k},
-                    headers=headers)
-    if resp.status_code == 404:
-        print("error: server 版本过旧，不支持 skillhub 搜索（需 ≥0.6.17），"
-              "请管理员先升级 server", file=sys.stderr)
-        return 1
-    if resp.status_code != 200:
-        print(f"error: 搜索失败 HTTP {resp.status_code}: {resp.text[:300]}",
+    try:
+        resp = http.get("/api/v1/team/skill_hub/search",
+                        params={"query": query, "limit": args.top_k},
+                        headers=headers)
+        if resp.status_code == 404:
+            print("error: server 版本过旧，不支持 skillhub 搜索（需 ≥0.6.17），"
+                  "请管理员先升级 server", file=sys.stderr)
+            return 1
+        if resp.status_code != 200:
+            print(f"error: 搜索失败 HTTP {resp.status_code}: {resp.text[:300]}",
+                  file=sys.stderr)
+            return 1
+        results = resp.json().get("results", [])
+        if not results:
+            print("skillhub 无匹配 skill")
+            return 0
+        slots = SearchSlots(xskill_home=XSKILL_HOME)
+        installed = []
+        for result in results:
+            bundle = http.get(f"/api/v1/team/skill/{result['skill_id']}/bundle",
+                              headers=headers)
+            if bundle.status_code != 200:
+                print(f"warning: 拉取 {result['skill_id']} 失败 "
+                      f"HTTP {bundle.status_code}", file=sys.stderr)
+                continue
+            local_path = slots.install(result, bundle.content, query=query)
+            # 原样透传 server 返回的所有字段，再补本机安装信息
+            installed_entry = dict(result)
+            installed_entry["name"] = result["display_name"]
+            installed_entry["path"] = str(local_path)
+            installed.append(installed_entry)
+    except (httpx.HTTPError, OSError) as network_error:
+        print(f"error: 无法连接 team server（{type(network_error).__name__}: "
+              f"{network_error}），server 可能未响应，请检查网络或联系管理员",
               file=sys.stderr)
         return 1
-    results = resp.json().get("results", [])
-    if not results:
-        print("skillhub 无匹配 skill")
-        return 0
-    slots = SearchSlots(xskill_home=XSKILL_HOME)
-    installed = []
-    for result in results:
-        bundle = http.get(f"/api/v1/team/skill/{result['skill_id']}/bundle",
-                          headers=headers)
-        if bundle.status_code != 200:
-            print(f"warning: 拉取 {result['skill_id']} 失败 "
-                  f"HTTP {bundle.status_code}", file=sys.stderr)
-            continue
-        local_path = slots.install(result, bundle.content, query=query)
-        installed.append({
-            "name": result["display_name"],
-            "skill_id": result["skill_id"],
-            "description": result["description"],
-            "path": str(local_path),
-        })
     if args.json:
         print(_json.dumps(installed, ensure_ascii=False, indent=2))
         return 0
     for row in installed:
-        print(f"{row['name']}  ({row['skill_id']})")
+        name_line = f"{row['name']}  ({row['skill_id']})"
+        if row.get("ux_avg") is not None:
+            name_line += f" ux {row['ux_avg']}"
+        if row.get("source"):
+            name_line += f" 来源: {row['source']}"
+        print(name_line)
         print(f"  {row['description']}")
         print(f"  {row['path']}")
     return 0
@@ -664,6 +644,7 @@ def cmd_upload(args, http=None, headers=None) -> int:
     import io as _io
     import json as _json
     import zipfile as _zipfile
+    import httpx
     from pathlib import Path
     from xskill.skill.frontmatter import FrontmatterError, parse_strict
 
@@ -699,18 +680,24 @@ def cmd_upload(args, http=None, headers=None) -> int:
         if http is None:
             return 1
     archive_name = f"{frontmatter['name']}.zip"
-    resp = http.post("/api/v1/team/skill_hub/upload",
-                     files={"file": (archive_name, payload, "application/zip")},
-                     headers=headers)
-    if resp.status_code == 404:
-        print("error: server 版本过旧，不支持 skill 上传（需 ≥0.6.17），"
-              "请管理员先升级 server", file=sys.stderr)
-        return 1
-    if resp.status_code != 200:
-        print(f"error: 上传失败 HTTP {resp.status_code}: {resp.text[:300]}",
+    try:
+        resp = http.post("/api/v1/team/skill_hub/upload",
+                         files={"file": (archive_name, payload, "application/zip")},
+                         headers=headers)
+        if resp.status_code == 404:
+            print("error: server 版本过旧，不支持 skill 上传（需 ≥0.6.17），"
+                  "请管理员先升级 server", file=sys.stderr)
+            return 1
+        if resp.status_code != 200:
+            print(f"error: 上传失败 HTTP {resp.status_code}: {resp.text[:300]}",
+                  file=sys.stderr)
+            return 1
+        stored = resp.json()
+    except (httpx.HTTPError, OSError) as network_error:
+        print(f"error: 无法连接 team server（{type(network_error).__name__}: "
+              f"{network_error}），server 可能未响应，请检查网络或联系管理员",
               file=sys.stderr)
         return 1
-    stored = resp.json()
     if args.json:
         print(_json.dumps(stored, ensure_ascii=False, indent=2))
         return 0
@@ -870,12 +857,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_search = sub.add_parser(
         "search",
-        help="搜 team server 的 skillhub 并拉到本地槽位；"
-             "`search traj|skill <query>` 保持原本机索引搜索",
+        help="搜 team server 的 skillhub 并把命中 skill 拉到本地槽位",
     )
     p_search.add_argument(
         "terms", nargs="+", metavar="QUERY",
-        help="搜索词（可多个）。首词恰为 traj/skill 时视为本机索引搜索",
+        help="搜索词（可多个，拼成一个 skillhub 查询）",
     )
     p_search.add_argument("--top-k", "-k", type=int, default=5,
                           help="返回条数（skillhub 搜索最多 10）")
@@ -1039,8 +1025,7 @@ def main() -> int:
         return cmd_dashboard(args)
 
     # skillhub 搜索/上传是瘦客户端侧（走 team server），不碰 config.yaml。
-    # `search traj|skill <q>` 仍是本机索引搜索，走下面的 facade 路径。
-    if args.command == "search" and args.terms[0] not in ("traj", "skill"):
+    if args.command == "search":
         return cmd_search_hub(args)
     if args.command == "upload":
         return cmd_upload(args)
@@ -1066,7 +1051,7 @@ def main() -> int:
                 and _standalone_watch_dir_count() == 0):
             return cmd_registry_list_client()
 
-    # 首次运行 auto-init：serve / registry / search 都需要 config.yaml。
+    # 首次运行 auto-init：serve / registry 都需要 config.yaml。
     # 不存在就写一份模板并要求用户填 key 后重跑——比直接抛 traceback 友好。
     from xskill.config import CONFIG_PATH, ensure_config_exists
     if not ensure_config_exists():
@@ -1084,7 +1069,6 @@ def main() -> int:
     handler = {
         "serve":    cmd_serve,
         "registry": cmd_registry,
-        "search":   cmd_search,
     }.get(args.command)
     return handler(args, xskill) if handler else (parser.print_help() or 1)
 

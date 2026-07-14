@@ -104,7 +104,7 @@ xskill search docker compose        # 关键词搜 server 的 skillhub,命中的
 xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
 ```
 
-`search` 只按关键词匹配、与推荐画像无关，输出命中技能的名字、描述和本机绝对路径；本地最多保留 **10 个槽位**滚动淘汰。`upload` 在 server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。本机索引搜索保持原样：`xskill search traj|skill <query>`。
+`search` 只按关键词匹配、与推荐画像无关，输出命中技能的名字、描述和本机绝对路径；本地最多保留 **10 个槽位**滚动淘汰。`upload` 在 server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。本机语义搜索已从 CLI 移除（不再有 `xskill search traj|skill <query>`），改用 dashboard 或 API（`POST /api/v1/skills/search`）检索本机轨迹/技能。
 
 ## 架构图
 
