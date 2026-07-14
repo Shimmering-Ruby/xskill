@@ -7,6 +7,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -84,6 +85,7 @@ jobs:
 
   publish:
     name: build and publish
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, stress, skillhub-search-smoke]
     runs-on: ubuntu-latest
     steps:
