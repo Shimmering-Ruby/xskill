@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 import tempfile
 import threading
+import time
 from typing import Callable
 import zipfile
 
@@ -62,6 +63,43 @@ class _Ctx:
 _ctx = _Ctx()
 _WHEEL_BUILD_LOCK = threading.Lock()
 _SYNC_EXECUTOR_STATE = "xskill_team_sync_executor"
+_TELEMETRY_EXECUTOR_STATE = "xskill_team_telemetry_executor"
+_MANIFEST_CONTROL_CACHE_TTL = 5.0
+_MANIFEST_CONTROL_CACHE: dict[str, tuple[float, dict]] = {}
+_MANIFEST_CONTROL_CACHE_LOCK = threading.Lock()
+
+
+class _BoundedExecutor:
+    """拒绝超出上限的后台任务，避免慢 SQLite 写入无限堆积。"""
+
+    def __init__(self, *, max_workers: int, max_pending: int) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="xskill-team-telemetry",
+        )
+        self._slots = threading.BoundedSemaphore(max_pending)
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def submit(self, func: Callable[[], None]) -> bool:
+        if not self._slots.acquire(blocking=False):
+            return False
+        with self._lock:
+            if self._closed:
+                self._slots.release()
+                return False
+            try:
+                future = self._executor.submit(func)
+            except RuntimeError:
+                self._slots.release()
+                return False
+        future.add_done_callback(lambda _future: self._slots.release())
+        return True
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._closed = True
+        self._executor.shutdown(wait=True)
 
 
 def start_team_sync_executor(
@@ -78,6 +116,11 @@ def start_team_sync_executor(
         thread_name_prefix="xskill-team-sync",
     )
     setattr(app.state, _SYNC_EXECUTOR_STATE, executor)
+    setattr(
+        app.state,
+        _TELEMETRY_EXECUTOR_STATE,
+        _BoundedExecutor(max_workers=1, max_pending=1024),
+    )
     return executor
 
 
@@ -88,6 +131,10 @@ def stop_team_sync_executor(app) -> None:
         return
     delattr(app.state, _SYNC_EXECUTOR_STATE)
     executor.shutdown(wait=True, cancel_futures=True)
+    telemetry_executor = getattr(app.state, _TELEMETRY_EXECUTOR_STATE, None)
+    if telemetry_executor is not None:
+        delattr(app.state, _TELEMETRY_EXECUTOR_STATE)
+        telemetry_executor.shutdown()
 
 
 async def _run_team_sync(app, func):
@@ -95,6 +142,35 @@ async def _run_team_sync(app, func):
     executor = getattr(app.state, _SYNC_EXECUTOR_STATE, None)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, func)
+
+
+def _submit_team_telemetry(app, func: Callable[[], None]) -> bool:
+    executor = getattr(app.state, _TELEMETRY_EXECUTOR_STATE, None)
+    if executor is None:
+        return False
+    return bool(executor.submit(func))
+
+
+def _manifest_controls(user_key: str) -> tuple[dict, set]:
+    """短时复用控制面只读快照，避免每个 sync 打开两次 registry DB。"""
+    from xskill.config import get_registry_db_path
+    from xskill.pipeline.registry import (
+        effective_prefs_from_snapshot,
+        manifest_control_plane_snapshot,
+    )
+
+    key = str(get_registry_db_path().expanduser().resolve())
+    now = time.monotonic()
+    cached = _MANIFEST_CONTROL_CACHE.get(key)
+    if cached is None or cached[0] <= now:
+        with _MANIFEST_CONTROL_CACHE_LOCK:
+            cached = _MANIFEST_CONTROL_CACHE.get(key)
+            if cached is None or cached[0] <= now:
+                snapshot = manifest_control_plane_snapshot()
+                cached = (now + _MANIFEST_CONTROL_CACHE_TTL, snapshot)
+                _MANIFEST_CONTROL_CACHE[key] = cached
+    snapshot = cached[1]
+    return effective_prefs_from_snapshot(snapshot, user_key), snapshot["retired"]
 
 
 def init_team_context(
@@ -608,6 +684,7 @@ def team_sync(
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
+    telemetry_submit: Callable[[Callable[[], None]], bool] | None = None,
 ):
     """只读已落库画像构建 manifest，再提交后台刷新。
 
@@ -625,6 +702,7 @@ def team_sync(
             ranked_slots=_ctx.ranked_slots,
             total_slots=0,
             traj_root=_ctx.traj_root,
+            telemetry_submit=telemetry_submit,
         )
     else:
         # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
@@ -633,11 +711,8 @@ def team_sync(
         prefs = None
         retired = None
         try:
-            from xskill.pipeline.registry import effective_prefs, retired_skills
-            row = _ctx.client_registry.get(client_id) or {}
-            user_key = row.get("user_name") or ""
-            prefs = effective_prefs(user_key)
-            retired = retired_skills()
+            user_key = _ctx.client_registry.user_name_for(client_id)
+            prefs, retired = _manifest_controls(user_key)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning("skill prefs lookup failed, serving without control-plane",
                            exc_info=True)
@@ -650,6 +725,7 @@ def team_sync(
             traj_root=_ctx.traj_root,
             prefs=prefs,
             retired=retired,
+            telemetry_submit=telemetry_submit,
         )
     # 本次响应必须使用 request() 之前的已落库画像。request 只操作
     # 有界内存队列；服务缺失、正在停止、队列满或自身异常都不改变
@@ -679,6 +755,7 @@ async def team_sync_endpoint(
             x_xskill_token=x_xskill_token,
             x_xskill_client=x_xskill_client,
             x_xskill_version=x_xskill_version,
+            telemetry_submit=partial(_submit_team_telemetry, request.app),
         ),
     )
 

@@ -11,6 +11,7 @@ import json
 from xskill.dashboard.metrics import DashboardMetrics, load_usage_records
 from xskill.pipeline.registry import (
     get_connection, record_atom_adoption, record_recommendation,
+    record_recommendations,
     reset_trajectories, unregister_dir,
 )
 
@@ -141,6 +142,20 @@ def test_record_recommendation_idempotent_across_syncs(tmp_path):
     assert n == 1
 
 
+def test_record_recommendations_batches_and_deduplicates(tmp_path):
+    db = tmp_path / "r.db"
+    records = [
+        (f"skill-{index}", "main", "recommended", f"sha-{index}")
+        for index in range(20)
+    ]
+    record_recommendations(client_id="alice", records=records, db_path=db)
+    record_recommendations(client_id="alice", records=records, db_path=db)
+    conn = get_connection(db)
+    count = conn.execute("SELECT COUNT(*) FROM recommendation_log").fetchone()[0]
+    conn.close()
+    assert count == 20
+
+
 def test_migration_dedupes_legacy_inflated_rows(tmp_path):
     """存量注水行在建唯一索引前被一次性去重，保留最早一条。"""
     db = tmp_path / "r.db"
@@ -242,10 +257,12 @@ def _init_skill_repo(path):
     g("config", "user.email", "t@t")
     g("config", "user.name", "t")
     (path / "SKILL.md").write_text("v1", encoding="utf-8")
-    g("add", "."); g("commit", "-q", "-m", "v1")
+    g("add", ".")
+    g("commit", "-q", "-m", "v1")
     g("checkout", "-q", "-b", "staging")
     (path / "SKILL.md").write_text("v2-staging", encoding="utf-8")
-    g("add", "."); g("commit", "-q", "-m", "staging work")
+    g("add", ".")
+    g("commit", "-q", "-m", "staging work")
     g("checkout", "-q", "main")
 
 

@@ -83,6 +83,38 @@ def test_manifest_caps_total_slots(tmp_path):
     assert len(ranked) == 80 and len(recommended) == 20
 
 
+def test_manifest_can_defer_recommendation_telemetry(tmp_path, monkeypatch):
+    """team server 可先返回 manifest，再由独立 worker 持久化推荐记录。"""
+    from xskill.team.server import skill_manifest
+
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    _make_skill(skill_dir, "recommended-skill")
+    submitted = []
+    recorded = []
+    monkeypatch.setattr(
+        skill_manifest,
+        "_record_recommendation_telemetry",
+        lambda **kwargs: recorded.append(kwargs),
+    )
+
+    response = skill_manifest.build_manifest(
+        client_id="cid-deferred",
+        skill_dir=skill_dir,
+        probability=0.2,
+        ranked_slots=0,
+        total_slots=1,
+        telemetry_submit=lambda func: submitted.append(func) or True,
+    )
+
+    assert len(response.slots) == 1
+    assert recorded == []
+    assert len(submitted) == 1
+    submitted[0]()
+    assert recorded[0]["client_id"] == "cid-deferred"
+    assert recorded[0]["records"][0][0] == "recommended-skill"
+
+
 def test_manifest_main_only_skill_has_main_side(tmp_path):
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()

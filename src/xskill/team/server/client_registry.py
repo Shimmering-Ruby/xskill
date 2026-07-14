@@ -108,6 +108,7 @@ class ClientRegistry:
         self._state_lock = threading.RLock()
         self._touch_flush_lock = threading.Lock()
         self._client_ids: set[str] = set()
+        self._client_user_names: dict[str, str] = {}
         self._pending_touches: dict[str, tuple[str, str | None]] = {}
         self._touch_timer: threading.Timer | None = None
         self._closed = False
@@ -148,19 +149,30 @@ class ClientRegistry:
         """从持久化注册表加载认证快照（服务重启时恢复）。"""
         conn = self._conn()
         try:
-            client_ids = {
-                row["client_id"]
-                for row in conn.execute("SELECT client_id FROM clients")
-            }
+            rows = conn.execute(
+                "SELECT client_id, user_name FROM clients"
+            ).fetchall()
         finally:
             conn.close()
         with self._state_lock:
-            self._client_ids = client_ids
+            self._client_ids = {row["client_id"] for row in rows}
+            self._client_user_names = {
+                row["client_id"]: row["user_name"] or "" for row in rows
+            }
 
     def _remember_client(self, client_id: str) -> None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT user_name FROM clients WHERE client_id=?", (client_id,),
+            ).fetchone()
+            user_name = (row["user_name"] or "") if row else ""
+        finally:
+            conn.close()
         with self._state_lock:
             if not self._closed:
                 self._client_ids.add(client_id)
+                self._client_user_names[client_id] = user_name
 
     def _raise_if_closed(self) -> None:
         """拒绝关闭后的新注册。"""
@@ -497,6 +509,7 @@ class ClientRegistry:
                 conn.close()
             with self._state_lock:
                 self._client_ids.discard(client_id)
+                self._client_user_names.pop(client_id, None)
                 self._pending_touches.pop(client_id, None)
         return cursor.rowcount > 0
 
@@ -536,6 +549,13 @@ class ClientRegistry:
         finally:
             conn.close()
 
+    def user_name_for(self, client_id: str) -> str:
+        """从认证快照读取用户名，不在 sync 热路径重新打开 SQLite。"""
+        with self._state_lock:
+            if self._closed or client_id not in self._client_ids:
+                raise ValueError(f"unknown client_id: {client_id}")
+            return self._client_user_names.get(client_id, "")
+
     def list(self) -> list[dict]:
         conn = self._conn()
         try:
@@ -551,7 +571,4 @@ class ClientRegistry:
 
         供 upload 落盘 / engine _client_store_root 用。client 不存在 → 抛 ValueError。
         """
-        row = self.get(client_id)
-        if row is None:
-            raise ValueError(f"unknown client_id: {client_id}")
-        return safe_dir_name(row.get("user_name") or None, client_id)
+        return safe_dir_name(self.user_name_for(client_id) or None, client_id)

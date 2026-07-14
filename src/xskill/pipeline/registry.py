@@ -527,6 +527,53 @@ def effective_prefs(user_key: str, *, db_path: Optional[Path] = None) -> dict:
     return {"pinned": pinned, "blocked": blocked, "pin_meta": pin_meta}
 
 
+def manifest_control_plane_snapshot(
+    *, db_path: Optional[Path] = None,
+) -> dict:
+    """一次查询取得 manifest 所需的全部偏好和下线状态。"""
+    conn = get_connection(db_path)
+    try:
+        rows = [dict(row) for row in conn.execute(
+            "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
+            " ORDER BY CASE user_key WHEN ? THEN 0 ELSE 1 END, ts",
+            (GLOBAL_PREF_KEY,),
+        ).fetchall()]
+        retired = {
+            row["skill_name"] for row in conn.execute(
+                "SELECT skill_name FROM skill_lifecycle WHERE state='retired'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    return {"prefs": rows, "retired": retired}
+
+
+def effective_prefs_from_snapshot(snapshot: dict, user_key: str) -> dict:
+    """从控制面快照计算单个用户的全局+个人偏好合并视图。"""
+    rows = [
+        row for row in snapshot.get("prefs", [])
+        if row["user_key"] in (GLOBAL_PREF_KEY, user_key)
+    ]
+    blocked = {row["skill_name"] for row in rows if row["pref"] == "blocked"}
+    pinned: list[str] = []
+    pin_meta: dict = {}
+    for row in rows:
+        skill_name = row["skill_name"]
+        if (
+            row["pref"] == "pinned"
+            and skill_name not in blocked
+            and skill_name not in pinned
+        ):
+            pinned.append(skill_name)
+            pin_meta[skill_name] = {
+                "set_by": row["set_by"],
+                "scope": (
+                    "global" if row["user_key"] == GLOBAL_PREF_KEY else "user"
+                ),
+            }
+    return {"pinned": pinned, "blocked": blocked, "pin_meta": pin_meta}
+
+
 # ---------------------------------------------------------------------------
 # P2-2.4c skill 生命周期
 # ---------------------------------------------------------------------------
@@ -590,12 +637,29 @@ def record_recommendation(*, client_id: str, skill: str, side: str, bucket: str,
     OR IGNORE 命中唯一索引 (client_id,skill,side,sha)：同一曝光对只记首次，
     反复 sync 不再膨胀触发率分母（审计 P0-2）。
     """
+    record_recommendations(
+        client_id=client_id,
+        records=[(skill, side, bucket, sha)],
+        db_path=db_path,
+    )
+
+
+def record_recommendations(
+    *,
+    client_id: str,
+    records: list[tuple[str, str, str, str]],
+    db_path: Optional[Path] = None,
+) -> None:
+    """在一个事务中记录同一用户的一批推荐曝光。"""
+    if not records:
+        return
     conn = get_connection(db_path)
     try:
-        conn.execute(
+        conn.executemany(
             "INSERT OR IGNORE INTO recommendation_log(client_id,skill,side,bucket,sha)"
             " VALUES(?,?,?,?,?)",
-            (client_id, skill, side, bucket, sha or ""),
+            [(client_id, skill, side, bucket, sha or "")
+             for skill, side, bucket, sha in records],
         )
         conn.commit()
     finally:

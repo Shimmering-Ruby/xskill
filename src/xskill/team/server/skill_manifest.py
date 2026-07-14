@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -60,7 +61,7 @@ class _ManifestCatalogCache:
     """
 
     def __init__(
-        self, *, ttl_seconds: float = 1.0,
+        self, *, ttl_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.ttl_seconds = ttl_seconds
@@ -155,7 +156,7 @@ def invalidate_manifest_cache(skill_dir: Path | str | None = None) -> None:
 
 
 def _reset_manifest_cache_for_tests(
-    *, ttl_seconds: float = 1.0,
+    *, ttl_seconds: float = 30.0,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """测试钩子：替换缓存，以便注入时钟并隔离用例。"""
@@ -241,6 +242,7 @@ def build_manifest(
     traj_root: Path | str | None = None,
     prefs: dict | None = None,
     retired: set | None = None,
+    telemetry_submit: Callable[[Callable[[], None]], bool] | None = None,
 ) -> SyncResponse:
     """为 ``client_id`` 现算 manifest。skill 总数不足 total_slots 时全发。
 
@@ -304,6 +306,7 @@ def build_manifest(
         traj_root=traj_root,
         candidate_pool=list(catalog.skills),
         candidate_refs=catalog.refs,
+        persist_recommendations=False,
     )
 
     slots: list[SkillSlot] = []
@@ -319,18 +322,48 @@ def build_manifest(
         )
         if slot is not None:
             slots.append(slot)
-    # 埋点：只记画像推荐位(recommended bucket)——推荐触发率衡量的就是这部分命中。
-    # best-effort，记录失败绝不阻断同步。
-    try:
-        from xskill.pipeline.registry import record_recommendation
-        for s in slots:
-            if s.bucket == "recommended":
-                record_recommendation(client_id=client_id, skill=s.skill_name,
-                                      side=s.side or "main", bucket=s.bucket,
-                                      sha=s.sha or "")
-    except Exception:  # pylint: disable=broad-exception-caught
-        _logger.debug("recommendation telemetry skipped", exc_info=True)
+    # 埋点：只记画像推荐位(recommended bucket)。team server 将写入提交给
+    # 独立的有界单线程 executor，避免 SQLite 写锁进入 /sync 响应路径；直接
+    # 调用 build_manifest 的场景仍同步落盘，保持原有 API 行为。
+    records = [
+        (s.skill_name, s.side or "main", s.bucket, s.sha or "")
+        for s in slots if s.bucket == "recommended"
+    ]
+    recorder = partial(
+        _record_recommendation_telemetry,
+        engine=_engine,
+        client_id=client_id,
+        records=records,
+    )
+    if telemetry_submit is None:
+        recorder()
+    elif not telemetry_submit(recorder):
+        _logger.debug("recommendation telemetry queue full; event skipped")
     return SyncResponse(slots=slots, server_time=time.time())
+
+
+def _record_recommendation_telemetry(
+    *,
+    engine,
+    client_id: str,
+    records: list[tuple[str, str, str, str]],
+) -> None:
+    """批量持久化推荐双向视图和曝光事件；失败不影响 sync。"""
+    if not records:
+        return
+    if engine is not None:
+        try:
+            engine.reco_store.record_many(
+                user_id=client_id,
+                records=[(skill, side, sha) for skill, side, _bucket, sha in records],
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            _logger.debug("recommendation view telemetry skipped", exc_info=True)
+    try:
+        from xskill.pipeline.registry import record_recommendations
+        record_recommendations(client_id=client_id, records=records)
+    except Exception:  # pylint: disable=broad-exception-caught
+        _logger.debug("recommendation exposure telemetry skipped", exc_info=True)
 
 
 def _pick_recommended(
@@ -344,6 +377,7 @@ def _pick_recommended(
     traj_root: Path | str | None,
     candidate_pool: list[Skill] | None = None,
     candidate_refs: dict[str, tuple[str, str | None]] | None = None,
+    persist_recommendations: bool = True,
 ) -> list[Skill]:
     """选 ``recommended`` bucket 的 skill。
 
@@ -369,6 +403,8 @@ def _pick_recommended(
             picked = _engine.get_skill_for_client(
                 user, reco_slots, exclude_names=ranked_names,
                 candidate_pool=candidate_pool, candidate_refs=candidate_refs,
+                persist_recommendations=persist_recommendations,
+                candidate_pool_quality_ordered=True,
             )
             # get_skill_for_client 已记录推荐 + resolve side；只取 reco_slots 个
             return picked[:reco_slots]

@@ -81,6 +81,40 @@ class CanaryConfig:
 # ═══════════════════════════════════════════════════════════════════
 
 def _rev_parse(skill_dir: Path, ref: str) -> str | None:
+    git_marker = Path(skill_dir) / ".git"
+    git_dir: Path | None = None
+    if git_marker.is_dir():
+        git_dir = git_marker
+    elif git_marker.is_file():
+        marker = git_marker.read_text(encoding="utf-8", errors="replace").strip()
+        if marker.startswith("gitdir:"):
+            candidate = Path(marker.removeprefix("gitdir:").strip())
+            git_dir = candidate if candidate.is_absolute() else skill_dir / candidate
+
+    # manifest 扫描只查询本地分支。直接读 loose/packed refs 可避免一个 300
+    # skill 仓的请求波次启动 600 个 git 子进程；reftable 等特殊布局仍走
+    # rev-parse 回退。
+    if git_dir is not None:
+        loose = git_dir / "refs" / "heads" / ref
+        if loose.is_file():
+            value = loose.read_text(encoding="ascii", errors="replace").strip()
+            if value and not value.startswith("ref:"):
+                return value
+        packed = git_dir / "packed-refs"
+        if packed.is_file():
+            target = f"refs/heads/{ref}"
+            for line in packed.read_text(
+                encoding="ascii", errors="replace",
+            ).splitlines():
+                if not line or line.startswith(("#", "^")):
+                    continue
+                sha, _, name = line.partition(" ")
+                if name == target:
+                    return sha
+        # 传统 loose/packed 布局中没有该分支就是确实不存在，无需起子进程。
+        if (git_dir / "refs").exists() or packed.exists():
+            return None
+
     code, out, _ = run_git(["rev-parse", ref], cwd=str(skill_dir))
     if code != 0 or not out:
         return None

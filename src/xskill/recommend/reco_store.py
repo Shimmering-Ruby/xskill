@@ -33,13 +33,29 @@ class RecoStore(_SqliteStore):
 
     def record(self, *, user_id: str, skill_name: str, side: str, sha: str) -> None:
         """幂等 upsert 一条推荐记录。"""
+        self.record_many(
+            user_id=user_id,
+            records=[(skill_name, side, sha)],
+        )
+
+    def record_many(
+        self,
+        *,
+        user_id: str,
+        records: list[tuple[str, str, str]],
+    ) -> None:
+        """在一个事务中幂等 upsert 同一用户的一批推荐记录。"""
+        if not records:
+            return
+        now = _now()
         conn = self._conn()
         try:
-            conn.execute(
+            conn.executemany(
                 "INSERT INTO recommendations (user_id, skill_name, side, sha, ts)"
                 " VALUES (?, ?, ?, ?, ?)"
                 " ON CONFLICT(user_id, skill_name, side) DO UPDATE SET sha=excluded.sha, ts=excluded.ts",
-                (user_id, skill_name, side, sha, _now()),
+                [(user_id, skill_name, side, sha, now)
+                 for skill_name, side, sha in records],
             )
             conn.commit()
         finally:

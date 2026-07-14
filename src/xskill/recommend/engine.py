@@ -351,11 +351,15 @@ class SkillRecommendEngine:
         *, exclude_names: Optional[set[str]] = None,
         candidate_pool: Optional[list["Skill"]] = None,
         candidate_refs: Optional[dict[str, tuple[str, str | None]]] = None,
+        persist_recommendations: bool = True,
+        candidate_pool_quality_ordered: bool = False,
     ) -> list["Skill"]:
         """80% 质量 + 20% 相关性，质量不足相关性回填；记录推荐 + resolve side。
 
         ``exclude_names``：从候选池排除的 skill 名（如已占 ranked 槽位的），供
         ``_pick_recommended`` 在 ranked 之外选 recommended 位用。
+        ``candidate_pool_quality_ordered`` 表示调用方已按同一质量键排好候选，
+        可避免 manifest 热路径重复读取每个 skill 的评分文件。
         """
         source_pool = (
             list(candidate_pool)
@@ -368,17 +372,23 @@ class SkillRecommendEngine:
 
         quality_ratio = self.rcfg["quality_ratio"]
         qn = min(math.ceil(skill_num * quality_ratio), len(pool))
-        quality_keys = {
-            s.name: self._quality_key(
-                s, candidate_refs.get(s.name) if candidate_refs is not None else None,
+        if candidate_pool_quality_ordered:
+            quality_ordered = pool
+        else:
+            quality_keys = {
+                s.name: self._quality_key(
+                    s,
+                    candidate_refs.get(s.name)
+                    if candidate_refs is not None else None,
+                )
+                for s in pool
+            }
+            quality_ordered = sorted(
+                pool,
+                key=lambda s: quality_keys[s.name],
+                reverse=True,
             )
-            for s in pool
-        }
-        quality = sorted(
-            pool,
-            key=lambda s: quality_keys[s.name],
-            reverse=True,
-        )[:qn]
+        quality = quality_ordered[:qn]
         quality_names = {s.name for s in quality}
 
         relevance: list["Skill"] = []
@@ -416,11 +426,7 @@ class SkillRecommendEngine:
         chosen = quality + relevance
         # 回填：质量池不足时从 pool（ux 序）补齐至 skill_num
         if len(chosen) < skill_num:
-            for s in sorted(
-                pool,
-                key=lambda s: quality_keys[s.name],
-                reverse=True,
-            ):
+            for s in quality_ordered:
                 if len(chosen) >= skill_num:
                     break
                 if s not in chosen:
@@ -429,6 +435,7 @@ class SkillRecommendEngine:
         chosen = chosen[:skill_num]
         # 记录推荐 + resolve side（双向）
         client_user.recommended_skills = []
+        recommendation_records: list[tuple[str, str, str]] = []
         for s in chosen:
             if isinstance(s, dict) and s.get("source") == "skillhub":
                 side = "main"
@@ -451,10 +458,13 @@ class SkillRecommendEngine:
                     sha = staging_sha(s.path) if side == "staging" else (main_sha(s.path) or "")
                 skill_name = s.name
                 rec = {"skill": skill_name, "branch": side, "hash": sha}
-            self.reco_store.record(
-                user_id=client_user.user_id, skill_name=skill_name, side=side, sha=sha,
-            )
+            recommendation_records.append((skill_name, side, sha))
             client_user.recommended_skills.append(rec)
+        if persist_recommendations:
+            self.reco_store.record_many(
+                user_id=client_user.user_id,
+                records=recommendation_records,
+            )
         return chosen
 
     # ── 5.4 resolve_side：staging 优先达量 ───────────────────────
