@@ -267,6 +267,7 @@ class TestEngineSkillhubPool:
         entries = sorted(eng._skillhub_entries(), key=lambda e: e["source_path"])
         stale_id = entries[0]["skill_id"]
         shutil.rmtree(first)
+        eng.skillhub._scan_snapshot_expires_at = 0.0  # 模拟 TTL 到期：增删最迟 5s 后被扫到
 
         q = FakeEmbed(dim=4).encode("django migration helper")
         q = q / np.linalg.norm(q)
@@ -369,6 +370,7 @@ class TestEngineSkillhubPool:
             _write_hub_skill(
                 hub_dir, "hub-a/foo", "django migration helper", name="foo",
             )
+            eng.skillhub._scan_snapshot_expires_at = 0.0  # 模拟 TTL 到期：增删最迟 5s 后被扫到
             second = build_manifest(
                 client_id="client-one",
                 skill_dir=skill_dir,
