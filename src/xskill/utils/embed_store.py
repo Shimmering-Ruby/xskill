@@ -13,6 +13,21 @@ from pathlib import Path
 import numpy as np
 
 
+_CACHE_LOCKS_GUARD = threading.Lock()
+_CACHE_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _cache_lock(cache_path: Path) -> threading.RLock:
+    """Return one process-local lock for every normalized cache path."""
+    key = str(cache_path.expanduser().resolve())
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CACHE_LOCKS[key] = lock
+        return lock
+
+
 class EmbedStore:
     """``cache_path`` 上的「文本哈希 → 向量」缓存，只对未命中文本现算。"""
 
@@ -24,8 +39,9 @@ class EmbedStore:
         self.model_id = str(getattr(embed_client, "model", "") or "")
         self._vectors: dict[str, np.ndarray] = {}
         self._touched: set[str] = set()
-        self._lock = threading.Lock()
-        self._load()
+        self._lock = _cache_lock(self.cache_path)
+        with self._lock:
+            self._load()
 
     def _load(self) -> None:
         try:
@@ -35,14 +51,17 @@ class EmbedStore:
             return
         # 缓存损坏或换了 embedding 模型 → 整体作废，从零重建。
         if not isinstance(data, dict) or data.get("model") != self.model_id:
+            self._vectors = {}
             return
         vectors = data.get("vectors")
         if isinstance(vectors, dict):
             self._vectors = vectors
 
     def _save(self) -> None:
-        # tmp 名带 pid：多进程写同一缓存时各写各的临时文件，replace 原子收尾。
-        temp_path = self.cache_path.with_suffix(f".tmp.{os.getpid()}")
+        # tmp 名带 pid + thread id：并发写各用独立临时文件，replace 原子收尾。
+        temp_path = self.cache_path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.get_ident()}"
+        )
         with open(temp_path, "wb") as cache_file:
             pickle.dump(
                 {"model": self.model_id, "vectors": self._vectors}, cache_file,
@@ -54,6 +73,11 @@ class EmbedStore:
         if not texts:
             return np.empty((0, 0), dtype=np.float32)
         with self._lock:
+            # Another EmbedStore instance may have written this path since this
+            # instance was constructed. Reload under the shared path lock before
+            # the read/modify/write cycle so concurrent backfills cannot clobber
+            # each other's vectors.
+            self._load()
             text_hashes = [
                 hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts
             ]
@@ -79,6 +103,7 @@ class EmbedStore:
     def cached_vectors(self, texts: list[str]) -> list[np.ndarray | None]:
         """只读入口：返回每条文本已缓存的向量，未命中为 None，绝不触发 encode。"""
         with self._lock:
+            self._load()
             return [
                 self._vectors.get(
                     hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -93,6 +118,7 @@ class EmbedStore:
         调用方不要调，否则会把其他调用方的缓存修剪掉。
         """
         with self._lock:
+            self._load()
             self._vectors = {
                 text_hash: vector
                 for text_hash, vector in self._vectors.items()

@@ -153,11 +153,11 @@ xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/L
 除了 server 按画像推送的技能,client 还可以主动搜 server 的 skillhub 并把命中的技能拉到本地:
 
 ```bash
-xskill search docker compose        # 关键词搜 skillhub,命中的直接拉到本地并装进各生态
+xskill search docker compose        # BM25+语义混合检索 skillhub,命中的直接拉到本地并安装
 xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
 ```
 
-- `search` 只按关键词匹配 skillhub 目录(含团队成员上传的技能),与推荐画像无关;输出每个命中技能的名字、描述和本机绝对路径。
+- `search` 使用 BM25 关键词+语义向量混合检索 skillhub 目录(含团队成员上传的技能),与推荐画像无关;语义服务不可用时自动退化为 BM25，并输出名字、描述、来源、评分和本机绝对路径。
 - 搜下来的技能落在 `~/.xskill/search_skills/`,本地最多保留 **10 个槽位**,按最近命中滚动淘汰,不受 sync 清理影响。
 - `upload` 会先校验 `SKILL.md` frontmatter,server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。
 - 本机语义搜索已从 CLI 移除(不再有 `xskill search traj|skill <query>`);如需按语义检索本机轨迹/技能,请用 dashboard 或 API(`POST /api/v1/skills/search`)。

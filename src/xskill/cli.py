@@ -404,6 +404,11 @@ def cmd_update(args) -> int:
         return 1
     try:
         if current_version is not None and Version(latest) <= current_version:
+            if updater._check_server_fallback(
+                current, current_version, reason="pypi_not_ahead", restart=False,
+            ):
+                print("已通过 team server wheel 升级完成")
+                return 0
             print(f"已是最新版本 ({current})")
             return 0
     except Exception:
@@ -570,8 +575,9 @@ def _team_client_http_and_headers():
 def cmd_search_hub(args, http=None, headers=None) -> int:
     """`xskill search <query>` —— 搜 server skillhub，命中的拉到本地滚动槽位。
 
-    结果只按关键词匹配 skillhub 目录（含 user_skill_hub 上传件），与推荐画像
-    无关。每个命中 skill 下载解包到 ``~/.xskill/search_skills/<skill_id>/``、
+    结果由 BM25 关键词与语义向量混合检索 skillhub 目录（含 user_skill_hub 上传件），
+    与推荐画像无关；语义服务不可用时自动退化为 BM25。每个命中 skill 下载解包到
+    ``~/.xskill/search_skills/<skill_id>/``、
     打 ``.xskill_search.json`` 标记、装进本机生态；本地最多保留 10 个槽位，
     按最近命中滚动淘汰。``http``/``headers`` 参数仅测试注入用。
     """

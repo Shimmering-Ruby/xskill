@@ -45,6 +45,10 @@ from xskill.utils.sanitize import sanitize_trajectory_text
 logger = logging.getLogger("xskill.team.server.api")
 router = APIRouter(prefix="/api/v1/team")
 
+_SKILL_ARCHIVE_MAX_FILES = 2048
+_SKILL_ARCHIVE_MAX_FILE_BYTES = 50 * 1024 * 1024
+_SKILL_ARCHIVE_MAX_TOTAL_BYTES = 100 * 1024 * 1024
+
 
 class _Ctx:
     """模块级上下文单例。init_team_context 填，端点读。"""
@@ -789,7 +793,7 @@ async def team_skill_hub_search(
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
 ) -> dict:
-    """关键词搜 skillhub（含 user_skill_hub 上传件）。与推荐画像完全无关。"""
+    """BM25 + 语义向量混合检索 skillhub；与推荐画像完全无关。"""
     _auth(x_xskill_token, x_xskill_client)
     hub = _ctx.skillhub
     if hub is None or not getattr(hub, "enabled", False):
@@ -863,9 +867,25 @@ def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
     except zipfile.BadZipFile as bad_zip:
         raise HTTPException(status_code=400, detail=f"invalid zip: {bad_zip}") from bad_zip
     with archive:
-        if "SKILL.md" not in archive.namelist():
+        members = archive.infolist()
+        files = [member for member in members if not member.is_dir()]
+        root_skill_files = [member for member in files if member.filename == "SKILL.md"]
+        if not root_skill_files:
             raise HTTPException(status_code=400,
                                 detail="SKILL.md missing at archive root")
+        if len(root_skill_files) != 1:
+            raise HTTPException(status_code=400,
+                                detail="archive contains duplicate SKILL.md entries")
+        if len(files) > _SKILL_ARCHIVE_MAX_FILES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"skill archive contains more than {_SKILL_ARCHIVE_MAX_FILES} files",
+            )
+        if any(member.file_size > _SKILL_ARCHIVE_MAX_FILE_BYTES for member in files):
+            raise HTTPException(status_code=413, detail="skill archive contains an oversized file")
+        if sum(member.file_size for member in files) > _SKILL_ARCHIVE_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413,
+                                detail="skill archive expands beyond 100MB")
         try:
             frontmatter, _body = parse_strict(
                 archive.read("SKILL.md").decode("utf-8"))
@@ -876,24 +896,47 @@ def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
         from xskill.recommend.skillhub import _safe_id_part
         dest_dir = (Path(hub.dir) / "user_skill_hub" / owner_dir
                     / _safe_id_part(display_name))
-        tmp_dir = dest_dir.with_name(f".{dest_dir.name}.tmp")
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        dest_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(tempfile.mkdtemp(
+            prefix=f".{dest_dir.name}.tmp.", dir=dest_dir.parent,
+        ))
         extracted_root = tmp_dir.resolve()
-        for info in archive.infolist():
-            target = (tmp_dir / info.filename).resolve()
-            try:
-                target.relative_to(extracted_root)
-            except ValueError:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                raise HTTPException(status_code=400,
-                                    detail=f"unsafe archive path: {info.filename}")
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(info) as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+        extracted_bytes = 0
+        try:
+            for info in members:
+                target = (tmp_dir / info.filename).resolve()
+                try:
+                    target.relative_to(extracted_root)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400, detail=f"unsafe archive path: {info.filename}",
+                    )
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                file_bytes = 0
+                with archive.open(info) as src, open(target, "wb") as dst:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        file_bytes += len(chunk)
+                        extracted_bytes += len(chunk)
+                        if (file_bytes > _SKILL_ARCHIVE_MAX_FILE_BYTES
+                                or extracted_bytes > _SKILL_ARCHIVE_MAX_TOTAL_BYTES):
+                            raise HTTPException(
+                                status_code=413, detail="skill archive expands beyond limit",
+                            )
+                        dst.write(chunk)
+        except HTTPException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+        except (OSError, RuntimeError, zipfile.BadZipFile, EOFError) as extract_error:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=400, detail=f"invalid zip content: {extract_error}",
+            ) from extract_error
     shutil.rmtree(dest_dir, ignore_errors=True)
     tmp_dir.replace(dest_dir)
     source_path = dest_dir.relative_to(Path(hub.dir)).as_posix()
@@ -913,35 +956,28 @@ def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
 
 
 def _backfill_skill_embed(hub, description: str) -> None:
-    """上传成功后 fire-and-forget 对这一条 description 补一次 corpus embed（best-effort）。
-
-    单独 daemon 线程内写 EmbedStore，失败仅 log warning，绝不阻断 upload 响应；
-    下一次 search 重建索引时该向量即进语义通道。
-    """
-    if not description or getattr(hub, "embed_client", None) is None:
-        return
-    from xskill.recommend.skillhub import EMBED_CACHE_NAME
-    from xskill.utils.embed_store import EmbedStore
-
-    def _run() -> None:
-        try:
-            EmbedStore(Path(hub.dir) / EMBED_CACHE_NAME, hub.embed_client).encode_cached(
-                [description],
-            )
-        except Exception as embed_error:
-            logger.warning("skill_hub upload embed backfill failed: %s", embed_error)
-
-    threading.Thread(target=_run, name="skillhub-upload-embed", daemon=True).start()
+    """上传成功后有界、异步补这一条 corpus 向量；忙时保留 BM25 可用性。"""
+    if not hub.backfill_description_embedding(description):
+        logger.debug("skill_hub upload embed backfill skipped or semantic search disabled")
 
 
 def _make_skillhub_archive(skill_dir: Path) -> bytes:
-    """Pack a non-git skillhub directory as a zip archive for thin clients."""
+    """Pack a deterministic, content-addressable skill archive for thin clients."""
     skill_dir = Path(skill_dir)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(skill_dir.rglob("*")):
-            if p.is_file():
-                zf.write(p, p.relative_to(skill_dir).as_posix())
+            relative = p.relative_to(skill_dir)
+            if (p.is_symlink() or not p.is_file()
+                    or any(part in (".git", "__pycache__") for part in relative.parts)
+                    or p.name == ".ux_scores.jsonl"
+                    or p.name.startswith(".xskill_")):
+                continue
+            info = zipfile.ZipInfo(relative.as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = (p.stat().st_mode & 0o777) << 16
+            zf.writestr(info, p.read_bytes())
     return buf.getvalue()
 
 
