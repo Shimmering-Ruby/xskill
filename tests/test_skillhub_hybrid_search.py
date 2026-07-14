@@ -6,12 +6,14 @@ max_embed=0 关闭语义、端点新字段（source/ux_avg/match）、upload 后
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import threading
+from unittest.mock import AsyncMock
 
 import numpy as np
 from fastapi import FastAPI
@@ -481,6 +483,16 @@ def test_endpoint_serves_hot_result_without_anyio_worker(tmp_path, monkeypatch):
                       params={"query": "docker"}, headers=headers)
     assert second.status_code == 200
     assert second.json() == first.json()
+
+    cooperative_yield = AsyncMock()
+    monkeypatch.setattr(server_api.asyncio, "sleep", cooperative_yield)
+    direct = asyncio.run(server_api.team_skill_hub_search(
+        query="docker",
+        x_xskill_token=headers["X-Xskill-Token"],
+        x_xskill_client=headers["X-Xskill-Client"],
+    ))
+    assert direct == first.json()
+    assert cooperative_yield.await_count == 2
 
 
 def test_endpoint_source_marks_uploader(tmp_path):
