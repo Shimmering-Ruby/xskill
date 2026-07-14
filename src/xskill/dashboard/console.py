@@ -21,7 +21,7 @@ from xskill.pipeline.registry import (
     PinQuotaExceeded,
     clear_skill_pref,
     effective_prefs,
-    get_connection,
+    pooled_connection,
     prefs_for,
     purge_skill_records,
     retire_skill,
@@ -54,12 +54,9 @@ def _total_slots() -> int:
 
 def _traj_user_map(db_path: Optional[Path]) -> dict[str, str]:
     """traj_id(stem) → user_key。直接读 trajectories.user_key（P2-2.1）。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT filename fn, user_key uk FROM trajectories").fetchall()
-    finally:
-        conn.close()
     out: dict[str, str] = {}
     for r in rows:
         fn = r["fn"] or ""
@@ -99,12 +96,9 @@ def reco_trigger_for_users(*, db_path: Optional[Path], skill_dir: Path,
     from xskill.dashboard.metrics import load_usage_records
 
     c2u = _client_to_user(registry)
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         reco_rows = conn.execute(
             "SELECT client_id, skill, ts FROM recommendation_log").fetchall()
-    finally:
-        conn.close()
 
     exposures: dict[tuple, int] = {}
     for r in reco_rows:
@@ -302,8 +296,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         ctx = _require_team_ctx()
         from xskill.dashboard.metrics import load_usage_records
         user = ident["user"]
-        conn = get_connection(db_path)
-        try:
+        with pooled_connection(db_path) as conn:
             row = conn.execute(
                 "SELECT COUNT(*) n, COALESCE(SUM(tasks_extracted),0) atoms"
                 " FROM trajectories WHERE user_key=?", (user,)).fetchone()
@@ -317,8 +310,6 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             adoption = conn.execute(
                 "SELECT atom_id, skill, weightscore FROM atom_adoption"
             ).fetchall()
-        finally:
-            conn.close()
         # atom_id 内嵌 traj_id（atom_<traj_id>_NNNN）——按包含判定归属
         my_adopted = [dict(a) for a in adoption
                       if any(stem in (a["atom_id"] or "") for stem in my_stems)]

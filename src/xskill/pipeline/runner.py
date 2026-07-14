@@ -1433,15 +1433,12 @@ class DirectoryWatcher:
         """
         try:
             from xskill.events import EventStore
-            from xskill.pipeline.registry import get_connection
-            conn = get_connection(kw.get("db_path"))
-            try:
+            from xskill.pipeline.registry import pooled_connection
+            with pooled_connection(kw.get("db_path")) as conn:
                 row = conn.execute(
                     "SELECT user_key FROM trajectories"
                     " WHERE watch_dir_id=? AND filename=?",
                     (wd_id, fname)).fetchone()
-            finally:
-                conn.close()
             EventStore(kw.get("db_path")).emit_feedback(
                 actor=(row["user_key"] or "") if row else "",
                 skill=skill_name, traj_id=traj_id,

@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from xskill.pipeline.registry import get_connection
+from xskill.pipeline.registry import pooled_connection
 
 
 def _pct(num: float, den: float) -> float:
@@ -439,13 +439,10 @@ class DashboardMetrics:
         P2-2.1 起直接读 ``trajectories.user_key``（team 桶入库时写、存量由
         scripts/backfill_user_key.py 回填），不再 JOIN ``watch_dirs.label``——
         source 唯一，不留两条归因链路。非 team 轨迹 user_key 为空 → '(local)'。"""
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             rows = conn.execute(
                 "SELECT filename fn, user_key uk FROM trajectories"
             ).fetchall()
-        finally:
-            conn.close()
         out: dict[str, str] = {}
         for r in rows:
             fn = r["fn"] or ""
@@ -454,8 +451,7 @@ class DashboardMetrics:
         return out
 
     def overview(self) -> dict:
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             r = conn.execute(
                 "SELECT COUNT(*) trajs, COALESCE(SUM(tasks_extracted),0) atoms,"
                 " SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) done,"
@@ -464,8 +460,6 @@ class DashboardMetrics:
                 " SUM(CASE WHEN retry_count>0 THEN 1 ELSE 0 END) retried"
                 " FROM trajectories"
             ).fetchone()
-        finally:
-            conn.close()
         n = r["trajs"] or 0
         # 处理成功率按终态口径：done/(done+error+filtered)，在途轨迹不进分母
         # （否则新批入库时比率被瞬间稀释——审计 P2-10）。
@@ -499,8 +493,7 @@ class DashboardMetrics:
             " THEN COALESCE(NULLIF(t.source_harness,''),:hlabel)"
             " ELSE wd.ecosystem END"
         )
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             # HAVING 排除 0 轨迹幻影行（空 team_client 目录经 LEFT JOIN 出成
             # unknown 行——审计 P3-13）。
             rows = conn.execute(
@@ -510,21 +503,16 @@ class DashboardMetrics:
                 f" GROUP BY {eco_expr} HAVING COUNT(t.id)>0 ORDER BY trajs DESC",
                 {"hlabel": self._unknown_harness},
             ).fetchall()
-        finally:
-            conn.close()
         return [self._row(r, "ecosystem") for r in rows]
 
     def by_model(self) -> list[dict]:
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             rows = conn.execute(
                 "SELECT COALESCE(source_model,:mlabel) model, COUNT(*) trajs,"
                 " COALESCE(SUM(tasks_extracted),0) atoms FROM trajectories"
                 " GROUP BY COALESCE(source_model,:mlabel) ORDER BY trajs DESC",
                 {"mlabel": self._unknown_model},
             ).fetchall()
-        finally:
-            conn.close()
         return [self._row(r, "model") for r in rows]
 
     def users(self) -> list[dict]:
@@ -532,8 +520,7 @@ class DashboardMetrics:
         一个 ecosystem='team_client' 的 watch_dir(label=client_id)。按 client 聚合
         其轨迹数 / 原子数 / 最近活跃时间。非 team 部署无此类目录 → 返回 []。
         """
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             # last_active 用 discovered_at（用户轨迹产生时间），不用 updated_at
             # （那是流水线自己的写时间，rebuild 会把它全刷新——审计 P3-13）。
             rows = conn.execute(
@@ -544,8 +531,6 @@ class DashboardMetrics:
                 " WHERE wd.ecosystem='team_client' AND wd.label IS NOT NULL"
                 " AND wd.label!='' GROUP BY wd.label ORDER BY trajs DESC"
             ).fetchall()
-        finally:
-            conn.close()
         return [{"client_id": r["client_id"], "trajs": r["trajs"] or 0,
                  "atoms": r["atoms"] or 0, "last_active": r["last_active"] or ""}
                 for r in rows]
@@ -569,12 +554,9 @@ class DashboardMetrics:
         db_dir = Path(self._db).parent if self._db else get_registry_db_path().parent
         counter: Counter = Counter()
         tag_users: dict[str, set] = defaultdict(set)
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             wds = [(r["path"], r["label"], r["ecosystem"]) for r in conn.execute(
                 "SELECT path, label, ecosystem FROM watch_dirs").fetchall()]
-        finally:
-            conn.close()
         for wp, label, eco in wds:
             root = _resolve_local_root(wp, db_dir)
             client = label if (eco == "team_client" and label) else None
@@ -614,14 +596,11 @@ class DashboardMetrics:
 
     def adoption_rate(self) -> dict:
         """原子采纳率 = 采纳原子(atom_adoption 去重) / 总原子(tasks_extracted 求和)。"""
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             adopted = conn.execute(
                 "SELECT COUNT(DISTINCT atom_id) FROM atom_adoption").fetchone()[0]
             total = conn.execute(
                 "SELECT COALESCE(SUM(tasks_extracted),0) FROM trajectories").fetchone()[0]
-        finally:
-            conn.close()
         # 分子是历史累计事件、分母是当前存量，reset/unregister 已同步清理分子；
         # 仍封顶 100% 防残余时间窗错位读成 >100%（审计 P1-7）。
         return {"adopted": adopted, "total": total,
@@ -629,12 +608,9 @@ class DashboardMetrics:
 
     def promotion_rate(self) -> dict:
         """canary 晋升率 = 晋升数 / 已裁决数(晋升+拒绝+超时丢弃)。"""
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             rows = dict(conn.execute(
                 "SELECT action, COUNT(*) n FROM canary_decision GROUP BY action").fetchall())
-        finally:
-            conn.close()
         promoted = rows.get("promoted", 0)
         decided = promoted + rows.get("rejected", 0) + rows.get("timeout_discarded", 0)
         return {"promoted": promoted, "decided": decided, "rate": _pct(promoted, decided)}
@@ -648,14 +624,11 @@ class DashboardMetrics:
         单 skill 触发率 = 采用的曝光对 / 该 skill 曝光对，天然 ≤100%；
         总触发率 = 全部采用对 / 全部曝光对。
         """
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             exposures = conn.execute(
                 "SELECT client_id, skill, MIN(ts) ts FROM recommendation_log"
                 " WHERE client_id IS NOT NULL AND client_id!=''"
                 " GROUP BY client_id, skill").fetchall()
-        finally:
-            conn.close()
         traj_client = self._traj_client_map()
         # (client, skill) → 最早使用时间
         first_use: dict[tuple[str, str], str] = {}

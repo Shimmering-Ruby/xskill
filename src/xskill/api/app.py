@@ -709,15 +709,14 @@ async def api_unregister_dir(req: dict):
 @router.get("/trajectories/logs")
 async def api_trajectory_logs(filename: str, dir: str = ""):
     """Return stored process logs for a trajectory."""
-    from xskill.pipeline.registry import list_watch_dirs, get_connection
+    from xskill.pipeline.registry import list_watch_dirs, pooled_connection
     import json as _json
 
     dirs = list_watch_dirs()
     for d in dirs:
         if dir and d["path"] != dir:
             continue
-        conn = get_connection()
-        try:
+        with pooled_connection() as conn:
             row = conn.execute(
                 "SELECT process_log FROM trajectories"
                 " WHERE watch_dir_id=? AND filename=?",
@@ -729,20 +728,17 @@ async def api_trajectory_logs(filename: str, dir: str = ""):
                 except Exception:
                     entries = [{"t": "", "tag": "raw", "msg": row["process_log"]}]
                 return {"logs": entries, "filename": filename}
-        finally:
-            conn.close()
     return {"logs": [], "filename": filename}
 
 
 @router.get("/trajectories/list")
 async def api_list_trajectories():
     """List all trajectories across registered directories with full status."""
-    from xskill.pipeline.registry import list_watch_dirs, get_connection, get_status_counts
+    from xskill.pipeline.registry import list_watch_dirs, pooled_connection, get_status_counts
     dirs = list_watch_dirs()
     all_trajs = []
     for d in dirs:
-        conn = get_connection()
-        try:
+        with pooled_connection() as conn:
             rows = conn.execute(
                 "SELECT filename, has_meta, has_embedding, status, process_action,"
                 " skill_generated, skill_used, canary_side, ux_score, error_msg,"
@@ -769,8 +765,6 @@ async def api_list_trajectories():
                     "indexed_at": r["indexed_at"],
                     "updated_at": r["updated_at"],
                 })
-        finally:
-            conn.close()
     status_counts = get_status_counts()
     return {"trajectories": all_trajs, "count": len(all_trajs), "status_counts": status_counts}
 

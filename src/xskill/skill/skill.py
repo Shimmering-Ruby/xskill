@@ -348,8 +348,7 @@ class Skill:
             paths = self._registry.trajectories_using(self.name)  # 备选反查
             # 直接按 filename 找
             from xskill.pipeline import registry as _r
-            conn = _r.get_connection(self._registry._db_path)
-            try:
+            with _r.pooled_connection(self._registry._db_path) as conn:
                 rows = conn.execute(
                     "SELECT w.path, t.filename FROM trajectories t "
                     "JOIN watch_dirs w ON t.watch_dir_id=w.id "
@@ -359,8 +358,6 @@ class Skill:
                 for r in rows:
                     out.append(_Traj(path=Path(r["path"]) / r["filename"],
                                      registry=self._registry))
-            finally:
-                conn.close()
         return out
 
     def __repr__(self) -> str:
