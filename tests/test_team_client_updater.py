@@ -82,7 +82,7 @@ def test_pypi_query_failure_falls_back_to_server_wheel(monkeypatch):
     monkeypatch.setattr(
         updater_mod,
         "_server_version",
-        lambda server_url, join_token, client_id: {
+        lambda server_url, join_token, client_id, use_proxy=False: {
             "version": "1.2.0",
             "wheel_available": True,
             "wheel_filename": "xskill-1.2.0-py3-none-any.whl",
@@ -95,6 +95,7 @@ def test_pypi_query_failure_falls_back_to_server_wheel(monkeypatch):
         client_id: str,
         dest_dir: Path,
         filename: str | None,
+        use_proxy: bool = False,
     ) -> Path:
         wheel = dest_dir / (filename or "xskill-1.2.0-py3-none-any.whl")
         wheel.write_bytes(b"wheel")
@@ -124,7 +125,7 @@ def test_pypi_install_failure_can_fallback_to_server_wheel(monkeypatch):
     monkeypatch.setattr(
         updater_mod,
         "_server_version",
-        lambda server_url, join_token, client_id: {
+        lambda server_url, join_token, client_id, use_proxy=False: {
             "version": "1.2.0",
             "wheel_available": True,
             "wheel_filename": "xskill-1.2.0-py3-none-any.whl",
@@ -137,6 +138,7 @@ def test_pypi_install_failure_can_fallback_to_server_wheel(monkeypatch):
         client_id: str,
         dest_dir: Path,
         filename: str | None,
+        use_proxy: bool = False,
     ) -> Path:
         wheel = dest_dir / (filename or "xskill-1.2.0-py3-none-any.whl")
         wheel.write_bytes(b"wheel")
@@ -166,7 +168,7 @@ def test_server_fallback_skips_non_newer_server_version(monkeypatch):
     monkeypatch.setattr(
         updater_mod,
         "_server_version",
-        lambda server_url, join_token, client_id: {
+        lambda server_url, join_token, client_id, use_proxy=False: {
             "version": "1.2.0",
             "wheel_available": True,
             "wheel_filename": "xskill-1.2.0-py3-none-any.whl",
@@ -201,9 +203,140 @@ def test_pip_respects_system_index_by_default(monkeypatch):
 
     monkeypatch.setattr(updater_mod.subprocess, "run", fake_run)
 
-    AutoUpdater()._install("1.2.3")
-    assert "-i" not in captured[-1], "缺省不许传 -i,必须尊重系统 pip 配置"
+    def pip_install_cmd(commands):
+        return next(c for c in commands
+                    if "install" in c and any("1.2.3" in part for part in c))
 
+    captured.clear()
+    AutoUpdater()._install("1.2.3")
+    assert "-i" not in pip_install_cmd(captured), "缺省不许传 -i,必须尊重系统 pip 配置"
+
+    captured.clear()
     AutoUpdater(pypi_url="https://mirror.example/simple/")._install("1.2.3")
-    idx = captured[-1].index("-i")
-    assert captured[-1][idx + 1] == "https://mirror.example/simple/"
+    install_cmd = pip_install_cmd(captured)
+    idx = install_cmd.index("-i")
+    assert install_cmd[idx + 1] == "https://mirror.example/simple/"
+
+
+def test_server_requests_default_to_no_proxy_opener(monkeypatch):
+    """回归(2026-07-14):server 方向 urllib 走默认 opener 会吃系统代理,内网 IP
+    被代理黑洞超时,PyPI 失败后的 server 回退也一起死。缺省必须用
+    ProxyHandler({}) 直连;use_proxy=True 才恢复走代理。"""
+    import json
+    import urllib.request
+
+    recorded_handlers: list[tuple] = []
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps({"version": "1.0.0"}).encode("utf-8")
+
+    class _FakeOpener:
+        def open(self, request, timeout=None):
+            return _FakeResponse()
+
+    def fake_build_opener(*handlers):
+        recorded_handlers.append(handlers)
+        return _FakeOpener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+
+    updater_mod._server_version("http://server", "tok", "cid")
+    assert len(recorded_handlers[-1]) == 1
+    assert isinstance(recorded_handlers[-1][0], urllib.request.ProxyHandler)
+    assert recorded_handlers[-1][0].proxies == {}, "缺省必须注入空代理映射直连"
+
+    updater_mod._server_version("http://server", "tok", "cid", use_proxy=True)
+    assert recorded_handlers[-1] == (), "use_proxy=True 时不得注入 ProxyHandler,走系统代理"
+
+
+class _FakeProc:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_pip_success_but_wrong_version_falls_back_to_server(monkeypatch):
+    """回归(2026-07-14):镜像只同步到旧版时 pip 可能返回 0 却没把版本推到目标,
+    装后必须另起解释器核验;核验不符一律视为安装失败并走 server 回退。"""
+    installed_wheels: list[str] = []
+
+    monkeypatch.setattr(updater_mod, "_current_version", lambda package: "1.0.0")
+    monkeypatch.setattr(updater_mod, "_latest_pypi_version", lambda package: "1.2.0")
+    monkeypatch.setattr(
+        updater_mod,
+        "_server_version",
+        lambda server_url, join_token, client_id, use_proxy=False: {
+            "version": "1.2.0",
+            "wheel_available": True,
+            "wheel_filename": "xskill-1.2.0-py3-none-any.whl",
+        },
+    )
+
+    def fake_download(
+        server_url, join_token, client_id, dest_dir, filename, use_proxy=False,
+    ):
+        wheel = dest_dir / (filename or "xskill-1.2.0-py3-none-any.whl")
+        wheel.write_bytes(b"wheel")
+        return wheel
+
+    monkeypatch.setattr(updater_mod, "_download_server_wheel", fake_download)
+    monkeypatch.setattr(updater_mod, "_restart", lambda: None)
+
+    def fake_run(cmd, **kwargs):
+        if "install" in cmd:
+            return _FakeProc(returncode=0)
+        return _FakeProc(returncode=0, stdout="1.0.0\n")
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", fake_run)
+
+    updater = AutoUpdater(server_url="http://server", client_id="cid", join_token="tok")
+    monkeypatch.setattr(
+        updater,
+        "_install_wheel",
+        lambda wheel: installed_wheels.append(wheel.name) or True,
+    )
+
+    updater._check_and_update()
+
+    assert installed_wheels == ["xskill-1.2.0-py3-none-any.whl"]
+
+
+def test_pip_and_server_fallback_both_fail_logs_warning(monkeypatch, caplog):
+    """回归(2026-07-14):pip 与 server 回退双双失败时,过去只在 DEBUG 记录,全链
+    静默。现在必须留一条 WARNING,一行含目标版本 + pip 失败摘要 + server 回退失败摘要。"""
+    import logging
+
+    monkeypatch.setattr(updater_mod, "_current_version", lambda package: "1.0.0")
+    monkeypatch.setattr(updater_mod, "_latest_pypi_version", lambda package: "1.2.0")
+    monkeypatch.setattr(
+        updater_mod,
+        "_server_version",
+        lambda server_url, join_token, client_id, use_proxy=False: None,
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _FakeProc(returncode=1, stderr="ERROR: 镜像无 1.2.0")
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", fake_run)
+
+    updater = AutoUpdater(server_url="http://server", client_id="cid", join_token="tok")
+    with caplog.at_level(logging.WARNING, logger="xskill.team.client.updater"):
+        updater._check_and_update()
+
+    combined = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "1.2.0" in record.getMessage()
+        and "镜像无 1.2.0" in record.getMessage()
+        and "查询 server 版本失败" in record.getMessage()
+    ]
+    assert combined, [r.getMessage() for r in caplog.records]
