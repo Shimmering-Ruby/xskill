@@ -38,6 +38,7 @@ HOT_QUERY_TERMS = (
     "机器学习", "搜索", "备份", "日志", "流水线", "告警",
 )
 ALL_QUERY_TERMS = PEAK_QUERY_TERMS + HOT_QUERY_TERMS
+WARM_QUERY_TERM = "自动化"
 
 
 def _dead_port_base_url() -> str:
@@ -322,6 +323,9 @@ async def _run_scenario_a_round(
     """常态混合负载单轮：峰值探测 burst + 中文吞吐波 + 并发 /sync + 面板轮询 + health 采样。"""
     headers_list = _client_headers(prepared)
     await warmup_sync_and_wait_idle(client, headers_list)
+    warm_search = await search_once(client, headers_list[0], WARM_QUERY_TERM)
+    if warm_search["status"] != 200:
+        raise RuntimeError(f"search cache warmup failed: {warm_search}")
     with state.lock:
         state.embed_max_active = 0
     window_embed_start = state.snapshot()["embedding"]["request_count"]
