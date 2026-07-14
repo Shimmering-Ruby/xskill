@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -507,26 +508,32 @@ def _register_explorer_endpoints(router: APIRouter, db_path: Optional[Path],
 
     @router.get("/api/v1/dashboard/user/{user_key}/scatter")
     def user_scatter_ep(user_key: str, method: str = "tsne") -> dict:
-        """画像散点（图③,P3-3.4）:原子点降维投影 + 兴趣中心 + skill 向量。
-        ``method`` ∈ {tsne, umap}——同一批向量、同款前置,换降维算法对比效果。"""
+        """画像散点（图③,P3-3.4）:事件触发物化 + 端点只读（#106）。命中缓存直返
+        坐标包;未命中/指纹过期 → 入队一次重算并返回 ``{"status":"pending"}``(HTTP 200)。
+        无常驻服务的独立只读实例退化为直算并物化一次。"""
+        if method not in ("tsne", "umap"):
+            raise HTTPException(status_code=400,
+                                detail=f"未知投影算法 {method!r}（可选 tsne/umap）")
         from xskill.dashboard.profile_viz import (
             ProfileViz, profile_db_for, skillhub_index_for)
+        from xskill.pipeline.registry import (
+            read_scatter_cache, write_scatter_cache)
         pdb = profile_db_for(db_path)
         if not pdb.is_file():
             raise HTTPException(status_code=404,
                                 detail="画像库不存在(team 模式未启用或还没有画像)")
         profile_viz = ProfileViz(pdb, skill_dir=skill_dir, db_path=db_path,
                                  skillhub_index=skillhub_index_for(db_path))
-        try:
-            return profile_viz.user_scatter(user_key, method=method)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        except KeyError as e:
-            # 画像按 client_id 存,而看板行的 uid 对命名用户是 user_name(#97)
-            # ——按名反查 client_id 重试,匿名/未知名字保持 404。
+
+        # 廉价内容指纹:输入不变则命中,不做投影。画像按 client_id 存,看板行的 uid
+        # 对命名用户是 user_name(#97)——首次拿不到指纹时按名反查 client_id 重试。
+        effective_key = user_key
+        fingerprint = profile_viz.scatter_input_fingerprint(user_key)
+        if fingerprint is None:
             from xskill.config import get_registry_db_path
             from xskill.team.server.client_registry import ClientRegistry
-            db_dir = Path(db_path).parent if db_path else get_registry_db_path().parent
+            db_dir = (Path(db_path).parent if db_path
+                      else get_registry_db_path().parent)
             clients_db = db_dir / "team_clients.db"
             resolved_client_id = None
             if clients_db.is_file():
@@ -535,10 +542,31 @@ def _register_explorer_endpoints(router: APIRouter, db_path: Optional[Path],
                         clients_db).find_by_user_name(user_key)
                 except ValueError:
                     resolved_client_id = None
-            if not resolved_client_id or resolved_client_id == user_key:
-                raise HTTPException(status_code=404, detail=str(e)) from e
-            try:
-                return profile_viz.user_scatter(resolved_client_id, method=method)
-            except KeyError as retry_error:
-                raise HTTPException(
-                    status_code=404, detail=str(retry_error)) from retry_error
+            if resolved_client_id and resolved_client_id != user_key:
+                fingerprint = profile_viz.scatter_input_fingerprint(
+                    resolved_client_id)
+                if fingerprint is not None:
+                    effective_key = resolved_client_id
+        if fingerprint is None:
+            raise HTTPException(status_code=404,
+                                detail=f"用户 {user_key!r} 无画像")
+
+        cached = read_scatter_cache(effective_key, method, db_path=db_path)
+        if cached is not None and cached["fingerprint"] == fingerprint:
+            return json.loads(cached["payload"])
+
+        service = None
+        try:
+            from xskill.api.app import _profile_refresh_ref
+            service = _profile_refresh_ref.get("instance")
+        except Exception:  # pylint: disable=broad-exception-caught
+            service = None
+        if service is not None and service.submit_scatter(effective_key, method):
+            return {"status": "pending", "user": effective_key, "method": method,
+                    "note": "画像散点计算中，请稍候…"}
+
+        # 独立只读实例(无常驻服务)或服务不收:直算并物化,下次即命中。
+        payload = profile_viz.user_scatter(effective_key, method=method)
+        write_scatter_cache(effective_key, method, fingerprint, payload,
+                            db_path=db_path)
+        return payload

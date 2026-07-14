@@ -3,16 +3,33 @@ from __future__ import annotations
 
 import logging
 import math
+import multiprocessing
 import queue
 import threading
 import time
-from typing import Callable
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from pathlib import Path
+from typing import Callable, Optional
 
 from xskill.recommend.client_interest import ClientInterest
 
 logger = logging.getLogger("xskill.team.server.profile_refresh")
 
 _STOP = object()
+
+
+def _shutdown_scatter_pool(pool) -> None:
+    """尽力关闭散点进程池（兼容假池/旧签名），不阻塞停机。"""
+    shutdown = getattr(pool, "shutdown", None)
+    if shutdown is None:
+        return
+    try:
+        shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        shutdown(wait=False)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("scatter pool shutdown failed", exc_info=True)
 
 
 class ProfileRefreshService:
@@ -31,6 +48,9 @@ class ProfileRefreshService:
         settle_delay: float = 0.0,
         interest_factory: Callable[[str], ClientInterest] = ClientInterest,
         autostart: bool = True,
+        scatter_materialize: bool = True,
+        scatter_pool_factory: Optional[Callable[[], object]] = None,
+        scatter_registry_db: Optional[Path] = None,
     ):
         if workers < 1:
             raise ValueError("workers 必须 >= 1")
@@ -70,7 +90,25 @@ class ProfileRefreshService:
             "embed_batches": 0,
             "embed_items": 0,
             "reused_vector_items": 0,
+            "scatter_submitted": 0,
+            "scatter_deduped": 0,
+            "scatter_materialized": 0,
         }
+        # #106 散点物化子系统:进程池 + 单派发线程懒创建,事件触发重算落盘。
+        # 引擎不具备取数属性(测试用假引擎)时整体关闭,不建线程/进程池。
+        self._scatter_enabled = (
+            scatter_materialize
+            and hasattr(engine, "skill_dir")
+            and hasattr(engine, "profile_store")
+        )
+        self._scatter_pool_factory = scatter_pool_factory
+        self._scatter_registry_db = scatter_registry_db
+        self._scatter_pool = None
+        self._scatter_pool_disabled = False
+        self._scatter_thread: Optional[threading.Thread] = None
+        self._scatter_queue: queue.Queue = queue.Queue()
+        self._scatter_inflight: set[tuple[str, str]] = set()
+        self._scatter_viz = None
         if autostart:
             self.start()
 
@@ -166,6 +204,16 @@ class ProfileRefreshService:
                 continue
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(remaining)
+
+        # 散点子系统停机:停派发线程 + 关进程池（在 with 块已置 _stopping,不再建新的）。
+        scatter_thread = self._scatter_thread
+        if scatter_thread is not None:
+            self._scatter_queue.put(_STOP)
+            scatter_thread.join(max(0.0, deadline - time.monotonic()))
+        if self._scatter_pool is not None:
+            _shutdown_scatter_pool(self._scatter_pool)
+            self._scatter_pool = None
+
         return all(not thread.is_alive() for thread in threads)
 
     def _worker(self) -> None:
@@ -199,8 +247,9 @@ class ProfileRefreshService:
                 self._metrics["queued"] -= 1
                 self._metrics["running"] += 1
 
+            changed = False
             if self._wait_for_settle():
-                self._run_once(client_id)
+                changed = self._run_once(client_id)
 
             run_again = False
             with self._condition:
@@ -212,7 +261,13 @@ class ProfileRefreshService:
                     self._metrics["rerun"] += 1
                     run_again = True
             if run_again:
-                self._run_once(client_id)
+                changed = self._run_once(client_id) or changed
+
+            # 事件触发（在 finalize 之前,保证 wait_idle 解除时投递已发生）:画像真的
+            # 变了才投递该用户 tsne+umap 两个方法的散点重算,指纹未变的空转在重算侧跳过。
+            if changed and self._scatter_enabled:
+                for scatter_method in ("tsne", "umap"):
+                    self.submit_scatter(client_id, scatter_method)
 
             with self._condition:
                 self._states.pop(client_id, None)
@@ -230,7 +285,8 @@ class ProfileRefreshService:
                 self._condition.wait(timeout=remaining)
             return False
 
-    def _run_once(self, client_id: str) -> None:
+    def _run_once(self, client_id: str) -> bool:
+        """执行一次画像更新;返回是否产生了变更（供事件触发散点重算判定）。"""
         try:
             result = self.engine.update_user_interest(
                 self.interest_factory(client_id),
@@ -240,11 +296,13 @@ class ProfileRefreshService:
             with self._condition:
                 self._metrics["failed"] += 1
             logger.exception("profile refresh failed for client %s", client_id)
-            return
+            return False
+        cancelled = getattr(result, "cancelled", False)
+        changed = getattr(result, "changed", True)
         with self._condition:
-            if getattr(result, "cancelled", False):
+            if cancelled:
                 self._metrics["cancelled"] += 1
-            elif getattr(result, "changed", True):
+            elif changed:
                 self._metrics["completed"] += 1
             else:
                 self._metrics["unchanged"] += 1
@@ -257,8 +315,134 @@ class ProfileRefreshService:
             self._metrics["reused_vector_items"] += int(
                 getattr(result, "reused_vector_items", 0),
             )
+        return bool(changed and not cancelled)
 
     def _should_commit(self) -> bool:
         """供引擎在最终画像 upsert 前检查停机状态。"""
         with self._condition:
             return self._accepting
+
+    # ── #106 散点物化子系统 ──────────────────────────────────────
+
+    def submit_scatter(self, user_key: str, method: str) -> bool:
+        """投递一次散点物化重算;同 ``(user_key, method)`` 在飞则合并去重,不重复入队。
+        服务停止/未启用散点物化 → False。真正的重算在单派发线程上串行执行。"""
+        if not self._scatter_enabled:
+            return False
+        key = (user_key, method)
+        with self._condition:
+            if not self._accepting or self._stopping:
+                return False
+            if key in self._scatter_inflight:
+                self._metrics["scatter_deduped"] += 1
+                return True
+            self._scatter_inflight.add(key)
+            self._metrics["scatter_submitted"] += 1
+        self._ensure_scatter_dispatcher()
+        self._scatter_queue.put(key)
+        return True
+
+    def _ensure_scatter_dispatcher(self) -> None:
+        """懒启动单条散点派发线程（串行消费重算队列）。"""
+        with self._condition:
+            if self._scatter_thread is not None or self._stopping:
+                return
+            self._scatter_thread = threading.Thread(
+                target=self._scatter_dispatch_loop,
+                name="xskill-scatter-dispatch",
+                daemon=True,
+            )
+            self._scatter_thread.start()
+
+    def _scatter_dispatch_loop(self) -> None:
+        while True:
+            key = self._scatter_queue.get()
+            if key is _STOP:
+                return
+            user_key, method = key
+            try:
+                self._recompute_scatter(user_key, method)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning("scatter recompute failed for %s/%s",
+                               user_key, method, exc_info=True)
+            finally:
+                with self._condition:
+                    self._scatter_inflight.discard(key)
+
+    def _recompute_scatter(self, user_key: str, method: str) -> None:
+        """取数(父进程)→ 指纹比对跳过空转 → 进程池纯数学 → 物化落盘。"""
+        from xskill.dashboard.profile_viz import compute_scatter_payload
+        from xskill.pipeline.registry import (
+            read_scatter_cache, write_scatter_cache)
+        viz = self._scatter_profile_viz()
+        fingerprint = viz.scatter_input_fingerprint(user_key)
+        if fingerprint is None:
+            return  # 无画像,不物化
+        cached = read_scatter_cache(user_key, method,
+                                    db_path=self._scatter_registry_db)
+        if cached is not None and cached["fingerprint"] == fingerprint:
+            return  # 指纹未变,事件触发的空转直接跳过
+        scatter_inputs = viz.gather_scatter_inputs(user_key, method)
+        payload = self._project_scatter(scatter_inputs, compute_scatter_payload)
+        if payload is None:
+            return  # 子进程异常,保留旧缓存
+        write_scatter_cache(user_key, method, fingerprint, payload,
+                            db_path=self._scatter_registry_db)
+        with self._condition:
+            self._metrics["scatter_materialized"] += 1
+
+    def _project_scatter(self, scatter_inputs: dict, worker) -> Optional[dict]:
+        """把 500 轮纯 Python 循环推到进程池(GIL 隔离);池不可用→线程内直算一次,
+        子进程异常→None(保留旧缓存)。``worker`` 为模块顶层可 pickle 的纯函数。"""
+        pool = self._acquire_scatter_pool()
+        if pool is None:
+            return worker(scatter_inputs)
+        try:
+            return pool.submit(worker, scatter_inputs).result()
+        except BrokenProcessPool:
+            with self._condition:
+                self._scatter_pool = None  # 池坏了,下次重建
+            logger.warning("scatter process pool broken; computing inline once")
+            return worker(scatter_inputs)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("scatter projection failed in subprocess", exc_info=True)
+            return None
+
+    def _acquire_scatter_pool(self):
+        """懒创建 spawn 单 worker 进程池;建池失败(极端环境)→ None,退回线程内直算。"""
+        with self._condition:
+            if self._stopping or self._scatter_pool_disabled:
+                return None
+            if self._scatter_pool is not None:
+                return self._scatter_pool
+        try:
+            if self._scatter_pool_factory is not None:
+                pool = self._scatter_pool_factory()
+            else:
+                context = multiprocessing.get_context("spawn")
+                pool = ProcessPoolExecutor(max_workers=1, mp_context=context)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("scatter process pool unavailable; inline fallback",
+                           exc_info=True)
+            with self._condition:
+                self._scatter_pool_disabled = True
+            return None
+        with self._condition:
+            if self._stopping:
+                _shutdown_scatter_pool(pool)
+                return None
+            self._scatter_pool = pool
+            return pool
+
+    def _scatter_profile_viz(self):
+        """懒构造读侧 ProfileViz（从引擎旁推 profile_db / skill_dir / skillhub 索引）。"""
+        if self._scatter_viz is None:
+            from xskill.dashboard.profile_viz import ProfileViz
+            engine = self.engine
+            self._scatter_viz = ProfileViz(
+                engine.profile_store.db_path,
+                skill_dir=engine.skill_dir,
+                skillhub_index=getattr(
+                    getattr(engine, "skillhub", None), "index_cache_path", None),
+            )
+        return self._scatter_viz

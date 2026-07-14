@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import pickle
 from collections import Counter
@@ -407,6 +408,95 @@ def _skillhub_index_vecs(cache_path: Optional[Path]) -> dict[str, np.ndarray]:
         return {}
 
 
+_PROJECTORS = {"tsne": _TSNE2D, "umap": _UMAP2D}
+
+
+def _file_signature(path: Optional[Path]) -> str:
+    """文件的廉价内容签名(size:mtime_ns);缺失/不可读 → '-'。只 stat,不读内容。"""
+    if not path:
+        return "-"
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return "-"
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def compute_scatter_payload(scatter_inputs: dict) -> dict:
+    """散点降维的纯计算核心（模块顶层、可 pickle）——进程池 worker 与直算共用。
+
+    入参为父进程取好的纯数据（向量矩阵 + 逐点/技能元数据），出参为前端契约的
+    坐标包 dict。子进程只做数学,不碰 SQLite/配置/文件（#106 multiprocessing 范式）。
+    """
+    if scatter_inputs.get("cold"):
+        return {"user": scatter_inputs["user"],
+                "updated_at": scatter_inputs["updated_at"],
+                "points": [], "centers": [], "skills": [], "clusters": [],
+                "method": scatter_inputs["method"],
+                "note": scatter_inputs["note"]}
+
+    method = scatter_inputs["method"]
+    combined = np.asarray(scatter_inputs["combined"], dtype=float)
+    n_points = scatter_inputs["n_points"]
+    n_centers = scatter_inputs["n_centers"]
+    coords_all = _PROJECTORS[method]().fit(combined)
+    coords = coords_all[:n_points]
+    center_coords = coords_all[n_points:n_points + n_centers]
+    skill_coords = coords_all[n_points + n_centers:]
+
+    meta = scatter_inputs["meta"]
+    assignment = scatter_inputs["assignment"]
+    out_points = []
+    cluster_tags: dict[int, Counter] = {}
+    for i, m in enumerate(meta):
+        cluster = int(assignment[i])
+        out_points.append({
+            "x": round(float(coords[i, 0]), 4),
+            "y": round(float(coords[i, 1]), 4),
+            "atom_id": m.get("atom_id") or "",
+            "summary": (m.get("summary") or "")[:200],
+            "ux": m.get("ux"),
+            "cluster": cluster,
+        })
+        tag_counter = cluster_tags.setdefault(cluster, Counter())
+        for tag in (m.get("tags") or []):
+            tag = str(tag).strip().lower()
+            if tag:
+                tag_counter[tag] += 1
+
+    clusters = [
+        {"cluster": c,
+         "label": (cluster_tags.get(c) or Counter()).most_common(1)[0][0]
+         if cluster_tags.get(c) else f"簇 {c}"}
+        for c in range(max(len(center_coords), 1))
+    ]
+
+    skills = [
+        {"name": name,
+         "x": round(float(skill_coords[i, 0]), 4),
+         "y": round(float(skill_coords[i, 1]), 4),
+         "use_count": use_count,
+         "source": source}
+        for i, (name, use_count, source) in enumerate(scatter_inputs["skill_meta"])
+    ]
+
+    return {
+        "user": scatter_inputs["user"],
+        "updated_at": scatter_inputs["updated_at"],
+        "points": out_points,
+        "centers": [{"cluster": i,
+                     "x": round(float(center_coords[i, 0]), 4),
+                     "y": round(float(center_coords[i, 1]), 4)}
+                    for i in range(len(center_coords))],
+        "clusters": clusters,
+        "skills": skills,
+        "method": method,
+        "total": scatter_inputs["total"],
+        "shown": len(out_points),
+        "sampled": scatter_inputs["sampled"],
+    }
+
+
 class ProfileViz:
     """画像可视化数据装配（读 ProfileStore + skill 索引,纯 numpy,无 LLM）。"""
 
@@ -420,28 +510,41 @@ class ProfileViz:
 
     # ── §2.3 画像散点 ────────────────────────────────────────────
 
-    _PROJECTORS = {"tsne": _TSNE2D, "umap": _UMAP2D}
+    def scatter_input_fingerprint(self, user_key: str) -> Optional[str]:
+        """散点输入的廉价内容指纹:画像修订(原子集+embedding 模型) + skill/skillhub
+        索引文件签名。只查一列 revision + stat 两个缓存文件,不做矩阵计算;输入不变
+        指纹不变。无画像行 → None（端点据此转 404,不入队）。"""
+        revision = self._store.get_revision(user_key)
+        if revision is None:
+            return None
+        skill_index = (Path(self._skill_dir) / ".skill_index.pkl"
+                       if self._skill_dir else None)
+        parts = [revision["source_revision"], revision["embed_model"],
+                 _file_signature(skill_index),
+                 _file_signature(self._skillhub_index)]
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
-    def user_scatter(self, user_key: str, method: str = "tsne") -> dict:
-        """降维 2D 散点数据。``method`` ∈ {tsne, umap}（默认 tsne）。无画像行 →
-        KeyError（端点转 404）;有行无点（冷启动）→ ``points=[]`` + ``note``,
-        显式标注不造假。
+    def gather_scatter_inputs(self, user_key: str, method: str = "tsne") -> dict:
+        """取数(读库/读 skill 索引)装配 ``compute_scatter_payload`` 的纯数据入参。
+
+        读侧全部留在此处（父进程）:返回的 dict 只含可 pickle 纯数据 + 内容指纹,
+        供进程池 worker 直接消费。无画像行 → KeyError（端点转 404）;有行无点
+        （冷启动）→ ``cold=True`` + ``note``,显式标注不造假。
 
         points/centers/skill 向量一次性联合投影（两种算法都没有 PCA 那种线性
-        basis 可以对新点复用——邻域结构必须从投影一开始就联合建立,分开投影
-        会让簇位置互相对不上）。
+        basis 可对新点复用——邻域结构必须从投影一开始就联合建立,分开投影会让
+        簇位置互相对不上）,故此处只组装 combined,不拆分。
         """
-        projector_cls = self._PROJECTORS.get(method)
-        if projector_cls is None:
+        if method not in _PROJECTORS:
             raise ValueError(f"未知投影算法 {method!r}（可选 tsne/umap）")
         profile = self._store.load(user_key)
         stored = self._store.load_points(user_key)
         if profile is None or stored is None:
             raise KeyError(f"用户 {user_key!r} 无画像")
+        fingerprint = self.scatter_input_fingerprint(user_key) or ""
         if stored["points"] is None or not len(stored["meta"]):
-            return {"user": user_key, "updated_at": stored["updated_at"],
-                    "points": [], "centers": [], "skills": [], "clusters": [],
-                    "method": method,
+            return {"cold": True, "user": user_key, "method": method,
+                    "updated_at": stored["updated_at"], "fingerprint": fingerprint,
                     "note": "画像冷启动:该用户还没有可投影的原子"}
 
         points = np.asarray(stored["points"], dtype=float)
@@ -488,60 +591,28 @@ class ProfileViz:
         if skill_entries:
             blocks.append(np.vstack([v for _, _, v, _ in skill_entries]))
         combined = np.vstack(blocks)
-        coords_all = projector_cls().fit(combined)
-        coords = coords_all[:len(points)]
-        center_coords = coords_all[len(points):len(points) + len(centers)]
-        skill_coords = coords_all[len(points) + len(centers):]
-
-        out_points = []
-        cluster_tags: dict[int, Counter] = {}
-        for i, m in enumerate(meta):
-            cluster = int(assignment[i])
-            out_points.append({
-                "x": round(float(coords[i, 0]), 4),
-                "y": round(float(coords[i, 1]), 4),
-                "atom_id": m.get("atom_id") or "",
-                "summary": (m.get("summary") or "")[:200],
-                "ux": m.get("ux"),
-                "cluster": cluster,
-            })
-            tag_counter = cluster_tags.setdefault(cluster, Counter())
-            for tag in (m.get("tags") or []):
-                tag = str(tag).strip().lower()
-                if tag:
-                    tag_counter[tag] += 1
-
-        clusters = [
-            {"cluster": c,
-             "label": (cluster_tags.get(c) or Counter()).most_common(1)[0][0]
-             if cluster_tags.get(c) else f"簇 {c}"}
-            for c in range(max(len(center_coords), 1))
-        ]
-
-        skills = [
-            {"name": name,
-             "x": round(float(skill_coords[i, 0]), 4),
-             "y": round(float(skill_coords[i, 1]), 4),
-             "use_count": use_count,
-             "source": source}  # 共同数据契约:native / skillhub(据向量来自哪个缓存)
-            for i, (name, use_count, _vec, source) in enumerate(skill_entries)
-        ]
 
         return {
+            "cold": False,
             "user": user_key,
-            "updated_at": stored["updated_at"],
-            "points": out_points,
-            "centers": [{"cluster": i,
-                         "x": round(float(center_coords[i, 0]), 4),
-                         "y": round(float(center_coords[i, 1]), 4)}
-                        for i in range(len(center_coords))],
-            "clusters": clusters,
-            "skills": skills,
             "method": method,
-            "total": total,          # 该用户原子总数
-            "shown": len(out_points),  # 实际投影/渲染的点数
-            "sampled": sampled,      # True → 已分层抽样,页面标注"显示 N/M"
+            "updated_at": stored["updated_at"],
+            "fingerprint": fingerprint,
+            "combined": combined,
+            "n_points": len(points),
+            "n_centers": len(centers),
+            "meta": meta,
+            "assignment": [int(cluster) for cluster in assignment],
+            "skill_meta": [(name, use_count, source)
+                           for name, use_count, _vec, source in skill_entries],
+            "total": total,
+            "sampled": sampled,
         }
+
+    def user_scatter(self, user_key: str, method: str = "tsne") -> dict:
+        """降维 2D 散点数据（gather → 纯计算）。保持既有契约,供无缓存/无进程池
+        时的直算回退与既有调用方使用。"""
+        return compute_scatter_payload(self.gather_scatter_inputs(user_key, method))
 
     # ── §2.5 admin 用户聚类 graph ────────────────────────────────
 
