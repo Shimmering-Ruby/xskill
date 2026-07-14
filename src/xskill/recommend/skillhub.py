@@ -42,6 +42,7 @@ EMBED_CACHE_NAME = ".skillhub_embed_cache.pkl"
 
 BM25_K1 = 1.2
 BM25_B = 0.75
+BM25_RANK_CACHE_CAPACITY = 256
 RRF_RANK_CONSTANT = 60
 QUERY_VECTOR_CACHE_CAPACITY = 256
 QUERY_EMBED_FAILURE_COOLDOWN_SECONDS = 5.0
@@ -337,6 +338,8 @@ class SkillHub:
         rank_cache_lock = index_bundle["bm25_rank_cache_lock"]
         with rank_cache_lock:
             cached = rank_cache.get(cache_key)
+            if cached is not None:
+                rank_cache.move_to_end(cache_key)
         if cached is not None:
             return cached
 
@@ -372,7 +375,14 @@ class SkillHub:
             for rank, entry_index in enumerate(ranked, start=1)
         }
         with rank_cache_lock:
-            return rank_cache.setdefault(cache_key, ranks)
+            cached = rank_cache.get(cache_key)
+            if cached is not None:
+                rank_cache.move_to_end(cache_key)
+                return cached
+            rank_cache[cache_key] = ranks
+            while len(rank_cache) > BM25_RANK_CACHE_CAPACITY:
+                rank_cache.popitem(last=False)
+            return ranks
 
     def _semantic_ranks(self, index_bundle: dict,
                         normalized_query: str) -> dict[int, int]:
@@ -585,7 +595,7 @@ class SkillHub:
             "document_frequencies": document_frequencies,
             "document_lengths": document_lengths,
             "average_document_length": average_document_length,
-            "bm25_rank_cache": {},
+            "bm25_rank_cache": OrderedDict(),
             "bm25_rank_cache_lock": threading.Lock(),
             "vector_present_indices": vector_present_indices,
             "corpus_matrix": corpus_matrix,
