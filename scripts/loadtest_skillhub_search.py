@@ -352,6 +352,9 @@ async def _run_scenario_a_round(
         warm_results.append(warm_result)
         if warm_result["status"] != 200:
             raise RuntimeError(f"steady search cache warmup failed: {warm_result}")
+    snapshot_refresh = await search_once(client, headers_list[0], WARM_QUERY_TERM)
+    if snapshot_refresh["status"] != 200:
+        raise RuntimeError(f"steady snapshot refresh failed: {snapshot_refresh}")
 
     health_samples: list[dict[str, Any]] = []
     sync_results: list[dict[str, Any]] = []
@@ -404,6 +407,7 @@ async def _run_scenario_a_round(
         "diagnostic_duplicate": _search_stats(duplicate_results),
         "diagnostic_peak": _search_stats(burst_results),
         "diagnostic_warmup": _search_stats(warm_results),
+        "diagnostic_snapshot_refresh": snapshot_refresh,
         "health": _health_stats(health_samples),
         "sync": _sync_stats(sync_results),
         "panel": _panel_stats(panel_results),
@@ -521,6 +525,11 @@ async def run_all_scenarios(
                 control_plane_harness._process_threads(server["process"].pid)
             )
         await asyncio.sleep(0.1)
+        snapshot_refresh = await search_once(
+            client, headers_list[0], WARM_QUERY_TERM,
+        )
+        if snapshot_refresh["status"] != 200:
+            raise RuntimeError(f"scenario B snapshot refresh failed: {snapshot_refresh}")
         threads_after_warmup = control_plane_harness._process_threads(server["process"].pid)
         warmup_thread_counts.append(threads_after_warmup)
         baseline_threads = max(warmup_thread_counts)
@@ -537,6 +546,7 @@ async def run_all_scenarios(
         "search": _search_stats(down_results),
         "thread_warmup": _search_stats(thread_warmup_results),
         "thread_stabilization": _search_stats(thread_stabilization_results),
+        "diagnostic_snapshot_refresh": snapshot_refresh,
         "threads_before_warmup": threads_before_warmup,
         "threads_after_warmup": threads_after_warmup,
         "warmup_thread_counts": warmup_thread_counts,
