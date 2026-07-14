@@ -231,6 +231,17 @@ CREATE TABLE IF NOT EXISTS skill_trigger_eval (
     catalog_size INTEGER      -- 诱饵清单平均大小(竞争对手数)
 );
 CREATE INDEX IF NOT EXISTS idx_trig_skill ON skill_trigger_eval(skill);
+
+-- #106 画像散点物化缓存:事件触发重算落盘,scatter 端点退化为纯读。
+-- payload=JSON 坐标包;fingerprint=散点输入的廉价内容指纹(输入不变则命中不重算)。
+CREATE TABLE IF NOT EXISTS scatter_cache (
+    user_key    TEXT NOT NULL,
+    method      TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    computed_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_key, method)
+);
 """
 
 
@@ -467,6 +478,42 @@ def record_usage(*, step: str, model: str, prompt: int, completion: int,
             " VALUES(?,?,?,?,?,?,?)",
             (step, model, int(prompt), int(completion), int(total),
              float(cost_usd), price_source),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# #106 画像散点物化缓存 —— 事件触发重算写入，scatter 端点只读命中
+# ---------------------------------------------------------------------------
+
+def read_scatter_cache(user_key: str, method: str, *,
+                       db_path: Optional[Path] = None) -> Optional[dict]:
+    """返回某用户某算法的散点缓存 ``{payload, fingerprint, computed_at}``；无行 → None。"""
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT payload, fingerprint, computed_at FROM scatter_cache"
+            " WHERE user_key=? AND method=?",
+            (user_key, method),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"payload": row["payload"], "fingerprint": row["fingerprint"],
+                "computed_at": row["computed_at"]}
+
+
+def write_scatter_cache(user_key: str, method: str, fingerprint: str,
+                        payload: dict, *,
+                        db_path: Optional[Path] = None) -> None:
+    """物化一条散点坐标包（``payload`` dict → JSON 存储），覆盖旧值并刷新 computed_at。"""
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    with pooled_connection(db_path) as conn:
+        conn.execute(
+            "INSERT INTO scatter_cache(user_key,method,fingerprint,payload)"
+            " VALUES(?,?,?,?)"
+            " ON CONFLICT(user_key,method) DO UPDATE SET"
+            " fingerprint=excluded.fingerprint, payload=excluded.payload,"
+            " computed_at=datetime('now')",
+            (user_key, method, fingerprint, payload_json),
         )
         conn.commit()
 

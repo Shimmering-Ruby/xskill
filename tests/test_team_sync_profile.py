@@ -121,7 +121,10 @@ def team_runtime(tmp_path):
         profile_db=tmp_path / "profile.db",
         client_registry=registry,
     )
-    service = ProfileRefreshService(engine, workers=2, queue_size=64)
+    # 本组测试只验画像刷新,不测散点物化——关掉散点子系统,避免事件触发派发线程/
+    # 进程池的异步副作用（#106 的散点路径由 test_scatter_materialize 专门覆盖）。
+    service = ProfileRefreshService(engine, workers=2, queue_size=64,
+                                    scatter_materialize=False)
     set_recommend_engine(engine)
     server_api.init_team_context(
         join_token="tok",
@@ -323,7 +326,8 @@ def test_thirty_clients_return_while_embedding_is_bounded(tmp_path, monkeypatch)
         profile_db=tmp_path / "profile.db",
         client_registry=registry,
     )
-    service = ProfileRefreshService(engine, workers=4, queue_size=64)
+    service = ProfileRefreshService(engine, workers=4, queue_size=64,
+                                    scatter_materialize=False)
     set_recommend_engine(engine)
     server_api.init_team_context(
         join_token="tok",

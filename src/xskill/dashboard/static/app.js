@@ -1434,7 +1434,7 @@ function convexHull(pts) {
 let SCATTER_METHOD = location.pathname.includes('umap') ? 'umap' : 'tsne';
 let _lastProfileUid = null;
 const METHOD_LABEL = { tsne: 't-SNE', umap: 'UMAP' };
-async function openUserProfile(uid) {
+async function openUserProfile(uid, isRetry) {
   _lastProfileUid = uid;
   const box = document.getElementById('user-profile');
   if (!box) return;
@@ -1443,6 +1443,12 @@ async function openUserProfile(uid) {
   try { d = await j('api/v1/dashboard/user/' + encodeURIComponent(uid) + '/scatter?method=' + SCATTER_METHOD); }
   catch (e) {
     box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400 text-xs">${esc(uid)}:${esc(e.message)}</div>`;
+    return;
+  }
+  // #106 端点只读:未物化时返回 pending,显示占位并在 5s 后自动重试一次(不做复杂轮询)。
+  if (d && d.status === 'pending') {
+    box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400 text-xs">${esc(uid)} 的画像散点计算中…${isRetry ? '' : '（约几秒后自动刷新）'}</div>`;
+    if (!isRetry) setTimeout(() => { if (_lastProfileUid === uid) openUserProfile(uid, true).catch(console.error); }, 5000);
     return;
   }
   if (!(d.points || []).length) {
