@@ -12,10 +12,8 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import threading
-from types import SimpleNamespace
 
 import numpy as np
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -149,6 +147,26 @@ def test_search_reuses_cached_ux_values(tmp_path, monkeypatch):
     assert len(first) == len(second) == 2
     assert len(loaded_paths) == 2
     assert all(result["ux_avg"] is None for result in second)
+
+
+def test_search_hot_path_reuses_snapshot_index_without_recopying_entries(
+    tmp_path, monkeypatch,
+):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    hub = SkillHub(
+        enabled=True, hub_dir=hub_dir, embed_client=None,
+        scan_ttl_seconds=60.0,
+    )
+    first = hub.search("alpha", limit=5)
+
+    def fail_entries(**_kwargs):
+        raise AssertionError("hot search rebuilt entries instead of reusing the snapshot index")
+
+    monkeypatch.setattr(hub, "_entries", fail_entries)
+    second = hub.search("alpha", limit=5)
+
+    assert first == second
 
 
 # ── 语义通道降级三条路 ─────────────────────────────────────────

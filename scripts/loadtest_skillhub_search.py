@@ -329,6 +329,21 @@ async def _run_scenario_a_round(
         state.embed_max_active = 0
     window_embed_start = state.snapshot()["embedding"]["request_count"]
 
+    # 冷 single-flight 与 max_embed 峰值是配置诊断，不计入场景 A 的缓存热 SLA。
+    duplicate_query = HOT_QUERY_TERMS[0]
+    duplicate_embed_start = state.snapshot()["embedding"]["request_count"]
+    duplicate_results = await run_search_wave(
+        client, headers_list[0], [duplicate_query] * args.concurrency,
+    )
+    duplicate_cold_embed_calls = (
+        state.snapshot()["embedding"]["request_count"] - duplicate_embed_start
+    )
+    # duplicate burst 已完全收敛，清零峰值后再独立验证 max_embed=1/4。
+    with state.lock:
+        state.embed_max_active = 0
+    burst_results = await run_search_wave(client, headers_list[0], list(PEAK_QUERY_TERMS))
+    observed_peak_embed = state.snapshot()["embedding"]["max_active"]
+
     health_samples: list[dict[str, Any]] = []
     sync_results: list[dict[str, Any]] = []
     panel_results: list[dict[str, Any]] = []
@@ -344,27 +359,17 @@ async def _run_scenario_a_round(
     async def panel_poll() -> None:
         while not stop_background.is_set():
             panel_results.extend(await asyncio.gather(
-                control_plane_harness._probe(client, "GET", "/api/v1/dashboard/tags"),
-                control_plane_harness._probe(client, "GET", "/api/v1/dashboard/my/manifest"),
+                control_plane_harness._probe(
+                    client, "GET", "/api/v1/dashboard/tags", timeout=5,
+                ),
+                control_plane_harness._probe(
+                    client, "GET", "/api/v1/dashboard/my/manifest", timeout=5,
+                ),
             ))
             await asyncio.sleep(0.05)
 
     sync_task = asyncio.create_task(sync_wave())
     panel_task = asyncio.create_task(panel_poll())
-
-    duplicate_query = HOT_QUERY_TERMS[0]
-    duplicate_embed_start = state.snapshot()["embedding"]["request_count"]
-    duplicate_results = await run_search_wave(
-        client, headers_list[0], [duplicate_query] * args.concurrency,
-    )
-    duplicate_cold_embed_calls = (
-        state.snapshot()["embedding"]["request_count"] - duplicate_embed_start
-    )
-    # duplicate burst 已完全收敛，清零峰值后再独立验证 max_embed=1/4。
-    with state.lock:
-        state.embed_max_active = 0
-    burst_results = await run_search_wave(client, headers_list[0], list(PEAK_QUERY_TERMS))
-    observed_peak_embed = state.snapshot()["embedding"]["max_active"]
 
     pre_wave_embed = state.snapshot()["embedding"]["request_count"]
     baseline_threads = control_plane_harness._process_threads(server_pid)
@@ -384,10 +389,11 @@ async def _run_scenario_a_round(
             task.cancel()
     await asyncio.wait_for(sync_task, timeout=30)
 
-    all_search_results = duplicate_results + burst_results + wave_results
     return {
         "max_embed": max_embed,
-        "search": _search_stats(all_search_results),
+        "search": _search_stats(wave_results),
+        "diagnostic_duplicate": _search_stats(duplicate_results),
+        "diagnostic_peak": _search_stats(burst_results),
         "health": _health_stats(health_samples),
         "sync": _sync_stats(sync_results),
         "panel": _panel_stats(panel_results),
@@ -574,11 +580,23 @@ async def run_all_scenarios(
         panel_deadline = time.monotonic() + args.panel_duration_s
         while time.monotonic() < panel_deadline:
             panel_probe_results.extend(await asyncio.gather(
-                control_plane_harness._probe(client, "GET", "/api/v1/dashboard/tags"),
-                control_plane_harness._probe(client, "GET", "/api/v1/dashboard/my/manifest"),
-                control_plane_harness._probe(client, "GET", "/api/v1/dashboard/overview"),
-                control_plane_harness._probe(client, "GET", "/api/v1/dashboard/skills"),
-                control_plane_harness._probe(client, "GET", f"/api/v1/dashboard/user/{scatter_user}/scatter", timeout=5),
+                control_plane_harness._probe(
+                    client, "GET", "/api/v1/dashboard/tags", timeout=5,
+                ),
+                control_plane_harness._probe(
+                    client, "GET", "/api/v1/dashboard/my/manifest", timeout=5,
+                ),
+                control_plane_harness._probe(
+                    client, "GET", "/api/v1/dashboard/overview", timeout=5,
+                ),
+                control_plane_harness._probe(
+                    client, "GET", "/api/v1/dashboard/skills", timeout=5,
+                ),
+                control_plane_harness._probe(
+                    client, "GET",
+                    f"/api/v1/dashboard/user/{scatter_user}/scatter",
+                    timeout=5,
+                ),
             ))
             await asyncio.sleep(0.05)
         sync_results.extend(await asyncio.wait_for(sync_task, timeout=30))
