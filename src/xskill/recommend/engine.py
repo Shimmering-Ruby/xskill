@@ -17,6 +17,7 @@ import json
 import logging
 import math
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
@@ -84,6 +85,9 @@ class SkillRecommendEngine:
         self.staging_need = self.rcfg["staging_need"] or self.canary_cfg.min_samples
         self._skill_index_cache: Optional[dict] = None
         self._skillhub_cache: Optional[tuple[tuple, list[dict]]] = None
+        self._profile_row_cache: dict[str, dict | None] = {}
+        self._profile_cache_generation: dict[str, int] = {}
+        self._profile_cache_lock = threading.Lock()
         # 保留该属性以兼容仍会清理旧进程内缓存的调用方；画像新鲜度以数据库中的
         # source_revision 为准，进程重启不会导致无谓重算。
         self._profile_fp_cache: dict[str, tuple] = {}
@@ -275,6 +279,12 @@ class SkillRecommendEngine:
                 user_id, feature_tensor=None, mean_tensor=None, used_skills=used_skills,
                 embed_model=model, source_revision=revision,
             )
+            self._publish_profile_cache(
+                user_id,
+                feature_tensor=None,
+                mean_tensor=None,
+                used_skills=used_skills,
+            )
             return ProfileUpdateResult(
                 changed=True, embed_items=0, source_revision=revision,
             )
@@ -308,6 +318,12 @@ class SkillRecommendEngine:
             user_id, feature_tensor=ft, mean_tensor=mt, used_skills=used_skills,
             points=vecs, point_meta=point_meta,
             embed_model=model, source_revision=revision,
+        )
+        self._publish_profile_cache(
+            user_id,
+            feature_tensor=ft,
+            mean_tensor=mt,
+            used_skills=used_skills,
         )
         return ProfileUpdateResult(
             changed=True, embed_items=embed_items, source_revision=revision,
@@ -511,14 +527,32 @@ class SkillRecommendEngine:
         order = np.argsort(-sims)[:top_k]
         return [(names[i], is_hub.get(names[i], False)) for i in order]
 
-    def load_client_user(self, user_id: str) -> "ClientUser":
+    def load_client_user(
+        self, user_id: str, *, include_recommended: bool = True,
+    ) -> "ClientUser":
         """从持久化加载 ``ClientUser``（画像 + used_skills + recommended_skills）。
 
         无画像行 → 冷启动 ``ClientUser``（client_interest=None）。
+        manifest 计算不读取 ``recommended_skills``，因为它只是反查视图，
+        不参与候选排序；其他调用默认保持完整加载。
         """
         from xskill.recommend.client_interest import ClientInterest
         from xskill.recommend.client_user import ClientUser
-        row = self.profile_store.load(user_id)
+        with self._profile_cache_lock:
+            if user_id in self._profile_row_cache:
+                row = self._profile_row_cache[user_id]
+                generation = None
+            else:
+                row = None
+                generation = self._profile_cache_generation.get(user_id, 0)
+        if generation is not None:
+            loaded = self.profile_store.load(user_id)
+            with self._profile_cache_lock:
+                if self._profile_cache_generation.get(user_id, 0) == generation:
+                    self._profile_row_cache[user_id] = loaded
+                    row = loaded
+                else:
+                    row = self._profile_row_cache.get(user_id)
         if row is None:
             return ClientUser(user_id)
         ci = ClientInterest(
@@ -529,8 +563,31 @@ class SkillRecommendEngine:
         return ClientUser(
             user_id, client_interest=ci,
             used_skills=row["used_skills"],
-            recommended_skills=self.reco_store.skills_for_user(user_id),
+            recommended_skills=(
+                self.reco_store.skills_for_user(user_id)
+                if include_recommended else []
+            ),
         )
+
+    def _publish_profile_cache(
+        self,
+        user_id: str,
+        *,
+        feature_tensor,
+        mean_tensor,
+        used_skills: list[dict],
+    ) -> None:
+        """画像事务提交后发布同一份只读推荐视图。"""
+        row = {
+            "feature_tensor": feature_tensor,
+            "mean_tensor": mean_tensor,
+            "used_skills": used_skills,
+        }
+        with self._profile_cache_lock:
+            self._profile_cache_generation[user_id] = (
+                self._profile_cache_generation.get(user_id, 0) + 1
+            )
+            self._profile_row_cache[user_id] = row
 
     def find_friend(self, client_user: "ClientUser", top_k: int = 5) -> list[str]:
         """按 mean_tensor 相似度检索其他用户。"""

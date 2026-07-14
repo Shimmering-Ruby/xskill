@@ -162,6 +162,7 @@ server:
   team_sync_workers: 32            # team /sync 独立线程池，不占用 dashboard/普通同步路由
   profile_refresh_workers: 4       # 用户画像后台刷新固定并发数
   profile_refresh_queue_size: 1024 # 待刷新 client 的有界队列容量
+  profile_refresh_settle_delay: 5  # sync 波次入队后再启动画像计算的秒数
   profile_refresh_shutdown_timeout: 5 # 停机等待画像 worker 的最长秒数
 
 # ===== Watcher (the directory poller inside `serve`) =====
@@ -516,6 +517,7 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
     section = (cfg or {}).get("server") or {}
     workers = section.get("profile_refresh_workers", 4)
     queue_size = section.get("profile_refresh_queue_size", 1024)
+    settle_delay = section.get("profile_refresh_settle_delay", 5)
     shutdown_timeout = section.get("profile_refresh_shutdown_timeout", 5)
 
     for key, value in (
@@ -524,17 +526,21 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
     ):
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(f"server.{key} 必须是正整数，got {value!r}")
-    if (not isinstance(shutdown_timeout, (int, float))
-            or isinstance(shutdown_timeout, bool)
-            or not math.isfinite(shutdown_timeout)
-            or shutdown_timeout <= 0):
-        raise ValueError(
-            "server.profile_refresh_shutdown_timeout 必须是正数，"
-            f"got {shutdown_timeout!r}"
-        )
+    for key, value, allow_zero in (
+        ("profile_refresh_settle_delay", settle_delay, True),
+        ("profile_refresh_shutdown_timeout", shutdown_timeout, False),
+    ):
+        if (not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+                or (not allow_zero and value == 0)):
+            qualifier = "非负数" if allow_zero else "正数"
+            raise ValueError(f"server.{key} 必须是{qualifier}，got {value!r}")
     return {
         "workers": workers,
         "queue_size": queue_size,
+        "settle_delay": float(settle_delay),
         "shutdown_timeout": float(shutdown_timeout),
     }
 

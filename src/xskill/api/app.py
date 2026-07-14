@@ -1375,6 +1375,7 @@ def create_app(home_root: Path | str | None = None,
                     _engine,
                     workers=profile_refresh_cfg["workers"],
                     queue_size=profile_refresh_cfg["queue_size"],
+                    settle_delay=profile_refresh_cfg["settle_delay"],
                     autostart=False,
                 )
 

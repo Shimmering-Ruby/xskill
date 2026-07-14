@@ -398,7 +398,7 @@ def _pick_recommended(
         # _combined_relevance 会 raise。退回 ux_tail（与既有 RECOMMENDER 守卫一致）。
         if not (skill_dir / ".skill_index.pkl").is_file() and not _engine._skillhub_entries():
             return ux_tail[:reco_slots]
-        user = _engine.load_client_user(client_id)
+        user = _engine.load_client_user(client_id, include_recommended=False)
         if user.client_interest is not None and user.client_interest.feature_tensor is not None:
             picked = _engine.get_skill_for_client(
                 user, reco_slots, exclude_names=ranked_names,

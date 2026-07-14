@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
 import time
@@ -27,6 +28,7 @@ class ProfileRefreshService:
         *,
         workers: int = 4,
         queue_size: int = 1024,
+        settle_delay: float = 0.0,
         interest_factory: Callable[[str], ClientInterest] = ClientInterest,
         autostart: bool = True,
     ):
@@ -34,8 +36,16 @@ class ProfileRefreshService:
             raise ValueError("workers 必须 >= 1")
         if queue_size < 1:
             raise ValueError("queue_size 必须 >= 1")
+        if (
+            not isinstance(settle_delay, (int, float))
+            or isinstance(settle_delay, bool)
+            or not math.isfinite(settle_delay)
+            or settle_delay < 0
+        ):
+            raise ValueError("settle_delay 必须 >= 0")
         self.engine = engine
         self.worker_count = workers
+        self.settle_delay = float(settle_delay)
         self.interest_factory = interest_factory
         self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self._condition = threading.Condition()
@@ -44,6 +54,7 @@ class ProfileRefreshService:
         self._started = False
         self._accepting = True
         self._stopping = False
+        self._settle_until = 0.0
         self._metrics = {
             "queued": 0,
             "running": 0,
@@ -92,6 +103,8 @@ class ProfileRefreshService:
                 if state["phase"] == "running" and not state["is_rerun"]:
                     state["rerun_requested"] = True
                 return True
+            if not self._states:
+                self._settle_until = time.monotonic() + self.settle_delay
             try:
                 self._queue.put_nowait(client_id)
             except queue.Full:
@@ -186,7 +199,8 @@ class ProfileRefreshService:
                 self._metrics["queued"] -= 1
                 self._metrics["running"] += 1
 
-            self._run_once(client_id)
+            if self._wait_for_settle():
+                self._run_once(client_id)
 
             run_again = False
             with self._condition:
@@ -205,6 +219,16 @@ class ProfileRefreshService:
                 self._metrics["running"] -= 1
                 self._condition.notify_all()
             self._queue.task_done()
+
+    def _wait_for_settle(self) -> bool:
+        """让同一波 sync 先返回，再启动会争用 CPU/SQLite 的画像计算。"""
+        with self._condition:
+            while self._accepting:
+                remaining = self._settle_until - time.monotonic()
+                if remaining <= 0:
+                    return True
+                self._condition.wait(timeout=remaining)
+            return False
 
     def _run_once(self, client_id: str) -> None:
         try:

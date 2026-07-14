@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
+import time
 
 from xskill.team.server.profile_refresh import ProfileRefreshService
 
@@ -133,6 +134,27 @@ def test_worker_concurrency_is_fixed_and_threads_are_daemon():
     release.set()
     assert service.wait_idle(timeout=2)
     assert engine.max_active == 2
+    assert service.stop(timeout=2)
+
+
+def test_settle_delay_keeps_profile_work_behind_sync_burst():
+    entered = threading.Event()
+
+    class Engine:
+        def update_user_interest(self, _interest, *, should_commit=None):
+            entered.set()
+            return _Result()
+
+    service = ProfileRefreshService(
+        Engine(), workers=2, queue_size=4, settle_delay=0.15,
+    )
+    started = time.monotonic()
+    assert service.request("u1")
+    assert service.request("u2")
+    assert not entered.wait(0.05)
+    assert entered.wait(1)
+    assert time.monotonic() - started >= 0.14
+    assert service.wait_idle(timeout=2)
     assert service.stop(timeout=2)
 
 
