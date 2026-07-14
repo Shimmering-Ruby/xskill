@@ -78,6 +78,7 @@ def _server_version(
     server_url: str,
     join_token: str,
     client_id: str,
+    use_proxy: bool = False,
 ) -> dict[str, Any] | None:
     """从 team server 读取版本信息。网络/鉴权失败返回 None。"""
     import json
@@ -87,8 +88,11 @@ def _server_version(
         _team_api_url(server_url, "/version"),
         headers=_team_headers(join_token, client_id),
     )
+    # server 方向默认直连：ProxyHandler({}) 绕开环境代理，与 daemon httpx trust_env=False 对齐。
+    opener = (urllib.request.build_opener() if use_proxy
+              else urllib.request.build_opener(urllib.request.ProxyHandler({})))
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with opener.open(req, timeout=10) as r:
             return json.loads(r.read().decode("utf-8"))
     except Exception:
         logger.debug("updater: 查询 server 版本失败", exc_info=True)
@@ -101,6 +105,7 @@ def _download_server_wheel(
     client_id: str,
     dest_dir: Path,
     filename: str | None,
+    use_proxy: bool = False,
 ) -> Path | None:
     """从 team server 下载 wheel 到临时目录。失败返回 None。"""
     import urllib.request
@@ -114,8 +119,11 @@ def _download_server_wheel(
         _team_api_url(server_url, "/wheel"),
         headers=_team_headers(join_token, client_id),
     )
+    # server 方向默认直连：ProxyHandler({}) 绕开环境代理，与 daemon httpx trust_env=False 对齐。
+    opener = (urllib.request.build_opener() if use_proxy
+              else urllib.request.build_opener(urllib.request.ProxyHandler({})))
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with opener.open(req, timeout=60) as r:
             data = r.read()
         if not data:
             logger.warning("updater: server wheel 为空")
@@ -199,6 +207,7 @@ class AutoUpdater:
         server_url: str | None = None,
         client_id: str | None = None,
         join_token: str | None = None,
+        use_proxy: bool = False,
     ):
         # pypi_url 缺省 None = 不传 -i，尊重用户机器的 pip 配置（pip.ini /
         # pip.conf 的 index-url，内网通常配了企业镜像）。曾写死
@@ -210,6 +219,10 @@ class AutoUpdater:
         self.server_url = server_url
         self.client_id = client_id
         self.join_token = join_token
+        # server 方向请求默认直连；True 时走系统/环境代理（跟随 connect 的 --use-proxy）。
+        self.use_proxy = use_proxy
+        self._last_pip_failure_summary = ""
+        self._last_server_fallback_failure_summary = ""
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -274,7 +287,13 @@ class AutoUpdater:
             _restart()   # 升级成功后重启，不会走到这行之后的代码
             # （_restart 在 Windows 上 os._exit；Linux 上 execv）
             return
-        self._check_server_fallback(current_str, current, reason="pypi_install_failed")
+        if not self._check_server_fallback(current_str, current,
+                                           reason="pypi_install_failed"):
+            logger.warning(
+                "updater: 升级到 %s 失败——pip 原因: %s；server 回退原因: %s",
+                latest_str,
+                self._last_pip_failure_summary or "未知",
+                self._last_server_fallback_failure_summary or "未知")
 
     # pip 卡死的硬上限。pip 自带的 socket timeout 只覆盖"完全无数据"，
     # 代理黑洞式的涓涓细流永远不触发；而 updater 是单线程循环，一次
@@ -294,19 +313,46 @@ class AutoUpdater:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=self._PIP_TIMEOUT)
-            if result.returncode == 0:
-                logger.info("updater: 升级到 %s 成功", target_version)
-                return True
+        except subprocess.TimeoutExpired:
+            self._last_pip_failure_summary = f"pip 超过 {self._PIP_TIMEOUT}s 未退出"
+            logger.warning("updater: %s，放弃本次升级", self._last_pip_failure_summary)
+            return False
+        except Exception as pip_error:
+            self._last_pip_failure_summary = f"执行 pip 异常: {pip_error}"
+            logger.warning("updater: 执行 pip 失败", exc_info=True)
+            return False
+        if result.returncode != 0:
+            self._last_pip_failure_summary = (
+                (result.stderr.strip() or result.stdout.strip()
+                 or "pip 返回非零退出码").splitlines()[-1])
             logger.warning("updater: pip 升级失败:\n%s",
                            result.stderr.strip() or result.stdout.strip())
             return False
-        except subprocess.TimeoutExpired:
-            logger.warning("updater: pip 超过 %ds 未退出，放弃本次升级",
-                           self._PIP_TIMEOUT)
-            return False
+        # pip 装完当前进程 metadata 不刷新，另起解释器核验实际落地版本。
+        installed_version = ""
+        try:
+            verify = subprocess.run(
+                [sys.executable, "-c",
+                 f"from importlib.metadata import version; print(version({self.package!r}))"],
+                capture_output=True, text=True, timeout=30)
+            installed_version = verify.stdout.strip()
         except Exception:
-            logger.warning("updater: 执行 pip 失败", exc_info=True)
-            return False
+            logger.debug("updater: 装后核验子进程失败，按 pip 退出码为准", exc_info=True)
+        # 只有拿到一个可解析且明确不同的版本才判失败；核验取不到版本则信任 pip 退出码。
+        if installed_version:
+            from packaging.version import Version
+            try:
+                reached_target = Version(installed_version) == Version(target_version)
+            except Exception:
+                reached_target = True
+            if not reached_target:
+                self._last_pip_failure_summary = (
+                    f"pip 装完核验版本 {installed_version} 未达目标 {target_version}")
+                logger.warning("updater: %s，改走 server 回退",
+                               self._last_pip_failure_summary)
+                return False
+        logger.info("updater: 升级到 %s 成功", target_version)
+        return True
 
     def _check_server_fallback(
         self, current_str: str, current, *, reason: str, restart: bool = True,
@@ -317,11 +363,14 @@ class AutoUpdater:
         CLI 进程重启只会重跑 update 命令本身，还会以报错收场。
         """
         if not (self.server_url and self.client_id and self.join_token):
+            self._last_server_fallback_failure_summary = "无 server 回退配置"
             logger.debug("updater: 无 server 回退配置，跳过（%s）", reason)
             return False
 
-        info = _server_version(self.server_url, self.join_token, self.client_id)
+        info = _server_version(self.server_url, self.join_token, self.client_id,
+                               self.use_proxy)
         if not info:
+            self._last_server_fallback_failure_summary = "查询 server 版本失败"
             return False
 
         server_version_str = str(info.get("version") or "")
@@ -329,15 +378,21 @@ class AutoUpdater:
             from packaging.version import Version
             server_version = Version(server_version_str)
         except Exception:
+            self._last_server_fallback_failure_summary = (
+                f"server 版本不可解析: {server_version_str}")
             logger.debug("updater: server 版本不可解析: %s",
                          server_version_str, exc_info=True)
             return False
 
         if server_version <= current:
+            self._last_server_fallback_failure_summary = (
+                f"server 版本 {server_version_str} 不高于当前 {current_str}")
             logger.debug("updater: server 版本 %s 不高于当前版本 %s",
                          server_version_str, current_str)
             return False
         if not info.get("wheel_available"):
+            self._last_server_fallback_failure_summary = (
+                f"server 版本 {server_version_str} 未提供 wheel")
             logger.warning("updater: server 版本 %s 可用，但未提供 wheel",
                            server_version_str)
             return False
@@ -349,8 +404,10 @@ class AutoUpdater:
                 self.client_id,
                 Path(td),
                 str(info.get("wheel_filename") or ""),
+                self.use_proxy,
             )
             if wheel is None:
+                self._last_server_fallback_failure_summary = "下载 server wheel 失败"
                 return False
             logger.info("updater: PyPI 不可用（%s），改用 server wheel 升级到 %s",
                         reason, server_version_str)
@@ -358,6 +415,7 @@ class AutoUpdater:
                 if restart:
                     _restart()
                 return True
+            self._last_server_fallback_failure_summary = "安装 server wheel 失败"
             return False
 
     def _install_wheel(self, wheel_path: Path) -> bool:

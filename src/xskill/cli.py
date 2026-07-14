@@ -299,6 +299,7 @@ def _run_team_client_forever(state, *, use_proxy: bool,
         cursor_path=get_team_client_cursor_path(state.server_url),
         history_path=get_team_client_history_path(state.server_url),
         auto_update=auto_update,
+        use_proxy=use_proxy,
     )
     client.run_forever()   # 阻塞
 
@@ -386,7 +387,7 @@ def cmd_update(args) -> int:
             # 连接信息坏了只影响回退通道，不该挡住 PyPI 主路径。
             print(f"warning: 读取 team 连接信息失败，禁用 server 回退（{state_error}）",
                   file=sys.stderr)
-    updater = AutoUpdater(**server_kwargs)
+    updater = AutoUpdater(**server_kwargs, use_proxy=args.use_proxy)
 
     print(f"当前版本: {current}")
     print("正在查询 PyPI...")
@@ -929,7 +930,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="查看 connect 常驻任务状态")
 
-    sub.add_parser("update", help="立即检查 PyPI 新版并升级（有新版则重启）")
+    p_update = sub.add_parser("update", help="立即检查 PyPI 新版并升级（有新版则重启）")
+    p_update.add_argument(
+        "--use-proxy", action="store_true",
+        help="server wheel 回退经系统/环境代理拉取（默认直连，绕开公司 SWG 代理）。",
+    )
     p_status.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
     sub.add_parser(

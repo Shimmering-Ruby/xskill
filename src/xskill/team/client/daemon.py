@@ -94,6 +94,7 @@ class TeamClient:
         quiet_seconds: int = 180,
         min_change_interval: int = 600,
         auto_update: bool = True,
+        use_proxy: bool = False,
     ):
         self.state = state
         self.http = http
@@ -112,6 +113,8 @@ class TeamClient:
         )
         self._stop = threading.Event()
         self.auto_update = auto_update
+        # updater 的 server 方向请求跟随 connect 的 --use-proxy；默认直连内网 server。
+        self.use_proxy = use_proxy
 
     # ── HTTP 鉴权头 ──────────────────────────────────────────────
     def _hdr(self, extra: dict | None = None) -> dict:
@@ -304,6 +307,7 @@ class TeamClient:
             server_url=self.state.server_url,
             client_id=self.state.client_id,
             join_token=self.state.join_token,
+            use_proxy=self.use_proxy,
         ) if self.auto_update else None
         if updater:
             updater.start()
