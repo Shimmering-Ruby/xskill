@@ -805,12 +805,18 @@ async def team_skill_hub_search(
     # loop instead of creating 50 short-lived AnyIO worker jobs beside CPU-heavy
     # /sync work; misses and expired snapshots still run entirely off-loop.
     matches = hub.cached_search(query, bounded_limit)
-    if matches is None:
+    hot_cache_hit = matches is not None
+    if hot_cache_hit:
+        # Fifty cache-hit handlers otherwise contain no suspension point and can
+        # monopolize one event-loop turn.  Yield around result assembly so health
+        # and dashboard requests keep their latency budget during a search burst.
+        await asyncio.sleep(0)
+    else:
         try:
             matches = await run_in_threadpool(hub.search, query, bounded_limit)
         except FileNotFoundError as missing_dir:
             raise HTTPException(status_code=503, detail=str(missing_dir)) from missing_dir
-    return {"results": [
+    payload = {"results": [
         {
             "skill_id": match["skill_id"],
             "display_name": match["display_name"],
@@ -826,6 +832,9 @@ async def team_skill_hub_search(
         }
         for match in matches
     ]}
+    if hot_cache_hit:
+        await asyncio.sleep(0)
+    return payload
 
 
 def _skillhub_result_source(source_path: str) -> str:
