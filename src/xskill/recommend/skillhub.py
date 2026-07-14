@@ -25,6 +25,11 @@ from pathlib import Path
 
 import numpy as np
 
+from xskill.canary import aggregate_ux_by_version, load_ux_scores
+from xskill.config import embedding_search_config, skillhub_config
+from xskill.skill.frontmatter import parse as fm_parse
+from xskill.utils.embed_store import EmbedStore
+
 logger = logging.getLogger("xskill.skillhub")
 
 # dashboard 可读的三方 skill 向量缓存文件名（落在 skillhub 目录内，dot 前缀故不被
@@ -34,11 +39,6 @@ INDEX_CACHE_NAME = ".skillhub_index.pkl"
 
 # 三方 skill description 的向量复用缓存（与 dashboard 只读产物分开存）。
 EMBED_CACHE_NAME = ".skillhub_embed_cache.pkl"
-
-from xskill.canary import aggregate_ux_by_version, load_ux_scores
-from xskill.config import embedding_search_config, skillhub_config
-from xskill.skill.frontmatter import parse as fm_parse
-from xskill.utils.embed_store import EmbedStore
 
 BM25_K1 = 1.2
 BM25_B = 0.75
@@ -333,7 +333,7 @@ class SkillHub:
     def _bm25_ranks(self, index_bundle: dict, query_tokens: list[str]) -> dict[int, int]:
         """对命中文档按 BM25 分数降序给出 1-based 排名（k1=1.2, b=0.75）。"""
         entries = index_bundle["entries"]
-        term_frequencies = index_bundle["term_frequencies"]
+        term_postings = index_bundle["term_postings"]
         document_frequencies = index_bundle["document_frequencies"]
         document_lengths = index_bundle["document_lengths"]
         average_document_length = index_bundle["average_document_length"]
@@ -347,10 +347,7 @@ class SkillHub:
                 1 + (document_count - document_frequency + 0.5)
                 / (document_frequency + 0.5)
             )
-            for entry_index, frequency_map in enumerate(term_frequencies):
-                token_frequency = frequency_map.get(token, 0)
-                if token_frequency == 0:
-                    continue
+            for entry_index, token_frequency in term_postings[token]:
                 denominator = token_frequency + BM25_K1 * (
                     1 - BM25_B
                     + BM25_B * document_lengths[entry_index] / average_document_length
@@ -526,33 +523,43 @@ class SkillHub:
 
     def _search_index_bundle(self) -> dict:
         """随内容 fingerprint 变化整体重建 BM25 倒排 + 只读 corpus 向量，几百 skill <10ms。"""
-        entries = self._entries(include_vec=False, require_description=False)
-        current_fingerprint = tuple(
-            (entry["skill_id"], entry["source_path"], entry["content_sha"])
-            for entry in entries
-        )
+        if not self.dir.is_dir():
+            raise FileNotFoundError(
+                f"skillhub.dir 不存在: {self.dir}（启用 skillhub 前请放置三方 skill）"
+            )
+        snapshot_entries = self._snapshot()
         bundle = self._search_index
-        if bundle is not None and bundle["fingerprint"] == current_fingerprint:
+        if bundle is not None and bundle["snapshot_entries"] is snapshot_entries:
             return bundle
         with self._search_index_lock:
             bundle = self._search_index
-            if bundle is not None and bundle["fingerprint"] == current_fingerprint:
+            if bundle is not None and bundle["snapshot_entries"] is snapshot_entries:
                 return bundle
+            entries = [dict(entry) for entry in snapshot_entries]
+            current_fingerprint = tuple(
+                (entry["skill_id"], entry["source_path"], entry["content_sha"])
+                for entry in entries
+            )
             self._search_index = self._build_search_index(entries, current_fingerprint)
+            self._search_index["snapshot_entries"] = snapshot_entries
             return self._search_index
 
     def _build_search_index(self, entries: list[dict], fingerprint: tuple) -> dict:
         term_frequencies: list[dict[str, int]] = []
+        term_postings: dict[str, list[tuple[int, int]]] = {}
         document_frequencies: dict[str, int] = {}
-        for entry in entries:
+        for entry_index, entry in enumerate(entries):
             frequency_map: dict[str, int] = {}
             for token in _tokenize(str(entry["display_name"])):
                 frequency_map[token] = frequency_map.get(token, 0) + 2
             for token in _tokenize(str(entry["description"])):
                 frequency_map[token] = frequency_map.get(token, 0) + 1
             term_frequencies.append(frequency_map)
-            for token in frequency_map:
+            for token, token_frequency in frequency_map.items():
                 document_frequencies[token] = document_frequencies.get(token, 0) + 1
+                term_postings.setdefault(token, []).append(
+                    (entry_index, token_frequency)
+                )
         document_lengths = [sum(frequency_map.values()) for frequency_map in term_frequencies]
         average_document_length = (
             sum(document_lengths) / len(document_lengths) if document_lengths else 0.0
@@ -561,7 +568,7 @@ class SkillHub:
         return {
             "fingerprint": fingerprint,
             "entries": entries,
-            "term_frequencies": term_frequencies,
+            "term_postings": term_postings,
             "document_frequencies": document_frequencies,
             "document_lengths": document_lengths,
             "average_document_length": average_document_length,
