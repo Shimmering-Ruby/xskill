@@ -55,6 +55,7 @@ jobs:
           name: release-control-plane-stress-${{ github.run_id }}
           path: .stress-artifacts/**
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 30
 
   skillhub-search-smoke:
@@ -81,6 +82,7 @@ jobs:
           name: release-skillhub-search-smoke-${{ github.run_id }}
           path: .skillhub-search-artifacts/**
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 30
 
   publish:

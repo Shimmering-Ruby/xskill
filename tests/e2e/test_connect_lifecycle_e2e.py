@@ -11,8 +11,6 @@ import site
 
 import pytest
 
-from xskill import __version__
-
 
 class _LocalTeamAndPypiHandler(BaseHTTPRequestHandler):
     def _json(self, payload: dict, status: int = 200) -> None:
@@ -37,7 +35,10 @@ class _LocalTeamAndPypiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/pypi/xskill/json":
-            self._json({"releases": {__version__: [{}]}})
+            # ``setuptools-scm`` checkout builds are dev releases, which the
+            # updater intentionally ignores.  A fixed older stable release
+            # keeps this lifecycle test valid for both checkout and tag builds.
+            self._json({"releases": {"0.0.0": [{}]}})
             return
         self._json({"detail": "not found"}, status=404)
 
