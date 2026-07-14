@@ -102,6 +102,12 @@ embedding:
   dim:      0
   # api: openai | multimodal   # optional; default openai. "multimodal" for
                                # vision-style embedding endpoints.
+  # max_embed: 2               # optional; skill_hub/search 语义通道的全局并发上限
+                               # （在飞的 query embed 数）。抢不到即降级纯 BM25；
+                               # 设 0 关闭语义通道。默认 2。
+  # search_timeout_s: 3.0      # optional; skill_hub/search query embed 的独立短
+                               # 超时秒数（不复用 EmbedClient 的 60s），超时即降级。
+                               # 默认 3.0。
 
 # ===== Pricing (optional; for `xskill stats` cost estimation) =====
 # Cost is ESTIMATED from response.usage tokens × price (USD per 1M tokens).
@@ -507,6 +513,29 @@ def skillhub_config(cfg: Optional[dict] = None) -> dict:
             f"skillhub.dir 必须是字符串路径，got {type(raw_dir).__name__}"
         )
     return {"enabled": enabled, "dir": Path(raw_dir).expanduser()}
+
+
+def embedding_search_config(cfg: Optional[dict] = None) -> dict:
+    """读 config 的 ``embedding`` 段中 skill_hub/search 语义通道的护栏参数。
+
+    返回 ``{max_embed: int, search_timeout_s: float}``。``max_embed`` 缺省 2
+    （0 = 关闭语义通道纯 BM25），``search_timeout_s`` 缺省 3.0。瘦 server 缺段用缺省。
+    """
+    section = (cfg or {}).get("embedding") or {}
+    max_embed = section.get("max_embed", 2)
+    if not isinstance(max_embed, int) or isinstance(max_embed, bool) or max_embed < 0:
+        raise ValueError(
+            f"embedding.max_embed 必须是非负整数，got {max_embed!r}"
+        )
+    search_timeout_s = section.get("search_timeout_s", 3.0)
+    if (not isinstance(search_timeout_s, (int, float))
+            or isinstance(search_timeout_s, bool)
+            or not math.isfinite(search_timeout_s)
+            or search_timeout_s <= 0):
+        raise ValueError(
+            f"embedding.search_timeout_s 必须是正数，got {search_timeout_s!r}"
+        )
+    return {"max_embed": int(max_embed), "search_timeout_s": float(search_timeout_s)}
 
 
 def profile_refresh_config(cfg: Optional[dict] = None) -> dict:

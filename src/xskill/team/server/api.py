@@ -808,9 +808,23 @@ async def team_skill_hub_search(
             "description": match["description"],
             "content_sha": match["content_sha"],
             "source_path": match["source_path"],
+            "source": _skillhub_result_source(match["source_path"]),
+            "ux_avg": hub.ux_avg(match["skill_id"]),
+            "match": {
+                "bm25_rank": match.get("bm25_rank"),
+                "semantic_rank": match.get("semantic_rank"),
+            },
         }
         for match in matches
     ]}
+
+
+def _skillhub_result_source(source_path: str) -> str:
+    """``user_skill_hub/<owner>/...`` 上传件标为 ``上传者:<owner>``，其余为 ``skillhub``。"""
+    parts = source_path.split("/")
+    if len(parts) >= 2 and parts[0] == "user_skill_hub":
+        return f"上传者:{parts[1]}"
+    return "skillhub"
 
 
 @router.post("/skill_hub/upload")
@@ -887,6 +901,7 @@ def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
     if entry is None:
         raise HTTPException(status_code=500,
                             detail="stored skill not visible in skillhub scan")
+    _backfill_skill_embed(hub, entry["description"])
     return {
         "skill_id": entry["skill_id"],
         "display_name": entry["display_name"],
@@ -895,6 +910,28 @@ def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
         "source_path": entry["source_path"],
         "stored_path": str(dest_dir),
     }
+
+
+def _backfill_skill_embed(hub, description: str) -> None:
+    """上传成功后 fire-and-forget 对这一条 description 补一次 corpus embed（best-effort）。
+
+    单独 daemon 线程内写 EmbedStore，失败仅 log warning，绝不阻断 upload 响应；
+    下一次 search 重建索引时该向量即进语义通道。
+    """
+    if not description or getattr(hub, "embed_client", None) is None:
+        return
+    from xskill.recommend.skillhub import EMBED_CACHE_NAME
+    from xskill.utils.embed_store import EmbedStore
+
+    def _run() -> None:
+        try:
+            EmbedStore(Path(hub.dir) / EMBED_CACHE_NAME, hub.embed_client).encode_cached(
+                [description],
+            )
+        except Exception as embed_error:
+            logger.warning("skill_hub upload embed backfill failed: %s", embed_error)
+
+    threading.Thread(target=_run, name="skillhub-upload-embed", daemon=True).start()
 
 
 def _make_skillhub_archive(skill_dir: Path) -> bytes:

@@ -10,16 +10,22 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
+import logging
+import math
 import os
 import pickle
 import re
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger("xskill.skillhub")
 
 # dashboard 可读的三方 skill 向量缓存文件名（落在 skillhub 目录内，dot 前缀故不被
 # ``rglob("SKILL.md")`` 扫到）。dashboard 端无 embed_client，只能读此缓存把用户用过
@@ -30,14 +36,32 @@ INDEX_CACHE_NAME = ".skillhub_index.pkl"
 EMBED_CACHE_NAME = ".skillhub_embed_cache.pkl"
 
 from xskill.canary import aggregate_ux_by_version, load_ux_scores
-from xskill.config import skillhub_config
+from xskill.config import embedding_search_config, skillhub_config
 from xskill.skill.frontmatter import parse as fm_parse
 from xskill.utils.embed_store import EmbedStore
+
+BM25_K1 = 1.2
+BM25_B = 0.75
+RRF_RANK_CONSTANT = 60
+QUERY_VECTOR_CACHE_CAPACITY = 256
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 0 else v
+
+
+def _tokenize(text: str) -> list[str]:
+    """ASCII ``[a-z0-9]+`` 小写切词 + 中文 bigram（孤立单字自成一 token）。"""
+    tokens: list[str] = []
+    for chunk in re.findall(r"[a-z0-9]+|[一-鿿]+", text.lower()):
+        if chunk.isascii():
+            tokens.append(chunk)
+        elif len(chunk) == 1:
+            tokens.append(chunk)
+        else:
+            tokens.extend(chunk[offset:offset + 2] for offset in range(len(chunk) - 1))
+    return tokens
 
 
 def _safe_id_part(value: str) -> str:
@@ -53,22 +77,39 @@ class SkillHub:
     """三方 skill 扫描器 + ux 查询。``enabled=False``（缺省）时为 no-op。"""
 
     def __init__(self, *, enabled: bool, hub_dir: Path | str, embed_client,
-                 scan_ttl_seconds: float = 5.0):
+                 scan_ttl_seconds: float = 5.0,
+                 search_max_embed: int = 2, search_timeout_s: float = 3.0):
         self.enabled = bool(enabled)
         self.dir = Path(hub_dir)
         self.embed_client = embed_client
         self.scan_ttl_seconds = float(scan_ttl_seconds)
+        self.search_max_embed = int(search_max_embed)
+        self.search_timeout_s = float(search_timeout_s)
         # L3 备忘录：SKILL.md 路径 → (st_mtime_ns, st_size, sha16, display_name, description)。
         self._file_memo: dict[Path, tuple[int, int, str, str, str]] = {}
         # L1 快照：require_description=False 的全集（不含 vec），single-flight 保护。
         self._scan_snapshot_entries: list[dict] | None = None
         self._scan_snapshot_expires_at: float = 0.0
         self._scan_lock = threading.Lock()
+        # 混合检索索引：随 fingerprint 变化整体重建，在扫描 single-flight 之外自成一锁。
+        self._search_index: dict | None = None
+        self._search_index_lock = threading.Lock()
+        # query embed 三护栏：非阻塞信号量 + 独立短超时线程 + fingerprint 感知 LRU。
+        self._query_embed_semaphore = threading.Semaphore(max(self.search_max_embed, 0))
+        self._query_embed_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._query_embed_executor_lock = threading.Lock()
+        self._query_vector_cache: OrderedDict[str, tuple[tuple, np.ndarray]] = OrderedDict()
+        self._query_vector_cache_lock = threading.Lock()
 
     @classmethod
     def from_config(cls, config: dict, embed_client) -> "SkillHub":
         cfg = skillhub_config(config)
-        return cls(enabled=cfg["enabled"], hub_dir=cfg["dir"], embed_client=embed_client)
+        search_cfg = embedding_search_config(config)
+        return cls(
+            enabled=cfg["enabled"], hub_dir=cfg["dir"], embed_client=embed_client,
+            search_max_embed=search_cfg["max_embed"],
+            search_timeout_s=search_cfg["search_timeout_s"],
+        )
 
     def _walk_snapshot(self) -> list[dict]:
         """L2 剪枝遍历 + L3 备忘录，产出 require_description=False 的全集（无 vec）。"""
@@ -204,33 +245,237 @@ class SkillHub:
             pickle.dump(data, index_file)
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
-        """无画像关键词检索：只按 display_name/description 文本匹配打分。
+        """BM25 关键词 + 语义向量 RRF 融合检索（无画像，query↔description）。
 
-        与 ``SkillRecommendEngine`` 完全无关——不读画像、不算向量，结果只由
-        查询词与 skill 元数据的字面匹配决定（`xskill search` 的语义契约）。
+        与 ``SkillRecommendEngine`` 完全无关——不读画像。语义通道只读 ``EmbedStore``
+        已缓存向量、绝不现算 corpus；query embed 受并发信号量 + 短超时 + LRU 三护栏
+        约束，慢/挂的 embed API 最多让语义位失效，请求自然退化为纯 BM25。
         """
-        needle = query.strip().lower()
-        if not needle:
+        normalized_query = query.strip().lower()
+        if not normalized_query:
             return []
-        tokens = [token for token in re.split(r"[^0-9a-z一-鿿]+", needle) if token]
-        scored: list[tuple[float, dict]] = []
-        for entry in self._entries(include_vec=False, require_description=False):
-            name_text = str(entry["display_name"]).lower()
-            desc_text = str(entry["description"]).lower()
-            score = 0.0
-            if needle in name_text:
-                score += 6.0
-            elif needle in desc_text:
-                score += 3.0
-            for token in tokens:
-                if token in name_text:
-                    score += 2.0
-                if token in desc_text:
-                    score += 1.0
-            if score > 0:
-                scored.append((score, entry))
-        scored.sort(key=lambda pair: (-pair[0], pair[1]["skill_id"]))
-        return [entry for _score, entry in scored[:limit]]
+        index_bundle = self._search_index_bundle()
+        entries = index_bundle["entries"]
+        if not entries:
+            return []
+        query_tokens = _tokenize(normalized_query)
+        bm25_rank_by_index = self._bm25_ranks(index_bundle, query_tokens)
+        semantic_rank_by_index = self._semantic_ranks(
+            index_bundle, normalized_query,
+        )
+        reciprocal_scores: dict[int, float] = {}
+        for rank_by_index in (bm25_rank_by_index, semantic_rank_by_index):
+            for entry_index, rank in rank_by_index.items():
+                reciprocal_scores[entry_index] = (
+                    reciprocal_scores.get(entry_index, 0.0)
+                    + 1.0 / (RRF_RANK_CONSTANT + rank)
+                )
+        ordered_indices = self._fuse_and_rank(
+            reciprocal_scores, entries, limit,
+        )
+        results: list[dict] = []
+        for entry_index in ordered_indices:
+            result_entry = dict(entries[entry_index])
+            result_entry["bm25_rank"] = bm25_rank_by_index.get(entry_index)
+            result_entry["semantic_rank"] = semantic_rank_by_index.get(entry_index)
+            results.append(result_entry)
+        return results
+
+    def _fuse_and_rank(self, reciprocal_scores: dict[int, float],
+                       entries: list[dict], limit: int) -> list[int]:
+        """RRF 排序，同分 tie-break ux_avg 降序（None 最低）再 skill_id；ux 只在同分组内算。"""
+        by_score_then_id = sorted(
+            reciprocal_scores,
+            key=lambda entry_index: (
+                -reciprocal_scores[entry_index], entries[entry_index]["skill_id"],
+            ),
+        )
+        ordered_indices: list[int] = []
+        run_start = 0
+        while run_start < len(by_score_then_id):
+            run_end = run_start
+            while (run_end < len(by_score_then_id)
+                   and reciprocal_scores[by_score_then_id[run_end]]
+                   == reciprocal_scores[by_score_then_id[run_start]]):
+                run_end += 1
+            run = by_score_then_id[run_start:run_end]
+            if len(run) > 1:
+                run.sort(key=lambda entry_index: (
+                    -self._ux_sort_key(entries[entry_index]["skill_id"]),
+                    entries[entry_index]["skill_id"],
+                ))
+            ordered_indices.extend(run)
+            if len(ordered_indices) >= limit:
+                break
+            run_start = run_end
+        return ordered_indices[:limit]
+
+    def _ux_sort_key(self, skill_id: str) -> float:
+        """ux_avg 用作 tie-break 的数值键；无评分视为最低（-inf）。"""
+        ux_value = self.ux_avg(skill_id)
+        return ux_value if ux_value is not None else float("-inf")
+
+    def _bm25_ranks(self, index_bundle: dict, query_tokens: list[str]) -> dict[int, int]:
+        """对命中文档按 BM25 分数降序给出 1-based 排名（k1=1.2, b=0.75）。"""
+        entries = index_bundle["entries"]
+        term_frequencies = index_bundle["term_frequencies"]
+        document_frequencies = index_bundle["document_frequencies"]
+        document_lengths = index_bundle["document_lengths"]
+        average_document_length = index_bundle["average_document_length"]
+        document_count = len(entries)
+        scores: dict[int, float] = {}
+        for token in set(query_tokens):
+            document_frequency = document_frequencies.get(token, 0)
+            if document_frequency == 0 or average_document_length == 0:
+                continue
+            inverse_document_frequency = math.log(
+                1 + (document_count - document_frequency + 0.5)
+                / (document_frequency + 0.5)
+            )
+            for entry_index, frequency_map in enumerate(term_frequencies):
+                token_frequency = frequency_map.get(token, 0)
+                if token_frequency == 0:
+                    continue
+                denominator = token_frequency + BM25_K1 * (
+                    1 - BM25_B
+                    + BM25_B * document_lengths[entry_index] / average_document_length
+                )
+                scores[entry_index] = scores.get(entry_index, 0.0) + (
+                    inverse_document_frequency
+                    * token_frequency * (BM25_K1 + 1) / denominator
+                )
+        ranked = sorted(scores, key=lambda entry_index: (
+            -scores[entry_index], entries[entry_index]["skill_id"],
+        ))
+        return {entry_index: rank for rank, entry_index in enumerate(ranked, start=1)}
+
+    def _semantic_ranks(self, index_bundle: dict,
+                        normalized_query: str) -> dict[int, int]:
+        """对有缓存向量的文档按 query↔description cosine 降序给出 1-based 排名。"""
+        present_indices = index_bundle["vector_present_indices"]
+        corpus_matrix = index_bundle["corpus_matrix"]
+        if not present_indices:
+            return {}
+        query_vector = self._embed_query(normalized_query, index_bundle["fingerprint"])
+        if query_vector is None or query_vector.shape[0] != corpus_matrix.shape[1]:
+            return {}
+        similarities = corpus_matrix @ query_vector
+        order = np.argsort(-similarities)
+        return {
+            present_indices[position]: rank
+            for rank, position in enumerate(order.tolist(), start=1)
+        }
+
+    def _embed_query(self, normalized_query: str,
+                     fingerprint: tuple) -> np.ndarray | None:
+        """query 向量三护栏：LRU 命中零调用；信号量非阻塞抢不到即降级；短超时即降级。"""
+        if self.embed_client is None or self.search_max_embed <= 0:
+            return None
+        with self._query_vector_cache_lock:
+            cached = self._query_vector_cache.get(normalized_query)
+            if cached is not None and cached[0] == fingerprint:
+                self._query_vector_cache.move_to_end(normalized_query)
+                return cached[1]
+            elif cached is not None:
+                del self._query_vector_cache[normalized_query]
+        if not self._query_embed_semaphore.acquire(blocking=False):
+            return None
+        # 超时后 embed 线程仍在跑（同步 60s httpx），信号量由该线程结束时释放，泄漏受 max_embed 约束。
+        future = self._query_embed_pool().submit(
+            self._encode_and_cache_query, normalized_query, fingerprint,
+        )
+        try:
+            return future.result(timeout=self.search_timeout_s)
+        except Exception:  # 超时或 embed API 任何异常都只降级语义位，绝不冒泡到 search
+            return None
+
+    def _query_embed_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._query_embed_executor is None:
+            with self._query_embed_executor_lock:
+                if self._query_embed_executor is None:
+                    self._query_embed_executor = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=self.search_max_embed,
+                        thread_name_prefix="skillhub-query-embed",
+                    )
+        return self._query_embed_executor
+
+    def _encode_and_cache_query(self, normalized_query: str,
+                                fingerprint: tuple) -> np.ndarray:
+        """在信号量保护下发一次 query embed，成功写 LRU，finally 必释放信号量。"""
+        try:
+            query_vector = _normalize(
+                np.asarray(self.embed_client.encode(normalized_query), dtype=float)
+            )
+            with self._query_vector_cache_lock:
+                self._query_vector_cache[normalized_query] = (fingerprint, query_vector)
+                self._query_vector_cache.move_to_end(normalized_query)
+                while len(self._query_vector_cache) > QUERY_VECTOR_CACHE_CAPACITY:
+                    self._query_vector_cache.popitem(last=False)
+            return query_vector
+        finally:
+            self._query_embed_semaphore.release()
+
+    def _search_index_bundle(self) -> dict:
+        """随内容 fingerprint 变化整体重建 BM25 倒排 + 只读 corpus 向量，几百 skill <10ms。"""
+        entries = self._entries(include_vec=False, require_description=False)
+        current_fingerprint = tuple(
+            (entry["skill_id"], entry["source_path"], entry["content_sha"])
+            for entry in entries
+        )
+        bundle = self._search_index
+        if bundle is not None and bundle["fingerprint"] == current_fingerprint:
+            return bundle
+        with self._search_index_lock:
+            bundle = self._search_index
+            if bundle is not None and bundle["fingerprint"] == current_fingerprint:
+                return bundle
+            self._search_index = self._build_search_index(entries, current_fingerprint)
+            return self._search_index
+
+    def _build_search_index(self, entries: list[dict], fingerprint: tuple) -> dict:
+        term_frequencies: list[dict[str, int]] = []
+        document_frequencies: dict[str, int] = {}
+        for entry in entries:
+            frequency_map: dict[str, int] = {}
+            for token in _tokenize(str(entry["display_name"])):
+                frequency_map[token] = frequency_map.get(token, 0) + 2
+            for token in _tokenize(str(entry["description"])):
+                frequency_map[token] = frequency_map.get(token, 0) + 1
+            term_frequencies.append(frequency_map)
+            for token in frequency_map:
+                document_frequencies[token] = document_frequencies.get(token, 0) + 1
+        document_lengths = [sum(frequency_map.values()) for frequency_map in term_frequencies]
+        average_document_length = (
+            sum(document_lengths) / len(document_lengths) if document_lengths else 0.0
+        )
+        vector_present_indices, corpus_matrix = self._read_cached_corpus_vectors(entries)
+        return {
+            "fingerprint": fingerprint,
+            "entries": entries,
+            "term_frequencies": term_frequencies,
+            "document_frequencies": document_frequencies,
+            "document_lengths": document_lengths,
+            "average_document_length": average_document_length,
+            "vector_present_indices": vector_present_indices,
+            "corpus_matrix": corpus_matrix,
+        }
+
+    def _read_cached_corpus_vectors(self, entries: list[dict]) -> tuple[list[int], np.ndarray]:
+        """只读 EmbedStore 已缓存向量（cached_vectors，绝不现算）；缺向量的 entry 本轮只进 BM25。"""
+        if self.embed_client is None or self.search_max_embed <= 0 or not entries:
+            return [], np.empty((0, 0), dtype=float)
+        embed_store = EmbedStore(self.dir / EMBED_CACHE_NAME, self.embed_client)
+        cached = embed_store.cached_vectors([entry["description"] for entry in entries])
+        present_indices = [
+            entry_index for entry_index, vector in enumerate(cached) if vector is not None
+        ]
+        if not present_indices:
+            return [], np.empty((0, 0), dtype=float)
+        corpus_matrix = np.vstack([
+            _normalize(np.asarray(cached[entry_index], dtype=float))
+            for entry_index in present_indices
+        ])
+        return present_indices, corpus_matrix
 
     def entry(self, name: str, *, force_refresh: bool = False) -> dict | None:
         """按 skill_id / source_path / 唯一 display_name 找当前磁盘上的 skill。

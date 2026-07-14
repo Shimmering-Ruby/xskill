@@ -76,6 +76,16 @@ class EmbedStore:
                 self._save()
             return np.stack([self._vectors[h] for h in text_hashes])
 
+    def cached_vectors(self, texts: list[str]) -> list[np.ndarray | None]:
+        """只读入口：返回每条文本已缓存的向量，未命中为 None，绝不触发 encode。"""
+        with self._lock:
+            return [
+                self._vectors.get(
+                    hashlib.sha256(text.encode("utf-8")).hexdigest()
+                )
+                for text in texts
+            ]
+
     def flush_pruned(self) -> None:
         """只保留本实例生命周期内被请求过的哈希，防陈旧条目无限积累。
 
