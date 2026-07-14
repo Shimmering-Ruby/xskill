@@ -169,6 +169,20 @@ def test_search_hot_path_reuses_snapshot_index_without_recopying_entries(
     assert first == second
 
 
+def test_unchanged_expired_snapshot_reuses_search_index(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    hub = SkillHub(
+        enabled=True, hub_dir=hub_dir, embed_client=None,
+        scan_ttl_seconds=0.0,
+    )
+
+    first_bundle = hub._search_index_bundle()
+    second_bundle = hub._search_index_bundle()
+
+    assert second_bundle is first_bundle
+
+
 def test_search_hot_path_reuses_bm25_ranks(tmp_path, monkeypatch):
     hub_dir = tmp_path / "hub"
     _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")

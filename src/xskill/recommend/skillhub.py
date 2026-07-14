@@ -182,7 +182,14 @@ class SkillHub:
             now = time.monotonic()
             if self._scan_snapshot_entries is not None and now < self._scan_snapshot_expires_at:
                 return self._scan_snapshot_entries
-            self._scan_snapshot_entries = self._walk_snapshot()
+            refreshed_entries = self._walk_snapshot()
+            # TTL 到期只代表需要重新核对磁盘。内容未变化时保留原列表身份，
+            # 让依赖该快照的搜索索引和缓存继续有效。
+            if (
+                self._scan_snapshot_entries is None
+                or self._scan_snapshot_entries != refreshed_entries
+            ):
+                self._scan_snapshot_entries = refreshed_entries
             self._scan_snapshot_expires_at = time.monotonic() + self.scan_ttl_seconds
             return self._scan_snapshot_entries
 
