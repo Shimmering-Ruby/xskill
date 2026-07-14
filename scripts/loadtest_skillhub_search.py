@@ -359,6 +359,12 @@ async def _run_scenario_a_round(
     snapshot_refresh = await search_once(client, headers_list[0], WARM_QUERY_TERM)
     if snapshot_refresh["status"] != 200:
         raise RuntimeError(f"steady snapshot refresh failed: {snapshot_refresh}")
+    post_refresh_warm_results: list[dict[str, Any]] = []
+    for query_term in ALL_QUERY_TERMS:
+        warm_result = await search_once(client, headers_list[0], query_term)
+        post_refresh_warm_results.append(warm_result)
+        if warm_result["status"] != 200:
+            raise RuntimeError(f"post-refresh search warmup failed: {warm_result}")
 
     health_samples: list[dict[str, Any]] = []
     sync_results: list[dict[str, Any]] = []
@@ -412,6 +418,7 @@ async def _run_scenario_a_round(
         "diagnostic_peak": _search_stats(burst_results),
         "diagnostic_warmup": _search_stats(warm_results),
         "diagnostic_snapshot_refresh": snapshot_refresh,
+        "diagnostic_post_refresh_warmup": _search_stats(post_refresh_warm_results),
         "health": _health_stats(health_samples),
         "sync": _sync_stats(sync_results),
         "panel": _panel_stats(panel_results),
@@ -535,6 +542,14 @@ async def run_all_scenarios(
         )
         if snapshot_refresh["status"] != 200:
             raise RuntimeError(f"scenario B snapshot refresh failed: {snapshot_refresh}")
+        post_refresh_warm_results: list[dict[str, Any]] = []
+        for query_term in ALL_QUERY_TERMS:
+            warm_result = await search_once(client, headers_list[0], query_term)
+            post_refresh_warm_results.append(warm_result)
+            if warm_result["status"] != 200:
+                raise RuntimeError(
+                    f"scenario B post-refresh warmup failed: {warm_result}"
+                )
         threads_after_warmup = control_plane_harness._process_threads(server["process"].pid)
         warmup_thread_counts.append(threads_after_warmup)
         baseline_threads = max(warmup_thread_counts)
@@ -552,6 +567,7 @@ async def run_all_scenarios(
         "thread_warmup": _search_stats(thread_warmup_results),
         "thread_stabilization": _search_stats(thread_stabilization_results),
         "diagnostic_snapshot_refresh": snapshot_refresh,
+        "diagnostic_post_refresh_warmup": _search_stats(post_refresh_warm_results),
         "threads_before_warmup": threads_before_warmup,
         "threads_after_warmup": threads_after_warmup,
         "warmup_thread_counts": warmup_thread_counts,
