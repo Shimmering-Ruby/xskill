@@ -801,10 +801,15 @@ async def team_skill_hub_search(
     if not query.strip():
         raise HTTPException(status_code=400, detail="empty query")
     bounded_limit = max(1, min(int(limit), 10))
-    try:
-        matches = await run_in_threadpool(hub.search, query, bounded_limit)
-    except FileNotFoundError as missing_dir:
-        raise HTTPException(status_code=503, detail=str(missing_dir)) from missing_dir
+    # A hot result is a bounded in-memory lookup.  Keep that path on the event
+    # loop instead of creating 50 short-lived AnyIO worker jobs beside CPU-heavy
+    # /sync work; misses and expired snapshots still run entirely off-loop.
+    matches = hub.cached_search(query, bounded_limit)
+    if matches is None:
+        try:
+            matches = await run_in_threadpool(hub.search, query, bounded_limit)
+        except FileNotFoundError as missing_dir:
+            raise HTTPException(status_code=503, detail=str(missing_dir)) from missing_dir
     return {"results": [
         {
             "skill_id": match["skill_id"],

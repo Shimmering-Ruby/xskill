@@ -139,7 +139,7 @@ def prepare_search_home(run_dir: Path, mock_base_url: str, args: argparse.Namesp
         "skill_opt": {"enabled": False},
         "watcher": {"poll_interval": 0.5, "max_concurrent": 8, "cluster_batch_size": 8},
         "server": {
-            "thread_pool_tokens": 80, "team_sync_workers": 16,
+            "thread_pool_tokens": 80, "team_sync_workers": args.team_sync_workers,
             "profile_refresh_workers": 8, "profile_refresh_queue_size": 1024,
             "profile_refresh_shutdown_timeout": 10.0,
         },
@@ -826,10 +826,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-timeout-s", type=float, default=3.0)
     parser.add_argument("--embed-delay-s", type=float, default=0.2)
     parser.add_argument("--panel-duration-s", type=float, default=20.0)
+    # GitHub hosted runners have few CPU cores.  Keep manifest calculation
+    # serialized in this mixed-load gate so 30 concurrent /sync requests test
+    # queue isolation instead of letting CPU-bound Python workers starve search.
+    parser.add_argument("--team-sync-workers", type=int, default=1)
     parser.add_argument("--artifact-root", type=Path, default=Path("/home/admin/xskill-loadtest-results"))
     args = parser.parse_args()
-    if args.skills < 1 or args.clients < 1 or args.concurrency < 1:
-        parser.error("--skills/--clients/--concurrency must be >= 1")
+    if (args.skills < 1 or args.clients < 1 or args.concurrency < 1
+            or args.team_sync_workers < 1):
+        parser.error("--skills/--clients/--concurrency/--team-sync-workers must be >= 1")
     if args.max_embed_high <= args.max_embed_low:
         parser.error("--max-embed-high must exceed --max-embed-low")
     return args
@@ -853,6 +858,7 @@ def main() -> int:
             "waves": args.waves, "distractors": args.distractors, "junk_depth": args.junk_depth,
             "max_embed_low": args.max_embed_low, "max_embed_high": args.max_embed_high,
             "search_timeout_s": args.search_timeout_s, "embed_delay_s": args.embed_delay_s,
+            "team_sync_workers": args.team_sync_workers,
         },
         "scenarios": {},
     }

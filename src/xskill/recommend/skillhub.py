@@ -307,6 +307,36 @@ class SkillHub:
         self._cache_search_results(index_bundle, result_cache_key, results)
         return results
 
+    def cached_search(self, query: str, limit: int = 5) -> list[dict] | None:
+        """Return a current final-result cache hit without scanning or ranking.
+
+        This method is safe to call on the event-loop thread: it only reads the
+        current snapshot/index identities and a bounded in-memory cache.  A
+        stale snapshot or cache miss returns ``None`` so the caller can offload
+        :meth:`search` to a worker thread.
+        """
+        normalized_query = query.strip().lower()
+        if not normalized_query:
+            return []
+        now = time.monotonic()
+        index_bundle = self._search_index
+        if (
+            index_bundle is None
+            or index_bundle["snapshot_entries"] is not self._scan_snapshot_entries
+            or now >= self._scan_snapshot_expires_at
+        ):
+            return None
+        # Prefer the cached hybrid result when both a prior degraded result
+        # and a later semantic result exist for the same query.
+        for has_semantic_rank in (True, False):
+            cached_results = self._cached_search_results(
+                index_bundle,
+                (normalized_query, int(limit), has_semantic_rank),
+            )
+            if cached_results is not None:
+                return cached_results
+        return None
+
     @staticmethod
     def _cached_search_results(
         index_bundle: dict, cache_key: tuple[str, int, bool],
@@ -684,9 +714,10 @@ class SkillHub:
                 (entry["skill_id"], entry["source_path"], entry["content_sha"])
                 for entry in entries
             )
-            self._search_index = self._build_search_index(entries, current_fingerprint)
-            self._search_index["snapshot_entries"] = snapshot_entries
-            return self._search_index
+            rebuilt_bundle = self._build_search_index(entries, current_fingerprint)
+            rebuilt_bundle["snapshot_entries"] = snapshot_entries
+            self._search_index = rebuilt_bundle
+            return rebuilt_bundle
 
     def _build_search_index(self, entries: list[dict], fingerprint: tuple) -> dict:
         term_frequencies: list[dict[str, int]] = []
