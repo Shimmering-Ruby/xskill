@@ -158,6 +158,35 @@ class SkillHub:
         with open(self.index_cache_path, "wb") as index_file:
             pickle.dump(data, index_file)
 
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        """无画像关键词检索：只按 display_name/description 文本匹配打分。
+
+        与 ``SkillRecommendEngine`` 完全无关——不读画像、不算向量，结果只由
+        查询词与 skill 元数据的字面匹配决定（`xskill search` 的语义契约）。
+        """
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        tokens = [token for token in re.split(r"[^0-9a-z一-鿿]+", needle) if token]
+        scored: list[tuple[float, dict]] = []
+        for entry in self._entries(include_vec=False, require_description=False):
+            name_text = str(entry["display_name"]).lower()
+            desc_text = str(entry["description"]).lower()
+            score = 0.0
+            if needle in name_text:
+                score += 6.0
+            elif needle in desc_text:
+                score += 3.0
+            for token in tokens:
+                if token in name_text:
+                    score += 2.0
+                if token in desc_text:
+                    score += 1.0
+            if score > 0:
+                scored.append((score, entry))
+        scored.sort(key=lambda pair: (-pair[0], pair[1]["skill_id"]))
+        return [entry for _score, entry in scored[:limit]]
+
     def entry(self, name: str) -> dict | None:
         """按 skill_id / source_path / 唯一 display_name 找当前磁盘上的 skill。"""
         if not self.enabled:

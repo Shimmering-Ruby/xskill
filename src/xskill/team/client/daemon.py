@@ -192,83 +192,13 @@ class TeamClient:
         self, archive_bytes: bytes, dest_dir: Path, *, expected_sha: str,
         display_name: str | None, source_path: str | None,
     ) -> None:
-        """Install a non-git skillhub skill archive into the local skill directory."""
-        dest_dir = Path(dest_dir)
-        meta_path = dest_dir / ".xskill_skillhub.json"
-        if meta_path.is_file() and (dest_dir / "SKILL.md").is_file():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                if meta.get("sha") == expected_sha:
-                    return
-            except (OSError, ValueError):
-                pass
-
-        tmp_dir = dest_dir.with_name(f".{dest_dir.name}.tmp")
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-            root = tmp_dir.resolve()
-            for info in zf.infolist():
-                target = (tmp_dir / info.filename).resolve()
-                try:
-                    target.relative_to(root)
-                except ValueError:
-                    raise RuntimeError(f"unsafe skillhub archive path: {info.filename}")
-                if info.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-        if not (tmp_dir / "SKILL.md").is_file():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise RuntimeError("skillhub archive missing SKILL.md")
-        (tmp_dir / ".xskill_skillhub.json").write_text(
-            json.dumps({
-                "sha": expected_sha,
-                "display_name": display_name,
-                "source_path": source_path,
-            }, ensure_ascii=False),
-            encoding="utf-8",
+        apply_skillhub_archive(
+            archive_bytes, dest_dir, expected_sha=expected_sha,
+            display_name=display_name, source_path=source_path,
         )
-        shutil.rmtree(dest_dir, ignore_errors=True)
-        tmp_dir.replace(dest_dir)
 
     def _install_to_ecosystems(self, repo_dir: Path) -> None:
-        """把一个已 checkout 好的 skill working copy 装到本机所有生态。
-
-        working tree 已是 server 指定 side 的内容，所以一律用 side='main'
-        语义（= 链接 / 拷贝整个 working tree 目录）。
-
-        注意 openclaw 走 copy 不是 symlink（openclaw 拒收 escape-root 的
-        symlink，详见 docs/ecosystem/openclaw-install-fix.md）。其他生态保持
-        symlink-first 三阶 fallback。
-        """
-        from xskill.ecosystems import (
-            detect_known_ecosystems, install_to_claude_code,
-            install_to_codex, install_to_nga3, install_to_opencode, install_to_ngagent,
-            install_to_openclaw, install_to_cursor, install_to_trae,
-        )
-        installer = {
-            "claude_code": install_to_claude_code,
-            "codex": install_to_codex,
-            "nga3": install_to_nga3,
-            "opencode": install_to_opencode,
-            "ngagent": install_to_ngagent,
-            "openclaw": install_to_openclaw,
-            "cursor": install_to_cursor,
-            "trae": install_to_trae,
-        }
-        for det in detect_known_ecosystems(home_root=self.home_root):
-            fn = installer.get(det["ecosystem"])
-            if fn is None:
-                continue
-            try:
-                fn(repo_dir, target_root=self.home_root, side="main")
-                logger.info("installed %s to %s", repo_dir.name, det["ecosystem"])
-            except Exception:
-                logger.warning("install %s to %s failed",
-                               repo_dir.name, det["ecosystem"], exc_info=True)
+        install_skill_to_ecosystems(repo_dir, home_root=self.home_root)
 
     # ── ④ push 用户手改 ──────────────────────────────────────────
     def push_user_edits(self) -> int:
@@ -354,14 +284,7 @@ class TeamClient:
             logger.info("cleanup removed stale skill: %s", repo_dir.name)
 
     def _uninstall_from_ecosystems(self, skill_name: str) -> None:
-        from xskill.ecosystems import _cc_skills_path, _agents_skills_path
-        for root_fn in (_cc_skills_path, _agents_skills_path):
-            dest = root_fn(self.home_root) / skill_name
-            if dest.is_symlink():
-                try:
-                    dest.unlink()
-                except OSError:
-                    logger.warning("failed to unlink %s", dest, exc_info=True)
+        uninstall_skill_from_ecosystems(skill_name, home_root=self.home_root)
 
     # ── 守护循环 ─────────────────────────────────────────────────
     def _tick(self) -> None:
@@ -398,3 +321,105 @@ class TeamClient:
 
     def stop(self) -> None:
         self._stop.set()
+
+
+def apply_skillhub_archive(
+    archive_bytes: bytes, dest_dir: Path, *, expected_sha: str,
+    display_name: str | None, source_path: str | None,
+    marker_name: str = ".xskill_skillhub.json",
+    extra_meta: dict | None = None,
+) -> None:
+    """把非 git 的 skillhub skill zip 原子落到本地目录（带路径穿越防护）。
+
+    sync reconcile 与 `xskill search` 槽位共用；后者用 ``marker_name`` /
+    ``extra_meta`` 换成自己的标记文件。marker sha 相同则跳过重写。
+    """
+    dest_dir = Path(dest_dir)
+    meta_path = dest_dir / marker_name
+    if meta_path.is_file() and (dest_dir / "SKILL.md").is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("sha") == expected_sha:
+                return
+        except (OSError, ValueError):
+            pass
+
+    tmp_dir = dest_dir.with_name(f".{dest_dir.name}.tmp")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+        root = tmp_dir.resolve()
+        for info in zf.infolist():
+            target = (tmp_dir / info.filename).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError:
+                raise RuntimeError(f"unsafe skillhub archive path: {info.filename}")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    if not (tmp_dir / "SKILL.md").is_file():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise RuntimeError("skillhub archive missing SKILL.md")
+    meta = {
+        "sha": expected_sha,
+        "display_name": display_name,
+        "source_path": source_path,
+    }
+    if extra_meta:
+        meta.update(extra_meta)
+    (tmp_dir / marker_name).write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8",
+    )
+    shutil.rmtree(dest_dir, ignore_errors=True)
+    tmp_dir.replace(dest_dir)
+
+
+def install_skill_to_ecosystems(repo_dir: Path, *, home_root: Path) -> None:
+    """把一个已就位的 skill 目录装到本机所有检测到的生态。
+
+    working tree 已是最终内容，一律用 side='main' 语义（= 链接 / 拷贝整个
+    目录）。openclaw 走 copy 不是 symlink（openclaw 拒收 escape-root 的
+    symlink，详见 docs/ecosystem/openclaw-install-fix.md）；其他生态保持
+    symlink-first 三阶 fallback。
+    """
+    from xskill.ecosystems import (
+        detect_known_ecosystems, install_to_claude_code,
+        install_to_codex, install_to_nga3, install_to_opencode, install_to_ngagent,
+        install_to_openclaw, install_to_cursor, install_to_trae,
+    )
+    installer = {
+        "claude_code": install_to_claude_code,
+        "codex": install_to_codex,
+        "nga3": install_to_nga3,
+        "opencode": install_to_opencode,
+        "ngagent": install_to_ngagent,
+        "openclaw": install_to_openclaw,
+        "cursor": install_to_cursor,
+        "trae": install_to_trae,
+    }
+    for det in detect_known_ecosystems(home_root=home_root):
+        fn = installer.get(det["ecosystem"])
+        if fn is None:
+            continue
+        try:
+            fn(repo_dir, target_root=home_root, side="main")
+            logger.info("installed %s to %s", repo_dir.name, det["ecosystem"])
+        except Exception:
+            logger.warning("install %s to %s failed",
+                           repo_dir.name, det["ecosystem"], exc_info=True)
+
+
+def uninstall_skill_from_ecosystems(skill_name: str, *, home_root: Path) -> None:
+    """摘掉生态目录里指向该 skill 的 symlink（copy 型安装不动，保守起见）。"""
+    from xskill.ecosystems import _cc_skills_path, _agents_skills_path
+    for root_fn in (_cc_skills_path, _agents_skills_path):
+        dest = root_fn(home_root) / skill_name
+        if dest.is_symlink():
+            try:
+                dest.unlink()
+            except OSError:
+                logger.warning("failed to unlink %s", dest, exc_info=True)

@@ -137,6 +137,15 @@ xskill stop / xskill start                    # stop / re-start (must have conne
 
 On **macOS / Linux**, native persistence (launchd / systemd --user) is still on the way; for now run the foreground form `xskill connect --foreground` under your own init system.
 
+#### Search / share skills on demand (skillhub)
+
+```bash
+xskill search docker compose   # keyword-search the server skillhub; hits are pulled locally and installed
+xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
+```
+
+`search` matches keywords only — independent of the recommendation profile — and prints each hit's name, description, and absolute local path. Pulled skills live in `~/.xskill/search_skills/` with a rolling cap of **10 slots** (least-recently-hit evicted). `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. The local index search is unchanged: `xskill search traj|skill <query>`.
+
 * * *
 
 ## 🔌 Works with your agents

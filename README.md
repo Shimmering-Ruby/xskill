@@ -148,6 +148,20 @@ xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/L
 
 > 把 `<服务器地址:端口>` 和 `<TOKEN>` 换成团队管理员给你的值(server 端 `xskill serve --server` 启动时会打印 token)。**切勿把真实 token 写进任何公开仓库或聊天记录。**
 
+#### 按需搜索 / 分享技能(skillhub)
+
+除了 server 按画像推送的技能,client 还可以主动搜 server 的 skillhub 并把命中的技能拉到本地:
+
+```bash
+xskill search docker compose        # 关键词搜 skillhub,命中的直接拉到本地并装进各生态
+xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
+```
+
+- `search` 只按关键词匹配 skillhub 目录(含团队成员上传的技能),与推荐画像无关;输出每个命中技能的名字、描述和本机绝对路径。
+- 搜下来的技能落在 `~/.xskill/search_skills/`,本地最多保留 **10 个槽位**,按最近命中滚动淘汰,不受 sync 清理影响。
+- `upload` 会先校验 `SKILL.md` frontmatter,server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。
+- 本机原有的本地索引搜索保持不变:`xskill search traj|skill <query>`。
+
 * * *
 
 ## 🔌 与你的 agent 协同
