@@ -42,7 +42,7 @@ EMBED_CACHE_NAME = ".skillhub_embed_cache.pkl"
 
 BM25_K1 = 1.2
 BM25_B = 0.75
-BM25_RANK_CACHE_CAPACITY = 256
+SEARCH_RANK_CACHE_CAPACITY = 256
 RRF_RANK_CONSTANT = 60
 QUERY_VECTOR_CACHE_CAPACITY = 256
 QUERY_EMBED_FAILURE_COOLDOWN_SECONDS = 5.0
@@ -274,15 +274,12 @@ class SkillHub:
         semantic_rank_by_index = self._semantic_ranks(
             index_bundle, normalized_query,
         )
-        reciprocal_scores: dict[int, float] = {}
-        for rank_by_index in (bm25_rank_by_index, semantic_rank_by_index):
-            for entry_index, rank in rank_by_index.items():
-                reciprocal_scores[entry_index] = (
-                    reciprocal_scores.get(entry_index, 0.0)
-                    + 1.0 / (RRF_RANK_CONSTANT + rank)
-                )
-        ordered_indices = self._fuse_and_rank(
-            reciprocal_scores, entries, limit,
+        score_groups = self._fusion_score_groups(
+            index_bundle, normalized_query,
+            bm25_rank_by_index, semantic_rank_by_index,
+        )
+        ordered_indices = self._rank_score_groups(
+            score_groups, entries, limit,
         )
         results: list[dict] = []
         for entry_index in ordered_indices:
@@ -296,13 +293,58 @@ class SkillHub:
     def _fuse_and_rank(self, reciprocal_scores: dict[int, float],
                        entries: list[dict], limit: int) -> list[int]:
         """RRF 排序，同分 tie-break ux_avg 降序（None 最低）再 skill_id；ux 只在同分组内算。"""
+        return self._rank_score_groups(
+            self._score_groups(reciprocal_scores, entries), entries, limit,
+        )
+
+    def _fusion_score_groups(
+        self, index_bundle: dict, normalized_query: str,
+        bm25_rank_by_index: dict[int, int],
+        semantic_rank_by_index: dict[int, int],
+    ) -> tuple[tuple[int, ...], ...]:
+        """复用缓存热查询的 RRF 分组；UX 仍在每次请求排序时读取。"""
+        cache = index_bundle["fusion_group_cache"]
+        cache_lock = index_bundle["fusion_group_cache_lock"]
+        # 语义通道临时降级时不能复用成功语义请求的分组，否则 match 字段会不一致。
+        if semantic_rank_by_index:
+            with cache_lock:
+                cached = cache.get(normalized_query)
+                if cached is not None:
+                    cache.move_to_end(normalized_query)
+                    return cached
+
+        reciprocal_scores: dict[int, float] = {}
+        for rank_by_index in (bm25_rank_by_index, semantic_rank_by_index):
+            for entry_index, rank in rank_by_index.items():
+                reciprocal_scores[entry_index] = (
+                    reciprocal_scores.get(entry_index, 0.0)
+                    + 1.0 / (RRF_RANK_CONSTANT + rank)
+                )
+        score_groups = self._score_groups(reciprocal_scores, index_bundle["entries"])
+        if not semantic_rank_by_index:
+            return score_groups
+        with cache_lock:
+            cached = cache.get(normalized_query)
+            if cached is not None:
+                cache.move_to_end(normalized_query)
+                return cached
+            cache[normalized_query] = score_groups
+            while len(cache) > SEARCH_RANK_CACHE_CAPACITY:
+                cache.popitem(last=False)
+        return score_groups
+
+    @staticmethod
+    def _score_groups(
+        reciprocal_scores: dict[int, float], entries: list[dict],
+    ) -> tuple[tuple[int, ...], ...]:
+        """按 RRF 分数和 skill_id 排序，保留同分组供实时 UX 排序。"""
         by_score_then_id = sorted(
             reciprocal_scores,
             key=lambda entry_index: (
                 -reciprocal_scores[entry_index], entries[entry_index]["skill_id"],
             ),
         )
-        ordered_indices: list[int] = []
+        score_groups: list[tuple[int, ...]] = []
         run_start = 0
         while run_start < len(by_score_then_id):
             run_end = run_start
@@ -310,7 +352,18 @@ class SkillHub:
                    and reciprocal_scores[by_score_then_id[run_end]]
                    == reciprocal_scores[by_score_then_id[run_start]]):
                 run_end += 1
-            run = by_score_then_id[run_start:run_end]
+            score_groups.append(tuple(by_score_then_id[run_start:run_end]))
+            run_start = run_end
+        return tuple(score_groups)
+
+    def _rank_score_groups(
+        self, score_groups: tuple[tuple[int, ...], ...],
+        entries: list[dict], limit: int,
+    ) -> list[int]:
+        """对同分组实时应用 UX tie-break，避免缓存陈旧的 UX 排名。"""
+        ordered_indices: list[int] = []
+        for score_group in score_groups:
+            run = list(score_group)
             if len(run) > 1:
                 run.sort(key=lambda entry_index: (
                     -self._ux_sort_key(entries[entry_index]),
@@ -319,7 +372,6 @@ class SkillHub:
             ordered_indices.extend(run)
             if len(ordered_indices) >= limit:
                 break
-            run_start = run_end
         return ordered_indices[:limit]
 
     def _ux_sort_key(self, entry: dict) -> float:
@@ -380,13 +432,21 @@ class SkillHub:
                 rank_cache.move_to_end(cache_key)
                 return cached
             rank_cache[cache_key] = ranks
-            while len(rank_cache) > BM25_RANK_CACHE_CAPACITY:
+            while len(rank_cache) > SEARCH_RANK_CACHE_CAPACITY:
                 rank_cache.popitem(last=False)
             return ranks
 
     def _semantic_ranks(self, index_bundle: dict,
                         normalized_query: str) -> dict[int, int]:
         """对有缓存向量的文档按 query↔description cosine 降序给出 1-based 排名。"""
+        rank_cache = index_bundle["semantic_rank_cache"]
+        rank_cache_lock = index_bundle["semantic_rank_cache_lock"]
+        with rank_cache_lock:
+            cached = rank_cache.get(normalized_query)
+            if cached is not None:
+                rank_cache.move_to_end(normalized_query)
+                return cached
+
         present_indices = index_bundle["vector_present_indices"]
         corpus_matrix = index_bundle["corpus_matrix"]
         if not present_indices:
@@ -396,10 +456,19 @@ class SkillHub:
             return {}
         similarities = corpus_matrix @ query_vector
         order = np.argsort(-similarities)
-        return {
+        ranks = {
             present_indices[position]: rank
             for rank, position in enumerate(order.tolist(), start=1)
         }
+        with rank_cache_lock:
+            cached = rank_cache.get(normalized_query)
+            if cached is not None:
+                rank_cache.move_to_end(normalized_query)
+                return cached
+            rank_cache[normalized_query] = ranks
+            while len(rank_cache) > SEARCH_RANK_CACHE_CAPACITY:
+                rank_cache.popitem(last=False)
+        return ranks
 
     def _embed_query(self, normalized_query: str,
                      fingerprint: tuple) -> np.ndarray | None:
@@ -597,6 +666,10 @@ class SkillHub:
             "average_document_length": average_document_length,
             "bm25_rank_cache": OrderedDict(),
             "bm25_rank_cache_lock": threading.Lock(),
+            "semantic_rank_cache": OrderedDict(),
+            "semantic_rank_cache_lock": threading.Lock(),
+            "fusion_group_cache": OrderedDict(),
+            "fusion_group_cache_lock": threading.Lock(),
             "vector_present_indices": vector_present_indices,
             "corpus_matrix": corpus_matrix,
         }
