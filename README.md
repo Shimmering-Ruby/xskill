@@ -160,7 +160,7 @@ xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.
 - `search` 只按关键词匹配 skillhub 目录(含团队成员上传的技能),与推荐画像无关;输出每个命中技能的名字、描述和本机绝对路径。
 - 搜下来的技能落在 `~/.xskill/search_skills/`,本地最多保留 **10 个槽位**,按最近命中滚动淘汰,不受 sync 清理影响。
 - `upload` 会先校验 `SKILL.md` frontmatter,server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。
-- 本机原有的本地索引搜索保持不变:`xskill search traj|skill <query>`。
+- 本机语义搜索已从 CLI 移除(不再有 `xskill search traj|skill <query>`);如需按语义检索本机轨迹/技能,请用 dashboard 或 API(`POST /api/v1/skills/search`)。
 
 * * *
 

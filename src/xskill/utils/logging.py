@@ -42,7 +42,7 @@ stdout 保留简略输出（只 xskill.* INFO+），日常 ``xskill serve`` 终�
 
 调用约定：``cli.py`` 在 ``cmd_serve`` 前调一次 ``configure_logging(...)``
 即可——它 hooks Python ``logging`` 全局配置，所有 logger 自动 inherit。
-``cmd_search`` / ``cmd_registry`` 这种短命令不需要文件 handler，保留
+``cmd_stats`` / ``cmd_registry`` 这种短命令不需要文件 handler，保留
 stdout-only basicConfig 即可。
 """
 from __future__ import annotations
