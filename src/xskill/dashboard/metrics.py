@@ -245,42 +245,48 @@ def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]
     skill_dir = Path(skill_dir)
     out: list[dict] = []
     if skill_dir.is_dir():
-        for d in sorted(skill_dir.iterdir()):
-            if not d.is_dir() or d.name.startswith("."):
-                continue
-            branches = _branches(d)
-            if "staging" in branches:
-                state = "staging"
-            elif "main" in branches:
-                state = "main"
-            elif "baby" in branches:
-                state = "baby"
-            else:
-                state = "unknown"
-            desc, version = "", 0
-            smd = d / "SKILL.md"
-            if smd.is_file():
-                try:
-                    fm, _ = fm_parse(smd.read_text(encoding="utf-8"))
-                    desc = (fm.get("description") or "").strip().replace("\n", " ")
-                    meta = fm.get("metadata", {}) or {}
-                    version = meta.get("version", 0)
-                except Exception:  # pylint: disable=broad-exception-caught
-                    pass
-            n_cand = 0
-            cand = d / ".candidates.yml"
-            if cand.is_file():
-                try:
-                    import yaml
-                    data = yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
-                    n_cand = len(data.get("candidates", []) or [])
-                except Exception:  # pylint: disable=broad-exception-caught
-                    pass
-            out.append({
-                "name": d.name, "state": state, "source": "native",
-                "description": desc[:300], "version": version,
-                "candidates": n_cand,
-            })
+        skill_dirs = [
+            path for path in sorted(skill_dir.iterdir())
+            if path.is_dir() and not path.name.startswith(".")
+        ]
+        snapshot_rows = _rows_from_manifest_snapshot(skill_dir, skill_dirs)
+        if snapshot_rows is not None:
+            out = snapshot_rows
+        else:
+            for d in skill_dirs:
+                branches = _branches(d)
+                if "staging" in branches:
+                    state = "staging"
+                elif "main" in branches:
+                    state = "main"
+                elif "baby" in branches:
+                    state = "baby"
+                else:
+                    state = "unknown"
+                desc, version = "", 0
+                smd = d / "SKILL.md"
+                if smd.is_file():
+                    try:
+                        fm, _ = fm_parse(smd.read_text(encoding="utf-8"))
+                        desc = (fm.get("description") or "").strip().replace("\n", " ")
+                        meta = fm.get("metadata", {}) or {}
+                        version = meta.get("version", 0)
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
+                n_cand = 0
+                cand = d / ".candidates.yml"
+                if cand.is_file():
+                    try:
+                        import yaml
+                        data = yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
+                        n_cand = len(data.get("candidates", []) or [])
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
+                out.append({
+                    "name": d.name, "state": state, "source": "native",
+                    "description": desc[:300], "version": version,
+                    "candidates": n_cand,
+                })
     # main/staging（已正式产出）排前,其次 baby,再按名字
     order = {"main": 0, "staging": 0, "baby": 1, "unknown": 2}
     out.sort(key=lambda s: (order.get(s["state"], 3), s["name"]))
@@ -299,6 +305,50 @@ def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]
     hub_rows.sort(key=lambda s: (s["hub"], s["name"]))
     out.extend(hub_rows)
     return out
+
+
+def _rows_from_manifest_snapshot(
+    skill_dir: Path,
+    skill_dirs: list[Path],
+) -> list[dict] | None:
+    """全部技能已毕业时复用 sync 仓快照，避免面板再解析 300 个仓库。"""
+    try:
+        from xskill.team.server.skill_manifest import manifest_catalog_snapshot
+        snapshot = manifest_catalog_snapshot(
+            skill_dir, max_age_seconds=_SKILLS_CATALOG_TTL_SECONDS,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    if {skill.name for skill in snapshot.skills} != {path.name for path in skill_dirs}:
+        return None
+
+    rows: list[dict] = []
+    for skill in snapshot.skills:
+        main_ref, staging_ref = snapshot.refs[skill.name]
+        state = "staging" if staging_ref else ("main" if main_ref else "unknown")
+        frontmatter = skill.frontmatter
+        metadata = frontmatter.get("metadata", {}) or {}
+        candidate_count = 0
+        candidate_path = skill.path / ".candidates.yml"
+        if candidate_path.is_file():
+            try:
+                import yaml
+                data = yaml.safe_load(
+                    candidate_path.read_text(encoding="utf-8"),
+                ) or {}
+                candidate_count = len(data.get("candidates", []) or [])
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+        rows.append({
+            "name": skill.name,
+            "state": state,
+            "source": "native",
+            "description": str(frontmatter.get("description") or "")
+            .strip().replace("\n", " ")[:300],
+            "version": metadata.get("version", 0),
+            "candidates": candidate_count,
+        })
+    return rows
 
 
 def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:

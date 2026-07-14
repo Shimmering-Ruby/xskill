@@ -78,14 +78,23 @@ class _ManifestCatalogCache:
         with self._entries_lock:
             return self._entries.setdefault(key, _CatalogEntry())
 
-    def get(self, skill_dir: Path) -> _CatalogSnapshot:
+    def get(
+        self,
+        skill_dir: Path,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> _CatalogSnapshot:
         entry = self._entry(skill_dir)
         with entry.condition:
             while True:
                 now = self.clock()
+                max_age = (
+                    self.ttl_seconds if max_age_seconds is None
+                    else min(self.ttl_seconds, max_age_seconds)
+                )
                 if (
                     entry.snapshot is not None
-                    and now - entry.snapshot.built_at < self.ttl_seconds
+                    and now - entry.snapshot.built_at < max_age
                 ):
                     return entry.snapshot
                 if not entry.refreshing:
@@ -153,6 +162,17 @@ _catalog_cache = _ManifestCatalogCache()
 def invalidate_manifest_cache(skill_dir: Path | str | None = None) -> None:
     """显式失效 manifest 仓快照；不传路径时清空全部根目录。"""
     _catalog_cache.clear(None if skill_dir is None else Path(skill_dir))
+
+
+def manifest_catalog_snapshot(
+    skill_dir: Path | str,
+    *,
+    max_age_seconds: float | None = None,
+) -> _CatalogSnapshot:
+    """返回与 sync 共用的最新仓库快照，供同进程只读接口复用。"""
+    return _catalog_cache.get(
+        Path(skill_dir), max_age_seconds=max_age_seconds,
+    )
 
 
 def _reset_manifest_cache_for_tests(
