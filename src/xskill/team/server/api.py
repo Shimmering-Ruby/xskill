@@ -20,6 +20,7 @@ import io
 import json
 import logging
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import time
@@ -779,6 +780,121 @@ async def team_skill_bundle(
         return Response(content=archive, media_type="application/zip")
     bundle = make_repo_bundle(repo_dir)
     return Response(content=bundle, media_type="application/octet-stream")
+
+
+@router.get("/skill_hub/search")
+async def team_skill_hub_search(
+    query: str,
+    limit: int = 5,
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+) -> dict:
+    """关键词搜 skillhub（含 user_skill_hub 上传件）。与推荐画像完全无关。"""
+    _auth(x_xskill_token, x_xskill_client)
+    hub = _ctx.skillhub
+    if hub is None or not getattr(hub, "enabled", False):
+        raise HTTPException(status_code=503, detail="skillhub not enabled on server")
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="empty query")
+    bounded_limit = max(1, min(int(limit), 10))
+    try:
+        matches = await run_in_threadpool(hub.search, query, bounded_limit)
+    except FileNotFoundError as missing_dir:
+        raise HTTPException(status_code=503, detail=str(missing_dir)) from missing_dir
+    return {"results": [
+        {
+            "skill_id": match["skill_id"],
+            "display_name": match["display_name"],
+            "description": match["description"],
+            "content_sha": match["content_sha"],
+            "source_path": match["source_path"],
+        }
+        for match in matches
+    ]}
+
+
+@router.post("/skill_hub/upload")
+async def team_skill_hub_upload(
+    file: UploadFile = File(...),
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+) -> dict:
+    """收 client 打包的 skill 文件夹 zip，落到 user_skill_hub/<用户目录>/ 下。
+
+    落盘位置在 skillhub 目录树内，所以上传件天然进入 skillhub 扫描范围：
+    可被 `/skill_hub/search` 搜到、可经 `/skill/{id}/bundle` 分发。
+    """
+    client_id = _auth(x_xskill_token, x_xskill_client)
+    hub = _ctx.skillhub
+    if hub is None or not getattr(hub, "enabled", False):
+        raise HTTPException(status_code=503, detail="skillhub not enabled on server")
+    payload = await file.read()
+    if len(payload) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="skill archive exceeds 20MB")
+    from xskill.team.server.client_registry import safe_dir_name
+    registry_row = _ctx.client_registry.get(client_id)
+    owner_dir = safe_dir_name((registry_row or {}).get("user_name") or None, client_id)
+    stored = await run_in_threadpool(_store_user_skill, hub, owner_dir, payload)
+    logger.info("skill_hub upload from %s: %s -> %s",
+                client_id, stored["display_name"], stored["stored_path"])
+    return stored
+
+
+def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
+    """校验并解压上传的 skill zip 到 <skillhub>/user_skill_hub/<owner>/<name>/。"""
+    from xskill.skill.frontmatter import FrontmatterError, parse_strict
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile as bad_zip:
+        raise HTTPException(status_code=400, detail=f"invalid zip: {bad_zip}") from bad_zip
+    with archive:
+        if "SKILL.md" not in archive.namelist():
+            raise HTTPException(status_code=400,
+                                detail="SKILL.md missing at archive root")
+        try:
+            frontmatter, _body = parse_strict(
+                archive.read("SKILL.md").decode("utf-8"))
+        except (FrontmatterError, UnicodeDecodeError) as bad_skill:
+            raise HTTPException(status_code=400,
+                                detail=f"invalid SKILL.md: {bad_skill}") from bad_skill
+        display_name = str(frontmatter["name"]).strip()
+        from xskill.recommend.skillhub import _safe_id_part
+        dest_dir = (Path(hub.dir) / "user_skill_hub" / owner_dir
+                    / _safe_id_part(display_name))
+        tmp_dir = dest_dir.with_name(f".{dest_dir.name}.tmp")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        extracted_root = tmp_dir.resolve()
+        for info in archive.infolist():
+            target = (tmp_dir / info.filename).resolve()
+            try:
+                target.relative_to(extracted_root)
+            except ValueError:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise HTTPException(status_code=400,
+                                    detail=f"unsafe archive path: {info.filename}")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    shutil.rmtree(dest_dir, ignore_errors=True)
+    tmp_dir.replace(dest_dir)
+    source_path = dest_dir.relative_to(Path(hub.dir)).as_posix()
+    entry = hub.entry(source_path)
+    if entry is None:
+        raise HTTPException(status_code=500,
+                            detail="stored skill not visible in skillhub scan")
+    return {
+        "skill_id": entry["skill_id"],
+        "display_name": entry["display_name"],
+        "description": entry["description"],
+        "content_sha": entry["content_sha"],
+        "source_path": entry["source_path"],
+        "stored_path": str(dest_dir),
+    }
 
 
 def _make_skillhub_archive(skill_dir: Path) -> bytes:

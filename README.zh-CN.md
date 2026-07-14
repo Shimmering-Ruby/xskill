@@ -97,6 +97,15 @@ xskill stop / xskill start                     # 停止 / 重新拉起(需先 co
 
 macOS / Linux 的原生常驻（launchd / systemd --user）仍在路上，当前用自己的 init 系统托管 `xskill connect --foreground` 即可。
 
+### 按需搜索 / 分享技能（skillhub）
+
+```bash
+xskill search docker compose        # 关键词搜 server 的 skillhub,命中的拉到本地并装进各生态
+xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
+```
+
+`search` 只按关键词匹配、与推荐画像无关，输出命中技能的名字、描述和本机绝对路径；本地最多保留 **10 个槽位**滚动淘汰。`upload` 在 server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。本机索引搜索保持原样：`xskill search traj|skill <query>`。
+
 ## 架构图
 
 <p align="center">

@@ -544,7 +544,12 @@ def cmd_stats(args) -> int:
 
 
 def cmd_search(args, xskill) -> int:
-    target = args.search_target
+    target = args.terms[0]
+    query = " ".join(args.terms[1:]).strip()
+    if not query:
+        print(f"error: 用法 xskill search {target} <query>", file=sys.stderr)
+        return 2
+    args.query = query
     if target == "traj":
         hits = xskill.search_trajectories(args.query, top_k=args.top_k)
         for h in hits:
@@ -567,6 +572,153 @@ def cmd_search(args, xskill) -> int:
             print(f"{h.similarity:.3f}\t{s.name}\t{s.use_count}\t{ux_col}\t{canary_col}")
         return 0
     return 1
+
+
+def _team_client_http_and_headers():
+    """瘦客户端命令共用：读连接 state，返回 (httpx client, 鉴权头)。
+
+    未 connect 过返回 (None, None)（调用方打印引导后退出）。
+    """
+    from xskill.config import get_team_client_state_path
+    from xskill.team.client.state import load_client_state
+
+    state_path = get_team_client_state_path()
+    if not state_path.is_file():
+        print("error: 未连接 team server。先跑：\n"
+              "  xskill connect <host:port> --token <t> --name <你的名字>",
+              file=sys.stderr)
+        return None, None
+    state = load_client_state(state_path)
+    import httpx
+    http = httpx.Client(base_url=state.server_url, timeout=60.0, trust_env=False)
+    headers = {"X-Xskill-Token": state.join_token,
+               "X-Xskill-Client": state.client_id,
+               "X-Xskill-Version": __version__}
+    return http, headers
+
+
+def cmd_search_hub(args, http=None, headers=None) -> int:
+    """`xskill search <query>` —— 搜 server skillhub，命中的拉到本地滚动槽位。
+
+    结果只按关键词匹配 skillhub 目录（含 user_skill_hub 上传件），与推荐画像
+    无关。每个命中 skill 下载解包到 ``~/.xskill/search_skills/<skill_id>/``、
+    打 ``.xskill_search.json`` 标记、装进本机生态；本地最多保留 10 个槽位，
+    按最近命中滚动淘汰。``http``/``headers`` 参数仅测试注入用。
+    """
+    import json as _json
+    from xskill.config import XSKILL_HOME
+    from xskill.team.client.search_slots import SearchSlots
+
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+    query = " ".join(args.terms).strip()
+    resp = http.get("/api/v1/team/skill_hub/search",
+                    params={"query": query, "limit": args.top_k},
+                    headers=headers)
+    if resp.status_code == 404:
+        print("error: server 版本过旧，不支持 skillhub 搜索（需 ≥0.6.17），"
+              "请管理员先升级 server", file=sys.stderr)
+        return 1
+    if resp.status_code != 200:
+        print(f"error: 搜索失败 HTTP {resp.status_code}: {resp.text[:300]}",
+              file=sys.stderr)
+        return 1
+    results = resp.json().get("results", [])
+    if not results:
+        print("skillhub 无匹配 skill")
+        return 0
+    slots = SearchSlots(xskill_home=XSKILL_HOME)
+    installed = []
+    for result in results:
+        bundle = http.get(f"/api/v1/team/skill/{result['skill_id']}/bundle",
+                          headers=headers)
+        if bundle.status_code != 200:
+            print(f"warning: 拉取 {result['skill_id']} 失败 "
+                  f"HTTP {bundle.status_code}", file=sys.stderr)
+            continue
+        local_path = slots.install(result, bundle.content, query=query)
+        installed.append({
+            "name": result["display_name"],
+            "skill_id": result["skill_id"],
+            "description": result["description"],
+            "path": str(local_path),
+        })
+    if args.json:
+        print(_json.dumps(installed, ensure_ascii=False, indent=2))
+        return 0
+    for row in installed:
+        print(f"{row['name']}  ({row['skill_id']})")
+        print(f"  {row['description']}")
+        print(f"  {row['path']}")
+    return 0
+
+
+def cmd_upload(args, http=None, headers=None) -> int:
+    """`xskill upload <dir>` —— 打包 skill 文件夹上传到 server 的 user skillhub。
+
+    server 落盘到 ``<skillhub>/user_skill_hub/<用户目录>/<skill名>/``，之后
+    团队成员可用 `xskill search` 搜到。``http``/``headers`` 仅测试注入用。
+    """
+    import io as _io
+    import json as _json
+    import zipfile as _zipfile
+    from pathlib import Path
+    from xskill.skill.frontmatter import FrontmatterError, parse_strict
+
+    skill_dir = Path(args.path).expanduser().resolve()
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.is_file():
+        print(f"error: {skill_dir} 下没有 SKILL.md，不是合法 skill 目录",
+              file=sys.stderr)
+        return 2
+    try:
+        frontmatter, _body = parse_strict(skill_md.read_text(encoding="utf-8"))
+    except (FrontmatterError, UnicodeDecodeError) as bad_skill:
+        print(f"error: SKILL.md 校验失败: {bad_skill}", file=sys.stderr)
+        return 2
+
+    buffer = _io.BytesIO()
+    with _zipfile.ZipFile(buffer, "w", compression=_zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(skill_dir.rglob("*")):
+            rel_parts = file_path.relative_to(skill_dir).parts
+            if any(part in (".git", "__pycache__") or part.startswith(".xskill_")
+                   for part in rel_parts):
+                continue
+            if file_path.is_file():
+                zf.write(file_path, file_path.relative_to(skill_dir).as_posix())
+    payload = buffer.getvalue()
+    if len(payload) > 20 * 1024 * 1024:
+        print("error: 打包后超过 20MB，请清理 skill 目录里的大文件",
+              file=sys.stderr)
+        return 2
+
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+    archive_name = f"{frontmatter['name']}.zip"
+    resp = http.post("/api/v1/team/skill_hub/upload",
+                     files={"file": (archive_name, payload, "application/zip")},
+                     headers=headers)
+    if resp.status_code == 404:
+        print("error: server 版本过旧，不支持 skill 上传（需 ≥0.6.17），"
+              "请管理员先升级 server", file=sys.stderr)
+        return 1
+    if resp.status_code != 200:
+        print(f"error: 上传失败 HTTP {resp.status_code}: {resp.text[:300]}",
+              file=sys.stderr)
+        return 1
+    stored = resp.json()
+    if args.json:
+        print(_json.dumps(stored, ensure_ascii=False, indent=2))
+        return 0
+    print(f"uploaded: {stored['display_name']}  ({stored['skill_id']})")
+    print(f"  server 路径: {stored['stored_path']}")
+    print("  团队成员现在可以: xskill search "
+          f"{stored['display_name']}")
+    return 0
 
 
 def cmd_read(args, xskill) -> int:
@@ -717,11 +869,23 @@ def build_parser() -> argparse.ArgumentParser:
                        help="human-friendly label (for add)")
 
     p_search = sub.add_parser(
-        "search", help="Search trajectories or skills (cross-registry)"
+        "search",
+        help="搜 team server 的 skillhub 并拉到本地槽位；"
+             "`search traj|skill <query>` 保持原本机索引搜索",
     )
-    p_search.add_argument("search_target", choices=["traj", "skill"])
-    p_search.add_argument("query", type=str)
-    p_search.add_argument("--top-k", "-k", type=int, default=5)
+    p_search.add_argument(
+        "terms", nargs="+", metavar="QUERY",
+        help="搜索词（可多个）。首词恰为 traj/skill 时视为本机索引搜索",
+    )
+    p_search.add_argument("--top-k", "-k", type=int, default=5,
+                          help="返回条数（skillhub 搜索最多 10）")
+    p_search.add_argument("--json", action="store_true", help="机读 JSON 输出")
+
+    p_upload = sub.add_parser(
+        "upload", help="打包一个 skill 文件夹上传到 team server 的 user skillhub",
+    )
+    p_upload.add_argument("path", type=str, help="包含 SKILL.md 的 skill 目录")
+    p_upload.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
     p_conn = sub.add_parser(
         "connect", help="Join a team server as a thin client",
@@ -873,6 +1037,13 @@ def main() -> int:
         return cmd_update(args)
     if args.command == "dashboard":
         return cmd_dashboard(args)
+
+    # skillhub 搜索/上传是瘦客户端侧（走 team server），不碰 config.yaml。
+    # `search traj|skill <q>` 仍是本机索引搜索，走下面的 facade 路径。
+    if args.command == "search" and args.terms[0] not in ("traj", "skill"):
+        return cmd_search_hub(args)
+    if args.command == "upload":
+        return cmd_upload(args)
 
     # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
     if args.command == "stats":
