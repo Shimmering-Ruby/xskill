@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from xskill._sqlite_connect import connect_with_lock
-from xskill.pipeline.registry import get_connection
+from xskill.pipeline.registry import pooled_connection
 from xskill.dashboard.metrics import _resolve_local_root, load_usage_records
 
 
@@ -27,16 +27,13 @@ class TrajExplorer:
                         else get_registry_db_path().parent)
 
     def _traj_row(self, traj_id: str) -> dict:
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             row = conn.execute(
                 "SELECT t.*, w.path wpath, w.label wlabel, w.ecosystem eco"
                 " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
                 " WHERE t.filename=? OR t.filename=?",
                 (traj_id, f"{traj_id}.md"),
             ).fetchone()
-        finally:
-            conn.close()
         if row is None:
             raise KeyError(f"trajectory not found: {traj_id}")
         return dict(row)
@@ -119,13 +116,10 @@ class TrajExplorer:
     def _atom_destinations(self, atom_id: str) -> list[dict]:
         """该 atom 的去向：进入了哪些 skill（adoption 事件 + 在途 candidates）。"""
         out: list[dict] = []
-        conn = get_connection(self._db)
-        try:
+        with pooled_connection(self._db) as conn:
             rows = conn.execute(
                 "SELECT skill, weightscore, ts FROM atom_adoption WHERE atom_id=?"
                 " ORDER BY ts", (atom_id,)).fetchall()
-        finally:
-            conn.close()
         for r in rows:
             out.append({"skill": r["skill"], "weightscore": r["weightscore"],
                         "state": "adopted", "ts": r["ts"]})
@@ -151,8 +145,7 @@ def skill_lineage(skill_dir: Path, name: str,
     sub = Path(skill_dir) / name
     if not sub.is_dir():
         raise KeyError(f"skill not found: {name}")
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         adoption = conn.execute(
             "SELECT atom_id, weightscore, ts FROM atom_adoption WHERE skill=?"
             " ORDER BY ts", (name,)).fetchall()
@@ -160,8 +153,6 @@ def skill_lineage(skill_dir: Path, name: str,
             "SELECT t.filename fn, t.source_model model, w.label label,"
             " w.path wpath FROM trajectories t"
             " JOIN watch_dirs w ON t.watch_dir_id=w.id").fetchall()
-    finally:
-        conn.close()
     from xskill.config import get_registry_db_path
     db_dir = Path(db_path).parent if db_path else get_registry_db_path().parent
     traj_info: dict[str, dict] = {}
@@ -245,13 +236,10 @@ def skill_ux_daily(skill_dir: Path, name: str) -> list[dict]:
 def pipeline_progress(db_path: Optional[Path],
                       skill_dir: Optional[Path]) -> dict:
     """总览页蒸馏管线进度（图⑥）：状态计数 + 冷启动信号 + 候选孵化进度。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = dict(conn.execute(
             "SELECT status, COUNT(*) FROM trajectories GROUP BY status"
         ).fetchall())
-    finally:
-        conn.close()
     stages = {
         "pending_split": rows.get("discovered", 0) + rows.get("meta_done", 0),
         "splitting": rows.get("splitting", 0),
@@ -319,8 +307,7 @@ def users_status(db_path: Optional[Path], *,
     finally:
         cconn.close()
     # 轨迹/原子/harness/模型聚合（registry）：team_client 目录按 label 归 client
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         trows = conn.execute(
             "SELECT w.label label, COUNT(t.id) trajs,"
             " COALESCE(SUM(t.tasks_extracted),0) atoms"
@@ -336,8 +323,6 @@ def users_status(db_path: Optional[Path], *,
             " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
             " WHERE w.ecosystem='team_client' GROUP BY w.label, t.source_model"
         ).fetchall()
-    finally:
-        conn.close()
     stats = {r["label"]: {"trajs": r["trajs"], "atoms": r["atoms"]}
              for r in trows}
     harness: dict[str, list] = {}

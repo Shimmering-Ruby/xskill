@@ -29,7 +29,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from xskill.pipeline.registry import get_connection
+from xskill.pipeline.registry import pooled_connection
 
 logger = logging.getLogger("xskill.events")
 
@@ -66,8 +66,7 @@ def skill_contributors(skill: str, *, min_weight: int = CONTRIBUTOR_MIN_WEIGHT,
     贡献关系 = ``atom_adoption``(atom 被聚进 skill) 经 atom_id 内嵌的
     traj_id 归到 ``trajectories.user_key``(D5 canonical 身份键)。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         traj_user = {
             (r["filename"][:-3] if r["filename"].endswith(".md")
              else r["filename"]): (r["user_key"] or "")
@@ -78,8 +77,6 @@ def skill_contributors(skill: str, *, min_weight: int = CONTRIBUTOR_MIN_WEIGHT,
             "SELECT atom_id, weightscore FROM atom_adoption WHERE skill=?",
             (skill,),
         ).fetchall()
-    finally:
-        conn.close()
     weights: dict[str, int] = {}
     for r in rows:
         user = traj_user.get(_traj_of_atom(r["atom_id"] or ""), "")
@@ -104,8 +101,7 @@ class EventStore:
 
         feedback 命中 (skill, traj_id) 去重索引时返回 None(已发过,不重发)。
         """
-        conn = get_connection(self._db_path)
-        try:
+        with pooled_connection(self._db_path) as conn:
             cur = conn.execute(
                 "INSERT OR IGNORE INTO events(kind,actor,skill,traj_id,payload)"
                 " VALUES(?,?,?,?,?)",
@@ -122,8 +118,6 @@ class EventStore:
                         " VALUES(?,?)", (event_id, user))
             conn.commit()
             return event_id
-        finally:
-            conn.close()
 
     def emit_feedback(self, *, actor: str, skill: str, traj_id: str,
                       score_avg: float, n_atoms: int, side: str,
@@ -180,8 +174,7 @@ class EventStore:
     def world_feed(self, *, limit: int = 50,
                    before_id: Optional[int] = None) -> list[dict]:
         """世界消息:全部事件,最新在前(Q6:登录可见;只读实例不挂该路由)。"""
-        conn = get_connection(self._db_path)
-        try:
+        with pooled_connection(self._db_path) as conn:
             sql = "SELECT * FROM events"
             params: list = []
             if before_id is not None:
@@ -191,14 +184,11 @@ class EventStore:
             params.append(max(1, min(int(limit), 200)))
             return [self._row_to_event(r)
                     for r in conn.execute(sql, params).fetchall()]
-        finally:
-            conn.close()
 
     def for_user(self, user_key: str, *, limit: int = 50,
                  before_id: Optional[int] = None) -> list[dict]:
         """发给我的通知,最新在前,带 ``read`` 标记(id ≤ 游标 = 已读)。"""
-        conn = get_connection(self._db_path)
-        try:
+        with pooled_connection(self._db_path) as conn:
             cursor_id = self._last_read_id(conn, user_key)
             sql = ("SELECT e.* FROM events e"
                    " JOIN event_targets t ON t.event_id=e.id"
@@ -215,12 +205,9 @@ class EventStore:
                 ev["read"] = ev["id"] <= cursor_id
                 out.append(ev)
             return out
-        finally:
-            conn.close()
 
     def unread_count(self, user_key: str) -> int:
-        conn = get_connection(self._db_path)
-        try:
+        with pooled_connection(self._db_path) as conn:
             cursor_id = self._last_read_id(conn, user_key)
             return conn.execute(
                 "SELECT COUNT(*) FROM event_targets t"
@@ -228,13 +215,10 @@ class EventStore:
                 " WHERE t.user_key=? AND e.id>?",
                 (user_key, cursor_id),
             ).fetchone()[0]
-        finally:
-            conn.close()
 
     def mark_read(self, user_key: str, last_id: int) -> None:
         """推进已读游标(只前进不后退——重复/乱序标记幂等)。"""
-        conn = get_connection(self._db_path)
-        try:
+        with pooled_connection(self._db_path) as conn:
             conn.execute(
                 "INSERT INTO event_reads(user_key,last_read_id) VALUES(?,?)"
                 " ON CONFLICT(user_key) DO UPDATE SET"
@@ -242,8 +226,6 @@ class EventStore:
                 (user_key, int(last_id)),
             )
             conn.commit()
-        finally:
-            conn.close()
 
     @staticmethod
     def _last_read_id(conn, user_key: str) -> int:

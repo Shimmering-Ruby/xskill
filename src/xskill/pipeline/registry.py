@@ -20,10 +20,12 @@ import logging
 import sqlite3
 import threading
 import zlib
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from types import SimpleNamespace
+from typing import Iterator, Optional
 
 from xskill._sqlite_connect import connect_with_lock
 from xskill.config import get_registry_db_path
@@ -35,6 +37,9 @@ _REGISTRY_DB_LOCKS_GUARD = threading.Lock()
 _REGISTRY_WAL_LOCKS: dict[Path, threading.Lock] = {}
 _REGISTRY_SCHEMA_LOCKS: dict[Path, threading.Lock] = {}
 _REGISTRY_WAL_READY: dict[Path, tuple[int, int]] = {}
+# 线程本地的按 DB 连接槽位（pooled_connection 用）；线程死亡随 GC 释放
+_REGISTRY_THREAD_POOL = threading.local()
+_REGISTRY_THREAD_POOL_CAPACITY = 4
 
 
 def _registry_db_lock(
@@ -282,6 +287,82 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         raise
 
 
+@contextmanager
+def pooled_connection(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
+    """线程内复用的 registry 连接；退出时回滚未提交事务，但不 close。
+
+    高频调用点（``record_usage`` 每次 LLM/embedding 调用一次）每次 open/close
+    会把连接 finalize 打成热事件，而 finalize 走 ``_SQLITE_CALL_GATE`` 独占侧，
+    高负载下整个进程的 SQLite 调用都会 park 在这把门后（futex convoy）。线程内
+    复用后 finalize 只发生在线程退出 / DB 重建 / 槽位淘汰这些低频时刻。
+
+    同线程重入（外层还没退出又请求同一 DB）退回一次性连接，保证两层事务互不
+    可见；DB 文件被删除重建（rebuild / 测试 tmp 目录）靠 inode 变化识别并重开。
+    """
+    if db_path is None:
+        db_path = get_registry_db_path()
+    db_key = db_path.expanduser().resolve()
+    slots = getattr(_REGISTRY_THREAD_POOL, "slots", None)
+    if slots is None:
+        slots = {}
+        _REGISTRY_THREAD_POOL.slots = slots
+    try:
+        identity = _registry_db_identity(db_key)
+    except OSError:
+        identity = None
+    slot = slots.get(db_key)
+    if slot is not None and slot.busy:
+        connection = get_connection(db_path)
+        try:
+            yield connection
+        finally:
+            connection.close()
+        return
+    if slot is not None and (identity is None or slot.identity != identity):
+        slots.pop(db_key, None)
+        try:
+            slot.conn.close()
+        except Exception:
+            logger.debug("closing stale pooled connection failed", exc_info=True)
+        slot = None
+    if slot is None:
+        connection = get_connection(db_path)
+        slot = SimpleNamespace(conn=connection,
+                               identity=_registry_db_identity(db_key),
+                               busy=False)
+        while len(slots) >= _REGISTRY_THREAD_POOL_CAPACITY:
+            _oldest_key, oldest_slot = next(iter(slots.items()))
+            slots.pop(_oldest_key)
+            try:
+                oldest_slot.conn.close()
+            except Exception:
+                logger.debug("evicting pooled connection failed", exc_info=True)
+        slots[db_key] = slot
+    else:
+        # 手动 LRU：命中的槽位挪到 dict 尾部，淘汰永远从头部取最旧
+        slots.pop(db_key)
+        slots[db_key] = slot
+    slot.busy = True
+    try:
+        yield slot.conn
+        if slot.conn.in_transaction:
+            slot.conn.rollback()
+    except Exception:
+        try:
+            if slot.conn.in_transaction:
+                slot.conn.rollback()
+        except Exception:
+            slots.pop(db_key, None)
+            try:
+                slot.conn.close()
+            except Exception:
+                logger.debug("closing broken pooled connection failed",
+                             exc_info=True)
+        raise
+    finally:
+        slot.busy = False
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns missing from older schema versions."""
     # ── trajectories ──
@@ -380,8 +461,7 @@ def record_usage(*, step: str, model: str, prompt: int, completion: int,
                  total: int, cost_usd: float, price_source: str,
                  db_path: Optional[Path] = None) -> None:
     """追加一条 LLM/embedding 调用的 token+成本记录。旁路 telemetry。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "INSERT INTO llm_usage(step,model,prompt,completion,total,cost_usd,price_source)"
             " VALUES(?,?,?,?,?,?,?)",
@@ -389,8 +469,6 @@ def record_usage(*, step: str, model: str, prompt: int, completion: int,
              float(cost_usd), price_source),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +497,7 @@ def set_skill_pref(*, user_key: str, skill_name: str, pref: str, set_by: str,
         raise ValueError(f"pref 必须是 pinned|blocked,得到 {pref!r}")
     if not user_key or not skill_name:
         raise ValueError("user_key/skill_name 不能为空")
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         if pref == "pinned" and max_pinned is not None:
             _check_pin_quota(conn, user_key=user_key, skill_name=skill_name,
                              max_pinned=max_pinned)
@@ -433,8 +510,6 @@ def set_skill_pref(*, user_key: str, skill_name: str, pref: str, set_by: str,
             (user_key, skill_name, pref, set_by),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def _check_pin_quota(conn, *, user_key: str, skill_name: str,
@@ -470,29 +545,23 @@ def _check_pin_quota(conn, *, user_key: str, skill_name: str,
 def clear_skill_pref(*, user_key: str, skill_name: str,
                      db_path: Optional[Path] = None) -> bool:
     """删除一条偏好(pin 取消/屏蔽恢复)。返回是否真的删了行。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         cur = conn.execute(
             "DELETE FROM skill_prefs WHERE user_key=? AND skill_name=?",
             (user_key, skill_name),
         )
         conn.commit()
         return cur.rowcount > 0
-    finally:
-        conn.close()
 
 
 def prefs_for(user_key: str, *, db_path: Optional[Path] = None) -> list[dict]:
     """某 user_key(或 '*global*')的全部偏好行。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         return [dict(r) for r in conn.execute(
             "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
             " WHERE user_key=? ORDER BY ts",
             (user_key,),
         ).fetchall()]
-    finally:
-        conn.close()
 
 
 def effective_prefs(user_key: str, *, db_path: Optional[Path] = None) -> dict:
@@ -503,16 +572,13 @@ def effective_prefs(user_key: str, *, db_path: Optional[Path] = None) -> dict:
     与全局行冲突时,**blocked 优先**(任何一侧屏蔽即不分发——全局屏蔽用户
     不能自行恢复;用户自己屏蔽的全局推荐仅对自己生效)。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
             " WHERE user_key IN (?, ?) ORDER BY CASE user_key WHEN ? THEN 0"
             " ELSE 1 END, ts",
             (GLOBAL_PREF_KEY, user_key, GLOBAL_PREF_KEY),
         ).fetchall()]
-    finally:
-        conn.close()
     blocked = {r["skill_name"] for r in rows if r["pref"] == "blocked"}
     pinned: list[str] = []
     pin_meta: dict = {}
@@ -531,8 +597,7 @@ def manifest_control_plane_snapshot(
     *, db_path: Optional[Path] = None,
 ) -> dict:
     """一次查询取得 manifest 所需的全部偏好和下线状态。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = [dict(row) for row in conn.execute(
             "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
             " ORDER BY CASE user_key WHEN ? THEN 0 ELSE 1 END, ts",
@@ -543,8 +608,6 @@ def manifest_control_plane_snapshot(
                 "SELECT skill_name FROM skill_lifecycle WHERE state='retired'"
             ).fetchall()
         }
-    finally:
-        conn.close()
     return {"prefs": rows, "retired": retired}
 
 
@@ -581,8 +644,7 @@ def effective_prefs_from_snapshot(snapshot: dict, user_key: str) -> dict:
 def retire_skill(*, skill_name: str, set_by: str,
                  db_path: Optional[Path] = None) -> None:
     """下线:停止分发与推荐,数据与 git 历史保留。幂等。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "INSERT INTO skill_lifecycle(skill_name,state,set_by) VALUES(?,?,?)"
             " ON CONFLICT(skill_name) DO UPDATE SET state='retired',"
@@ -590,30 +652,22 @@ def retire_skill(*, skill_name: str, set_by: str,
             (skill_name, "retired", set_by),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def unretire_skill(*, skill_name: str, db_path: Optional[Path] = None) -> bool:
     """恢复在役。返回是否真的有行被删。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         cur = conn.execute(
             "DELETE FROM skill_lifecycle WHERE skill_name=?", (skill_name,))
         conn.commit()
         return cur.rowcount > 0
-    finally:
-        conn.close()
 
 
 def retired_skills(*, db_path: Optional[Path] = None) -> set:
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         return {r["skill_name"] for r in conn.execute(
             "SELECT skill_name FROM skill_lifecycle WHERE state='retired'"
         ).fetchall()}
-    finally:
-        conn.close()
 
 
 def purge_skill_records(*, skill_name: str,
@@ -621,13 +675,10 @@ def purge_skill_records(*, skill_name: str,
     """删除 skill 时清掉它的 prefs/lifecycle 行——"删后同名 skill 再生"从
     零开始,不继承旧 pin/屏蔽/下线状态(语义拍板,见 tasks.md 2.4c)。
     评分/推荐等历史埋点(recommendation_log 等)保留作审计。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute("DELETE FROM skill_prefs WHERE skill_name=?", (skill_name,))
         conn.execute("DELETE FROM skill_lifecycle WHERE skill_name=?", (skill_name,))
         conn.commit()
-    finally:
-        conn.close()
 
 
 def record_recommendation(*, client_id: str, skill: str, side: str, bucket: str,
@@ -653,8 +704,7 @@ def record_recommendations(
     """在一个事务中记录同一用户的一批推荐曝光。"""
     if not records:
         return
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.executemany(
             "INSERT OR IGNORE INTO recommendation_log(client_id,skill,side,bucket,sha)"
             " VALUES(?,?,?,?,?)",
@@ -662,22 +712,17 @@ def record_recommendations(
              for skill, side, bucket, sha in records],
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def record_atom_adoption(*, atom_id: str, skill: str, weightscore: int,
                          was_new: bool, db_path: Optional[Path] = None) -> None:
     """记一次"某 atom 被聚进某 skill"。供算原子采纳率(采纳原子/总原子)。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "INSERT INTO atom_adoption(atom_id,skill,weightscore,was_new) VALUES(?,?,?,?)",
             (atom_id, skill, int(weightscore), 1 if was_new else 0),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def record_trigger_eval(*, skill: str, version_sha: Optional[str], exp_id: str,
@@ -689,8 +734,7 @@ def record_trigger_eval(*, skill: str, version_sha: Optional[str], exp_id: str,
     供看板展示 per-skill/版本"离线探针触发率"——区别于 mark_skill_used 记的
     线上真实使用频次,两者语义不同不可混。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "INSERT INTO skill_trigger_eval"
             "(skill,version_sha,exp_id,train_score,test_score,n_cases,catalog_size)"
@@ -699,22 +743,17 @@ def record_trigger_eval(*, skill: str, version_sha: Optional[str], exp_id: str,
              int(n_cases), int(catalog_size)),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def trigger_eval_for_skill(skill: str, *, db_path: Optional[Path] = None) -> list:
     """取某 skill 的离线触发评测历史(按时间升序),供看板趋势图。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT ts,version_sha,exp_id,train_score,test_score,n_cases,"
             "catalog_size FROM skill_trigger_eval WHERE skill=? ORDER BY id ASC",
             (skill,),
         ).fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def record_canary_decision(*, skill: str, action: str, main_avg: float,
@@ -727,8 +766,7 @@ def record_canary_decision(*, skill: str, action: str, main_avg: float,
     ``main_sha``/``staging_sha`` 是裁决时两侧 HEAD——进化图据此把裁决挂到
     具体 commit（D9）；存量无 sha 的历史裁决在图上显式标"无法定位"。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "INSERT INTO canary_decision(skill,action,main_avg,staging_avg,"
             "main_samples,staging_samples,age_days,main_sha,staging_sha)"
@@ -738,8 +776,6 @@ def record_canary_decision(*, skill: str, action: str, main_avg: float,
              main_sha or "", staging_sha or ""),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def clear_rebuild_derived_state(
@@ -750,9 +786,8 @@ def clear_rebuild_derived_state(
     ``llm_usage`` is deliberately retained: it is cost accounting for already
     paid calls, not skill state derived from the current repository contents.
     """
-    connection = get_connection(registry_path)
     deleted_counts: dict[str, int] = {}
-    try:
+    with pooled_connection(registry_path) as connection:
         cursor = connection.execute("DELETE FROM recommendation_log")
         deleted_counts["recommendation_log"] = cursor.rowcount
         cursor = connection.execute("DELETE FROM atom_adoption")
@@ -763,14 +798,11 @@ def clear_rebuild_derived_state(
         deleted_counts["skill_trigger_eval"] = cursor.rowcount
         connection.commit()
         return deleted_counts
-    finally:
-        connection.close()
 
 
 def usage_summary(db_path: Optional[Path] = None) -> dict:
     """跨重启的持久汇总:累计 token/$、今日 $、按 step / model 分解。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         tot = conn.execute(
             "SELECT COALESCE(SUM(total),0) t, COALESCE(SUM(cost_usd),0) c, COUNT(*) n"
             " FROM llm_usage"
@@ -797,8 +829,6 @@ def usage_summary(db_path: Optional[Path] = None) -> dict:
             "total_calls": tot["n"], "today_usd": round(today, 6),
             "estimated": estimated, "by_step": by_step, "by_model": by_model,
         }
-    finally:
-        conn.close()
 
 
 def _sidecar_field(md_path: Path, key: str) -> Optional[str]:
@@ -839,8 +869,7 @@ def harness_share(db_path: Optional[Path] = None, *,
     config 传入 dashboard.default_harness 覆盖；canary/stats 等调用不传，保持
     'unknown' 语义不变。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             f"SELECT {_HARNESS_EXPR} AS harness, COUNT(*) AS trajs"
             " FROM trajectories t JOIN watch_dirs wd ON t.watch_dir_id=wd.id"
@@ -850,8 +879,6 @@ def harness_share(db_path: Optional[Path] = None, *,
         total = sum(r["trajs"] for r in rows) or 1
         return [{"harness": r["harness"], "trajs": r["trajs"],
                  "pct": round(100 * r["trajs"] / total, 1)} for r in rows]
-    finally:
-        conn.close()
 
 
 def model_share(db_path: Optional[Path] = None, *,
@@ -862,8 +889,7 @@ def model_share(db_path: Optional[Path] = None, *,
     注意：canary 的 ``eligible_models`` 把 'unknown' 当“未归属、留在 main”的哨兵，
     所以那条路径必须用默认 'unknown'——只有看板展示层才传入 config 的覆盖值。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT COALESCE(source_model,:mlabel) AS model, COUNT(*) AS trajs"
             " FROM trajectories GROUP BY COALESCE(source_model,:mlabel)"
@@ -873,8 +899,6 @@ def model_share(db_path: Optional[Path] = None, *,
         total = sum(r["trajs"] for r in rows) or 1
         return [{"model": r["model"], "trajs": r["trajs"],
                  "pct": round(100 * r["trajs"] / total, 1)} for r in rows]
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -897,8 +921,7 @@ def register_dir(
       - 未来：``codex``、``opencode`` 等
     """
     dir_path = str(Path(dir_path).resolve())
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "INSERT INTO watch_dirs (path, label, auto_index, ecosystem)"
             " VALUES (?, ?, ?, ?)"
@@ -911,8 +934,6 @@ def register_dir(
         conn.commit()
         row = conn.execute("SELECT id FROM watch_dirs WHERE path=?", (dir_path,)).fetchone()
         return row["id"]
-    finally:
-        conn.close()
 
 
 def unregister_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> bool:
@@ -922,8 +943,7 @@ def unregister_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> b
     分母被删小，比率虚高（审计 P1-7）。
     """
     dir_path = str(Path(dir_path).resolve())
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         stems = [
             (r["filename"][:-3] if r["filename"].endswith(".md") else r["filename"])
             for r in conn.execute(
@@ -938,14 +958,11 @@ def unregister_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> b
         cur = conn.execute("DELETE FROM watch_dirs WHERE path=?", (dir_path,))
         conn.commit()
         return cur.rowcount > 0
-    finally:
-        conn.close()
 
 
 def list_watch_dirs(*, db_path: Optional[Path] = None) -> list[dict]:
     """返回所有注册目录及统计信息。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT w.*, "
             "  (SELECT COUNT(*) FROM trajectories t WHERE t.watch_dir_id=w.id) AS traj_count,"
@@ -953,19 +970,14 @@ def list_watch_dirs(*, db_path: Optional[Path] = None) -> list[dict]:
             " FROM watch_dirs w ORDER BY w.id"
         ).fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def get_watch_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> dict | None:
     """查询单个目录记录。"""
     dir_path = str(Path(dir_path).resolve())
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         row = conn.execute("SELECT * FROM watch_dirs WHERE path=?", (dir_path,)).fetchone()
         return dict(row) if row else None
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -992,9 +1004,8 @@ def discover_trajectories(
     只拆新增内容。``updated`` 不计入返回的 new_files（只统计真·新文件）。
     """
     dir_path = Path(dir_path)
-    conn = get_connection(db_path)
     new_files: list[str] = []
-    try:
+    with pooled_connection(db_path) as conn:
         # P2-2.1 归因(D5):入库即把 watch_dir 的 label 写进 user_key,聚合层
         # 不再 JOIN watch_dirs.label——source 唯一。CS 模式各用户桶(label=
         # sessions 桶目录名=user_name/client_id)不论 ecosystem 是 team_client
@@ -1070,37 +1081,29 @@ def discover_trajectories(
 
         conn.commit()
         return new_files
-    finally:
-        conn.close()
 
 
 def mark_meta_done(
     watch_dir_id: int, filename: str, *, db_path: Optional[Path] = None
 ) -> None:
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "UPDATE trajectories SET has_meta=1 WHERE watch_dir_id=? AND filename=?",
             (watch_dir_id, filename),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def mark_indexed(
     watch_dir_id: int, filename: str, *, db_path: Optional[Path] = None
 ) -> None:
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "UPDATE trajectories SET has_embedding=1, indexed_at=?"
             " WHERE watch_dir_id=? AND filename=?",
             (datetime.now(timezone.utc).isoformat(timespec="seconds"), watch_dir_id, filename),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def mark_skill_used(
@@ -1118,24 +1121,20 @@ def mark_skill_used(
     watch_dirs.label 现算(用户)。与工具调用/ token 同属"按轨迹文本现算",保持
     "分析而非埋点"一致——免迁移、不改这条打分热路径的写入语义。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "UPDATE trajectories SET skill_used=?, canary_side=?"
             " WHERE watch_dir_id=? AND filename=?",
             (skill_used, canary_side, watch_dir_id, filename),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_unindexed(
     watch_dir_id: int, *, db_path: Optional[Path] = None
 ) -> list[str]:
     """返回缺少 meta 或 embedding 的文件名。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT filename FROM trajectories"
             " WHERE watch_dir_id=? AND (has_meta=0 OR has_embedding=0)"
@@ -1143,16 +1142,13 @@ def get_unindexed(
             (watch_dir_id,),
         ).fetchall()
         return [r["filename"] for r in rows]
-    finally:
-        conn.close()
 
 
 def get_needs_meta(
     watch_dir_id: int, *, db_path: Optional[Path] = None
 ) -> list[str]:
     """返回缺少 meta 的文件名。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT filename FROM trajectories"
             " WHERE watch_dir_id=? AND has_meta=0"
@@ -1160,16 +1156,13 @@ def get_needs_meta(
             (watch_dir_id,),
         ).fetchall()
         return [r["filename"] for r in rows]
-    finally:
-        conn.close()
 
 
 def get_needs_embedding(
     watch_dir_id: int, *, db_path: Optional[Path] = None
 ) -> list[str]:
     """返回有 meta 但缺 embedding 的文件名。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT filename FROM trajectories"
             " WHERE watch_dir_id=? AND has_meta=1 AND has_embedding=0"
@@ -1177,8 +1170,6 @@ def get_needs_embedding(
             (watch_dir_id,),
         ).fetchall()
         return [r["filename"] for r in rows]
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1187,8 +1178,7 @@ def get_needs_embedding(
 
 def all_index_paths(*, db_path: Optional[Path] = None) -> list[Path]:
     """返回所有注册目录中实际存在 index.pkl 的路径。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute("SELECT path FROM watch_dirs ORDER BY id").fetchall()
         result = []
         for r in rows:
@@ -1196,8 +1186,6 @@ def all_index_paths(*, db_path: Optional[Path] = None) -> list[Path]:
             if (p / "index.pkl").is_file():
                 result.append(p)
         return result
-    finally:
-        conn.close()
 
 
 def find_traj_file(
@@ -1268,8 +1256,7 @@ def update_traj_status(
     会算好"重试次数 + 1"再回写，沿着 ``retry_count < max_retries``
     继续重试，超过门槛后兜底标 done + WARNING。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         sets = ["updated_at=datetime('now')"]
         vals: list = []
         if status is not None:
@@ -1297,8 +1284,6 @@ def update_traj_status(
             vals,
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_traj_retry_count(
@@ -1310,8 +1295,7 @@ def get_traj_retry_count(
     ``update_traj_status(..., retry_count=N+1)``。和 ``increment_retry``
     的差异是这里**只读不写**，由调用方决定何时 +1。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         row = conn.execute(
             "SELECT retry_count FROM trajectories"
             " WHERE watch_dir_id=? AND filename=?",
@@ -1320,8 +1304,6 @@ def get_traj_retry_count(
         if row is None:
             return 0
         return int(row["retry_count"] or 0)
-    finally:
-        conn.close()
 
 
 def update_traj_log(
@@ -1332,16 +1314,13 @@ def update_traj_log(
     db_path: Optional[Path] = None,
 ) -> None:
     """Store process log (JSON string) for a trajectory."""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "UPDATE trajectories SET process_log=?, updated_at=datetime('now')"
             " WHERE watch_dir_id=? AND filename=?",
             (log_json, watch_dir_id, filename),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_traj_log(
@@ -1351,15 +1330,12 @@ def get_traj_log(
     db_path: Optional[Path] = None,
 ) -> str | None:
     """Retrieve the stored process log JSON for a trajectory."""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         row = conn.execute(
             "SELECT process_log FROM trajectories WHERE watch_dir_id=? AND filename=?",
             (watch_dir_id, filename),
         ).fetchone()
         return row["process_log"] if row else None
-    finally:
-        conn.close()
 
 
 def update_traj_offset(
@@ -1377,8 +1353,7 @@ def update_traj_offset(
     ``last_atom_id`` 为 None 表示当前轨迹还没切出任何 atom（罕见——通常拆出
     至少 1 个）。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "UPDATE trajectories SET last_offset=?, last_atom_id=?, "
             "tasks_extracted=?, updated_at=datetime('now')"
@@ -1387,8 +1362,6 @@ def update_traj_offset(
              watch_dir_id, filename),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def mark_not_fit(
@@ -1400,8 +1373,7 @@ def mark_not_fit(
     db_path: Optional[Path] = None,
 ) -> None:
     """Mark a trajectory as terminally filtered by the configured interests."""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "UPDATE trajectories SET status=?, process_action=?, error_msg=?, "
             "interest_fingerprint=?, updated_at=datetime('now')"
@@ -1416,8 +1388,6 @@ def mark_not_fit(
             ),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def reset_not_fit_for_interest_change(
@@ -1429,8 +1399,7 @@ def reset_not_fit_for_interest_change(
     """Reset only stale filtered/not_fit trajectories for re-evaluation."""
     if old_interest_fingerprint == new_interest_fingerprint:
         return 0
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT t.id, t.filename, w.path FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id "
@@ -1468,8 +1437,6 @@ def reset_not_fit_for_interest_change(
             if index_path.is_file():
                 index_path.unlink()
         return len(rows)
-    finally:
-        conn.close()
 
 
 def reset_trajectories(
@@ -1499,8 +1466,7 @@ def reset_trajectories(
     Returns:
         被重置的轨迹 id 列表（cold-start 快照即由此而来）。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         query_text = (
             "SELECT t.id, t.filename, w.path FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id WHERE 1=1"
@@ -1547,8 +1513,6 @@ def reset_trajectories(
             if index_path.is_file():
                 index_path.unlink()
         return [trajectory_row["id"] for trajectory_row in trajectory_rows]
-    finally:
-        conn.close()
 
 
 def get_trajs_by_status(
@@ -1560,8 +1524,7 @@ def get_trajs_by_status(
     db_path: Optional[Path] = None,
 ) -> list[str]:
     """按状态查询文件名。error 状态自动过滤超过 max_retries 的。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         sql = "SELECT filename FROM trajectories WHERE watch_dir_id=? AND status=?"
         params: list = [watch_dir_id, status]
         if status == "error":
@@ -1572,8 +1535,6 @@ def get_trajs_by_status(
             sql += f" LIMIT {limit}"
         rows = conn.execute(sql, params).fetchall()
         return [r["filename"] for r in rows]
-    finally:
-        conn.close()
 
 
 def get_pending_traj_ids(
@@ -1586,8 +1547,7 @@ def get_pending_traj_ids(
     只计 ``auto_index=1`` 的 watch dir——watcher 不处理关闭索引的目录，其中
     的轨迹永远不会离开 pending，计入会让 cold-start 只能靠超时退出。
     """
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         status_placeholders = ",".join("?" * len(PENDING_TRAJECTORY_STATUSES))
         base_sql = (
             "SELECT t.id FROM trajectories t "
@@ -1608,31 +1568,25 @@ def get_pending_traj_ids(
             ).fetchall()
             pending_ids += [row["id"] for row in rows]
         return pending_ids
-    finally:
-        conn.close()
 
 
 def increment_retry(
     watch_dir_id: int, filename: str, *, db_path: Optional[Path] = None
 ) -> None:
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         conn.execute(
             "UPDATE trajectories SET retry_count = retry_count + 1"
             " WHERE watch_dir_id=? AND filename=?",
             (watch_dir_id, filename),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_status_counts(
     watch_dir_id: int | None = None, *, db_path: Optional[Path] = None
 ) -> dict[str, int]:
     """返回各状态的轨迹数量。watch_dir_id=None 时统计全部。"""
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         if watch_dir_id is not None:
             rows = conn.execute(
                 "SELECT status, COUNT(*) as cnt FROM trajectories"
@@ -1644,8 +1598,6 @@ def get_status_counts(
                 "SELECT status, COUNT(*) as cnt FROM trajectories GROUP BY status"
             ).fetchall()
         return {r["status"]: r["cnt"] for r in rows}
-    finally:
-        conn.close()
 
 
 # =============================================================================
@@ -1708,8 +1660,7 @@ class Registry:
         未找到返回 None。"""
         traj_path = Path(traj_path).resolve()
         wd_path = str(traj_path.parent)
-        conn = get_connection(self._db_path)
-        try:
+        with pooled_connection(self._db_path) as conn:
             row = conn.execute(
                 "SELECT t.* FROM trajectories t "
                 "JOIN watch_dirs w ON t.watch_dir_id = w.id "
@@ -1717,14 +1668,11 @@ class Registry:
                 (wd_path, traj_path.name),
             ).fetchone()
             return dict(row) if row else None
-        finally:
-            conn.close()
 
     def trajectories_using(self, skill_name: str) -> list[Path]:
         """反查：曾用过某个 skill 的所有轨迹路径。
         skill_used 字段是逗号分隔，故 LIKE 匹配。"""
-        conn = get_connection(self._db_path)
-        try:
+        with pooled_connection(self._db_path) as conn:
             rows = conn.execute(
                 "SELECT w.path AS wd_path, t.filename "
                 "FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id "
@@ -1736,5 +1684,3 @@ class Registry:
                  f"%,{skill_name},%"),
             ).fetchall()
             return [Path(r["wd_path"]) / r["filename"] for r in rows]
-        finally:
-            conn.close()

@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from xskill.pipeline.registry import get_connection
+from xskill.pipeline.registry import pooled_connection
 
 _MAX_COMMITS = 200
 
@@ -81,14 +81,11 @@ def skill_commit_graph(skill_dir: Path, name: str,
 
     decisions_by_sha: dict[str, dict] = {}
     unlocated: list[dict] = []
-    conn = get_connection(db_path)
-    try:
+    with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT ts, action, main_avg, staging_avg, staging_sha, main_sha"
             " FROM canary_decision WHERE skill=? ORDER BY ts", (name,)
         ).fetchall()
-    finally:
-        conn.close()
     node_shas = {n["sha"] for n in nodes}
     for r in rows:
         d = {"ts": r["ts"], "action": r["action"],
