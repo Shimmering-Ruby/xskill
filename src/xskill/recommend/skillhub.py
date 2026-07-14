@@ -332,6 +332,14 @@ class SkillHub:
 
     def _bm25_ranks(self, index_bundle: dict, query_tokens: list[str]) -> dict[int, int]:
         """对命中文档按 BM25 分数降序给出 1-based 排名（k1=1.2, b=0.75）。"""
+        cache_key = tuple(sorted(set(query_tokens)))
+        rank_cache = index_bundle["bm25_rank_cache"]
+        rank_cache_lock = index_bundle["bm25_rank_cache_lock"]
+        with rank_cache_lock:
+            cached = rank_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         entries = index_bundle["entries"]
         term_postings = index_bundle["term_postings"]
         document_frequencies = index_bundle["document_frequencies"]
@@ -339,7 +347,7 @@ class SkillHub:
         average_document_length = index_bundle["average_document_length"]
         document_count = len(entries)
         scores: dict[int, float] = {}
-        for token in set(query_tokens):
+        for token in cache_key:
             document_frequency = document_frequencies.get(token, 0)
             if document_frequency == 0 or average_document_length == 0:
                 continue
@@ -359,7 +367,12 @@ class SkillHub:
         ranked = sorted(scores, key=lambda entry_index: (
             -scores[entry_index], entries[entry_index]["skill_id"],
         ))
-        return {entry_index: rank for rank, entry_index in enumerate(ranked, start=1)}
+        ranks = {
+            entry_index: rank
+            for rank, entry_index in enumerate(ranked, start=1)
+        }
+        with rank_cache_lock:
+            return rank_cache.setdefault(cache_key, ranks)
 
     def _semantic_ranks(self, index_bundle: dict,
                         normalized_query: str) -> dict[int, int]:
@@ -572,6 +585,8 @@ class SkillHub:
             "document_frequencies": document_frequencies,
             "document_lengths": document_lengths,
             "average_document_length": average_document_length,
+            "bm25_rank_cache": {},
+            "bm25_rank_cache_lock": threading.Lock(),
             "vector_present_indices": vector_present_indices,
             "corpus_matrix": corpus_matrix,
         }

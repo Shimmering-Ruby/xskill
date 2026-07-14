@@ -169,6 +169,21 @@ def test_search_hot_path_reuses_snapshot_index_without_recopying_entries(
     assert first == second
 
 
+def test_search_hot_path_reuses_bm25_ranks(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    first = hub.search("alpha", limit=5)
+
+    def fail_log(*_args, **_kwargs):
+        raise AssertionError("hot search recomputed cached BM25 ranks")
+
+    monkeypatch.setattr(skillhub_module.math, "log", fail_log)
+    second = hub.search("alpha", limit=5)
+
+    assert first == second
+
+
 # ── 语义通道降级三条路 ─────────────────────────────────────────
 
 def test_semantic_degrades_when_embed_client_is_none(tmp_path):

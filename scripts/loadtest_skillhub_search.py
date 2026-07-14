@@ -344,6 +344,15 @@ async def _run_scenario_a_round(
     burst_results = await run_search_wave(client, headers_list[0], list(PEAK_QUERY_TERMS))
     observed_peak_embed = state.snapshot()["embedding"]["max_active"]
 
+    # 场景 A 的 SLA 是缓存热负载。峰值探测在 max_embed=1/4 时会让部分并发查询
+    # 立即走 BM25，因此这里逐个预热全部查询词，确保计时波次不再夹带 200ms embed。
+    warm_results: list[dict[str, Any]] = []
+    for query_term in ALL_QUERY_TERMS:
+        warm_result = await search_once(client, headers_list[0], query_term)
+        warm_results.append(warm_result)
+        if warm_result["status"] != 200:
+            raise RuntimeError(f"steady search cache warmup failed: {warm_result}")
+
     health_samples: list[dict[str, Any]] = []
     sync_results: list[dict[str, Any]] = []
     panel_results: list[dict[str, Any]] = []
@@ -394,6 +403,7 @@ async def _run_scenario_a_round(
         "search": _search_stats(wave_results),
         "diagnostic_duplicate": _search_stats(duplicate_results),
         "diagnostic_peak": _search_stats(burst_results),
+        "diagnostic_warmup": _search_stats(warm_results),
         "health": _health_stats(health_samples),
         "sync": _sync_stats(sync_results),
         "panel": _panel_stats(panel_results),
@@ -676,6 +686,10 @@ def validate_result(result: dict[str, Any], args: argparse.Namespace) -> list[st
             failures.append(f"{name}: panel probes={panel}")
         if int(wave["window_embed_calls"]) > int(wave["distinct_query_terms"]):
             failures.append(f"{name}: window embeds={wave['window_embed_calls']} > distinct terms")
+        if int(wave["throughput_wave_embed_calls"]) != 0:
+            failures.append(
+                f"{name}: cache-hot wave embeds={wave['throughput_wave_embed_calls']} != 0"
+            )
         if int(wave["duplicate_cold_embed_calls"]) != 1:
             failures.append(
                 f"{name}: same-query cold burst embeds={wave['duplicate_cold_embed_calls']} != 1"
