@@ -237,6 +237,80 @@ def test_service_submit_scatter_dedup(tmp_path):
     assert seen == [("u", "tsne")]  # 只重算一次
 
 
+def test_service_stop_cancels_queued_scatter_and_reports_running_thread(tmp_path):
+    """回归:旧实现把 STOP 排在队尾且返回值漏看 scatter thread。
+
+    首任务仍在执行时 stop(timeout=0) 不得谎报成功；第二个未开始任务必须从
+    queue/inflight 同步取消，首任务释放后派发线程直接退出，不再继续算第二个。
+    """
+    engine = _FakeEngine(tmp_path / "team_profile.db")
+    service = ProfileRefreshService(engine, workers=1, queue_size=4, autostart=False)
+    started = threading.Event()
+    release = threading.Event()
+    seen: list[tuple[str, str]] = []
+
+    def _blocking_recompute(user_key, method):
+        seen.append((user_key, method))
+        started.set()
+        release.wait(3)
+
+    service._recompute_scatter = _blocking_recompute
+    assert service.submit_scatter("running", "tsne") is True
+    assert started.wait(3)
+    assert service.submit_scatter("queued", "tsne") is True
+
+    # 运行项尚未退出，stop 必须返回 False；排队项已经同步取消并清掉去重状态。
+    assert service.stop(timeout=0) is False
+    assert service._scatter_thread.is_alive()
+    assert service._scatter_inflight == set()
+
+    release.set()
+    assert service.stop(timeout=3) is True
+    assert not service._scatter_thread.is_alive()
+    assert seen == [("running", "tsne")]
+
+
+def test_service_stop_discards_projection_result_that_finishes_late(
+    tmp_path, monkeypatch,
+):
+    """运行中的投影可在 timeout 后收尾，但停机结果不得再写缓存。"""
+    engine = _FakeEngine(tmp_path / "team_profile.db")
+    service = ProfileRefreshService(engine, workers=1, queue_size=4, autostart=False)
+    projection_started = threading.Event()
+    release_projection = threading.Event()
+    writes: list[tuple] = []
+
+    class _FakeViz:
+        @staticmethod
+        def scatter_input_fingerprint(_user_key):
+            return "fp"
+
+        @staticmethod
+        def gather_scatter_inputs(user_key, method):
+            return {"user": user_key, "method": method}
+
+    def _blocking_project(_inputs, _worker):
+        projection_started.set()
+        release_projection.wait(3)
+        return {"points": [], "method": "tsne"}
+
+    service._scatter_viz = _FakeViz()
+    service._project_scatter = _blocking_project
+    monkeypatch.setattr(R, "read_scatter_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        R, "write_scatter_cache",
+        lambda *args, **kwargs: writes.append((args, kwargs)),
+    )
+
+    assert service.submit_scatter("running", "tsne") is True
+    assert projection_started.wait(3)
+    assert service.stop(timeout=0) is False
+    release_projection.set()
+    assert service.stop(timeout=3) is True
+    assert writes == []
+    assert service.metrics["scatter_materialized"] == 0
+
+
 class _RecorderScatter:
     def __init__(self):
         self.enqueued: list[tuple[str, str]] = []
