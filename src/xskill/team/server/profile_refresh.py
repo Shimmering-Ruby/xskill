@@ -176,7 +176,12 @@ class ProfileRefreshService:
             )
 
     def stop(self, timeout: float = 5.0) -> bool:
-        """停止接收、取消尚未执行的任务并有限等待；返回是否全部退出。"""
+        """停止接收、取消尚未执行的任务并有限等待；返回是否全部退出。
+
+        画像队列与散点队列都在竖起 ``_stopping`` 后同步清空。散点进程池先
+        ``cancel_futures`` 再等待派发线程，避免排队任务在停机期间转成线程内直算；
+        已经开始的投影最多等待 ``timeout``，未按时退出时返回 ``False``。
+        """
         with self._condition:
             self._accepting = False
             self._stopping = True
@@ -198,23 +203,42 @@ class ProfileRefreshService:
                 except queue.Full:  # 上面已清空；只作并发保护
                     pass
 
+            # 散点队列是独立的无界队列。停机时必须先取消所有尚未开始的任务，
+            # 不能把 _STOP 排在它们后面让派发线程继续逐个计算。
+            while True:
+                try:
+                    scatter_item = self._scatter_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if scatter_item is not _STOP:
+                    self._scatter_inflight.discard(scatter_item)
+                self._scatter_queue.task_done()
+            # 当前执行项也不再需要去重身份；服务已拒绝所有新提交。派发线程的
+            # finally 仍会 discard，一次或多次清理都是幂等的。
+            self._scatter_inflight.clear()
+            scatter_thread = self._scatter_thread
+            if scatter_thread is not None and scatter_thread.is_alive():
+                self._scatter_queue.put_nowait(_STOP)
+            scatter_pool = self._scatter_pool
+            self._scatter_pool = None
+
         deadline = time.monotonic() + max(0.0, timeout)
+        # 先取消进程池里尚未开始的 future。运行中的 future 不会被强杀，下面对
+        # 派发线程只做 deadline 内的有界等待，并通过返回 False 报告尚未退出。
+        if scatter_pool is not None:
+            _shutdown_scatter_pool(scatter_pool)
         for thread in threads:
             if thread.ident is None:
                 continue
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(remaining)
 
-        # 散点子系统停机:停派发线程 + 关进程池（在 with 块已置 _stopping,不再建新的）。
-        scatter_thread = self._scatter_thread
         if scatter_thread is not None:
-            self._scatter_queue.put(_STOP)
             scatter_thread.join(max(0.0, deadline - time.monotonic()))
-        if self._scatter_pool is not None:
-            _shutdown_scatter_pool(self._scatter_pool)
-            self._scatter_pool = None
 
-        return all(not thread.is_alive() for thread in threads)
+        profile_stopped = all(not thread.is_alive() for thread in threads)
+        scatter_stopped = scatter_thread is None or not scatter_thread.is_alive()
+        return profile_stopped and scatter_stopped
 
     def _worker(self) -> None:
         while True:
@@ -338,8 +362,10 @@ class ProfileRefreshService:
                 return True
             self._scatter_inflight.add(key)
             self._metrics["scatter_submitted"] += 1
+            # 入队与停机标记受同一把锁保护，避免 stop 清空队列之后本线程才 put，
+            # 留下永远无人消费的任务。
+            self._scatter_queue.put_nowait(key)
         self._ensure_scatter_dispatcher()
-        self._scatter_queue.put(key)
         return True
 
     def _ensure_scatter_dispatcher(self) -> None:
@@ -357,23 +383,33 @@ class ProfileRefreshService:
     def _scatter_dispatch_loop(self) -> None:
         while True:
             key = self._scatter_queue.get()
-            if key is _STOP:
-                return
-            user_key, method = key
+            user_key = method = "<unknown>"
             try:
+                if key is _STOP:
+                    return
+                user_key, method = key
+                with self._condition:
+                    if self._stopping:
+                        self._scatter_inflight.discard(key)
+                        continue
                 self._recompute_scatter(user_key, method)
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.warning("scatter recompute failed for %s/%s",
                                user_key, method, exc_info=True)
             finally:
-                with self._condition:
-                    self._scatter_inflight.discard(key)
+                if key is not _STOP:
+                    with self._condition:
+                        self._scatter_inflight.discard(key)
+                self._scatter_queue.task_done()
 
     def _recompute_scatter(self, user_key: str, method: str) -> None:
         """取数(父进程)→ 指纹比对跳过空转 → 进程池纯数学 → 物化落盘。"""
         from xskill.dashboard.profile_viz import compute_scatter_payload
         from xskill.pipeline.registry import (
             read_scatter_cache, write_scatter_cache)
+        with self._condition:
+            if self._stopping:
+                return
         viz = self._scatter_profile_viz()
         fingerprint = viz.scatter_input_fingerprint(user_key)
         if fingerprint is None:
@@ -386,6 +422,12 @@ class ProfileRefreshService:
         payload = self._project_scatter(scatter_inputs, compute_scatter_payload)
         if payload is None:
             return  # 子进程异常,保留旧缓存
+        # 投影可能远慢于停机 timeout。结果回来后必须再次检查，禁止已取消的
+        # 运行项继续写物化缓存。这里只在锁内决定是否开始写，SQLite I/O 留在
+        # 锁外，避免数据库锁竞争反过来拖住 stop 获取条件锁、破坏有界等待。
+        with self._condition:
+            if self._stopping:
+                return
         write_scatter_cache(user_key, method, fingerprint, payload,
                             db_path=self._scatter_registry_db)
         with self._condition:
@@ -396,12 +438,18 @@ class ProfileRefreshService:
         子进程异常→None(保留旧缓存)。``worker`` 为模块顶层可 pickle 的纯函数。"""
         pool = self._acquire_scatter_pool()
         if pool is None:
+            with self._condition:
+                if self._stopping:
+                    return None
             return worker(scatter_inputs)
         try:
             return pool.submit(worker, scatter_inputs).result()
         except BrokenProcessPool:
             with self._condition:
                 self._scatter_pool = None  # 池坏了,下次重建
+                stopping = self._stopping
+            if stopping:
+                return None
             logger.warning("scatter process pool broken; computing inline once")
             return worker(scatter_inputs)
         except Exception:  # pylint: disable=broad-exception-caught
