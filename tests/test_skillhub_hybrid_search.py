@@ -131,6 +131,26 @@ def test_rrf_tie_break_prefers_higher_ux_then_skill_id(tmp_path):
         "m-high", "z-low", "a-none"]
 
 
+def test_search_reuses_cached_ux_values(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha-one", "alpha shared")
+    _write_hub_skill(hub_dir, "b", "alpha-two", "alpha shared")
+    loaded_paths: list[Path] = []
+
+    def fake_load_ux_scores(path):
+        loaded_paths.append(Path(path))
+        return []
+
+    monkeypatch.setattr(skillhub_module, "load_ux_scores", fake_load_ux_scores)
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    first = hub.search("alpha", limit=5)
+    second = hub.search("alpha", limit=5)
+
+    assert len(first) == len(second) == 2
+    assert len(loaded_paths) == 2
+    assert all(result["ux_avg"] is None for result in second)
+
+
 # ── 语义通道降级三条路 ─────────────────────────────────────────
 
 def test_semantic_degrades_when_embed_client_is_none(tmp_path):

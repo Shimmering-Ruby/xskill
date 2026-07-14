@@ -813,7 +813,7 @@ async def team_skill_hub_search(
             "content_sha": match["content_sha"],
             "source_path": match["source_path"],
             "source": _skillhub_result_source(match["source_path"]),
-            "ux_avg": hub.ux_avg(match["skill_id"]),
+            "ux_avg": match.get("ux_avg"),
             "match": {
                 "bm25_rank": match.get("bm25_rank"),
                 "semantic_rank": match.get("semantic_rank"),
