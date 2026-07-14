@@ -106,7 +106,9 @@ class SkillHub:
         self._query_embed_inflight: set[str] = set()
         self._corpus_embed_inflight: set[str] = set()
         self._query_embed_retry_after = 0.0
-        self._ux_avg_cache: dict[tuple[str, int, str], tuple[float, float | None]] = {}
+        self._ux_avg_cache: dict[
+            tuple[str, int], tuple[float, str, float | None]
+        ] = {}
         self._ux_avg_cache_lock = threading.Lock()
 
     @classmethod
@@ -667,12 +669,12 @@ class SkillHub:
     def _ux_avg_for_entry(self, entry: dict, days: int = 30) -> float | None:
         """按已解析 entry 读取近期均分，并用短 TTL 避免搜索热路径重复扫文件。"""
         sha = str(entry["content_sha"])
-        cache_key = (str(entry["skill_id"]), int(days), sha)
+        cache_key = (str(entry["skill_id"]), int(days))
         now = time.monotonic()
         with self._ux_avg_cache_lock:
             cached = self._ux_avg_cache.get(cache_key)
-            if cached is not None and now < cached[0]:
-                return cached[1]
+            if cached is not None and now < cached[0] and cached[1] == sha:
+                return cached[2]
 
             rows = load_ux_scores(Path(entry["path"]))
             if days > 0:
@@ -692,6 +694,7 @@ class SkillHub:
             value = sum(scores) / len(scores) if scores else None
             self._ux_avg_cache[cache_key] = (
                 time.monotonic() + UX_AVG_CACHE_TTL_SECONDS,
+                sha,
                 value,
             )
             return value
