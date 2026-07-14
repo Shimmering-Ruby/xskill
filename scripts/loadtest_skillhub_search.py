@@ -332,16 +332,22 @@ async def _run_scenario_a_round(
     stop_background = asyncio.Event()
     health_task = asyncio.create_task(sample_health(client, health_samples, stop_background))
 
-    async def sync_and_panel_storm() -> None:
+    async def sync_wave() -> None:
+        sync_results.extend(await asyncio.gather(*[
+            control_plane_harness._sync_one(client, headers, index)
+            for index, headers in enumerate(headers_list)
+        ]))
+
+    async def panel_poll() -> None:
         while not stop_background.is_set():
-            batch = await asyncio.gather(
-                *[control_plane_harness._sync_one(client, headers, index) for index, headers in enumerate(headers_list)],
+            panel_results.extend(await asyncio.gather(
                 control_plane_harness._probe(client, "GET", "/api/v1/dashboard/tags"),
                 control_plane_harness._probe(client, "GET", "/api/v1/dashboard/my/manifest"),
-            )
-            sync_results.extend(batch[:len(headers_list)])
-            panel_results.extend(batch[len(headers_list):])
-    storm_task = asyncio.create_task(sync_and_panel_storm())
+            ))
+            await asyncio.sleep(0.05)
+
+    sync_task = asyncio.create_task(sync_wave())
+    panel_task = asyncio.create_task(panel_poll())
 
     duplicate_query = HOT_QUERY_TERMS[0]
     duplicate_embed_start = state.snapshot()["embedding"]["request_count"]
@@ -368,11 +374,12 @@ async def _run_scenario_a_round(
     post_wave_embed = state.snapshot()["embedding"]["request_count"]
 
     stop_background.set()
-    for task in (health_task, storm_task):
+    for task in (health_task, panel_task):
         try:
             await asyncio.wait_for(task, timeout=15)
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             task.cancel()
+    await asyncio.wait_for(sync_task, timeout=30)
 
     all_search_results = duplicate_results + burst_results + wave_results
     return {
@@ -479,15 +486,15 @@ async def run_all_scenarios(
             warmup_thread_counts.append(
                 control_plane_harness._process_threads(server["process"].pid)
             )
-        # watcher 的首轮 poll 也可能懒启动一个固定 worker；跨过两个 0.5s
-        # poll 周期后再取稳态基线，避免把正常初始化误报成持续增长。
-        await asyncio.sleep(1.1)
+        # watcher 和控制面固定 worker 都可能延迟启动；跨过四个 0.5s poll
+        # 周期后再取稳态基线，避免把正常初始化误报成持续增长。
+        await asyncio.sleep(2.1)
         steady_queries = [
             ALL_QUERY_TERMS[position % len(ALL_QUERY_TERMS)]
             for position in range(args.concurrency)
         ]
         thread_stabilization_results: list[dict[str, Any]] = []
-        for _stabilization_wave in range(2):
+        for _stabilization_wave in range(4):
             thread_stabilization_results.extend(
                 await run_search_wave(client, headers_list[0], steady_queries)
             )
@@ -556,23 +563,26 @@ async def run_all_scenarios(
         sync_results: list[dict[str, Any]] = []
         stop_background = asyncio.Event()
         health_task = asyncio.create_task(sample_health(client, health_samples, stop_background))
+        sync_task = asyncio.ensure_future(asyncio.gather(*[
+            control_plane_harness._sync_one(client, headers, index)
+            for index, headers in enumerate(headers_list)
+        ]))
         panel_probe_results: list[dict[str, Any]] = []
         panel_deadline = time.monotonic() + args.panel_duration_s
         while time.monotonic() < panel_deadline:
-            batch = await asyncio.gather(
-                *[control_plane_harness._sync_one(client, headers, index) for index, headers in enumerate(headers_list)],
+            panel_probe_results.extend(await asyncio.gather(
                 control_plane_harness._probe(client, "GET", "/api/v1/dashboard/tags"),
                 control_plane_harness._probe(client, "GET", "/api/v1/dashboard/my/manifest"),
                 control_plane_harness._probe(client, "GET", "/api/v1/dashboard/overview"),
                 control_plane_harness._probe(client, "GET", "/api/v1/dashboard/skills"),
                 control_plane_harness._probe(client, "GET", f"/api/v1/dashboard/user/{scatter_user}/scatter", timeout=5),
-            )
-            sync_results.extend(batch[:len(headers_list)])
-            panel_probe_results.extend(batch[len(headers_list):])
+            ))
+            await asyncio.sleep(0.05)
+        sync_results.extend(await asyncio.wait_for(sync_task, timeout=30))
         stop_background.set()
         try:
             await asyncio.wait_for(health_task, timeout=15)
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             health_task.cancel()
     finally:
         await client.aclose()
