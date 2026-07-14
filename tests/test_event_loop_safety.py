@@ -151,11 +151,11 @@ def test_rate_bucket_wait_aborts_on_shutdown():
 # ---------------------------------------------------------------------------
 
 def test_startup_raises_thread_pool_capacity():
-    """所有 def 路由(search/resolve/team_sync/整个 dashboard)共享 anyio
-    默认线程池(40)。embedding 后端慢时 /sync 单请求占线程数分钟,40 被
-    打满 → 网页整体失联。startup 必须把容量设成 server.thread_pool_tokens
-    (默认 80，显式旧配置仍可设为 300)。只能在 startup 里设——create_app
-    时还没有事件循环，
+    """普通 def 路由(search/resolve/dashboard)共享 anyio 默认线程池。
+
+    startup 必须把容量设成 server.thread_pool_tokens（默认 80）。team
+    ``/sync`` 另有专用 executor，不应再依赖这个共享容量。只能在 startup
+    里设置——create_app 时还没有事件循环，
     current_default_thread_limiter 会抛 AsyncLibraryNotFoundError。"""
     from xskill.api import app as app_mod
 
@@ -179,6 +179,63 @@ def test_thread_pool_limiter_settable_in_loop():
         limiter.total_tokens = before
 
     anyio.run(main)
+
+
+@pytest.mark.asyncio
+async def test_team_sync_saturation_does_not_block_dashboard(monkeypatch):
+    """占满 team sync 专用池时，同步 dashboard 路由仍能取得 AnyIO token。"""
+    import anyio.to_thread
+    import httpx
+    from fastapi import FastAPI
+    from xskill.team.server import api as server_api
+
+    entered = threading.Event()
+    release = threading.Event()
+    worker_names: list[str] = []
+
+    def slow_sync(**_kwargs):
+        worker_names.append(threading.current_thread().name)
+        entered.set()
+        assert release.wait(3)
+        return {"slots": [], "server_time": 1.0}
+
+    monkeypatch.setattr(server_api, "team_sync", slow_sync)
+    app = FastAPI()
+    app.include_router(server_api.router)
+
+    @app.get("/")
+    def dashboard_index():
+        return {"ok": True}
+
+    server_api.start_team_sync_executor(app, max_workers=1)
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    previous_tokens = limiter.total_tokens
+    limiter.total_tokens = 1
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            sync_task = asyncio.create_task(client.get("/api/v1/team/sync"))
+            deadline = time.monotonic() + 1
+            while not entered.is_set() and time.monotonic() < deadline:
+                await asyncio.sleep(0.005)
+            assert entered.is_set()
+
+            web = await asyncio.wait_for(client.get("/"), timeout=1)
+            assert web.status_code == 200
+            assert web.json() == {"ok": True}
+
+            release.set()
+            sync = await sync_task
+            assert sync.status_code == 200
+    finally:
+        release.set()
+        limiter.total_tokens = previous_tokens
+        server_api.stop_team_sync_executor(app)
+
+    assert worker_names
+    assert worker_names[0].startswith("xskill-team-sync")
 
 
 @pytest.mark.asyncio

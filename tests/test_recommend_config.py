@@ -12,6 +12,7 @@ from xskill.config import (
     profile_refresh_config,
     recommend_config,
     skillhub_config,
+    team_sync_config,
 )
 
 
@@ -46,6 +47,22 @@ class TestProfileRefreshConfig:
         assert "profile_refresh_workers: 4" in CONFIG_TEMPLATE
         assert "profile_refresh_queue_size: 1024" in CONFIG_TEMPLATE
         assert "thread_pool_tokens: 80" in CONFIG_TEMPLATE
+
+
+class TestTeamSyncConfig:
+    def test_defaults_and_override(self):
+        assert team_sync_config({}) == {"workers": 32}
+        assert team_sync_config({"server": {"team_sync_workers": 12}}) == {
+            "workers": 12,
+        }
+
+    @pytest.mark.parametrize("value", [0, -1, 1.5, True, "32"])
+    def test_invalid_values_fail_loud(self, value):
+        with pytest.raises(ValueError, match="team_sync_workers"):
+            team_sync_config({"server": {"team_sync_workers": value}})
+
+    def test_template_contains_team_sync_default(self):
+        assert "team_sync_workers: 32" in CONFIG_TEMPLATE
 
 
 # ── recommend_config ──────────────────────────────────────────────

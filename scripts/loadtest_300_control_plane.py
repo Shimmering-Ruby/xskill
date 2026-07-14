@@ -369,9 +369,11 @@ def prepare_home(
     clients: int,
     max_concurrent: int,
     thread_pool_tokens: int,
+    team_sync_workers: int,
     profile_refresh_workers: int,
     profile_refresh_queue_size: int,
     profile_refresh_shutdown_timeout: float,
+    skill_slots: int,
 ) -> dict[str, Any]:
     server_home = run_dir / "server_home"
     xhome = server_home / ".xskill"
@@ -474,6 +476,7 @@ def prepare_home(
         },
         "server": {
             "thread_pool_tokens": thread_pool_tokens,
+            "team_sync_workers": team_sync_workers,
             "profile_refresh_workers": profile_refresh_workers,
             "profile_refresh_queue_size": profile_refresh_queue_size,
             "profile_refresh_shutdown_timeout": profile_refresh_shutdown_timeout,
@@ -481,8 +484,8 @@ def prepare_home(
         "team": {
             "server": {
                 "traj_root": str(traj_root),
-                "skill_slots": 0,
-                "ranked_slots": 0,
+                "skill_slots": skill_slots,
+                "ranked_slots": min(80, skill_slots),
                 "allow_anonymous_user": True,
             },
         },
@@ -592,6 +595,7 @@ async def _probe(
 
 async def _control_plane_probes(client, *, auth_headers: dict[str, str]) -> list[dict[str, Any]]:
     specs = [
+        ("GET", "/", None),
         ("GET", "/api/v1/health", None),
         ("GET", "/api/v1/status", None),
         ("GET", "/api/v1/watcher/status", None),
@@ -611,11 +615,13 @@ async def _sync_one(client, headers: dict[str, str], index: int) -> dict[str, An
     started = time.monotonic()
     try:
         response = await client.get("/api/v1/team/sync", headers=headers, timeout=10)
+        payload = response.json() if response.status_code == 200 else None
         return {
             "index": index,
             "status": response.status_code,
             "elapsed_s": time.monotonic() - started,
             "error": None if response.status_code == 200 else response.text[:300],
+            "slot_count": len(payload.get("slots", [])) if payload else None,
         }
     except Exception as exc:  # noqa: BLE001
         return {
@@ -633,6 +639,7 @@ def _wave_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "requests": len(results),
         "statuses": dict(statuses),
         "errors": errors[:20],
+        "slot_counts": dict(Counter(str(r.get("slot_count")) for r in results)),
         "latency": _latency_summary([float(r["elapsed_s"]) for r in results]),
     }
 
@@ -933,7 +940,9 @@ async def run_scenario(
     }
     result["waves"] = {}
     result["profile_metrics"] = {}
-    checkpoint = lambda: _write_result_snapshot(result, result_path)
+    def checkpoint() -> None:
+        _write_result_snapshot(result, result_path)
+
     checkpoint()
 
     limits = httpx.Limits(
@@ -1163,6 +1172,7 @@ def validate_result(result: dict[str, Any]) -> list[str]:
     clients = int(config["clients"])
     skills = int(config["skills"])
     workers = int(config["profile_refresh_workers"])
+    expected_slots = min(skills, int(config["skill_slots"]))
 
     for phase in ("cold", "cache_hit", "one_new_atom"):
         wave = result.get("waves", {}).get(phase)
@@ -1174,6 +1184,20 @@ def validate_result(result: dict[str, Any]) -> list[str]:
         sync = wave["sync"]
         if sync["requests"] != clients or sync["statuses"] != {"200": clients}:
             failures.append(f"{phase}: sync statuses={sync['statuses']}")
+        slot_counts = sync.get("slot_counts") or {}
+        try:
+            observed_slot_counts = {
+                int(count): int(requests)
+                for count, requests in slot_counts.items()
+            }
+        except (TypeError, ValueError):
+            observed_slot_counts = {-1: 0}
+        if (
+            sum(observed_slot_counts.values()) != clients
+            or any(count < 0 or count > expected_slots
+                   for count in observed_slot_counts)
+        ):
+            failures.append(f"{phase}: sync slot counts={slot_counts}")
         latency = sync["latency"]
         # 300 个请求同刻到达且 watcher 正在落 300 个 Git 仓时，实测尾延迟
         # 会包含单进程事件循环调度；4 秒 p95 / 5 秒最大值仍能区分正常
@@ -1193,7 +1217,7 @@ def validate_result(result: dict[str, Any]) -> list[str]:
         if probe.get("status") != 200:
             failures.append(f"probe failed: {probe}")
         if probe.get("path") in {
-            "/api/v1/dashboard/overview", "/api/v1/dashboard/skills",
+            "/", "/api/v1/dashboard/overview", "/api/v1/dashboard/skills",
         } and float(probe.get("elapsed_s", 99)) >= 1.5:
             failures.append(f"dashboard probe too slow: {probe}")
 
@@ -1274,11 +1298,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clients", type=int, default=300)
     parser.add_argument("--max-concurrent", type=int, default=30)
     parser.add_argument("--thread-pool-tokens", type=int, default=80)
+    parser.add_argument("--team-sync-workers", type=int, default=32)
     parser.add_argument("--profile-refresh-workers", type=int, default=30)
     parser.add_argument("--profile-refresh-queue-size", type=int, default=1024)
     parser.add_argument("--profile-refresh-shutdown-timeout", type=float, default=10.0)
     parser.add_argument("--llm-delay", type=float, default=12.0)
     parser.add_argument("--embed-delay", type=float, default=23.0)
+    parser.add_argument("--skill-slots", type=int, default=100)
     parser.add_argument("--convergence-timeout", type=float, default=900.0)
     parser.add_argument(
         "--artifact-root", type=Path, default=Path("/home/admin/xskill-loadtest-results"),
@@ -1290,6 +1316,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--clients must be >= 1")
     if args.max_concurrent < 1:
         parser.error("--max-concurrent must be >= 1")
+    if args.team_sync_workers < 1:
+        parser.error("--team-sync-workers must be >= 1")
+    if args.skill_slots < 0:
+        parser.error("--skill-slots must be >= 0")
     if args.profile_refresh_queue_size < args.clients:
         parser.error("--profile-refresh-queue-size must be >= --clients")
     if args.profile_refresh_workers < 1:
@@ -1320,6 +1350,8 @@ def main() -> int:
             "clients": args.clients,
             "watcher_max_concurrent": args.max_concurrent,
             "thread_pool_tokens": args.thread_pool_tokens,
+            "team_sync_workers": args.team_sync_workers,
+            "skill_slots": args.skill_slots,
             "profile_refresh_workers": args.profile_refresh_workers,
             "profile_refresh_queue_size": args.profile_refresh_queue_size,
             "profile_refresh_shutdown_timeout_s": args.profile_refresh_shutdown_timeout,
@@ -1361,9 +1393,11 @@ def main() -> int:
             clients=args.clients,
             max_concurrent=args.max_concurrent,
             thread_pool_tokens=args.thread_pool_tokens,
+            team_sync_workers=args.team_sync_workers,
             profile_refresh_workers=args.profile_refresh_workers,
             profile_refresh_queue_size=args.profile_refresh_queue_size,
             profile_refresh_shutdown_timeout=args.profile_refresh_shutdown_timeout,
+            skill_slots=args.skill_slots,
         )
         result["setup"] = {
             "server_home": prepared["server_home"],

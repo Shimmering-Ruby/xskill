@@ -972,9 +972,11 @@ def create_app(home_root: Path | str | None = None,
         # 配置错误必须让 team server 启动失败，不能在下方 best-effort
         # 上下文初始化中被吞掉。
         profile_refresh_cfg = None
+        team_sync_cfg = None
         if team_server:
-            from xskill.config import profile_refresh_config
+            from xskill.config import profile_refresh_config, team_sync_config
             profile_refresh_cfg = profile_refresh_config(_config)
+            team_sync_cfg = team_sync_config(_config)
 
         llm = create_llm_client(_config)
         if llm is None:
@@ -1332,7 +1334,10 @@ def create_app(home_root: Path | str | None = None,
             profile_refresh_service = None
             try:
                 from xskill.team.server.client_registry import ClientRegistry
-                from xskill.team.server.api import init_team_context
+                from xskill.team.server.api import (
+                    init_team_context,
+                    start_team_sync_executor,
+                )
                 from xskill.team.server.profile_refresh import ProfileRefreshService
                 from xskill.team.server.state import ensure_join_token
                 from xskill.config import (
@@ -1387,6 +1392,10 @@ def create_app(home_root: Path | str | None = None,
                     profile_refresh_service=profile_refresh_service,
                 )
                 profile_refresh_service.start()
+                start_team_sync_executor(
+                    app,
+                    max_workers=team_sync_cfg["workers"],
+                )
                 _profile_refresh_ref["instance"] = profile_refresh_service
                 _profile_refresh_ref["shutdown_timeout"] = profile_refresh_cfg[
                     "shutdown_timeout"
@@ -1396,6 +1405,12 @@ def create_app(home_root: Path | str | None = None,
                     traj_root, profile_refresh_cfg["workers"],
                 )
             except Exception:
+                try:
+                    from xskill.team.server.api import stop_team_sync_executor
+                    stop_team_sync_executor(app)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    logger.warning("failed to stop partial team sync executor",
+                                   exc_info=True)
                 if profile_refresh_service is not None:
                     profile_refresh_service.stop(
                         timeout=profile_refresh_cfg["shutdown_timeout"],
@@ -1457,7 +1472,11 @@ def create_app(home_root: Path | str | None = None,
         # watcher 在两者之后停止，避免慢 embedding 占用 watcher/anyio 资源。
         if team_server:
             try:
-                from xskill.team.server.api import clear_team_context
+                from xskill.team.server.api import (
+                    clear_team_context,
+                    stop_team_sync_executor,
+                )
+                stop_team_sync_executor(app)
                 clear_team_context(
                     profile_refresh_shutdown_timeout=float(
                         _profile_refresh_ref.get("shutdown_timeout", 5.0),

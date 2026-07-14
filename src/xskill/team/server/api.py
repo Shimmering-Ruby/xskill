@@ -10,8 +10,11 @@ client 完全信任 server；token 只挡组织外随机接入。
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import csv
+from functools import partial
 import hashlib
 import io
 import json
@@ -58,6 +61,40 @@ class _Ctx:
 
 _ctx = _Ctx()
 _WHEEL_BUILD_LOCK = threading.Lock()
+_SYNC_EXECUTOR_STATE = "xskill_team_sync_executor"
+
+
+def start_team_sync_executor(
+    app,
+    *,
+    max_workers: int = 32,
+) -> ThreadPoolExecutor:
+    """为单个 team app 创建独立的 ``/sync`` 线程池。"""
+    existing = getattr(app.state, _SYNC_EXECUTOR_STATE, None)
+    if existing is not None:
+        return existing
+    executor = ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="xskill-team-sync",
+    )
+    setattr(app.state, _SYNC_EXECUTOR_STATE, executor)
+    return executor
+
+
+def stop_team_sync_executor(app) -> None:
+    """停止接收新 sync，并取消尚未开始的排队任务。"""
+    executor = getattr(app.state, _SYNC_EXECUTOR_STATE, None)
+    if executor is None:
+        return
+    delattr(app.state, _SYNC_EXECUTOR_STATE)
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
+async def _run_team_sync(app, func):
+    """在 team 专用 executor 中执行同步 manifest 计算。"""
+    executor = getattr(app.state, _SYNC_EXECUTOR_STATE, None)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, func)
 
 
 def init_team_context(
@@ -629,22 +666,20 @@ def team_sync(
 
 @router.get("/sync")
 async def team_sync_endpoint(
+    request: Request,
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
 ):
-    """零分发配置直接响应；其余 manifest 计算继续在线程池执行。"""
-    if _ctx.total_slots <= 0:
-        return team_sync(
+    """所有 manifest 计算都在 team 专用线程池执行。"""
+    return await _run_team_sync(
+        request.app,
+        partial(
+            team_sync,
             x_xskill_token=x_xskill_token,
             x_xskill_client=x_xskill_client,
             x_xskill_version=x_xskill_version,
-        )
-    return await run_in_threadpool(
-        team_sync,
-        x_xskill_token=x_xskill_token,
-        x_xskill_client=x_xskill_client,
-        x_xskill_version=x_xskill_version,
+        ),
     )
 
 

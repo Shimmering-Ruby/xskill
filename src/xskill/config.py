@@ -159,6 +159,7 @@ skill_opt:
 # ===== Server (uvicorn/FastAPI runtime knobs) =====
 server:
   thread_pool_tokens: 80           # anyio 同步路由线程池容量（画像刷新使用独立 worker）
+  team_sync_workers: 32            # team /sync 独立线程池，不占用 dashboard/普通同步路由
   profile_refresh_workers: 4       # 用户画像后台刷新固定并发数
   profile_refresh_queue_size: 1024 # 待刷新 client 的有界队列容量
   profile_refresh_shutdown_timeout: 5 # 停机等待画像 worker 的最长秒数
@@ -536,6 +537,18 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
         "queue_size": queue_size,
         "shutdown_timeout": float(shutdown_timeout),
     }
+
+
+def team_sync_config(cfg: Optional[dict] = None) -> dict:
+    """读取 team ``/sync`` 专用线程池配置并严格校验。"""
+    section = (cfg or {}).get("server") or {}
+    workers = section.get("team_sync_workers", 32)
+    if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
+        raise ValueError(
+            "server.team_sync_workers 必须是正整数，"
+            f"got {workers!r}"
+        )
+    return {"workers": workers}
 
 
 def allow_anonymous_user(cfg: Optional[dict] = None) -> bool:

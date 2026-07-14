@@ -20,6 +20,9 @@ class _Response:
     status_code = 200
     text = "{}"
 
+    def json(self):
+        return {"slots": []}
+
 
 class _BlockedSyncClient:
     def __init__(self, release: threading.Event):
