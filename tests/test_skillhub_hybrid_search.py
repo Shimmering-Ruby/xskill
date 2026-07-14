@@ -169,6 +169,20 @@ def test_search_hot_path_reuses_snapshot_index_without_recopying_entries(
     assert first == second
 
 
+def test_unchanged_expired_snapshot_reuses_search_index(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    hub = SkillHub(
+        enabled=True, hub_dir=hub_dir, embed_client=None,
+        scan_ttl_seconds=0.0,
+    )
+
+    first_bundle = hub._search_index_bundle()
+    second_bundle = hub._search_index_bundle()
+
+    assert second_bundle is first_bundle
+
+
 def test_search_hot_path_reuses_bm25_ranks(tmp_path, monkeypatch):
     hub_dir = tmp_path / "hub"
     _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
@@ -188,7 +202,7 @@ def test_bm25_rank_cache_is_bounded(tmp_path, monkeypatch):
     hub_dir = tmp_path / "hub"
     _write_hub_skill(hub_dir, "a", "alpha beta gamma", "shared")
     hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
-    monkeypatch.setattr(skillhub_module, "BM25_RANK_CACHE_CAPACITY", 2)
+    monkeypatch.setattr(skillhub_module, "SEARCH_RANK_CACHE_CAPACITY", 2)
 
     hub.search("alpha", limit=5)
     hub.search("beta", limit=5)
@@ -196,6 +210,29 @@ def test_bm25_rank_cache_is_bounded(tmp_path, monkeypatch):
 
     rank_cache = hub._search_index_bundle()["bm25_rank_cache"]
     assert list(rank_cache) == [("beta",), ("gamma",)]
+
+
+def test_search_hot_path_reuses_semantic_ranks_and_fusion_groups(
+    tmp_path, monkeypatch,
+):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    client = ControlledEmbed({
+        "alpha shared": [1.0, 0.0],
+        "alpha": [1.0, 0.0],
+    })
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=client)
+    _prime_corpus_cache(hub)
+    first = hub.search("alpha", limit=5)
+
+    def fail_recompute(*_args, **_kwargs):
+        raise AssertionError("hot search recomputed semantic or fusion ranks")
+
+    monkeypatch.setattr(skillhub_module.np, "argsort", fail_recompute)
+    monkeypatch.setattr(hub, "_score_groups", fail_recompute)
+    second = hub.search("alpha", limit=5)
+
+    assert first == second
 
 
 # ── 语义通道降级三条路 ─────────────────────────────────────────
