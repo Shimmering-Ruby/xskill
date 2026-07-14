@@ -43,6 +43,7 @@ EMBED_CACHE_NAME = ".skillhub_embed_cache.pkl"
 BM25_K1 = 1.2
 BM25_B = 0.75
 SEARCH_RANK_CACHE_CAPACITY = 256
+SEARCH_RESULT_CACHE_TTL_SECONDS = 10.0
 RRF_RANK_CONSTANT = 60
 QUERY_VECTOR_CACHE_CAPACITY = 256
 QUERY_EMBED_FAILURE_COOLDOWN_SECONDS = 5.0
@@ -281,6 +282,14 @@ class SkillHub:
         semantic_rank_by_index = self._semantic_ranks(
             index_bundle, normalized_query,
         )
+        result_cache_key = (
+            normalized_query, int(limit), bool(semantic_rank_by_index),
+        )
+        cached_results = self._cached_search_results(
+            index_bundle, result_cache_key,
+        )
+        if cached_results is not None:
+            return cached_results
         score_groups = self._fusion_score_groups(
             index_bundle, normalized_query,
             bm25_rank_by_index, semantic_rank_by_index,
@@ -295,7 +304,43 @@ class SkillHub:
             result_entry["semantic_rank"] = semantic_rank_by_index.get(entry_index)
             result_entry["ux_avg"] = self._ux_avg_for_entry(result_entry)
             results.append(result_entry)
+        self._cache_search_results(index_bundle, result_cache_key, results)
         return results
+
+    @staticmethod
+    def _cached_search_results(
+        index_bundle: dict, cache_key: tuple[str, int, bool],
+    ) -> list[dict] | None:
+        """读取短 TTL 最终结果缓存并返回浅拷贝，调用方修改不会污染缓存。"""
+        cache = index_bundle["search_result_cache"]
+        cache_lock = index_bundle["search_result_cache_lock"]
+        with cache_lock:
+            cached = cache.get(cache_key)
+            if cached is None:
+                return None
+            expires_at, cached_results = cached
+            if time.monotonic() >= expires_at:
+                del cache[cache_key]
+                return None
+            cache.move_to_end(cache_key)
+            return [dict(result) for result in cached_results]
+
+    @staticmethod
+    def _cache_search_results(
+        index_bundle: dict, cache_key: tuple[str, int, bool], results: list[dict],
+    ) -> None:
+        """短时缓存最终排序；索引 bundle 替换时缓存自然整体失效。"""
+        cache = index_bundle["search_result_cache"]
+        cache_lock = index_bundle["search_result_cache_lock"]
+        cached_results = tuple(dict(result) for result in results)
+        with cache_lock:
+            cache[cache_key] = (
+                time.monotonic() + SEARCH_RESULT_CACHE_TTL_SECONDS,
+                cached_results,
+            )
+            cache.move_to_end(cache_key)
+            while len(cache) > SEARCH_RANK_CACHE_CAPACITY:
+                cache.popitem(last=False)
 
     def _fuse_and_rank(self, reciprocal_scores: dict[int, float],
                        entries: list[dict], limit: int) -> list[int]:
@@ -677,6 +722,8 @@ class SkillHub:
             "semantic_rank_cache_lock": threading.Lock(),
             "fusion_group_cache": OrderedDict(),
             "fusion_group_cache_lock": threading.Lock(),
+            "search_result_cache": OrderedDict(),
+            "search_result_cache_lock": threading.Lock(),
             "vector_present_indices": vector_present_indices,
             "corpus_matrix": corpus_matrix,
         }

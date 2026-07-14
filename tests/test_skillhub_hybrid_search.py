@@ -210,6 +210,8 @@ def test_bm25_rank_cache_is_bounded(tmp_path, monkeypatch):
 
     rank_cache = hub._search_index_bundle()["bm25_rank_cache"]
     assert list(rank_cache) == [("beta",), ("gamma",)]
+    result_cache = hub._search_index_bundle()["search_result_cache"]
+    assert [cache_key[0] for cache_key in result_cache] == ["beta", "gamma"]
 
 
 def test_search_hot_path_reuses_semantic_ranks_and_fusion_groups(
@@ -224,6 +226,7 @@ def test_search_hot_path_reuses_semantic_ranks_and_fusion_groups(
     hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=client)
     _prime_corpus_cache(hub)
     first = hub.search("alpha", limit=5)
+    hub._search_index_bundle()["search_result_cache"].clear()
 
     def fail_recompute(*_args, **_kwargs):
         raise AssertionError("hot search recomputed semantic or fusion ranks")
@@ -233,6 +236,41 @@ def test_search_hot_path_reuses_semantic_ranks_and_fusion_groups(
     second = hub.search("alpha", limit=5)
 
     assert first == second
+
+
+def test_search_hot_path_reuses_final_results(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    first = hub.search("alpha", limit=5)
+
+    def fail_ranking(*_args, **_kwargs):
+        raise AssertionError("hot search recomputed final result ranking")
+
+    monkeypatch.setattr(hub, "_rank_score_groups", fail_ranking)
+    second = hub.search("alpha", limit=5)
+
+    assert first == second
+
+
+def test_search_final_result_cache_expires(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha shared")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    monkeypatch.setattr(skillhub_module, "SEARCH_RESULT_CACHE_TTL_SECONDS", 0.0)
+    original_rank = hub._rank_score_groups
+    rank_calls = 0
+
+    def counted_rank(*args, **kwargs):
+        nonlocal rank_calls
+        rank_calls += 1
+        return original_rank(*args, **kwargs)
+
+    monkeypatch.setattr(hub, "_rank_score_groups", counted_rank)
+    hub.search("alpha", limit=5)
+    hub.search("alpha", limit=5)
+
+    assert rank_calls == 2
 
 
 # ── 语义通道降级三条路 ─────────────────────────────────────────
