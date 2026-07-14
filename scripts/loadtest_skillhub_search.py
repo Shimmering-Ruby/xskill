@@ -48,7 +48,6 @@ def _dead_port_base_url() -> str:
 
 def prepare_search_home(run_dir: Path, mock_base_url: str, args: argparse.Namespace) -> dict[str, Any]:
     """建 skillhub 语料 + 干扰文件 + 深垃圾目录 + client，写 config，并预热 corpus 向量。"""
-    import yaml
     from xskill.recommend.skillhub import SkillHub
     from xskill.team.server.client_registry import ClientRegistry
     from xskill.utils.llm import create_embed_client
