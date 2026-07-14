@@ -141,6 +141,27 @@ _skills_catalog_cache: dict[tuple, tuple[float, list[dict]]] = {}
 _skills_catalog_flights: dict[tuple, "_CatalogFlight"] = {}
 _skills_catalog_cache_lock = threading.Lock()
 
+_TAG_CLOUD_TTL_SECONDS = 5.0
+_TAG_CLOUD_CACHE_MAX_ENTRIES = 64
+_tag_cloud_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_tag_cloud_cache_lock = threading.Lock()
+
+
+def _prune_tag_cloud_cache(now: float) -> None:
+    """在持锁状态下清理过期项并限制不同 registry.db/top_n 组合的缓存数量。"""
+    for stale_key, (expires_at, _rows) in list(_tag_cloud_cache.items()):
+        if expires_at <= now:
+            _tag_cloud_cache.pop(stale_key, None)
+    limit = max(0, int(_TAG_CLOUD_CACHE_MAX_ENTRIES))
+    overflow = len(_tag_cloud_cache) - limit
+    if overflow > 0:
+        oldest = sorted(
+            _tag_cloud_cache,
+            key=lambda cache_key: _tag_cloud_cache[cache_key][0],
+        )[:overflow]
+        for stale_key in oldest:
+            _tag_cloud_cache.pop(stale_key, None)
+
 
 class _CatalogFlight:
     """同一个清单缓存键只允许一个线程扫描磁盘。"""
@@ -551,6 +572,13 @@ class DashboardMetrics:
         from collections import Counter, defaultdict
         from xskill.pipeline.atom import AtomTaskStore
         from xskill.config import get_registry_db_path
+        cache_key = (str(self._db), int(top_n))
+        now = time.monotonic()
+        with _tag_cloud_cache_lock:
+            _prune_tag_cloud_cache(now)
+            cached = _tag_cloud_cache.get(cache_key)
+            if cached is not None:
+                return copy.deepcopy(cached[1])
         db_dir = Path(self._db).parent if self._db else get_registry_db_path().parent
         counter: Counter = Counter()
         tag_users: dict[str, set] = defaultdict(set)
@@ -572,8 +600,13 @@ class DashboardMetrics:
                                 tag_users[t].add(client)
             except OSError:
                 continue  # 某个目录不可读/路径异常,跳过不阻断整体聚合
-        return [{"tag": t, "count": n, "users": sorted(tag_users.get(t, ()))}
-                for t, n in counter.most_common(top_n)]
+        result = [{"tag": t, "count": n, "users": sorted(tag_users.get(t, ()))}
+                  for t, n in counter.most_common(top_n)]
+        with _tag_cloud_cache_lock:
+            _tag_cloud_cache[cache_key] = (
+                time.monotonic() + _TAG_CLOUD_TTL_SECONDS, copy.deepcopy(result))
+            _prune_tag_cloud_cache(time.monotonic())
+        return result
 
     def canary_sides(self) -> list[dict]:
         """灰度分桶分布：使用打分记录按 side 聚合（与 check_and_decide 裁决同源）。

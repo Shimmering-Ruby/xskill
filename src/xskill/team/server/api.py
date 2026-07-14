@@ -883,7 +883,7 @@ def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
     shutil.rmtree(dest_dir, ignore_errors=True)
     tmp_dir.replace(dest_dir)
     source_path = dest_dir.relative_to(Path(hub.dir)).as_posix()
-    entry = hub.entry(source_path)
+    entry = hub.entry(source_path, force_refresh=True)
     if entry is None:
         raise HTTPException(status_code=500,
                             detail="stored skill not visible in skillhub scan")
