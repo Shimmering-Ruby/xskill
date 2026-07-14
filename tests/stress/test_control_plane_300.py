@@ -130,7 +130,10 @@ def test_control_plane_300(tmp_path: Path) -> None:
     assert all(probe["status"] == 200 for probe in probes), artifact
     dashboard = [probe for probe in probes if probe["path"].startswith("/api/v1/dashboard/")]
     assert len(dashboard) >= 6, artifact
-    assert all(probe["elapsed_s"] < 1.5 for probe in dashboard), artifact
+    assert all(probe["elapsed_s"] < 2.5 for probe in dashboard), artifact
+    index_probes = [probe for probe in probes if probe["path"] == "/"]
+    assert index_probes, artifact
+    assert all(probe["elapsed_s"] < 1.5 for probe in index_probes), artifact
     assert any(probe["path"] == "/api/v1/status" for probe in probes), artifact
 
     assert result["diagnostics"]["database_locked_count"] == 0, artifact

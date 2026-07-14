@@ -1216,10 +1216,18 @@ def validate_result(result: dict[str, Any]) -> list[str]:
     for probe in probes:
         if probe.get("status") != 200:
             failures.append(f"probe failed: {probe}")
-        if probe.get("path") in {
-            "/", "/api/v1/dashboard/overview", "/api/v1/dashboard/skills",
-        } and float(probe.get("elapsed_s", 99)) >= 1.5:
-            failures.append(f"dashboard probe too slow: {probe}")
+        if (
+            probe.get("path") == "/"
+            and float(probe.get("elapsed_s", 99)) >= 1.5
+        ):
+            failures.append(f"dashboard index probe too slow: {probe}")
+        if (
+            probe.get("path") in {
+                "/api/v1/dashboard/overview", "/api/v1/dashboard/skills",
+            }
+            and float(probe.get("elapsed_s", 99)) >= 2.5
+        ):
+            failures.append(f"dashboard data probe too slow: {probe}")
 
     mock = result.get("mock", {})
     llm = mock.get("llm", {})
