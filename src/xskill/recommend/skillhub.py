@@ -44,6 +44,7 @@ BM25_K1 = 1.2
 BM25_B = 0.75
 RRF_RANK_CONSTANT = 60
 QUERY_VECTOR_CACHE_CAPACITY = 256
+QUERY_EMBED_FAILURE_COOLDOWN_SECONDS = 5.0
 
 
 def _normalize(v: np.ndarray) -> np.ndarray:
@@ -94,7 +95,8 @@ class SkillHub:
         # 混合检索索引：随 fingerprint 变化整体重建，在扫描 single-flight 之外自成一锁。
         self._search_index: dict | None = None
         self._search_index_lock = threading.Lock()
-        # query embed 三护栏：非阻塞信号量 + 独立短超时线程 + fingerprint 感知 LRU。
+        # query embed 四护栏：非阻塞信号量 + 独立短超时线程 + fingerprint 感知 LRU
+        # + 后端失败短时冷却。
         self._query_embed_semaphore = threading.Semaphore(max(self.search_max_embed, 0))
         self._query_embed_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._query_embed_executor_lock = threading.Lock()
@@ -102,6 +104,7 @@ class SkillHub:
         self._query_vector_cache_lock = threading.Lock()
         self._query_embed_inflight: set[str] = set()
         self._corpus_embed_inflight: set[str] = set()
+        self._query_embed_retry_after = 0.0
 
     @classmethod
     def from_config(cls, config: dict, embed_client) -> "SkillHub":
@@ -370,7 +373,7 @@ class SkillHub:
 
     def _embed_query(self, normalized_query: str,
                      fingerprint: tuple) -> np.ndarray | None:
-        """query 向量三护栏：LRU 命中零调用；信号量非阻塞抢不到即降级；短超时即降级。"""
+        """query 向量护栏：LRU、并发上限、短超时，以及后端失败短时冷却。"""
         if self.embed_client is None or self.search_max_embed <= 0:
             return None
         with self._query_vector_cache_lock:
@@ -380,6 +383,8 @@ class SkillHub:
                 return cached[1]
             elif cached is not None:
                 del self._query_vector_cache[normalized_query]
+            if time.monotonic() < self._query_embed_retry_after:
+                return None
             if normalized_query in self._query_embed_inflight:
                 return None
         if not self._query_embed_semaphore.acquire(blocking=False):
@@ -404,13 +409,25 @@ class SkillHub:
         except Exception:
             with self._query_vector_cache_lock:
                 self._query_embed_inflight.discard(normalized_query)
+                self._query_embed_retry_after = max(
+                    self._query_embed_retry_after,
+                    time.monotonic() + QUERY_EMBED_FAILURE_COOLDOWN_SECONDS,
+                )
             self._query_embed_semaphore.release()
             logger.warning("skillhub semantic search degraded to BM25: submit failed",
                            exc_info=True)
             return None
         try:
-            return future.result(timeout=self.search_timeout_s)
+            query_vector = future.result(timeout=self.search_timeout_s)
+            with self._query_vector_cache_lock:
+                self._query_embed_retry_after = 0.0
+            return query_vector
         except Exception as embed_error:  # 超时/API 异常只降级语义位，不冒泡到 search
+            with self._query_vector_cache_lock:
+                self._query_embed_retry_after = max(
+                    self._query_embed_retry_after,
+                    time.monotonic() + QUERY_EMBED_FAILURE_COOLDOWN_SECONDS,
+                )
             logger.warning(
                 "skillhub semantic search degraded to BM25: query embedding %s: %s",
                 type(embed_error).__name__, embed_error,
