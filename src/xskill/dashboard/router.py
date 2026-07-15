@@ -385,10 +385,13 @@ def _file_tree(root: Path) -> list[dict]:
 
 def _git(root: Path, args: list[str]) -> str:
     import subprocess
+
+    from xskill.utils.proc import windowless_subprocess_kwargs
     try:
-        r = subprocess.run(["git", "-C", str(root)] + args,
-                           capture_output=True, text=True, timeout=10)
-        return r.stdout
+        result = subprocess.run(["git", "-C", str(root)] + args,
+                                capture_output=True, text=True, timeout=10,
+                                **windowless_subprocess_kwargs())
+        return result.stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 

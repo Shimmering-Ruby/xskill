@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Optional
 
 from xskill.config import get_connect_daemon_state_path
+from xskill.utils.proc import windowless_subprocess_kwargs
 
 logger = logging.getLogger("xskill.team.client.service")
 
@@ -83,6 +84,7 @@ def _pid_alive_windows(pid: int) -> bool:
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
             capture_output=True, text=True, check=False, timeout=2,
+            **windowless_subprocess_kwargs(),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return False
@@ -301,6 +303,7 @@ class WindowsTaskSchedulerBackend(ConnectServiceBackend):
         """跑一条 schtasks 子命令。text 模式拿输出，不 check（自行判 returncode）。"""
         return subprocess.run(
             ["schtasks", *args], capture_output=True, text=True, check=False,
+            **windowless_subprocess_kwargs(),
         )
 
     def install_and_start(self) -> dict:
@@ -371,13 +374,13 @@ class WindowsTaskSchedulerBackend(ConnectServiceBackend):
         except OSError as e:
             raise ServiceError(f"写开机启动脚本失败：{e}") from e
 
-        # 立即 detach 启动（CREATE_NO_WINDOW=0x08000000, DETACHED_PROCESS=0x00000008）
-        CREATE_NO_WINDOW = 0x08000000
+        # 立即 detach 启动：无窗 flag 叠加 DETACHED_PROCESS（0x00000008）
         DETACHED_PROCESS = 0x00000008
+        no_window = windowless_subprocess_kwargs()
         try:
             proc = subprocess.Popen(
                 argv,
-                creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+                creationflags=no_window.get("creationflags", 0) | DETACHED_PROCESS,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -410,7 +413,8 @@ class WindowsTaskSchedulerBackend(ConnectServiceBackend):
             if pid and _pid_alive(pid):
                 try:
                     subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                                   capture_output=True, check=False)
+                                   capture_output=True, check=False,
+                                   **windowless_subprocess_kwargs())
                 except OSError:
                     pass
             clear_daemon_state()

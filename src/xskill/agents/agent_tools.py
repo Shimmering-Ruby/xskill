@@ -23,6 +23,7 @@ from xskill.skill.frontmatter import (
     serialize as fm_serialize,
     FrontmatterError,
 )
+from xskill.utils.proc import windowless_subprocess_kwargs
 
 logger = logging.getLogger("xskill.agent_tools")
 
@@ -1061,6 +1062,7 @@ def grep_files(pattern: str, path: str = "", glob: str = "",
         try:
             completed = subprocess.run(
                 command, capture_output=True, text=True, timeout=30,
+                **windowless_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             return "error: grep timed out after 30s — narrow path/glob"
