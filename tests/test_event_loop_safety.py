@@ -263,7 +263,6 @@ async def test_stats_sqlite_read_does_not_block_health(tmp_path, monkeypatch):
         "dashboard": {"enabled": False},
     })
     monkeypatch.setattr(app_module, "_skill_dir", tmp_path / "skill")
-    monkeypatch.setattr(app_module, "_watcher_ref", {})
     monkeypatch.setattr(app_module, "_profile_refresh_ref", {})
     monkeypatch.setattr(pipeline_registry, "usage_summary", slow_usage_summary)
     monkeypatch.setattr(pipeline_registry, "model_share", lambda: [])
@@ -347,7 +346,6 @@ async def test_stats_propagates_unexpected_registry_errors(tmp_path, monkeypatch
         "dashboard": {"enabled": False},
     })
     monkeypatch.setattr(app_module, "_skill_dir", tmp_path / "skill")
-    monkeypatch.setattr(app_module, "_watcher_ref", {})
     monkeypatch.setattr(app_module, "_profile_refresh_ref", {})
 
     def fail_usage_summary():

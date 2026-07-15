@@ -404,24 +404,31 @@ def test_context_clear_stops_workers_and_removes_references(team_runtime):
     assert server_api._ctx.profile_refresh_service is None
 
 
-def test_stats_exposes_profile_refresh_metrics(tmp_path, monkeypatch):
+def test_stats_exposes_profile_refresh_status(tmp_path, monkeypatch):
+    """画像拆为短命子进程后,/stats 的 profile_refresh 读子进程落盘的状态文件。"""
     from xskill.api import app as app_module
+    from xskill import config as xconfig
     from xskill.pipeline import registry as pipeline_registry
-
-    class Service:
-        metrics = {"queued": 2, "running": 1, "requested": 3}
+    from xskill.utils.status_file import PROFILE_STATUS_FILE, write_status_file
 
     monkeypatch.setattr(app_module, "_config", {
         "team": {"server": {}},
         "dashboard": {"enabled": False},
     })
     monkeypatch.setattr(app_module, "_skill_dir", tmp_path / "skill")
-    monkeypatch.setattr(app_module, "_watcher_ref", {})
-    monkeypatch.setattr(app_module, "_profile_refresh_ref", {"instance": Service()})
-    monkeypatch.setattr(pipeline_registry, "usage_summary", lambda: {})
-    monkeypatch.setattr(pipeline_registry, "model_share", lambda: {})
+    monkeypatch.setattr(xconfig, "XSKILL_HOME", tmp_path)
+
+    def _empty_summary():
+        return {}
+
+    monkeypatch.setattr(pipeline_registry, "usage_summary", _empty_summary)
+    monkeypatch.setattr(pipeline_registry, "model_share", _empty_summary)
+    write_status_file(
+        tmp_path / PROFILE_STATUS_FILE, {"clients": 3, "completed": 2}, ok=True)
 
     response = TestClient(app_module.create_app()).get("/api/v1/stats")
 
     assert response.status_code == 200
-    assert response.json()["profile_refresh"] == Service.metrics
+    body = response.json()["profile_refresh"]
+    assert body["ok"] is True
+    assert body["stats"] == {"clients": 3, "completed": 2}

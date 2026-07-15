@@ -23,17 +23,23 @@ class TestProfileRefreshConfig:
             "queue_size": 1024,
             "settle_delay": 5.0,
             "shutdown_timeout": 5.0,
+            "interval": 600.0,
+            "timeout": 1800.0,
         }
         assert profile_refresh_config({"server": {
             "profile_refresh_workers": 8,
             "profile_refresh_queue_size": 99,
             "profile_refresh_settle_delay": 2.5,
             "profile_refresh_shutdown_timeout": 1.5,
+            "profile_refresh_interval": 60,
+            "profile_refresh_timeout": 600,
         }}) == {
             "workers": 8,
             "queue_size": 99,
             "settle_delay": 2.5,
             "shutdown_timeout": 1.5,
+            "interval": 60.0,
+            "timeout": 600.0,
         }
 
     @pytest.mark.parametrize("key,value", [
@@ -47,6 +53,10 @@ class TestProfileRefreshConfig:
         ("profile_refresh_shutdown_timeout", float("inf")),
         ("profile_refresh_shutdown_timeout", float("nan")),
         ("profile_refresh_shutdown_timeout", "5"),
+        ("profile_refresh_interval", 0),
+        ("profile_refresh_interval", -30),
+        ("profile_refresh_timeout", 0),
+        ("profile_refresh_timeout", float("inf")),
     ])
     def test_invalid_values_fail_loud(self, key, value):
         with pytest.raises(ValueError, match=key):

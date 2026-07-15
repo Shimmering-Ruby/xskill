@@ -810,31 +810,36 @@ class JsonlIngester:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                submitted = self.scan_and_bridge(
-                    target_traj_dir=self.target_traj_dir,
-                    home_root=self.home_root,
-                    seen_sessions=self._seen,
-                )
-                self._stats["polls"] += 1
-                self._stats["last_poll"] = time.time()
-                if submitted:
-                    self._stats["ingested"] += len(submitted)
-                    logger.info(
-                        "JsonlIngester(%s): bridged %d new session(s) → %s",
-                        self.spec.name, len(submitted), self.target_traj_dir,
-                    )
-                    if self.on_new_sessions is not None:
-                        try:
-                            self.on_new_sessions(submitted)
-                        except Exception:
-                            logger.exception(
-                                "JsonlIngester(%s) on_new_sessions hook failed",
-                                self.spec.name,
-                            )
+                self.run_once()
             except Exception:
                 self._stats["errors"] += 1
                 logger.exception("JsonlIngester(%s) scan error", self.spec.name)
             self._stop.wait(self.poll_interval)
+
+    def run_once(self) -> list[dict]:
+        """单轮扫盘 + 桥接(供短命 sweep 子进程调;_loop 每轮也调它,source 唯一)。"""
+        submitted = self.scan_and_bridge(
+            target_traj_dir=self.target_traj_dir,
+            home_root=self.home_root,
+            seen_sessions=self._seen,
+        )
+        self._stats["polls"] += 1
+        self._stats["last_poll"] = time.time()
+        if submitted:
+            self._stats["ingested"] += len(submitted)
+            logger.info(
+                "JsonlIngester(%s): bridged %d new session(s) → %s",
+                self.spec.name, len(submitted), self.target_traj_dir,
+            )
+            if self.on_new_sessions is not None:
+                try:
+                    self.on_new_sessions(submitted)
+                except Exception:
+                    logger.exception(
+                        "JsonlIngester(%s) on_new_sessions hook failed",
+                        self.spec.name,
+                    )
+        return submitted
 
     def scan_and_bridge(
         self,

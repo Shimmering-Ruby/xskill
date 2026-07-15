@@ -273,9 +273,58 @@ def find_atom_entry_in_any_skill(
             for c in data.get("candidates", []) or []:
                 if c.get("atom_id") == atom_id:
                     return (skill_path.name, int(c.get("weightscore", 0)))
-        except Exception:
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            logger.warning("跳过无法解析的 candidates 文件 %s", cand_yml, exc_info=True)
             continue
     return None
+
+
+def build_atom_consumed_index(skill_dir: Path) -> dict[str, tuple[str, int]]:
+    """一次性扫描所有 skill 的 ``.candidates.yml``，建 ``atom_id -> (skill_name, weightscore)`` 索引。
+
+    ``find_atom_entry_in_any_skill`` 是逐 atom 查（每次遍历所有 skill 读盘 O(skills)）；
+    watcher 一轮 scan 要对成百上千个未打 ``clustered`` 标记的 atom 判是否已消费，逐个调
+    即 O(atoms×skills) 全量重读磁盘，冷启动会烧满一个核、握死 GIL。改为每轮 scan 只调本
+    函数一次建索引，再 O(1) 命中，磁盘 IO 降为 O(skills)。
+    """
+    index: dict[str, tuple[str, int]] = {}
+    if not skill_dir or not Path(skill_dir).is_dir():
+        return index
+    for skill_path in sorted(Path(skill_dir).iterdir()):
+        if not skill_path.is_dir() or skill_path.name.startswith("."):
+            continue
+        cand_yml = skill_path / CANDIDATES_FILENAME
+        if not cand_yml.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cand_yml.read_text(encoding="utf-8")) or {}
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            logger.warning("跳过无法解析的 candidates 文件 %s", cand_yml, exc_info=True)
+            continue
+        for candidate in data.get("candidates", []) or []:
+            atom_id = candidate.get("atom_id")
+            if atom_id:
+                index[atom_id] = (skill_path.name, int(candidate.get("weightscore", 0)))
+    return index
+
+
+class LazyConsumedIndex:
+    """惰性 atom→skill 消费索引:**只有真遇到未打 ``clustered`` 标记的 atom 才扫盘建
+    索引**,本轮复用。
+
+    watcher 一轮 scan 里,只要 atom 都已打 ``clustered`` 快标记(稳态),就完全不碰
+    磁盘;唯有冷启动那种存量未打标 atom 才触发一次 ``build_atom_consumed_index``。
+    这避免了"1 万 skill 下每轮 sweep 无条件读 1 万个 .candidates.yml"的纯浪费。
+    """
+
+    def __init__(self, skill_dir):
+        self._skill_dir = skill_dir
+        self._index: dict[str, tuple[str, int]] | None = None
+
+    def contains(self, atom_id: str) -> bool:
+        if self._index is None:
+            self._index = build_atom_consumed_index(self._skill_dir)
+        return atom_id in self._index
 
 
 # ═══════════════════════════════════════════════════════════════════

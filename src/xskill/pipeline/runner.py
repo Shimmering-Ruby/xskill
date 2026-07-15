@@ -261,13 +261,20 @@ class DirectoryWatcher:
         # ── Step 0: 收割已完成的 futures ──
         self._harvest()
 
+        # ── 本轮已消费索引（惰性）：只有真遇到未打 clustered 标记的 atom 才扫盘建
+        # atom_id→skill 索引，供 _atom_consumed 走 O(1) 命中，替代逐 atom 全量重读磁盘
+        # （O(atoms×skills) 烧核握死 GIL 的根因）。稳态全 clustered → 完全不碰磁盘，
+        # 避免 1 万 skill 下每轮白扫 1 万个 .candidates.yml。本轮内快照一致有效。
+        from xskill.skill.candidates import LazyConsumedIndex
+        consumed_index = LazyConsumedIndex(self.skill_dir)
+
         # ── Step 1-4: 对每个目录扫描 + 提交任务 ──
         for wd in list_watch_dirs(**kw):
             if self._stop.is_set():
                 break
             if not wd.get("auto_index"):
                 continue
-            self._scan_dir(wd, **kw)
+            self._scan_dir(wd, consumed_index, **kw)
 
         # ── Step 5: 独立扫所有 skill 目录的 candidates buffer ──
         # 这步与具体 atom 处理解耦：即便某些 atom cluster 失败，buffer
@@ -300,6 +307,18 @@ class DirectoryWatcher:
         # CS 模式的分桶在 client 的 reconcile_skill_sides 里按 client_id 做。
         if not self.server_mode:
             self._reconcile_skill_sides()
+
+    def run_once_and_drain(self) -> None:
+        """跑一轮 ``_scan_once`` → 排空线程池等所有在飞任务完成 → 再收割一次。
+
+        供短命 ``sweep --once`` 子进程调:一次调用 = daemon 的一个 poll 周期(提交本轮
+        任务 → 阻塞等完成 → ``_harvest`` 推进 traj 状态/落审计),完事即退,不留常驻
+        线程(不调 ``start()``,无 daemon 线程)。多阶段流水线(split→embed→cluster→
+        done)靠调度器按 ``poll_interval`` 反复 spawn 逐轮推进,与 daemon 逐 poll 等价。
+        """
+        self._scan_once()
+        self._pool.shutdown(wait=True)  # 阻塞等在飞 future(禁 sleep,用 join 语义)
+        self._harvest()
 
     def _run_skill_edit_step(self):
         """Step 5 的冷启动感知封装：hold 只等 rebuild 快照内轨迹到终态。"""
@@ -810,7 +829,7 @@ class DirectoryWatcher:
     # 扫描单个目录：发现 + 提交任务
     # ───────────────────────────────────────────────────────────
 
-    def _scan_dir(self, wd, **kw):
+    def _scan_dir(self, wd, consumed_index, **kw):
         wd_id = wd["id"]
         dir_path = Path(wd["path"])
         if not dir_path.is_dir():
@@ -900,7 +919,7 @@ class DirectoryWatcher:
                 for i in self._futures.values()
             )
             if not cluster_in_flight and not self._too_many_in_flight():
-                batch = self._collect_cluster_batch(dir_path, wd_id, **kw)
+                batch = self._collect_cluster_batch(dir_path, wd_id, consumed_index, **kw)
                 if batch:
                     fut = self._pool.submit(self._do_cluster_batch, dir_path, batch)
                     self._futures[fut] = {
@@ -912,7 +931,7 @@ class DirectoryWatcher:
             # Windows 对正在被 cluster future 原子替换的 atom JSON 会报
             # PermissionError；等 future 被 harvest 后下一轮再 sweep。
             if not cluster_in_flight:
-                self._sweep_done_trajs(wd_id, dir_path, **kw)
+                self._sweep_done_trajs(wd_id, dir_path, consumed_index, **kw)
 
         # ── ux_score（对有 xskill header 的新轨迹）──
         if self.llm and self.skill_dir and new:
@@ -1028,7 +1047,7 @@ class DirectoryWatcher:
         store.rebuild_vector_index(self.embed_client)
         return (wd_id, filenames)
 
-    def _collect_cluster_batch(self, dir_path, wd_id, **kw):
+    def _collect_cluster_batch(self, dir_path, wd_id, consumed_index, **kw):
         """跨所有 indexed 轨迹收集"尚未落进任何 skill .candidates.yml"的 atom，
         按 ``cluster_batch_size`` 截断，返回 atom_id 列表（≤ batch_size）。
 
@@ -1046,22 +1065,22 @@ class DirectoryWatcher:
         for fname in get_trajs_by_status(wd_id, "indexed", **kw):
             traj_id = (dir_path / fname).stem
             for atom in store.list_by_traj(traj_id):
-                if self._atom_consumed(atom):
+                if self._atom_consumed(atom, consumed_index):
                     continue  # 已消费 → 跳过（去重 + 断点续传）
                 batch.append(atom.atom_id)
                 if len(batch) >= self.cluster_batch_size:
                     return batch
         return batch
 
-    def _atom_consumed(self, atom) -> bool:
+    def _atom_consumed(self, atom, consumed_index) -> bool:
         """atom 是否已被 cluster 消费。耐久标记 ``clustered`` 为主（O(1)，扛得住
         SkillEdit 晋升清空 .candidates.yml 与进程重启）；未打标记的（旧 daemon 落
-        的 / 外部预置的）回退查 ``.candidates.yml`` 成员——任何 skill buffer 里出现
-        过即视为消费过。常态走快路径，回退仅对少量未打标 atom 触发。"""
+        的 / 外部预置的）回退查本轮 ``consumed_index``（惰性索引）——任何 skill buffer
+        里出现过即视为消费过。常态走快路径不碰索引；回退时索引惰性建一次、本轮复用
+        （稳态全 clustered → 索引根本不构建，1 万 skill 下零扫盘）。"""
         if atom.clustered:
             return True
-        from xskill.skill.candidates import find_atom_entry_in_any_skill
-        return find_atom_entry_in_any_skill(self.skill_dir, atom.atom_id) is not None
+        return consumed_index.contains(atom.atom_id)
 
     def _do_cluster_batch(self, dir_path, atom_ids):
         """对一批（可能跨多条轨迹）atom 调**一个** ClusterAgent，只跑 cluster。
@@ -1173,7 +1192,7 @@ class DirectoryWatcher:
             )
         self._stats["atoms_clustered"] += len(in_skills)
 
-    def _sweep_done_trajs(self, wd_id, dir_path, **kw):
+    def _sweep_done_trajs(self, wd_id, dir_path, consumed_index, **kw):
         """把"所有 atom 都已落进某个 skill .candidates.yml"的 indexed 轨迹标
         done，并触发该轨迹的 ux 打分。
 
@@ -1190,7 +1209,7 @@ class DirectoryWatcher:
         for fname in get_trajs_by_status(wd_id, "indexed", **kw):
             traj_id = (dir_path / fname).stem
             atoms = store.list_by_traj(traj_id)
-            if any(not self._atom_consumed(a) for a in atoms):
+            if any(not self._atom_consumed(a, consumed_index) for a in atoms):
                 continue  # 还有未消费 atom → 等后续 batch 消费
             update_traj_status(
                 wd_id, fname, "done", process_action="clustered", **kw,

@@ -111,8 +111,11 @@ async def _run_control_plane(func, app: FastAPI | None = None):
 # 完全不读 config。
 _config: dict | None = None
 _skill_dir: Path | None = None
-_watcher_ref: dict = {}  # {"instance": DirectoryWatcher} — set in create_app startup
-_profile_refresh_ref: dict = {}  # {"instance": ProfileRefreshService}
+# 画像拆为短命子进程后 web 进程不再放常驻 service(恒无 "instance");dashboard 散点
+# 端点仍读它:无 instance → 内联物化(画像子进程也会预物化进 scatter 缓存)。
+_profile_refresh_ref: dict = {}
+# 定时短命子进程调度器(画像 profile-refresh 等);startup 起、shutdown 停。
+_schedulers: list = []
 
 # debug 模式：把生态扫描的 home_root 指向用户自选目录，不扫真正的 $HOME。
 # 用法：xskill serve --debug --home /tmp/test-home → 只扫
@@ -921,19 +924,27 @@ def create_app(home_root: Path | str | None = None,
     # -- Watcher status endpoint --
     @app.get("/api/v1/watcher/status")
     async def api_watcher_status():
-        if _watcher_ref.get("instance"):
-            return _watcher_ref["instance"].stats
-        return {"running": False, "message": "watcher not started"}
+        # watcher 拆为短命 sweep 子进程,web 进程不再持有其内存对象——读子进程每轮
+        # 落盘的状态文件(最近一轮 sweep 的 ok/stats);尚无子进程跑过则为未启动。
+        from xskill.config import XSKILL_HOME
+        from xskill.utils.status_file import WATCHER_STATUS_FILE, read_status_file
+        status = read_status_file(XSKILL_HOME / WATCHER_STATUS_FILE)
+        if status is None:
+            return {"running": False, "message": "no sweep has run yet"}
+        return status
 
     # -- Usage / cost stats (Issue #43) --
     @app.get("/api/v1/stats")
     async def api_stats():
-        watcher = (_watcher_ref["instance"].stats
-                   if _watcher_ref.get("instance") else None)
-        profile_refresh = (
-            _profile_refresh_ref["instance"].metrics
-            if _profile_refresh_ref.get("instance") else None
+        # watcher / 画像均拆为短命子进程,web 进程不再持有其内存对象——两者都改读
+        # 子进程每轮落盘的状态文件(最近一轮的 ok/stats);尚无子进程跑过则为 None。
+        from xskill.config import XSKILL_HOME
+        from xskill.utils.status_file import (
+            PROFILE_STATUS_FILE, WATCHER_STATUS_FILE, read_status_file,
         )
+        watcher = read_status_file(XSKILL_HOME / WATCHER_STATUS_FILE)
+        profile_refresh = read_status_file(XSKILL_HOME / PROFILE_STATUS_FILE)
+
         def _read_registry_stats():
             from xskill.pipeline.registry import model_share, usage_summary
             return usage_summary(), model_share()
@@ -978,7 +989,9 @@ def create_app(home_root: Path | str | None = None,
                 "LLM client could not be created — check ~/.xskill/config.yaml: "
                 "llm.base_url / llm.model / llm.api_key must all be valid"
             )
-        embed = create_embed_client(_config)
+        # 构造即校验(fail-loud):api 进程本身不 embed,实际 embed 在 sweep/profile
+        # 子进程各自构造;这里仅确认配置可用,配错早报错。
+        create_embed_client(_config)
         # data_dir 在 server 端点路径上不被消费（trajectory 搜索走 Registry），
         # 传 _skill_dir 占位即可——同 core.py 的 tool context 初始化。
         init_skill_authoring_tool_context(
@@ -991,348 +1004,19 @@ def create_app(home_root: Path | str | None = None,
             _skill_dir,
         )
 
-        # Auto-detect known agent ecosystems on this host and bridge them in.
-        # 抽成闭包：startup 跑一次（初始状态），同时挂到 watcher._loop 每轮跑
-        # 一次（运行中新装的 agent 也能自动接管，无需重启 daemon）。幂等通过
-        # _watcher_ref[f"ingester_{eco}"] 字典 in-check 保证。
-        # team server 模式整段跳过——纯 server 不采集自己这台机器的本地轨迹。
-        def _ensure_ingesters_for_detected_ecosystems():
-            if team_server:
-                return
-            try:
-                from xskill.ecosystems import (
-                    detect_known_ecosystems,
-                    CCSessionIngester, JsonlIngester, SqliteIngester,
-                    CODEX_SPEC, NGA3_SPEC, OPENCODE_SPEC, NGAGENT_SPEC,
-                    OPENCLAW_SPEC, CURSOR_SPEC,
-                    TraeIngester,
-                    install_all_to_claude_code,
-                    install_all_to_codex,
-                    install_all_to_nga3,
-                    install_all_to_opencode,
-                    install_all_to_ngagent,
-                    install_all_to_openclaw,
-                    install_all_to_cursor,
-                    install_all_to_trae,
-                    make_openclaw_canary_flip_hook,
-                )
-                from xskill.canary import CanaryConfig
-                from xskill.config import XSKILL_HOME
-                from xskill.ecosystems._history import InstallHistory
-                from xskill.pipeline.registry import register_dir
-
-                install_history_path = XSKILL_HOME / "install_history.jsonl"
-                install_history = InstallHistory(install_history_path)
-
-                detections = detect_known_ecosystems(home_root=_home_root())
-                poll_interval = float(_config.get("watcher", {}).get("poll_interval", 10))
-
-                for det in detections:
-                    eco = det["ecosystem"]
-                    ingester_key = f"ingester_{eco}"
-                    if ingester_key in _watcher_ref:
-                        continue  # 该生态的 ingester 已起，幂等跳过
-
-                    bridge: Path = det["bridge"]
-                    bridge.mkdir(parents=True, exist_ok=True)
-                    register_dir(
-                        bridge,
-                        label=f"{eco} sessions",
-                        ecosystem=eco,
-                    )
-
-                    if eco == "claude_code":
-                        # 启动时先把现有 skill 全部装 main 到 ~/.claude/skills/，
-                        # 同时往 install_history append 起始记录。后续 ingester
-                        # 见到新 session 才有依据查"那一刻装的是哪 side"。
-                        try:
-                            installed = install_all_to_claude_code(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            for dest in installed:
-                                install_history.record(
-                                    skill=dest.parent.name, side="main",
-                                    sha="",  # 启动时不取 sha，避免硬依赖 git 状态
-                                )
-                            logger.info(
-                                "startup install_all_to_claude_code: %d skills installed (side=main)",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_claude_code failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="claude_code",
-                                reason=str(e)[:200],
-                            )
-
-                        # CCSessionIngester 是 CC 专属（处理灰度翻牌 + header 注入），
-                        # 不是普通 JsonlIngester——它在 _loop 里干的事更多。
-                        ingester = CCSessionIngester(
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            poll_interval=poll_interval,
-                            skill_dir=_skill_dir,
-                            target_root=_home_root(),
-                            history_path=install_history_path,
-                            assignments_path=_skill_dir / "session_assignments.jsonl",
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    elif eco == "codex":
-                        # Codex 一次性同步 + 起 daemon 线程；后续 codex session 新写入
-                        # 会被 daemon poll 实时桥接，不必重启 daemon。
-                        try:
-                            installed = install_all_to_codex(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            logger.info(
-                                "startup install_all_to_codex: %d skills installed to ~/.agents/skills/",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_codex failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="codex",
-                                reason=str(e)[:200],
-                            )
-                        ingester = JsonlIngester(
-                            CODEX_SPEC,
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            poll_interval=poll_interval,
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    elif eco == "nga3":
-                        # nga3 / CodeAgent3: sessions in ~/.cac/projects and
-                        # skills in ~/.cac/skills, both JSONL/symlink-first.
-                        try:
-                            installed = install_all_to_nga3(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            for dest in installed:
-                                install_history.record(
-                                    skill=dest.parent.name, side="main", sha="",
-                                )
-                            logger.info(
-                                "startup install_all_to_nga3: %d skills installed to ~/.cac/skills/",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_nga3 failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="nga3",
-                                reason=str(e)[:200],
-                            )
-                        ingester = JsonlIngester(
-                            NGA3_SPEC,
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            poll_interval=poll_interval,
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    elif eco == "opencode":
-                        # OpenCode SQLite + WAL：SqliteIngester 用 immutable=1 打开
-                        # 避免 daemon poll 撞 OpenCode 写端的 WAL 锁。
-                        # Skill install 走 ~/.agents/skills/ (Codex 共享；重复 install
-                        # 是 idempotent)。
-                        try:
-                            installed = install_all_to_opencode(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            logger.info(
-                                "startup install_all_to_opencode: %d skills installed to ~/.agents/skills/",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_opencode failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="opencode",
-                                reason=str(e)[:200],
-                            )
-                        ingester = SqliteIngester(
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            spec=OPENCODE_SPEC,
-                            poll_interval=poll_interval,
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    elif eco == "ngagent":
-                        # ngagent = opencode 企业分支：复用 SqliteIngester
-                        # （schema 一致），只在 spec / skill install 路径上
-                        # 与 opencode 区分。skill 装到 ~/.config/opencode/skills/
-                        # （不和 opencode 共享 ~/.agents/skills/）。
-                        try:
-                            installed = install_all_to_ngagent(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            logger.info(
-                                "startup install_all_to_ngagent: %d skills installed to ~/.config/opencode/skills/",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_ngagent failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="ngagent",
-                                reason=str(e)[:200],
-                            )
-                        ingester = SqliteIngester(
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            spec=NGAGENT_SPEC,
-                            poll_interval=poll_interval,
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    elif eco == "openclaw":
-                        # OpenClaw 走 JSONL（每个 session 一个 .trajectory.jsonl）。
-                        # Skill install 走 ~/.agents/skills/，与 codex/opencode 共享
-                        # 目录但用 copy 而非 symlink（openclaw 拒收 escape-root
-                        # 的 symlink，详见 docs/ecosystem/openclaw-install-fix.md）。
-                        try:
-                            installed = install_all_to_openclaw(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            for dest in installed:
-                                install_history.record(
-                                    skill=dest.parent.name, side="main", sha="",
-                                )
-                            logger.info(
-                                "startup install_all_to_openclaw: %d skills installed (copy mode) to ~/.agents/skills/",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_openclaw failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="openclaw",
-                                reason=str(e)[:200],
-                            )
-                        # canary flip hook：每轮 ingester 桥出新 session 后，
-                        # pick_side + 跟 install_history 比对 + 必要时重 copy
-                        # 切版本到 dest。无 staging 的 skill 永远 main，hook
-                        # 是 no-op；有 staging 时按 probability 比例哈希分流。
-                        canary_cfg = CanaryConfig.from_dict(_config.get("canary", {}))
-                        flip_hook = make_openclaw_canary_flip_hook(
-                            skill_dir=_skill_dir,
-                            target_root=_home_root(),
-                            history=install_history,
-                            probability=canary_cfg.probability,
-                        )
-                        ingester = JsonlIngester(
-                            OPENCLAW_SPEC,
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            poll_interval=poll_interval,
-                            on_new_sessions=flip_hook,
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    elif eco == "cursor":
-                        # Cursor 也有 skill 目录（~/.cursor/skills/），跟 CC 同形：
-                        # symlink-first 三阶 fallback。Cursor 的 agent-transcripts
-                        # JSONL 走 JsonlIngester 采集，没有特殊的灰度 hook。
-                        try:
-                            installed = install_all_to_cursor(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            for dest in installed:
-                                install_history.record(
-                                    skill=dest.parent.name, side="main", sha="",
-                                )
-                            logger.info(
-                                "startup install_all_to_cursor: %d skills installed to ~/.cursor/skills/",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_cursor failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="cursor",
-                                reason=str(e)[:200],
-                            )
-                        ingester = JsonlIngester(
-                            CURSOR_SPEC,
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            poll_interval=poll_interval,
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    elif eco == "trae":
-                        # Trae IDE：workspaceStorage/state.vscdb 里的 chat blob；
-                        # Trae Agent CLI：~/trajectories/trajectory_*.json。
-                        # Skill 装 ~/.trae-cn/skills 与/或 ~/.trae/skills。
-                        try:
-                            installed = install_all_to_trae(
-                                _skill_dir, target_root=_home_root(),
-                            )
-                            for dest in installed:
-                                install_history.record(
-                                    skill=dest.parent.name, side="main", sha="",
-                                )
-                            logger.info(
-                                "startup install_all_to_trae: %d skills installed",
-                                len(installed),
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "startup install_all_to_trae failed", exc_info=True,
-                            )
-                            install_history.record_fail(
-                                skill="<startup_all>", agent="trae",
-                                reason=str(e)[:200],
-                            )
-                        ingester = TraeIngester(
-                            target_traj_dir=bridge,
-                            home_root=_home_root(),
-                            poll_interval=poll_interval,
-                        )
-                        ingester.start()
-                        _watcher_ref[ingester_key] = ingester
-
-                    logger.info(
-                        "ecosystem %s detected: source=%s bridge=%s",
-                        eco, det["source"], bridge,
-                    )
-            except Exception:
-                logger.warning("ecosystem auto-detect failed", exc_info=True)
-
-        # startup 跑一次确保初始状态正确；watcher._loop 里会通过 on_poll_hook
-        # 每轮再跑一次，以便 daemon 运行中新装的 agent 也能被自动接管。
-        _ensure_ingesters_for_detected_ecosystems()
+        # 生态自动检测 + 一次性入库已迁到短命 sweep 子进程
+        # (pipeline.watcher_factory.ingest_detected_ecosystems_once),web 进程不再起
+        # 常驻 ingester 线程。
 
         # team server：初始化 team 上下文 + 注册 traj_root 为 watch_dir 基。
         if team_server:
-            profile_refresh_service = None
             try:
                 from xskill.team.server.client_registry import ClientRegistry
                 from xskill.team.server.api import (
                     init_team_context,
                     start_team_sync_executor,
                 )
-                from xskill.team.server.profile_refresh import ProfileRefreshService
+                from xskill.pipeline.scheduler import IntervalSubprocessScheduler
                 from xskill.team.server.state import ensure_join_token
                 from xskill.config import (
                     allow_anonymous_user as _allow_anonymous,
@@ -1365,13 +1049,6 @@ def create_app(home_root: Path | str | None = None,
                     client_registry=client_registry,
                 )
                 set_recommend_engine(_engine)
-                profile_refresh_service = ProfileRefreshService(
-                    _engine,
-                    workers=profile_refresh_cfg["workers"],
-                    queue_size=profile_refresh_cfg["queue_size"],
-                    settle_delay=profile_refresh_cfg["settle_delay"],
-                    autostart=False,
-                )
 
                 init_team_context(
                     join_token=join_token,
@@ -1384,20 +1061,28 @@ def create_app(home_root: Path | str | None = None,
                     register_dir=_team_register_dir,
                     allow_anonymous_user=_allow_anonymous(_config),
                     skillhub=_engine.skillhub,
-                    profile_refresh_service=profile_refresh_service,
+                    profile_refresh_service=None,
                 )
-                profile_refresh_service.start()
                 start_team_sync_executor(
                     app,
                     max_workers=team_sync_cfg["workers"],
                 )
-                _profile_refresh_ref["instance"] = profile_refresh_service
-                _profile_refresh_ref["shutdown_timeout"] = profile_refresh_cfg[
-                    "shutdown_timeout"
-                ]
+                # 画像刷新改为定时短命子进程(python -m xskill._workers profile-refresh):重计算
+                # (含散点物化子系统)全在独立子进程,web 进程不再起常驻 worker 线程,
+                # GIL 与事件循环隔离。/sync 只读已落库画像(profile_refresh_service=None
+                # 时 api.team_sync 的入队守卫自然跳过)。
+                profile_scheduler = IntervalSubprocessScheduler(
+                    "profile-refresh",
+                    [_sys.executable, "-m", "xskill._workers", "profile-refresh"],
+                    interval=profile_refresh_cfg["interval"],
+                    timeout=profile_refresh_cfg["timeout"],
+                )
+                profile_scheduler.start()
+                _schedulers.append(profile_scheduler)
                 logger.info(
-                    "team server context ready (traj_root=%s, profile_workers=%d)",
-                    traj_root, profile_refresh_cfg["workers"],
+                    "team server context ready (traj_root=%s, "
+                    "profile refresh every %.0fs via subprocess)",
+                    traj_root, profile_refresh_cfg["interval"],
                 )
             except Exception:
                 try:
@@ -1406,11 +1091,9 @@ def create_app(home_root: Path | str | None = None,
                 except Exception:  # pylint: disable=broad-exception-caught
                     logger.warning("failed to stop partial team sync executor",
                                    exc_info=True)
-                if profile_refresh_service is not None:
-                    profile_refresh_service.stop(
-                        timeout=profile_refresh_cfg["shutdown_timeout"],
-                    )
-                _profile_refresh_ref.clear()
+                for scheduler in _schedulers:
+                    scheduler.stop()
+                _schedulers.clear()
                 try:
                     from xskill.team.server.api import clear_team_context
                     clear_team_context(profile_refresh_shutdown_timeout=0)
@@ -1424,29 +1107,25 @@ def create_app(home_root: Path | str | None = None,
                     pass
                 logger.warning("team server context init failed", exc_info=True)
 
-        # watcher 无条件启动——即便此刻 registry 为空。
-        # 它的 _loop 每轮 _scan_once 重新 list_watch_dirs()、跑 on_poll_hook
-        # 做生态再检测；daemon 运行中新装的 agent 全靠这个 poll 循环接管
-        # （Bug #5）。历史上这里有个 `if dirs` 门，靠 startup 必注册
-        # chat_archive 凑出 ≥1 dir 才不踩坑——chat_archive 随 web 面板移除后，
-        # 该门会让空 home 启动的 daemon 永远起不了 watcher，故直接去掉。
-        try:
-            from xskill.pipeline.runner import DirectoryWatcher
-            watcher_cfg = _config.get("watcher", {})
-            watcher = DirectoryWatcher(
-                llm=llm, embed_client=embed, config=_config,
-                skill_dir=_skill_dir,
-                poll_interval=float(watcher_cfg.get("poll_interval", 30)),
-                max_concurrent=int(watcher_cfg.get("max_concurrent", 30)),
-                cluster_batch_size=int(watcher_cfg.get("cluster_batch_size", 8)),
-                server_mode=team_server,
-                on_poll_hook=_ensure_ingesters_for_detected_ecosystems,
-            )
-            watcher.start()
-            _watcher_ref["instance"] = watcher
-            logger.info("watcher started (team_server=%s)", team_server)
-        except Exception:
-            logger.warning("watcher startup failed", exc_info=True)
+        # watcher 拆为定时短命子进程(python -m xskill._workers sweep):每轮 spawn 一个子进程跑一轮
+        # 采集/拆分/聚类/灰度即退,重计算(含 30 线程池)全在独立子进程,GIL 与 web 事件
+        # 循环隔离——这是消除"watcher 烧核饿死探针"的根治。web 进程只留一个轻量调度线程
+        # (只 spawn+等子进程,I/O 阻塞不占事件循环)。多阶段流水线(split→embed→cluster→
+        # done)靠调度器按 poll_interval 反复 spawn 逐轮推进,与旧 daemon 逐 poll 等价。
+        from xskill.pipeline.scheduler import IntervalSubprocessScheduler as _SweepSched
+        poll_interval = float(_config.get("watcher", {}).get("poll_interval", 30))
+        sweep_command = [_sys.executable, "-m", "xskill._workers", "sweep"]
+        if team_server:
+            sweep_command.append("--server")
+        sweep_scheduler = _SweepSched(
+            "sweep", sweep_command,
+            interval=poll_interval,
+            timeout=float(_config.get("server", {}).get("sweep_timeout", 1800)),
+        )
+        sweep_scheduler.start()
+        _schedulers.append(sweep_scheduler)
+        logger.info("sweep scheduler started (team_server=%s, every %.0fs via subprocess)",
+                    team_server, poll_interval)
 
         # 依赖初始化全部成功后才创建线程池；如果 startup 在此之前
         # 失败，不会留下需要额外回收的非 daemon 线程。
@@ -1463,8 +1142,11 @@ def create_app(home_root: Path | str | None = None,
         # 先停止控制面新任务并等待已接收的短 Git/SQLite 读取退出。
         # 即使后续 team/watcher 清理抛异常，也不会泄漏这个 app 的线程池。
         _stop_control_plane_executor(app)
-        # 画像 worker 先停止接收并有界等待，随后清理 team 上下文；
-        # watcher 在两者之后停止，避免慢 embedding 占用 watcher/anyio 资源。
+        # 先停定时子进程调度器(画像 profile-refresh 等),再清理 team 上下文；
+        # watcher 在其后停止,避免慢 embedding 占用 watcher/anyio 资源。
+        for scheduler in _schedulers:
+            scheduler.stop()
+        _schedulers.clear()
         if team_server:
             try:
                 from xskill.team.server.api import (
@@ -1472,26 +1154,13 @@ def create_app(home_root: Path | str | None = None,
                     stop_team_sync_executor,
                 )
                 stop_team_sync_executor(app)
-                clear_team_context(
-                    profile_refresh_shutdown_timeout=float(
-                        _profile_refresh_ref.get("shutdown_timeout", 5.0),
-                    ),
-                )
+                # 画像已无常驻 service(profile_refresh_service=None),clear 对它是 no-op。
+                clear_team_context(profile_refresh_shutdown_timeout=0)
             finally:
-                _profile_refresh_ref.clear()
                 from xskill.team.server.skill_manifest import set_recommend_engine
                 set_recommend_engine(None)
-        watcher = _watcher_ref.get("instance")
-        if watcher:
-            watcher.stop()
-            _watcher_ref.pop("instance", None)
-        # Stop any ecosystem ingesters started in startup.
-        for k, v in list(_watcher_ref.items()):
-            if k.startswith("ingester_"):
-                try:
-                    v.stop()
-                except Exception:
-                    logger.warning("failed to stop %s", k, exc_info=True)
+        # watcher / ingester 已拆为短命 sweep 子进程,web 进程无常驻实例可停;
+        # 上面已 stop 全部 _schedulers(含 sweep 调度器),在跑的子进程由其 timeout 收敛。
 
     # 看板:仅当 config.dashboard.enabled 时挂载(默认不挂)
     from xskill.dashboard.mount import mount_dashboard

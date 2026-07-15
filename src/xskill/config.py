@@ -170,6 +170,9 @@ server:
   profile_refresh_queue_size: 1024 # 待刷新 client 的有界队列容量
   profile_refresh_settle_delay: 5  # sync 波次入队后再启动画像计算的秒数
   profile_refresh_shutdown_timeout: 5 # 停机等待画像 worker 的最长秒数
+  profile_refresh_interval: 600    # 画像短命子进程调度周期(秒;画像变化慢,默认 10min,与 sweep 解耦)
+  profile_refresh_timeout: 1800    # 单轮画像子进程硬上限(秒;冷启动大量 client 兜底)
+  sweep_timeout: 1800              # 单轮 watcher sweep 子进程(xskill sweep --once)硬上限(秒)
 
 # ===== Watcher (the directory poller inside `serve`) =====
 watcher:
@@ -548,6 +551,11 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
     queue_size = section.get("profile_refresh_queue_size", 1024)
     settle_delay = section.get("profile_refresh_settle_delay", 5)
     shutdown_timeout = section.get("profile_refresh_shutdown_timeout", 5)
+    # 画像已改为定时短命子进程(python -m xskill._workers profile-refresh):interval=
+    # 调度周期,timeout=单轮子进程硬上限(冷启动大量 client 兜底)。画像变化慢、批量重,
+    # 默认 600s(10min),不必频繁——与 30s 的 watcher sweep 解耦,各自节奏。
+    interval = section.get("profile_refresh_interval", 600)
+    timeout = section.get("profile_refresh_timeout", 1800)
 
     for key, value in (
         ("profile_refresh_workers", workers),
@@ -558,6 +566,8 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
     for key, value, allow_zero in (
         ("profile_refresh_settle_delay", settle_delay, True),
         ("profile_refresh_shutdown_timeout", shutdown_timeout, False),
+        ("profile_refresh_interval", interval, False),
+        ("profile_refresh_timeout", timeout, False),
     ):
         if (not isinstance(value, (int, float))
                 or isinstance(value, bool)
@@ -571,6 +581,8 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
         "queue_size": queue_size,
         "settle_delay": float(settle_delay),
         "shutdown_timeout": float(shutdown_timeout),
+        "interval": float(interval),
+        "timeout": float(timeout),
     }
 
 

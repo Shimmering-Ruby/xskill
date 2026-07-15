@@ -558,16 +558,21 @@ class TraeIngester:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                n = len(self.scan_and_bridge(seen_sessions=self._seen))
-                self._stats["polls"] += 1
-                self._stats["last_poll"] = time.time()
-                if n:
-                    self._stats["ingested"] += n
-                    logger.info("TraeIngester: bridged %d new session(s)", n)
+                self.run_once()
             except Exception:
                 self._stats["errors"] += 1
                 logger.exception("TraeIngester scan error")
             self._stop.wait(self.poll_interval)
+
+    def run_once(self) -> list[dict]:
+        """单轮扫盘 + 桥接(供短命 sweep 子进程调;_loop 每轮也调它,source 唯一)。"""
+        submitted = self.scan_and_bridge(seen_sessions=self._seen)
+        self._stats["polls"] += 1
+        self._stats["last_poll"] = time.time()
+        if submitted:
+            self._stats["ingested"] += len(submitted)
+            logger.info("TraeIngester: bridged %d new session(s)", len(submitted))
+        return submitted
 
     def scan_and_bridge(
         self,

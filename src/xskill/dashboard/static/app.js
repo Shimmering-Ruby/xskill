@@ -181,8 +181,13 @@ const sourceBadge = s => s.source === 'skillhub'
     + (s.hub ? `<span class="ml-2 inline-block text-[11px] text-slate-400">${esc(s.hub)}</span>` : '')
   : `<span class="ml-2 inline-block px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-500">自产</span>`;
 
+// 海量 skill(如 1 万条)分页:一次只拉/渲一页,别让前端一次性渲 1 万行 DOM 炸锅。
+let skillsPage = 0;
+const SKILLS_PAGE_SIZE = 100;
+
 async function loadSkills() {
-  const d = await jc('api/v1/dashboard/skills');
+  const off = skillsPage * SKILLS_PAGE_SIZE;
+  const d = await jc(`api/v1/dashboard/skills?limit=${SKILLS_PAGE_SIZE}&offset=${off}`);
   const bs = d.by_state || {};
   const parts = Object.keys(bs).sort().map(k => `${k} ${bs[k]}`).join(' · ');
   put('skills.summary', `共 ${d.total} 个${parts ? ' · ' + parts : ''}`);
@@ -194,6 +199,24 @@ async function loadSkills() {
     + `<td class="text-right tabular-nums">v${esc(s.version)}</td>`
     + `<td class="text-right tabular-nums">${s.candidates || 0}</td></tr>`).join(''),
     '技能库还是空的');
+  renderSkillsPager(d.total || 0);
+}
+
+function renderSkillsPager(total) {
+  const pager = document.getElementById('skills-pager');
+  if (!pager) return;
+  const pages = Math.max(1, Math.ceil(total / SKILLS_PAGE_SIZE));
+  if (pages <= 1) { pager.innerHTML = ''; return; }
+  if (skillsPage > pages - 1) skillsPage = pages - 1;
+  const btn = (label, page, disabled) =>
+    `<button class="px-2 py-0.5 rounded border border-slate-200 ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-slate-50'}"`
+    + `${disabled ? ' disabled' : ` data-skills-page="${page}"`}>${label}</button>`;
+  pager.innerHTML = btn('‹ 上一页', skillsPage - 1, skillsPage <= 0)
+    + `<span>第 ${skillsPage + 1} / ${pages} 页 · 共 ${total} 个</span>`
+    + btn('下一页 ›', skillsPage + 1, skillsPage >= pages - 1);
+  pager.querySelectorAll('[data-skills-page]').forEach(b => {
+    b.onclick = () => { skillsPage = parseInt(b.getAttribute('data-skills-page'), 10) || 0; loadSkills(); };
+  });
 }
 
 // 进化路径：git-log 式行视图（mockup ①）。main 泳道 x=22，staging/rejected x=64。
@@ -380,7 +403,8 @@ let _curSkill = null;
 // 拿不到 source / 请求失败 → 安全兜底按自产走，绝不因缺字段崩。
 async function skillSource(name) {
   try {
-    const d = await jc('api/v1/dashboard/skills');
+    // 定向查这一条(?name=),别为判 source 拉全量 1 万条 skill。
+    const d = await jc('api/v1/dashboard/skills?name=' + encodeURIComponent(name));
     const hit = (d.skills || []).find(s => s.name === name);
     return (hit && hit.source === 'skillhub') ? 'skillhub' : 'native';
   } catch (_e) {
