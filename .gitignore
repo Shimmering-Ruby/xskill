@@ -11,6 +11,9 @@ skill/
 # 否则给它加新文件 git add 会被静默拒掉、得 -f 强加
 !src/xskill/skill/
 !src/xskill/skill/**
+# src/xskill/data/skill/ 是随包发布的官方 skill,同样不属于"生成 skill 仓库"
+!src/xskill/data/skill/
+!src/xskill/data/skill/**
 
 # 运行日志
 output/

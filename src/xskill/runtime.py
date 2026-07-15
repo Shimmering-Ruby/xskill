@@ -18,6 +18,8 @@ from typing import Optional
 
 import yaml
 
+from xskill.utils.proc import windowless_subprocess_kwargs
+
 from xskill.config import (
     CONFIG_PATH, XSKILL_HOME,
     get_team_client_state_path, get_team_server_state_path,
@@ -86,6 +88,7 @@ def _alive_windows(pid: int) -> bool:
         res = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
             capture_output=True, text=True, timeout=2, check=False,
+            **windowless_subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

@@ -172,6 +172,120 @@ def cmd_registry_list_client() -> int:
     return 0
 
 
+def cmd_init(args) -> int:
+    """一站式引导：把 xskill 使用指南 skill 装进各 agent 生态 + 连上 team server。
+
+    交互式（默认）逐项询问缺失的 server/token/工号；带齐 flag 且 ``--yes`` 可无头执行。
+    """
+    from pathlib import Path
+
+    interactive = not args.yes
+    target_root = None
+    if args.target_root:
+        target_root = Path(args.target_root).expanduser().resolve()
+
+    if not args.no_skill:
+        from importlib.resources import files
+        from xskill.ecosystems import (
+            detect_known_ecosystems,
+            install_to_claude_code, install_to_codex, install_to_cursor,
+            install_to_nga3, install_to_ngagent, install_to_openclaw,
+            install_to_opencode, install_to_trae,
+        )
+        installer_by_eco = {
+            "claude_code": install_to_claude_code,
+            "codex": install_to_codex,
+            "nga3": install_to_nga3,
+            "opencode": install_to_opencode,
+            "ngagent": install_to_ngagent,
+            "openclaw": install_to_openclaw,
+            "cursor": install_to_cursor,
+            "trae": install_to_trae,
+        }
+        skill_source = Path(str(files("xskill") / "data" / "skill" / "xskill"))
+        if not (skill_source / "SKILL.md").is_file():
+            print(f"warning: 捆绑的 xskill skill 缺失（{skill_source}），跳过装 skill",
+                  file=sys.stderr)
+        else:
+            installed_ecosystems = []
+            for detection in detect_known_ecosystems(home_root=target_root):
+                install_fn = installer_by_eco.get(detection["ecosystem"])
+                if install_fn is None:
+                    continue
+                try:
+                    install_fn(skill_source, target_root=target_root, side="main")
+                    installed_ecosystems.append(detection["ecosystem"])
+                except Exception as install_error:  # noqa: BLE001
+                    print(f"warning: 装到 {detection['ecosystem']} 失败：{install_error}",
+                          file=sys.stderr)
+            if installed_ecosystems:
+                print(f"已把 xskill 使用指南装进 {'/'.join(installed_ecosystems)} 的 "
+                      f"skill 目录，在对应 agent 里可直接 /xskill 查用法。")
+            else:
+                print("未检测到已知 agent 生态（claude_code/codex/opencode/cursor/… "
+                      "均未发现），跳过装 skill。")
+
+    if args.skills_only:
+        return 0
+
+    from xskill.team.client.service import read_daemon_state
+    daemon_state = read_daemon_state()
+    if daemon_state.get("running"):
+        current_server = "?"
+        try:
+            from xskill.config import get_team_client_state_path
+            from xskill.team.client.state import load_client_state
+            current_server = load_client_state(get_team_client_state_path()).server_url
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"检测到常驻连接正在运行：server={current_server}  "
+              f"pid={daemon_state.get('pid')}  backend={daemon_state.get('backend')}")
+        should_stop = args.force
+        if not args.force:
+            if not interactive:
+                print("已保留现有连接（加 --force 可停掉重新配置）。")
+                return 0
+            should_stop = input("停掉并重新配置？[y/N] ").strip().lower() in ("y", "yes")
+            if not should_stop:
+                print("保留现有连接，未改动。")
+                return 0
+        from xskill.team.client.service import (
+            ServiceError, clear_daemon_state, get_backend,
+        )
+        try:
+            get_backend().stop()
+        except ServiceError as stop_error:
+            print(f"warning: 停止旧常驻失败：{stop_error}", file=sys.stderr)
+        clear_daemon_state()
+
+    address = args.address
+    if not address and interactive:
+        address = input("server 地址 (host:port): ").strip()
+    if not address:
+        print("error: 缺少 server 地址（位置参数或交互输入）", file=sys.stderr)
+        return 2
+    token = args.token
+    if not token and interactive:
+        token = input("join token (server 启动时打印的 token): ").strip()
+    if not token:
+        print("error: 缺少 --token（首次连接必填）", file=sys.stderr)
+        return 2
+    name = args.name
+    if not name and interactive:
+        name = input("工号/用户 ID (推荐填，直接回车留空): ").strip() or None
+
+    connect_args = argparse.Namespace(
+        address=address, token=token, label=args.label, name=name,
+        use_proxy=args.use_proxy, foreground=args.foreground,
+        no_auto_update=args.no_auto_update,
+    )
+    exit_code = cmd_connect(connect_args)
+    if exit_code == 0:
+        print("\n后续：`xskill status` 看状态 · `xskill search <词>` 搜技能 · "
+              "`xskill update`／`pip install -U xskill` 升级 · `xskill stop` 停。")
+    return exit_code
+
+
 def cmd_connect(args) -> int:
     """team 瘦客户端：连上 server。
 
@@ -880,6 +994,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_upload.add_argument("path", type=str, help="包含 SKILL.md 的 skill 目录")
     p_upload.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
+    p_init = sub.add_parser(
+        "init",
+        help="一站式引导：装 xskill 使用指南 skill 到各 agent + 连上 team server",
+    )
+    p_init.add_argument("address", nargs="?", default=None,
+                        help="server 地址 host:port（交互模式留空会询问）")
+    p_init.add_argument("--token", default=None,
+                        help="join token（server 启动时打印；交互模式留空会询问）")
+    p_init.add_argument("--name", default=None, metavar="EMPLOYEE_ID",
+                        help="工号/用户 ID（推荐填，跨设备保持身份一致）")
+    p_init.add_argument("--label", default="",
+                        help="本 client 可读标签（默认主机名）")
+    p_init.add_argument("--use-proxy", action="store_true",
+                        help="经系统/环境代理连 server（默认直连，绕开公司 SWG 代理）")
+    p_init.add_argument("--foreground", action="store_true",
+                        help="前台阻塞跑守护循环（默认交给操作系统后台常驻）")
+    p_init.add_argument("--no-auto-update", action="store_true", dest="no_auto_update",
+                        help="禁用自动更新检查")
+    p_init.add_argument("--skills-only", action="store_true", dest="skills_only",
+                        help="只装 xskill skill，不配置连接")
+    p_init.add_argument("--no-skill", action="store_true", dest="no_skill",
+                        help="只配置连接，不装 xskill skill")
+    p_init.add_argument("--force", action="store_true",
+                        help="已有常驻连接时停掉并重新配置")
+    p_init.add_argument("-y", "--yes", action="store_true",
+                        help="非交互：缺必填项直接报错，不询问")
+    p_init.add_argument("--target-root", default=None,
+                        help="[测试/隔离] 安装与探测的 HOME 根（默认真实 HOME）")
+
     p_conn = sub.add_parser(
         "connect", help="Join a team server as a thin client",
     )
@@ -1018,6 +1161,10 @@ def main() -> int:
     if args.command == "registry" and args.registry_action in ("add", "remove"):
         if not args.path:
             parser.error(f"path is required for 'registry {args.registry_action}'")
+
+    # init 一站式引导：装 skill + connect，同样是瘦客户端侧，不碰 config.yaml。
+    if args.command == "init":
+        return cmd_init(args)
 
     # connect 是瘦客户端：不读 config.yaml / 不需要 llm.api_key / 不构造 XSkill 门面
     if args.command == "connect":

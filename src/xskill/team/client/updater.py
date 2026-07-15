@@ -26,6 +26,8 @@ import tempfile
 import threading
 from typing import Any, Optional
 
+from xskill.utils.proc import windowless_subprocess_kwargs
+
 logger = logging.getLogger("xskill.team.client.updater")
 
 _PYPI_JSON_URL = "https://pypi.org/pypi/{package}/json"
@@ -158,11 +160,12 @@ def _restart() -> None:
         else:
             # startup_folder / 未知：.vbs 无重启能力，手动 spawn 新进程
             logger.info("updater: startup_folder 路径 — spawn 新进程后退出")
-            CREATE_NO_WINDOW = 0x08000000
             DETACHED_PROCESS = 0x00000008
+            no_window = windowless_subprocess_kwargs()
             subprocess.Popen(
                 sys.argv,
-                creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+                # 保持 detach 语义：无窗 flag 之外再叠加 DETACHED_PROCESS
+                creationflags=no_window.get("creationflags", 0) | DETACHED_PROCESS,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -312,7 +315,8 @@ class AutoUpdater:
             cmd += ["-i", self.pypi_url]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
-                                    timeout=self._PIP_TIMEOUT)
+                                    timeout=self._PIP_TIMEOUT,
+                                    **windowless_subprocess_kwargs())
         except subprocess.TimeoutExpired:
             self._last_pip_failure_summary = f"pip 超过 {self._PIP_TIMEOUT}s 未退出"
             logger.warning("updater: %s，放弃本次升级", self._last_pip_failure_summary)
@@ -334,7 +338,8 @@ class AutoUpdater:
             verify = subprocess.run(
                 [sys.executable, "-c",
                  f"from importlib.metadata import version; print(version({self.package!r}))"],
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, timeout=30,
+                **windowless_subprocess_kwargs())
             installed_version = verify.stdout.strip()
         except Exception:
             logger.debug("updater: 装后核验子进程失败，按 pip 退出码为准", exc_info=True)
@@ -427,7 +432,8 @@ class AutoUpdater:
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
-                                    timeout=self._PIP_TIMEOUT)
+                                    timeout=self._PIP_TIMEOUT,
+                                    **windowless_subprocess_kwargs())
             if result.returncode == 0:
                 logger.info("updater: 安装 server wheel 成功: %s", wheel_path.name)
                 return True
