@@ -14,7 +14,7 @@
 [![GitHub](https://img.shields.io/badge/code-SkillNerds%2Fxskill-243B45?style=flat-square&logo=github)](https://github.com/SkillNerds/xskill)
 [![Paper](https://img.shields.io/badge/paper-PDF-8E44AD?style=flat-square&logo=readthedocs&logoColor=white)](paper/xskill_v4.pdf)
 [![Live demo](https://img.shields.io/badge/demo-xskill.wiki-0E7C86?style=flat-square)](https://xskill.wiki/story/)
-[![WeChat group](https://img.shields.io/badge/微信-进群-2E8B6F?style=flat-square&logo=wechat&logoColor=white)](#community)
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-社区-FFB003?style=flat-square)](https://linux.do)
 
 [English](README.en.md) · **简体中文**
 
@@ -206,8 +206,6 @@ xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.
 - **2026-05-12** —— 支持 Claude Code、Codex、OpenCode;接通 OpenClaw 与 Cursor。
 
 * * *
-
-<a name="community"></a>
 
 ## 🙏 致谢
 
