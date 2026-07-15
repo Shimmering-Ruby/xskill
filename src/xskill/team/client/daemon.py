@@ -178,12 +178,13 @@ class TeamClient:
                                slot.skill_name, r.status_code)
                 continue
             if getattr(slot, "source", "repo") == "skillhub":
-                self._apply_skillhub_archive(
+                # 与 repo slot 的 on_changed 语义对齐：内容没变不重装生态
+                if self._apply_skillhub_archive(
                     r.content, repo_dir, expected_sha=slot.sha,
                     display_name=slot.display_name,
                     source_path=slot.source_path,
-                )
-                self._install_to_ecosystems(repo_dir)
+                ):
+                    self._install_to_ecosystems(repo_dir)
                 continue
             apply_repo_bundle(r.content, repo_dir)
             # 步骤 1 = manifest 给的 (side, sha)；2/3/4 = 共享助手
@@ -196,8 +197,8 @@ class TeamClient:
     def _apply_skillhub_archive(
         self, archive_bytes: bytes, dest_dir: Path, *, expected_sha: str,
         display_name: str | None, source_path: str | None,
-    ) -> None:
-        apply_skillhub_archive(
+    ) -> bool:
+        return apply_skillhub_archive(
             archive_bytes, dest_dir, expected_sha=expected_sha,
             display_name=display_name, source_path=source_path,
         )
@@ -336,12 +337,14 @@ def apply_skillhub_archive(
     display_name: str | None, source_path: str | None,
     marker_name: str = ".xskill_skillhub.json",
     extra_meta: dict | None = None,
-) -> None:
+) -> bool:
     """把非 git 的 skillhub skill zip 原子落到本地目录（带路径穿越防护）。
 
     sync reconcile 与 `xskill search` 槽位共用；后者用 ``marker_name`` /
     ``extra_meta`` 换成自己的标记文件。安装判断使用实际 zip 内容哈希，而不是仅覆盖
     SKILL.md 的 ``expected_sha``，确保 scripts/references/assets 单独变化也会更新。
+
+    返回是否真正落了新内容——``False`` 表示 zip 哈希命中现有安装、盘上没动。
     """
     dest_dir = Path(dest_dir)
     meta_path = dest_dir / marker_name
@@ -350,7 +353,7 @@ def apply_skillhub_archive(
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("archive_sha") == archive_sha:
-                return
+                return False
         except (OSError, ValueError):
             pass
 
@@ -387,6 +390,7 @@ def apply_skillhub_archive(
     )
     shutil.rmtree(dest_dir, ignore_errors=True)
     tmp_dir.replace(dest_dir)
+    return True
 
 
 def _valid_skill_name(skill_name: str) -> bool:

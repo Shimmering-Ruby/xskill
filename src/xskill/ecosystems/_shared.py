@@ -36,7 +36,8 @@ from typing import Callable, Iterable, Literal, Optional
 
 from xskill.config import get_traj_dir, ingest_config
 from xskill.ecosystems._fallback import (
-    InstallMode, _is_link_or_junction, install_dir,
+    InstallMode, _copy_install_is_current, _is_link_or_junction,
+    _read_skill_head_sha, install_dir,
 )
 
 logger = logging.getLogger("xskill.ecosystems")
@@ -335,6 +336,9 @@ def _install_skill_into(
         # （不递归动 target）
         dest.unlink()
     elif dest.exists():
+        # copy 模式且源未变：no-op——避免每轮 reconcile 重拷 + 重试 junction（Windows 弹 cmd 窗）
+        if _copy_install_is_current(src_dir, dest):
+            return dest / "SKILL.md"
         # 旧 install 留下的真实目录或文件 → 删（保留备份避免误删用户手写）。
         # ``.replaced-by-symlink`` 备份保留——这是用户手写 skill 目录的保护机制，
         # 不是 boilerplate；不能直接走 ``_reset_dest`` 删掉。
@@ -355,24 +359,6 @@ def _install_skill_into(
             ecosystem_label, name, dest,
         )
     return dest / "SKILL.md"
-
-
-def _read_skill_head_sha(skill_path: Path) -> str:
-    """读 skill 仓当前 HEAD 的 sha。读不到（非 git 仓 / 没有 HEAD）就返回空串——
-    用于 install-meta 记录，缺失不影响 install 本身。
-    """
-    head = skill_path / ".git" / "HEAD"
-    if not head.is_file():
-        return ""
-    try:
-        ref = head.read_text(encoding="utf-8").strip()
-        if ref.startswith("ref: "):
-            ref_path = skill_path / ".git" / ref[5:]
-            if ref_path.is_file():
-                return ref_path.read_text(encoding="utf-8").strip()
-        return ref  # detached HEAD
-    except OSError:
-        return ""
 
 
 def _install_all_with(
