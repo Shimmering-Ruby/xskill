@@ -471,3 +471,110 @@ class TestSkillhubTeamPush:
         assert (installed / "SKILL.md").is_file()
         assert not (installed / ".git").exists()
         assert (installed / ".xskill_skillhub.json").is_file()
+
+    def test_skillhub_slot_skips_ecosystem_install_when_unchanged(
+        self, tmp_path, monkeypatch,
+    ):
+        hub_dir = tmp_path / "hub"
+        _write_hub_skill(hub_dir, "hub-a/foo", "django migration helper", name="foo")
+        hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=FakeEmbed(dim=4))
+        entry = hub.index()[0]
+        reg = ClientRegistry(tmp_path / "clients.db")
+        client_id = reg.register(label="alice", hostname="host")
+        http = self._app(tmp_path, hub, reg)
+        state = ClientState(
+            server_url="http://testserver",
+            client_id=client_id,
+            join_token="tok",
+        )
+        client = TeamClient(
+            state=state,
+            http=http,
+            skill_dir=tmp_path / "client_home" / ".xskill" / "skill",
+            cursor_path=tmp_path / "cursor.json",
+            history_path=tmp_path / "history.jsonl",
+            home_root=tmp_path / "client_home",
+            min_change_interval=0,
+        )
+        manifest = SyncResponse(
+            server_time=1.0,
+            slots=[
+                SkillSlot(
+                    skill_name=entry["skill_id"],
+                    side="main",
+                    sha=entry["content_sha"],
+                    bucket="recommended",
+                    source="skillhub",
+                    display_name=entry["display_name"],
+                    source_path=entry["source_path"],
+                )
+            ],
+        )
+        install_calls = []
+        monkeypatch.setattr(
+            client, "_install_to_ecosystems",
+            lambda repo_dir: install_calls.append(repo_dir),
+        )
+
+        client.reconcile_skill_sides(manifest)
+        assert len(install_calls) == 1
+
+        # 第二轮 tick：zip 内容没变 → 不重装生态（黑窗风暴回归护栏）
+        client.reconcile_skill_sides(manifest)
+        assert len(install_calls) == 1
+
+    def test_skillhub_slot_reinstalls_ecosystems_when_content_changes(
+        self, tmp_path, monkeypatch,
+    ):
+        hub_dir = tmp_path / "hub"
+        _write_hub_skill(hub_dir, "hub-a/foo", "django migration helper", name="foo")
+        hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=FakeEmbed(dim=4))
+        entry = hub.index()[0]
+        reg = ClientRegistry(tmp_path / "clients.db")
+        client_id = reg.register(label="alice", hostname="host")
+        http = self._app(tmp_path, hub, reg)
+        state = ClientState(
+            server_url="http://testserver",
+            client_id=client_id,
+            join_token="tok",
+        )
+        client = TeamClient(
+            state=state,
+            http=http,
+            skill_dir=tmp_path / "client_home" / ".xskill" / "skill",
+            cursor_path=tmp_path / "cursor.json",
+            history_path=tmp_path / "history.jsonl",
+            home_root=tmp_path / "client_home",
+            min_change_interval=0,
+        )
+        manifest = SyncResponse(
+            server_time=1.0,
+            slots=[
+                SkillSlot(
+                    skill_name=entry["skill_id"],
+                    side="main",
+                    sha=entry["content_sha"],
+                    bucket="recommended",
+                    source="skillhub",
+                    display_name=entry["display_name"],
+                    source_path=entry["source_path"],
+                )
+            ],
+        )
+        install_calls = []
+        monkeypatch.setattr(
+            client, "_install_to_ecosystems",
+            lambda repo_dir: install_calls.append(repo_dir),
+        )
+
+        client.reconcile_skill_sides(manifest)
+        assert len(install_calls) == 1
+
+        # 源 skill 内容变了 → server 出的 zip 哈希变 → 重装一次
+        skill_md = hub_dir / "hub-a" / "foo" / "SKILL.md"
+        skill_md.write_text(
+            skill_md.read_text(encoding="utf-8") + "\nupdated line\n",
+            encoding="utf-8",
+        )
+        client.reconcile_skill_sides(manifest)
+        assert len(install_calls) == 2

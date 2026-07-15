@@ -36,7 +36,7 @@ from typing import Iterable
 
 from xskill._sqlite_connect import connect_with_lock
 from xskill.ecosystems._fallback import (
-    InstallMode, _is_link_or_junction, install_dir,
+    InstallMode, _copy_install_is_current, _is_link_or_junction, install_dir,
 )
 from xskill.ecosystems._shared import (
     SqliteEcosystemSpec,
@@ -525,6 +525,9 @@ def install_to_opencode(
             return dest / "SKILL.md"
         dest.unlink()
     elif dest.exists():
+        # copy 模式且源未变：no-op——避免每轮 reconcile 重拷 + 重试 junction（Windows 弹 cmd 窗）
+        if _copy_install_is_current(src_dir, dest):
+            return dest / "SKILL.md"
         if dest.is_dir():
             backup = skills_root / f".{name}.replaced-by-symlink"
             if backup.exists():

@@ -94,11 +94,30 @@ def _install_meta_path(dest: Path) -> Path:
     return dest.parent / f"{_INSTALL_META_PREFIX}{dest.name}.json"
 
 
+def _read_skill_head_sha(skill_path: Path) -> str:
+    """读 skill 仓当前 HEAD 的 sha。读不到（非 git 仓 / 没有 HEAD）就返回空串——
+    用于 install-meta 记录，缺失不影响 install 本身。
+    """
+    head = skill_path / ".git" / "HEAD"
+    if not head.is_file():
+        return ""
+    try:
+        ref = head.read_text(encoding="utf-8").strip()
+        if ref.startswith("ref: "):
+            ref_path = skill_path / ".git" / ref[5:]
+            if ref_path.is_file():
+                return ref_path.read_text(encoding="utf-8").strip()
+        return ref  # detached HEAD
+    except OSError:
+        return ""
+
+
 def _write_install_meta(dest: Path, source: Path, mode: InstallMode) -> None:
     """install_dir 落地成功后写一份 meta。失败仅 warn（meta 缺失不影响主流程）。"""
     meta = {
         "mode": mode,
         "source": str(source.resolve()),
+        "source_sha": _read_skill_head_sha(source),
         "installed_at": time.time(),
     }
     try:
@@ -135,6 +154,41 @@ def _is_link_or_junction(p: Path) -> bool:
     return False
 
 
+def _copy_install_is_current(src_dir: Path, dest: Path) -> bool:
+    """dest 已是同源且源内容未变的 copy 安装 → True（调用方可跳过重装）。
+
+    源未变的判定：git 源比 HEAD sha 与 meta 记录；skillhub 源比
+    ``.xskill_skillhub.json`` 的 sha；两者都不可用 → False（保守重装）。
+    """
+    meta_path = _install_meta_path(dest)
+    if not dest.is_dir() or not meta_path.is_file():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if meta.get("mode") != "copy" or meta.get("source") != str(src_dir):
+        return False
+    if "source_sha" not in meta:
+        # 老版本 meta 没记 sha，无法判定源是否变过
+        return False
+    recorded_sha = meta["source_sha"]
+    if recorded_sha:
+        return _read_skill_head_sha(src_dir) == recorded_sha
+    source_hub_meta = src_dir / ".xskill_skillhub.json"
+    dest_hub_meta = dest / ".xskill_skillhub.json"
+    if not (source_hub_meta.is_file() and dest_hub_meta.is_file()):
+        return False
+    try:
+        source_hub_sha = json.loads(
+            source_hub_meta.read_text(encoding="utf-8")).get("sha")
+        dest_hub_sha = json.loads(
+            dest_hub_meta.read_text(encoding="utf-8")).get("sha")
+    except (OSError, ValueError):
+        return False
+    return bool(source_hub_sha) and source_hub_sha == dest_hub_sha
+
+
 def _try_symlink(src_dir: Path, dest: Path) -> bool:
     """尝试建目录 symlink。成功 True，失败（OSError/NotImplementedError）False。
 
@@ -160,6 +214,8 @@ def _try_junction(src_dir: Path, dest: Path) -> bool:
             ["cmd", "/c", "mklink", "/J", str(dest), str(src_dir)],
             check=True,
             capture_output=True,
+            # CREATE_NO_WINDOW：无 console 的父进程下不弹 cmd 黑窗
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:

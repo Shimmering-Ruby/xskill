@@ -309,3 +309,116 @@ def test_install_dir_mode_matrix(tmp_path, monkeypatch, symlink_ok, junction_ok,
     mode = install_dir(src, dest)
     assert mode == expected_mode
     assert (dest / "SKILL.md").is_file()
+
+
+# ──────────────────────────────────────────────────────────────────
+# T10. copy 模式 no-op 守卫 —— 源未变不重装，源变了重装
+# ──────────────────────────────────────────────────────────────────
+
+
+def _force_copy_mode(monkeypatch):
+    """把 symlink/junction 都打成失败，逼 install 走 copy 模式。"""
+    monkeypatch.setattr(install_fallback, "_try_symlink", lambda s, d: False)
+    monkeypatch.setattr(install_fallback, "_try_junction", lambda s, d: False)
+
+
+def _count_do_copy(monkeypatch):
+    """包一层 _do_copy 计数，返回可变的计数容器。"""
+    copy_calls = []
+    original_do_copy = install_fallback._do_copy
+
+    def _counting_do_copy(src_dir, dest):
+        copy_calls.append((src_dir, dest))
+        original_do_copy(src_dir, dest)
+
+    monkeypatch.setattr(install_fallback, "_do_copy", _counting_do_copy)
+    return copy_calls
+
+
+def test_copy_reinstall_skipped_when_git_source_unchanged(tmp_path, monkeypatch):
+    """git 源 sha 未变时，第二次 install 应命中守卫直接 no-op。"""
+    from xskill import ecosystems
+
+    src = _make_src(tmp_path / "srcs")
+    (src / ".git").mkdir()
+    (src / ".git" / "HEAD").write_text("a" * 40, encoding="utf-8")
+    fake_home = tmp_path / "fake_home"
+    _force_copy_mode(monkeypatch)
+    copy_calls = _count_do_copy(monkeypatch)
+
+    first = ecosystems.install_to_claude_code(src, target_root=fake_home)
+    assert len(copy_calls) == 1
+    assert first.is_file()
+
+    second = ecosystems.install_to_claude_code(src, target_root=fake_home)
+    assert second == first
+    assert len(copy_calls) == 1  # 守卫命中，没有重新 copy
+    assert (first.parent / "scripts" / "run.sh").is_file()  # dest 内容还在
+
+
+def test_copy_reinstall_happens_when_git_source_changed(tmp_path, monkeypatch):
+    """git 源 sha 变了（模拟新 commit），第二次 install 必须重装。"""
+    from xskill import ecosystems
+
+    src = _make_src(tmp_path / "srcs")
+    (src / ".git").mkdir()
+    (src / ".git" / "HEAD").write_text("a" * 40, encoding="utf-8")
+    fake_home = tmp_path / "fake_home"
+    _force_copy_mode(monkeypatch)
+    copy_calls = _count_do_copy(monkeypatch)
+
+    ecosystems.install_to_claude_code(src, target_root=fake_home)
+    (src / ".git" / "HEAD").write_text("b" * 40, encoding="utf-8")
+    (src / "SKILL.md").write_text("---\nname: skill-x\n---\nv2\n", encoding="utf-8")
+
+    dest_md = ecosystems.install_to_claude_code(src, target_root=fake_home)
+    assert len(copy_calls) == 2
+    assert "v2" in dest_md.read_text(encoding="utf-8")
+
+
+def test_copy_reinstall_skipped_when_skillhub_sha_unchanged(tmp_path, monkeypatch):
+    """skillhub 源（非 git 仓）用 .xskill_skillhub.json 的 sha 判定未变 → no-op。
+
+    走 install_to_opencode 覆盖 opencode.py 里复制的那份守卫调用点。
+    """
+    from xskill import ecosystems
+
+    src = _make_src(tmp_path / "srcs")
+    (src / ".xskill_skillhub.json").write_text('{"sha": "hub-sha-1"}', encoding="utf-8")
+    fake_home = tmp_path / "fake_home"
+    _force_copy_mode(monkeypatch)
+    copy_calls = _count_do_copy(monkeypatch)
+
+    ecosystems.install_to_opencode(src, target_root=fake_home)
+    assert len(copy_calls) == 1
+
+    ecosystems.install_to_opencode(src, target_root=fake_home)
+    assert len(copy_calls) == 1  # sha 未变，守卫命中
+
+    (src / ".xskill_skillhub.json").write_text('{"sha": "hub-sha-2"}', encoding="utf-8")
+    ecosystems.install_to_opencode(src, target_root=fake_home)
+    assert len(copy_calls) == 2  # sha 变了，重装
+
+
+def test_copy_reinstall_happens_with_legacy_meta_without_sha(tmp_path, monkeypatch):
+    """老版本 meta 没有 source_sha 字段：无法判定 → 保守重装，且不崩。"""
+    import json as json_mod
+
+    from xskill import ecosystems
+    from xskill.ecosystems._fallback import _install_meta_path
+
+    src = _make_src(tmp_path / "srcs")
+    (src / ".git").mkdir()
+    (src / ".git" / "HEAD").write_text("a" * 40, encoding="utf-8")
+    fake_home = tmp_path / "fake_home"
+    _force_copy_mode(monkeypatch)
+    copy_calls = _count_do_copy(monkeypatch)
+
+    dest_md = ecosystems.install_to_claude_code(src, target_root=fake_home)
+    meta_path = _install_meta_path(dest_md.parent)
+    legacy_meta = json_mod.loads(meta_path.read_text(encoding="utf-8"))
+    legacy_meta.pop("source_sha")
+    meta_path.write_text(json_mod.dumps(legacy_meta), encoding="utf-8")
+
+    ecosystems.install_to_claude_code(src, target_root=fake_home)
+    assert len(copy_calls) == 2  # 老 meta 判不了，重装
