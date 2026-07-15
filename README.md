@@ -208,19 +208,6 @@ xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.
 * * *
 
 <a name="community"></a>
-## 💬 社区
-
-关于 coding-agent 技能的问题、想法、踩坑故事——来一起聊。扫码加微信群:
-
-<div align="center">
-
-<table><tr><td align="center" style="border:2px solid #07C160;border-radius:16px;padding:18px 26px;background:#F2FCF6">
-<b style="color:#07C160;font-size:1.05em">💬 微信交流群</b><br><br>
-<img src="docs/assets/wechat-qr.jpg" width="200" alt="xskill 微信群二维码"><br>
-<sub>扫码进群 · 一起聊 coding agent 技能</sub>
-</td></tr></table>
-
-</div>
 
 ## 🙏 致谢
 
