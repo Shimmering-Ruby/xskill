@@ -227,13 +227,15 @@ def test_tag_cloud_ttl_cache_hit(tmp_path, monkeypatch):
 
     dashboard_metrics._tag_cloud_cache.clear()
     traversal_calls: list[int] = []
-    real_all_atoms = AtomTaskStore.all_atoms
+    # tag_cloud 现只取 tags 字段，走 iter_tags（免构建完整 AtomTask）——TTL 缓存
+    # 命中仍应只遍历一次。
+    real_iter_tags = AtomTaskStore.iter_tags
 
-    def counting_all_atoms(self):
+    def counting_iter_tags(self):
         traversal_calls.append(1)
-        yield from real_all_atoms(self)
+        yield from real_iter_tags(self)
 
-    monkeypatch.setattr(AtomTaskStore, "all_atoms", counting_all_atoms)
+    monkeypatch.setattr(AtomTaskStore, "iter_tags", counting_iter_tags)
 
     metrics = DashboardMetrics(db_path=db_path)
     first = {row["tag"]: row["count"] for row in metrics.tag_cloud()}

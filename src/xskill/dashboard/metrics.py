@@ -137,7 +137,7 @@ def _skillhub_entries(skillhub) -> list[dict]:
 
 _SKILLS_CATALOG_TTL_SECONDS = 5.0
 _SKILLS_CATALOG_CACHE_MAX_ENTRIES = 128
-_skills_catalog_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_skills_catalog_cache: dict[tuple, tuple[float, "_CatalogBundle"]] = {}
 _skills_catalog_flights: dict[tuple, "_CatalogFlight"] = {}
 _skills_catalog_cache_lock = threading.Lock()
 
@@ -163,13 +163,35 @@ def _prune_tag_cloud_cache(now: float) -> None:
             _tag_cloud_cache.pop(stale_key, None)
 
 
+class _CatalogBundle:
+    """构建一次即冻结的技能清单：行数据 + 预聚合的 ``by_state`` / ``total``。
+
+    ``by_state`` 与 ``total`` 只在**构建清单时**算一次（清单只有重建才变），
+    随行数据一起缓存。每次 ``/skills`` 请求由此 O(1) 取计数、只深拷贝请求的
+    那一页，不再逐请求全量重算计数 / 深拷贝全部 N 条（审计 L9）。
+
+    ``rows`` 属只读共享数据：所有读取方（``skills_catalog`` /
+    ``skills_catalog_page``）都对自己要返回的部分做深拷贝，故缓存里的行永不被
+    调用方改写。
+    """
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        by_state: dict[str, int] = {}
+        for entry in rows:
+            state = entry["state"]
+            by_state[state] = by_state.get(state, 0) + 1
+        self.by_state = by_state
+        self.total = len(rows)
+
+
 class _CatalogFlight:
     """同一个清单缓存键只允许一个线程扫描磁盘。"""
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.error: BaseException | None = None
-        self.rows: list[dict] | None = None
+        self.bundle: "_CatalogBundle | None" = None
 
 
 def _copy_catalog_error(error: BaseException) -> BaseException:
@@ -372,11 +394,12 @@ def _rows_from_manifest_snapshot(
     return rows
 
 
-def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
-    """返回短时缓存的技能清单，每次都给调用方独立的可修改副本。
+def _skills_catalog_bundle(skill_dir: Path, skillhub) -> "_CatalogBundle":
+    """短时缓存的技能清单不可变 bundle（行 + 预聚合计数）。
 
     缓存按自产目录与 SkillHub 输入隔离；过期后重新读取分支、SKILL.md 和
-    candidates。构建失败不会写入缓存，同键并发请求共享一次磁盘扫描。
+    candidates。构建失败不会写入缓存，同键并发请求共享一次磁盘扫描。返回的
+    bundle 是缓存内共享的只读对象——读取方各自深拷贝所需部分，故不会改写它。
     """
     key = _skills_catalog_cache_key(skill_dir, skillhub)
     while True:
@@ -386,7 +409,7 @@ def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
 
             cached = _skills_catalog_cache.get(key)
             if cached is not None:
-                return copy.deepcopy(cached[1])
+                return cached[1]
 
             flight = _skills_catalog_flights.get(key)
             if flight is None:
@@ -402,13 +425,15 @@ def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
                 raise _copy_catalog_error(flight.error)
             # 直接使用本轮构建结果。即使它刚好过期或因容量限制被逐出，
             # 已经合并到本轮的等待者也不应再发起一次相同扫描。
-            if flight.rows is not None:
-                return copy.deepcopy(flight.rows)
+            if flight.bundle is not None:
+                return flight.bundle
             continue
 
         try:
             rows = _build_skills_catalog_uncached(skill_dir, skillhub=skillhub)
-            cached_rows = copy.deepcopy(rows)
+            # 行数据此刻是本次扫描独占的新对象，直接封入 bundle 缓存即可；
+            # 读取方总会深拷贝各自返回的部分，缓存里的行永不被改写。
+            bundle = _CatalogBundle(rows)
         except BaseException as exc:
             with _skills_catalog_cache_lock:
                 flight.error = exc
@@ -419,15 +444,15 @@ def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
 
         with _skills_catalog_cache_lock:
             try:
-                flight.rows = cached_rows
+                flight.bundle = bundle
                 _skills_catalog_cache[key] = (
                     time.monotonic() + _SKILLS_CATALOG_TTL_SECONDS,
-                    cached_rows,
+                    bundle,
                 )
                 _prune_skills_catalog_cache(time.monotonic())
             except BaseException as exc:
                 # 即使缓存落盘阶段发生异常，也必须唤醒全部等待线程。
-                flight.rows = None
+                flight.bundle = None
                 flight.error = exc
                 _skills_catalog_cache.pop(key, None)
                 raise
@@ -435,7 +460,46 @@ def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
                 if _skills_catalog_flights.get(key) is flight:
                     _skills_catalog_flights.pop(key, None)
                 flight.done.set()
-        return copy.deepcopy(cached_rows)
+        return bundle
+
+
+def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
+    """返回短时缓存的技能清单全量，每次都给调用方独立的可修改副本。
+
+    分页读取请走 :func:`skills_catalog_page`——它只深拷贝请求的那一页并 O(1)
+    取聚合计数；本函数保留全量深拷贝语义，服务于需要整份清单的既有调用方。
+    """
+    return copy.deepcopy(_skills_catalog_bundle(skill_dir, skillhub).rows)
+
+
+def skills_catalog_page(skill_dir: Path, skillhub=None, *,
+                        limit: int = 0, offset: int = 0,
+                        name: str = "") -> dict:
+    """分页读取技能清单：``total`` / ``by_state`` 从缓存 bundle O(1) 取，只深拷贝
+    请求的那一页（审计 L9——避免每请求深拷贝全部 N 条并重算计数）。
+
+    - ``name`` 非空：定向查该名字的条目（可能多于一条，语义同旧实现的全量筛选），
+      只遍历不深拷贝全部 N。
+    - ``limit`` > 0：返回 ``rows[offset:offset+limit]`` 这一页。
+    - 否则：返回 ``rows[offset:]``（``limit=0`` 向后兼容旧行为）。
+
+    响应形状与旧 ``/skills`` 端点严格一致：
+    ``{total, by_state, offset, limit, skills}``；``skills`` 为当前页的独立可修改副本。
+    """
+    bundle = _skills_catalog_bundle(skill_dir, skillhub)
+    if name:
+        page = [entry for entry in bundle.rows if entry["name"] == name]
+    elif limit > 0:
+        page = bundle.rows[offset:offset + limit]
+    else:
+        page = bundle.rows[offset:]
+    return {
+        "total": bundle.total,
+        "by_state": dict(bundle.by_state),
+        "offset": offset,
+        "limit": limit,
+        "skills": copy.deepcopy(page),
+    }
 
 
 class DashboardMetrics:
@@ -591,8 +655,10 @@ class DashboardMetrics:
             try:
                 if not root.is_dir():
                     continue
-                for atom in AtomTaskStore(root=root).all_atoms():
-                    for tag in (atom.tags or []):
+                # 标签云只需 tags 字段——用 iter_tags 免去构建完整 AtomTask
+                # 对象（审计 L10：缓存未命中时对每个原子省下 dataclass 实例化）。
+                for atom_tags in AtomTaskStore(root=root).iter_tags():
+                    for tag in atom_tags:
                         t = str(tag).strip().lower()
                         if t:
                             counter[t] += 1

@@ -162,6 +162,25 @@ class AtomTaskStore:
             for p in sorted(tasks_dir.glob("atom_*.json")):
                 yield AtomTask.from_json(p.read_text(encoding="utf-8"))
 
+    def iter_tags(self) -> Iterator[list[str]]:
+        """只产出每个 atom 的 ``tags`` 列表——给标签云聚合等只看标签的调用方用。
+
+        落盘结构与 :meth:`all_atoms` 相同，但只 ``json.loads`` 后取 ``tags``
+        字段，省去构建完整 ``AtomTask`` 对象（``raw_segment`` 等大字段照旧被
+        json 解析，但不再实例化 dataclass）。:meth:`all_atoms` 的契约不变。
+        """
+        if not self.root.is_dir():
+            return
+        for traj_dir in sorted(self.root.iterdir()):
+            if not traj_dir.is_dir():
+                continue
+            tasks_dir = traj_dir / "tasks"
+            if not tasks_dir.is_dir():
+                continue
+            for atom_path in sorted(tasks_dir.glob("atom_*.json")):
+                data = json.loads(atom_path.read_text(encoding="utf-8"))
+                yield list(data.get("tags", []) or [])
+
     # ── offset pointer ────────────────────────────────────────────
 
     def last_offset(self, traj_id: str) -> int:

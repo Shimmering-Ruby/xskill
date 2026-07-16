@@ -146,6 +146,127 @@ class TestPool:
 
         assert len(chosen) == 2
 
+    def test_combined_relevance_aligns_and_dedups(self, tmp_path, monkeypatch):
+        """_combined_relevance:矩阵行与 names 严格对齐、同名 skill 保留自有向量。
+
+        锁死修 O(n²) 逐行 vstack(engine.py:137)后的语义:上万 skillhub skill 时
+        逐行 np.vstack 会把 /sync 的 32 个 worker 焊死在核上;改成末尾单次 vstack
+        后结果必须与旧语义逐位等价。
+        """
+        skill_dir = tmp_path / "skills"
+        for name in ("s0", "s1"):
+            _make_main_skill(skill_dir, name)
+        _write_index(skill_dir, ["s0", "s1"], dim=5)
+        eng = _engine(tmp_path, skill_dir, tmp_path / "traj")
+
+        # 在真实接缝(skillhub.fingerprint / index)打桩,让真正的 _skillhub_entries
+        # 管理 self._skillhub_cache(fingerprint 返回稳定对象→缓存命中判定生效)。
+        hub_fp = ("hub-fingerprint",)
+        hub_entries = [
+            {"name": "hubA", "vec": np.asarray([0, 0, 1, 0, 0], dtype=float)},
+            {"name": "s0", "vec": np.asarray([9, 9, 9, 9, 9], dtype=float)},
+            {"name": "hubB", "vec": np.asarray([0, 0, 0, 1, 0], dtype=float)},
+        ]
+
+        def fake_fingerprint():
+            return hub_fp
+
+        def fake_index():
+            return hub_entries
+
+        monkeypatch.setattr(eng.skillhub, "fingerprint", fake_fingerprint)
+        monkeypatch.setattr(eng.skillhub, "index", fake_index)
+        names, embs, is_hub = eng._combined_relevance()
+
+        assert names == ["s0", "s1", "hubA", "hubB"]
+        assert embs.shape == (4, 5)
+        assert np.allclose(embs[0], [1, 0, 0, 0, 0])  # s0 保留自有 one-hot,不用 hub 的 [9..]
+        assert np.allclose(embs[1], [0, 1, 0, 0, 0])
+        assert np.allclose(embs[2], [0, 0, 1, 0, 0])  # hubA
+        assert np.allclose(embs[3], [0, 0, 0, 1, 0])  # hubB
+        assert is_hub == {"s0": False, "s1": False, "hubA": True, "hubB": True}
+
+    def test_combined_relevance_hub_only_when_no_repo_index(self, tmp_path, monkeypatch):
+        """无 .skill_index.pkl(rebuild 窗口):池 = 纯三方 skill,单次 vstack 直接成矩阵。"""
+        skill_dir = tmp_path / "skills"
+        skill_dir.mkdir()
+        eng = _engine(tmp_path, skill_dir, tmp_path / "traj")
+
+        hub_fp = ("fp2",)
+        hub_entries = [
+            {"name": "hubA", "vec": np.asarray([1, 0], dtype=float)},
+            {"name": "hubB", "vec": np.asarray([0, 1], dtype=float)},
+        ]
+
+        def fake_fingerprint():
+            return hub_fp
+
+        def fake_index():
+            return hub_entries
+
+        monkeypatch.setattr(eng.skillhub, "fingerprint", fake_fingerprint)
+        monkeypatch.setattr(eng.skillhub, "index", fake_index)
+        names, embs, is_hub = eng._combined_relevance()
+
+        assert names == ["hubA", "hubB"]
+        assert embs.shape == (2, 2)
+        assert np.allclose(embs, [[1, 0], [0, 1]])
+        assert is_hub == {"hubA": True, "hubB": True}
+
+    def test_combined_relevance_is_cached_and_invalidated(self, tmp_path, monkeypatch):
+        """候选池客户端无关:重复调用命中缓存返回同一对象(不重拼万行矩阵);
+        invalidate_cache 后重建。这是消除 /sync 每请求每 worker 重算的核心。"""
+        skill_dir = tmp_path / "skills"
+        for name in ("s0", "s1"):
+            _make_main_skill(skill_dir, name)
+        _write_index(skill_dir, ["s0", "s1"], dim=5)
+        eng = _engine(tmp_path, skill_dir, tmp_path / "traj")
+
+        hub_fp = ("fp3",)
+        hub_entries = [{"name": "hubA", "vec": np.asarray([0, 0, 1, 0, 0], dtype=float)}]
+
+        def fake_fingerprint():
+            return hub_fp
+
+        def fake_index():
+            return hub_entries
+
+        monkeypatch.setattr(eng.skillhub, "fingerprint", fake_fingerprint)
+        monkeypatch.setattr(eng.skillhub, "index", fake_index)
+        first = eng._combined_relevance()
+        second = eng._combined_relevance()
+        assert first is second  # 命中缓存:同一 (names, embs, is_hub) 对象
+
+        eng.invalidate_cache()
+        third = eng._combined_relevance()
+        assert third is not first  # 失效后重建
+        assert third[0] == first[0] == ["s0", "s1", "hubA"]
+
+    def test_combined_relevance_key_and_data_same_generation(self, tmp_path, monkeypatch):
+        """并发 race 回归:hub_entries(建矩阵的数据)与缓存键必须同代。模拟另一线程
+        在本次调用期间把 self._skillhub_cache 推进到新代——结果与所存键必须都取新代,
+        不能出现"用旧代数据建的结果存到新代键上"(会让新上传的 skill 长期不可见)。"""
+        skill_dir = tmp_path / "skills"
+        _make_main_skill(skill_dir, "s0")
+        _write_index(skill_dir, ["s0"], dim=5)
+        eng = _engine(tmp_path, skill_dir, tmp_path / "traj")
+
+        gen_old = (("fpOLD",),
+                   [{"name": "hubOLD", "vec": np.asarray([0, 0, 1, 0, 0], dtype=float)}])
+        gen_new = (("fpNEW",),
+                   [{"name": "hubNEW", "vec": np.asarray([0, 0, 0, 1, 0], dtype=float)}])
+
+        def racing_entries():
+            # 模拟并发另一线程已把缓存推进到新代;但返回旧代数据(旧实现会误用它)。
+            eng._skillhub_cache = gen_new
+            return gen_old[1]
+
+        monkeypatch.setattr(eng, "_skillhub_entries", racing_entries)
+        names, _embs, _is_hub = eng._combined_relevance()
+
+        assert eng._combined_pool_cache[0] is gen_new  # 键为新代
+        assert "hubNEW" in names and "hubOLD" not in names  # 数据也必须是新代
+
 
 # ── update_user_interest ─────────────────────────────────────────
 

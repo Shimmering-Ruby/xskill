@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
-from xskill.dashboard.metrics import DashboardMetrics, skills_catalog
+from xskill.dashboard.metrics import DashboardMetrics, skills_catalog_page
 from xskill.pipeline.registry import (
     usage_summary, model_share, harness_share, list_watch_dirs,
     trigger_eval_for_skill,
@@ -122,26 +122,12 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         **分页**(海量 skill,如 1 万条,别让前端一次性拉全量炸锅):``limit``>0 时只返回
         ``skills[offset:offset+limit]`` 这一页;``limit``=0(默认)返回全部,向后兼容。
         ``total`` / ``by_state`` 始终按**全量**统计(概览计数准确),``skills`` 只含当前页。
-        目录扫描结果按内容指纹缓存,翻页命中缓存不重扫。
+        目录扫描结果按内容指纹缓存,翻页命中缓存不重扫；``total`` / ``by_state`` 在
+        构建清单时算一次随缓存复用(O(1) 取),每请求只深拷贝当前页(审计 L9)。
         """
-        catalog = skills_catalog(skill_dir, skillhub=_build_skillhub())
-        states: dict = {}
-        for entry in catalog:
-            states[entry["state"]] = states.get(entry["state"], 0) + 1
-        if name:
-            # 定向查单条(如详情钻取判 source),避免为查一条拉全量 1 万条。
-            page = [entry for entry in catalog if entry["name"] == name]
-        elif limit > 0:
-            page = catalog[offset:offset + limit]
-        else:
-            page = catalog[offset:]
-        return {
-            "total": len(catalog),
-            "by_state": states,
-            "offset": offset,
-            "limit": limit,
-            "skills": page,
-        }
+        return skills_catalog_page(
+            skill_dir, skillhub=_build_skillhub(),
+            limit=limit, offset=offset, name=name)
 
     # ── 单 skill 详情（drill-in）：统计 / 文件树 / 预览 / 版本 / diff ──
 

@@ -82,6 +82,31 @@ class TestAtomTaskRoundtrip:
         assert [a.atom_id for a in listed] == ["atom_t_0001", "atom_t_0002"]
 
 
+class TestIterTags:
+    """iter_tags 只产出 tags 列表(标签云聚合用),不构建完整 AtomTask 对象。"""
+
+    def test_iter_tags_yields_each_atom_tags_across_trajs(self, tmp_path):
+        store = _store(tmp_path)
+        store.save(_atom(atom_id="atom_a_0001", traj_id="a", tags=["deploy", "fastapi"]))
+        store.save(_atom(atom_id="atom_a_0002", traj_id="a", tags=["deploy"]))
+        store.save(_atom(atom_id="atom_b_0001", traj_id="b", tags=["testing"]))
+        store.save(_atom(atom_id="atom_c_0001", traj_id="c", tags=[]))
+        collected = sorted(tuple(tags) for tags in store.iter_tags())
+        assert collected == [(), ("deploy",), ("deploy", "fastapi"), ("testing",)]
+
+    def test_iter_tags_matches_all_atoms_tags(self, tmp_path):
+        store = _store(tmp_path)
+        store.save(_atom(atom_id="atom_a_0001", traj_id="a", tags=["x", "y"]))
+        store.save(_atom(atom_id="atom_a_0002", traj_id="a", tags=["z"]))
+        via_all_atoms = sorted(tuple(a.tags) for a in store.all_atoms())
+        via_iter_tags = sorted(tuple(tags) for tags in store.iter_tags())
+        assert via_iter_tags == via_all_atoms
+
+    def test_iter_tags_empty_when_root_missing(self, tmp_path):
+        store = AtomTaskStore(root=tmp_path / "does-not-exist")
+        assert list(store.iter_tags()) == []
+
+
 class TestOffsetPointer:
     def test_last_offset_zero_when_no_atoms(self, tmp_path):
         store = _store(tmp_path)

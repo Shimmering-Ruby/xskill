@@ -9,7 +9,8 @@ import pytest
 
 import xskill.dashboard.metrics as dashboard_metrics
 from xskill.pipeline.registry import get_connection, harness_share, model_share
-from xskill.dashboard.metrics import DashboardMetrics, skills_catalog
+from xskill.dashboard.metrics import (
+    DashboardMetrics, skills_catalog, skills_catalog_page)
 
 
 def _seed_team(db):
@@ -457,6 +458,75 @@ def test_skills_catalog_returns_independent_copies(tmp_path):
     assert len(second) == 1
     assert second[0]["name"] == "alpha"
     assert second[0]["description"] == "original"
+
+
+def test_skills_catalog_page_counts_from_cache_and_deepcopies_only_page(
+        tmp_path, monkeypatch):
+    """L9：分页只深拷贝当前页，total/by_state 从缓存 bundle 取；改页不污染缓存。"""
+    root = tmp_path / "skills"
+    rows = [
+        {"name": f"s{index}",
+         "state": "main" if index % 2 else "staging",
+         "source": "native", "description": "", "version": 1, "candidates": 0}
+        for index in range(300)
+    ]
+    def build_rows(*_args, **_kwargs):
+        return [dict(entry) for entry in rows]
+
+    monkeypatch.setattr(
+        dashboard_metrics, "_build_skills_catalog_uncached", build_rows)
+
+    page = skills_catalog_page(root, limit=10, offset=20)
+    assert page["total"] == 300
+    assert page["by_state"] == {"staging": 150, "main": 150}
+    assert [entry["name"] for entry in page["skills"]] == [
+        f"s{index}" for index in range(20, 30)]
+    assert page["offset"] == 20 and page["limit"] == 10
+
+    # 改写返回页不得污染缓存里的行（只深拷贝当前页的保证）。
+    page["skills"][0]["description"] = "caller mutation"
+    fresh = skills_catalog_page(root, limit=10, offset=20)
+    assert fresh["skills"][0]["description"] == ""
+    # 返回的 by_state 是独立副本，改它也不动缓存。
+    page["by_state"]["main"] = -1
+    assert skills_catalog_page(root, limit=1)["by_state"]["main"] == 150
+
+
+def test_skills_catalog_page_builds_once_across_requests(tmp_path, monkeypatch):
+    """L9：多次翻页 / 计数只触发一次磁盘扫描（缓存 bundle 复用）。"""
+    root = tmp_path / "skills"
+    calls = 0
+
+    def counted(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return [{"name": f"s{index}", "state": "main", "source": "native",
+                 "description": "", "version": 1, "candidates": 0}
+                for index in range(50)]
+
+    monkeypatch.setattr(
+        dashboard_metrics, "_build_skills_catalog_uncached", counted)
+    skills_catalog_page(root, limit=10, offset=0)
+    skills_catalog_page(root, limit=10, offset=10)
+    skills_catalog_page(root, name="s7")
+    assert calls == 1
+
+
+def test_skills_catalog_page_name_filter_returns_matches(tmp_path, monkeypatch):
+    """L9：name 定向查返回匹配条目，total/by_state 仍按全量。"""
+    root = tmp_path / "skills"
+
+    def build_thousand(*_args, **_kwargs):
+        return [{"name": f"s{index}", "state": "main", "source": "native",
+                 "description": "", "version": 1, "candidates": 0}
+                for index in range(1000)]
+
+    monkeypatch.setattr(
+        dashboard_metrics, "_build_skills_catalog_uncached", build_thousand)
+    page = skills_catalog_page(root, name="s512")
+    assert [entry["name"] for entry in page["skills"]] == ["s512"]
+    assert page["total"] == 1000
+    assert page["by_state"] == {"main": 1000}
 
 
 def test_users_lists_team_clients(tmp_path):

@@ -85,6 +85,11 @@ class SkillRecommendEngine:
         self.staging_need = self.rcfg["staging_need"] or self.canary_cfg.min_samples
         self._skill_index_cache: Optional[dict] = None
         self._skillhub_cache: Optional[tuple[tuple, list[dict]]] = None
+        # 合并候选池(names/embs/is_hub)客户端无关,只随 skillhub 缓存 / .skill_index
+        # / 可分发集合变化。single-flight 缓存:32 个并发 /sync 只在其一变化后重建
+        # 一次万行矩阵,不再每请求每 worker 各拼一遍。invalidate_cache 清空。
+        self._combined_pool_cache: Optional[tuple] = None
+        self._combined_pool_lock = threading.Lock()
         self._profile_row_cache: dict[str, dict | None] = {}
         self._profile_cache_generation: dict[str, int] = {}
         self._profile_cache_lock = threading.Lock()
@@ -98,7 +103,9 @@ class SkillRecommendEngine:
     def _skillhub_entries(self) -> list[dict]:
         """三方 skill ``{name, vec}``（按内容指纹缓存）。禁用时为空。"""
         fp = self.skillhub.fingerprint()
-        if self._skillhub_cache is None or self._skillhub_cache[0] != fp:
+        # fingerprint() 不变盘时返回同一 tuple 对象,故 `is not` 做 O(1) 失效判断,
+        # 不再每请求对万元素 tuple 逐位比较。
+        if self._skillhub_cache is None or self._skillhub_cache[0] is not fp:
             self._skillhub_cache = (fp, self.skillhub.index())
         return self._skillhub_cache[1]
 
@@ -108,36 +115,66 @@ class SkillRecommendEngine:
         """合并检索池：可分发 skill 的 desc 向量 + 三方 skill 向量。
 
         返回 ``(names, embeddings, is_skillhub)``。三方 skill 标记 True（仅相关性位）。
+
+        结果客户端无关——只随 skillhub 缓存 / ``.skill_index.pkl`` / 可分发集合变化。
+        按这三者身份缓存并 single-flight：32 个并发 /sync 只在其一变化后重建一次万行
+        候选矩阵(1 万 skill 下每次约 120MB 的 ``repo_embs[keep]`` 拷贝 + O(N) 组装，
+        是探针超时的主因之一)，其余请求 O(1) 命中。``invalidate_cache`` 清空。
         """
-        hub_entries = self._skillhub_entries()
+        self._skillhub_entries()  # 触发/刷新 self._skillhub_cache
+        # 一次性捕获 skillhub 缓存代 tuple:hub_entries(建矩阵用)与缓存键必须同代。
+        # _skillhub_entries 无锁改写 self._skillhub_cache,若键与数据分两次读,并发下
+        # 可能用旧代 hub_entries 建的结果存到新代键上→后续请求读到陈旧推荐。
+        hub_cache = self._skillhub_cache
+        hub_entries = hub_cache[1]
         idx_path = self.skill_dir / ".skill_index.pkl"
-        if idx_path.is_file():
-            idx = self._skill_index()
-            repo_names = list(idx.get("skill_names") or [])
-            repo_embs = np.asarray(idx["embeddings"], dtype=float)
-        else:
-            repo_names = []
-            dim = len(hub_entries[0]["vec"]) if hub_entries else 0
-            repo_embs = np.zeros((0, dim), dtype=float)
+        idx = self._skill_index() if idx_path.is_file() else None
         pool = (
             distributable_skills
             if distributable_skills is not None
             else self._distributable_skills()
         )
-        distributable = {s.name for s in pool}
-        # 仅保留可分发 skill（排除 baby / 已删）
-        keep = [i for i, n in enumerate(repo_names) if n in distributable]
-        names = [repo_names[i] for i in keep]
-        embs = repo_embs[keep] if keep else np.zeros((0, repo_embs.shape[1] if repo_embs.ndim == 2 else 0))
-        is_hub = {n: False for n in names}
-        for e in hub_entries:
-            if e["name"] in is_hub:
-                continue  # 自有 skill 同名优先
-            names.append(e["name"])
-            embs = np.vstack([embs, np.asarray(e["vec"], dtype=float)]) if len(embs) else \
-                np.asarray([e["vec"]], dtype=float)
-            is_hub[e["name"]] = True
-        return names, embs, is_hub
+        distributable = frozenset(skill.name for skill in pool)
+        cache = self._combined_pool_cache
+        if (cache is not None and cache[0] is hub_cache
+                and cache[1] is idx and cache[2] == distributable):
+            return cache[3]
+        with self._combined_pool_lock:
+            cache = self._combined_pool_cache
+            if (cache is not None and cache[0] is hub_cache
+                    and cache[1] is idx and cache[2] == distributable):
+                return cache[3]
+            if idx is not None:
+                repo_names = list(idx.get("skill_names") or [])
+                repo_embs = np.asarray(idx["embeddings"], dtype=float)
+            else:
+                repo_names = []
+                dim = len(hub_entries[0]["vec"]) if hub_entries else 0
+                repo_embs = np.zeros((0, dim), dtype=float)
+            # 仅保留可分发 skill（排除 baby / 已删）
+            keep = [i for i, name in enumerate(repo_names) if name in distributable]
+            names = [repo_names[i] for i in keep]
+            embs = repo_embs[keep] if keep else np.zeros(
+                (0, repo_embs.shape[1] if repo_embs.ndim == 2 else 0)
+            )
+            is_hub = {name: False for name in names}
+            # 三方 skill 向量先收集成列表、末尾单次 vstack。循环内逐行 np.vstack 是
+            # 意外二次复杂度:第 k 行复制整个已累积矩阵(总搬运 O(n²)),且每行一次
+            # GIL-held 的 Python 调用。上万 skillhub skill 时把 /sync 的 32 个 worker
+            # 线程焊死在核上、饿死事件循环令探针超时。参照 skillhub.py 已有写法。
+            hub_vectors: list[np.ndarray] = []
+            for entry in hub_entries:
+                if entry["name"] in is_hub:
+                    continue  # 自有 skill 同名优先
+                names.append(entry["name"])
+                hub_vectors.append(np.asarray(entry["vec"], dtype=float))
+                is_hub[entry["name"]] = True
+            if hub_vectors:
+                hub_matrix = np.vstack(hub_vectors)
+                embs = np.vstack([embs, hub_matrix]) if len(embs) else hub_matrix
+            result = (names, embs, is_hub)
+            self._combined_pool_cache = (hub_cache, idx, distributable, result)
+            return result
 
     # ── skill 索引 / 池 ───────────────────────────────────────────
     def invalidate_cache(self) -> None:
@@ -145,6 +182,7 @@ class SkillRecommendEngine:
         确保下次检索读最新 ``.skill_index.pkl`` 与三方 skill 目录。"""
         self._skill_index_cache = None
         self._skillhub_cache = None
+        self._combined_pool_cache = None
 
     def _skill_index(self) -> dict:
         if self._skill_index_cache is None:

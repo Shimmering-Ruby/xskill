@@ -1,10 +1,14 @@
-"""海量 skill 分页:/skills 支持 limit/offset 分页 + name 定向查,total/by_state 按全量。"""
+"""海量 skill 分页:/skills 支持 limit/offset 分页 + name 定向查,total/by_state 按全量。
+
+分页 / 计数 / 深拷贝隔离都走真实的 :func:`skills_catalog_page` + 缓存 bundle
+（审计 L9），测试只在最底层磁盘扫描处注入假清单，让真实读路径全程被覆盖。
+"""
 from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from xskill.dashboard import router as router_mod
+from xskill.dashboard import metrics as metrics_mod
 from xskill.dashboard.mount import mount_dashboard
 from xskill.pipeline.registry import get_connection
 
@@ -29,10 +33,12 @@ def _client(tmp_path, monkeypatch, n):
     app = FastAPI()
     mount_dashboard(app, {"dashboard": {"enabled": True, "public": True}}, db_path=db)
 
-    def fake_skills_catalog(*_args, **_kwargs):
+    # 注入到最底层磁盘扫描：真实的缓存 bundle + 分页 + 计数 + 单页深拷贝全程被覆盖。
+    # 每个用例用独立 tmp_path/skill 作缓存键，天然隔离不串缓存。
+    def fake_build(*_args, **_kwargs):
         return _fake_catalog(n)
 
-    monkeypatch.setattr(router_mod, "skills_catalog", fake_skills_catalog)
+    monkeypatch.setattr(metrics_mod, "_build_skills_catalog_uncached", fake_build)
     return TestClient(app)
 
 

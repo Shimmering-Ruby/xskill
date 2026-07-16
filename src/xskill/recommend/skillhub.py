@@ -95,6 +95,15 @@ class SkillHub:
         self._scan_snapshot_entries: list[dict] | None = None
         self._scan_snapshot_expires_at: float = 0.0
         self._scan_lock = threading.Lock()
+        # 派生结构随快照身份缓存：_snapshot 内容不变时列表身份不变，故 entry() /
+        # fingerprint() 不变盘时零重建、不再每次调用深拷全量 N 条。single-flight
+        # 由独立锁保护。strong_index：skill_id / source_path → entry(O(1) 定位)；
+        # display_unique：display_name → entry(仅唯一时命中，兜底键)。
+        self._derived_for: list[dict] | None = None
+        self._strong_index: dict[str, dict] = {}
+        self._display_unique: dict[str, dict | None] = {}
+        self._fingerprint_cache: tuple[tuple[str, str, str], ...] = ()
+        self._derived_lock = threading.Lock()
         # 混合检索索引：随 fingerprint 变化整体重建，在扫描 single-flight 之外自成一锁。
         self._search_index: dict | None = None
         self._search_index_lock = threading.Lock()
@@ -218,15 +227,59 @@ class SkillHub:
                 entry["vec"] = _normalize(np.asarray(vector, dtype=float))
         return entries
 
+    def _ensure_derived(self) -> None:
+        """按快照身份缓存派生结构：``strong_index`` / ``display_unique`` / 指纹。
+
+        ``_snapshot`` 内容不变时列表身份不变，故不变盘时零重建；1 万 skill 下把
+        ``entry()`` 从"每次深拷+线性扫全量"降到 O(1)，把 ``fingerprint()`` 从
+        "每请求重建万元素 tuple"降到"命中即返回同一 tuple 对象"。
+        """
+        if not self.enabled:
+            self._strong_index = {}
+            self._display_unique = {}
+            self._fingerprint_cache = ()
+            self._derived_for = None
+            return
+        if not self.dir.is_dir():
+            raise FileNotFoundError(
+                f"skillhub.dir 不存在: {self.dir}（启用 skillhub 前请放置三方 skill）"
+            )
+        snapshot = self._snapshot()
+        if self._derived_for is snapshot:
+            return
+        with self._derived_lock:
+            if self._derived_for is snapshot:
+                return
+            strong_index: dict[str, dict] = {}
+            display_unique: dict[str, dict | None] = {}
+            fingerprint_items: list[tuple[str, str, str]] = []
+            for entry in snapshot:
+                # skill_id == entry["name"]（见 _walk_snapshot），故 skill_id 键
+                # 同时覆盖 name 匹配；source_path 相对路径亦唯一。
+                strong_index[entry["skill_id"]] = entry
+                strong_index[entry["source_path"]] = entry
+                display_name = entry["display_name"]
+                display_unique[display_name] = (
+                    entry if display_name not in display_unique else None
+                )
+                if entry["description"]:
+                    fingerprint_items.append(
+                        (entry["skill_id"], entry["source_path"], entry["content_sha"])
+                    )
+            self._strong_index = strong_index
+            self._display_unique = display_unique
+            self._fingerprint_cache = tuple(fingerprint_items)
+            self._derived_for = snapshot
+
     def fingerprint(self) -> tuple[tuple[str, str, str], ...]:
         """当前 skillhub 内容指纹，用于推荐引擎缓存自动失效。
 
         只包含稳定身份、相对路径和内容版本；新增、删除、改内容都会改变该值。
+        随快照身份缓存：不变盘时返回同一 tuple 对象，让调用方可用 ``is`` 做 O(1)
+        失效判断，不再每次重建万元素 tuple。
         """
-        return tuple(
-            (entry["skill_id"], entry["source_path"], entry["content_sha"])
-            for entry in self._entries(include_vec=False, require_description=True)
-        )
+        self._ensure_derived()
+        return self._fingerprint_cache
 
     @property
     def index_cache_path(self) -> Path:
@@ -790,19 +843,16 @@ class SkillHub:
             with self._scan_lock:
                 self._scan_snapshot_expires_at = 0.0
                 self._file_memo.clear()
-        matches: list[dict] = []
-        for entry in self._entries(include_vec=False, require_description=False):
-            if name in {
-                entry["skill_id"], entry["name"], entry["source_path"],
-                entry["display_name"],
-            }:
-                matches.append(entry)
-        if len(matches) == 1:
-            return matches[0]
-        for entry in matches:
-            if name in {entry["skill_id"], entry["name"], entry["source_path"]}:
-                return entry
-        return None
+        # strong_index / display_unique 做 O(1) 定位，语义与旧线性扫等价：
+        # 强键(skill_id / name / source_path)唯一，命中即定；display_name 仅在
+        # 全局唯一时作兜底，重名一律 None(与旧代码 len(matches)!=1 → 无强键匹配
+        # 时返回 None 一致)。不再每次深拷全量快照。
+        self._ensure_derived()
+        strong = self._strong_index.get(name)
+        if strong is not None:
+            return dict(strong)
+        unique = self._display_unique.get(name)
+        return dict(unique) if unique is not None else None
 
     # ── §7 三方 skill ux 定位 / 版本 / 查询 ──────────────────────
     # 三方 skill 无 git → 版本号用 SKILL.md 内容 sha256 前 16 位；side 恒 "main"
