@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import math
+from operator import attrgetter, itemgetter
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Callable, Optional
@@ -78,11 +79,12 @@ class SkillRecommendEngine:
         self.skill_dir = Path(skill_dir)
         self.traj_root = Path(traj_root)
         self.embed_client = embed_client
-        self.rcfg = recommend_config(config)
+        recommend_config(config)  # fail-loud：构造期就拒掉畸形 recommend 段
         self.profile_store = ProfileStore(profile_db)
         self.reco_store = RecoStore(profile_db)
-        self.canary_cfg = canary_config or CanaryConfig.from_dict(config.get("canary", {}))
-        self.staging_need = self.rcfg["staging_need"] or self.canary_cfg.min_samples
+        # 显式传入的 canary 配置是**覆盖**（测试/离线 worker 用），None 时
+        # canary_cfg 属性每次现取 self.config 的 canary 段（热生效）。
+        self._canary_override = canary_config
         self._skill_index_cache: Optional[dict] = None
         self._skillhub_cache: Optional[tuple[tuple, list[dict]]] = None
         # 合并候选池(names/embs/is_hub)客户端无关,只随 skillhub 缓存 / .skill_index
@@ -98,6 +100,31 @@ class SkillRecommendEngine:
         self._profile_fp_cache: dict[str, tuple] = {}
         self.skillhub = SkillHub.from_config(config, embed_client)
         self.client_registry = client_registry  # 用于 user_name → 目录名解析
+
+    # ── 热生效配置（现取，不快照） ─────────────────────────────────
+    # ``recommend.quality_ratio`` / ``staging_need`` 与 ``canary`` 都是
+    # HOT_RELOAD 段：admin_config_reload 原地 mutate serve 进程的 _config dict
+    # （engine 持同一引用），故每次现取即热生效。曾在 __init__ 里快照成
+    # self.rcfg / self.staging_need，导致面板改完静默不生效、必须重启 serve
+    # （invalidate_cache 只清 skill 索引缓存，不会重解析配置）。
+
+    @property
+    def rcfg(self) -> dict:
+        """现取 ``recommend`` 段（已校验）。畸形值照常 fail-loud 抛 ValueError。"""
+        return recommend_config(self.config)
+
+    @property
+    def canary_cfg(self) -> CanaryConfig:
+        """构造时显式传入的覆盖优先；否则现取 ``canary`` 段。"""
+        if self._canary_override is not None:
+            return self._canary_override
+        return CanaryConfig.from_dict(self.config.get("canary", {}) or {})
+
+    @property
+    def staging_need(self) -> int:
+        """推荐侧达量阈值。单一推导来源：``recommend.staging_need``，
+        未配（None）时复用 ``canary.min_samples``。"""
+        return self.rcfg["staging_need"] or self.canary_cfg.min_samples
 
     # ─§6 三方 skill 检索池 ────────────────────────────────────────
     def _skillhub_entries(self) -> list[dict]:
@@ -255,7 +282,7 @@ class SkillRecommendEngine:
                 "use_count": len(scores),
                 "avg_score": sum(scores) / len(scores),
             })
-        out.sort(key=lambda d: d["use_count"], reverse=True)
+        out.sort(key=itemgetter("use_count"), reverse=True)
         return out
 
     def _user_used_skills(self, user_id: str) -> list[dict]:
@@ -272,7 +299,7 @@ class SkillRecommendEngine:
             "used_skills": sorted(atom.used_skills or []),
             "ux_score": atom.ux_score,
             "tags": sorted(atom.tags or []),
-        } for atom in sorted(atoms, key=lambda item: item.atom_id)]
+        } for atom in sorted(atoms, key=attrgetter("atom_id"))]
         encoded = json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
@@ -281,7 +308,7 @@ class SkillRecommendEngine:
     def update_user_interest(
         self,
         client_interest: "ClientInterest",
-        task_atom=None,
+        task_atom=None,  # noqa: ARG002 — 触发事件；当前以 atom store 为单一真源重扫
         *,
         should_commit: Optional[Callable[[], bool]] = None,
     ) -> ProfileUpdateResult:
@@ -292,7 +319,7 @@ class SkillRecommendEngine:
         """
         # pylint: disable=unused-argument
         user_id = client_interest.user_id
-        snapshot = sorted(self._user_atoms(user_id), key=lambda item: item.atom_id)
+        snapshot = sorted(self._user_atoms(user_id), key=attrgetter("atom_id"))
         revision = self._atom_revision(snapshot)
         model = getattr(self.embed_client, "model", "") or ""
         persisted = self.profile_store.get_revision(user_id)
@@ -437,11 +464,12 @@ class SkillRecommendEngine:
                 )
                 for s in pool
             }
-            quality_ordered = sorted(
-                pool,
-                key=lambda s: quality_keys[s.name],
-                reverse=True,
-            )
+            # decorate-sort-undecorate：排序键是"拿 skill.name 查表"，itemgetter
+            # 表达不了对象→键的映射，故先把键贴成元组首位再排（禁 lambda）。
+            # list.sort 稳定且只比较首位，与原 sorted(reverse=True) 的并列次序一致。
+            decorated = [(quality_keys[skill.name], skill) for skill in pool]
+            decorated.sort(key=itemgetter(0), reverse=True)
+            quality_ordered = [skill for _key, skill in decorated]
         quality = quality_ordered[:qn]
         quality_names = {s.name for s in quality}
 
@@ -637,12 +665,10 @@ class SkillRecommendEngine:
                   if uid != client_user.user_id]
         if not others:
             return []
-        scored = sorted(
-            others,
-            key=lambda um: float(np.asarray(um[1], dtype=float) @ mine),
-            reverse=True,
-        )
-        return [uid for uid, _m in scored[:top_k]]
+        scored = [(uid, float(np.asarray(mean, dtype=float) @ mine))
+                  for uid, mean in others]
+        scored.sort(key=itemgetter(1), reverse=True)
+        return [uid for uid, _score in scored[:top_k]]
 
     # ── 5.7 find_tag_for_user / find_tag_for_skill ────────────────
     def _all_tags_with_embeds(self) -> list[tuple[str, np.ndarray]]:
@@ -681,12 +707,10 @@ class SkillRecommendEngine:
         tag_vecs = self._all_tags_with_embeds()
         if not tag_vecs:
             return []
-        scored = sorted(
-            tag_vecs,
-            key=lambda tv: float(np.asarray(tv[1], dtype=float) @ mine),
-            reverse=True,
-        )
-        return [t for t, _v in scored[:top_k]]
+        scored = [(tag, float(np.asarray(vec, dtype=float) @ mine))
+                  for tag, vec in tag_vecs]
+        scored.sort(key=itemgetter(1), reverse=True)
+        return [tag for tag, _score in scored[:top_k]]
 
     def find_tag_for_skill(self, skill: "Skill", top_k: int = 10) -> list[str]:
         """该 skill 被路由 atom 的 ``AtomTask.tags`` 按 tag embedding 与 skill 向量的

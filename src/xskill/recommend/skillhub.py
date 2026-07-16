@@ -68,7 +68,9 @@ def _tokenize(text: str) -> list[str]:
     return tokens
 
 
-def _safe_id_part(value: str) -> str:
+def safe_id_part(value: str) -> str:
+    """display_name → 可安全做目录/id 片段的字符串（跨模块公开:上传落盘也用它，
+    必须与 skill_id 的生成保持同一实现，否则同名 skill 会落到两个目录）。"""
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
     return safe or "skill"
 
@@ -166,7 +168,7 @@ class SkillHub:
                     content_sha, display_name, description,
                 )
             path_hash = _path_hash(rel)
-            skill_id = f"{_safe_id_part(display_name)}@{path_hash}"
+            skill_id = f"{safe_id_part(display_name)}@{path_hash}"
             entries.append({
                 "source": "skillhub",
                 "name": skill_id,

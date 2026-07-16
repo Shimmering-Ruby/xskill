@@ -18,7 +18,7 @@ LLM 和 Embedding 分别配置 base_url / model / api_key
 
 from __future__ import annotations
 
-import os, json, logging, time
+import os, logging
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -289,7 +289,15 @@ class EmbedClient:
         return vec
 
     def encode_batch(self, texts: list[str]) -> np.ndarray:
-        """批量文本 → (n, dim) 矩阵，逐条调用 embedding 端点"""
+        """批量文本 → (n, dim) 矩阵，逐条调用 embedding 端点。
+
+        不做限速：这里曾每 10 条 ``time.sleep(0.1)``，均摊 10ms/请求——挡不住任何
+        真实配额，只是把每轮 embedding 拖慢，且在优雅退出时不可中断（sleep 禁令
+        的由来）。真限速要走 ``utils/rate_limit`` 的令牌桶，但它按 ``rate_limit``
+        配置段建桶，embedding 段没有该配置；且用无配置的 ``get_or_create_bucket``
+        占坑会污染按 base_url 共享的注册表（先建的无限桶会让随后配了 rpm 的
+        LLMClient 静默失去限流）。故此处不限速，需要时另行引入 embedding 侧配置。
+        """
         from tqdm import tqdm
         all_vecs = []
 
@@ -300,9 +308,6 @@ class EmbedClient:
             except Exception as e:
                 logger.error(f"Embedding 失败 (第 {i} 条): {e}")
                 raise
-
-            if (i + 1) % 10 == 0:
-                time.sleep(0.1)  # 简单限速
 
         result = np.stack(all_vecs)
         if self.dim == 0:

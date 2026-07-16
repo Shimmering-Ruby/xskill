@@ -288,6 +288,38 @@ class TeamClient:
             self._uninstall_from_ecosystems(repo_dir)
             shutil.rmtree(repo_dir, ignore_errors=True)
             logger.info("cleanup removed stale skill: %s", repo_dir.name)
+        # 上面的 working-copy 驱动清理看不见"工作副本已被 out-of-band 删除、生态
+        # link 却还在"的孤儿；按生态目录反向再收一遍。
+        self._reap_orphaned_ecosystem_links(keep)
+
+    def _reap_orphaned_ecosystem_links(self, keep: set[str]) -> None:
+        """扫生态 dest 根目录，收掉 manifest 已不含、且指向 xskill 工作副本根的
+        link/junction（含工作副本被删后留下的 dangling 孤儿）。
+
+        working-copy 驱动的 cleanup 遍历 ``skill_dir``，看不到"工作副本已消失但
+        生态 link 还在"的孤儿——它们永远清不掉，在 ``~/.claude/skills`` 等目录越积
+        越多（Windows 卸 junction 失败尤甚）。这里按生态目录反向收敛：仅当 link 的
+        realpath 落在 ``skill_dir`` 根内（= xskill 自己装的）且名字不在 keep 集时才
+        删；真目录 / 手动建 / 指向别处的第三方 link 一律不碰。名字在 keep 里的
+        dangling link 留给 reconcile 重装，不在这里删。
+        """
+        skill_root_key = _source_path_key(self.skill_dir)
+        for root in _ecosystem_skill_roots(self.home_root):
+            if not root.is_dir():
+                continue
+            for entry in sorted(root.iterdir()):
+                if entry.name in keep:
+                    continue  # manifest 仍需要 → 保留（dangling 也留给 reconcile 重装）
+                # 只收 link/junction：真目录（手动建 skill）与 copy 安装一律不碰。
+                # 复用本模块 _installed_mode——dangling symlink 仍报 "symlink"。
+                if _installed_mode(entry) not in {"symlink", "junction"}:
+                    continue
+                entry_key = _source_path_key(entry)
+                if not (entry_key == skill_root_key
+                        or entry_key.startswith(skill_root_key + os.sep)):
+                    continue  # link 不指向 xskill 工作副本根 → 第三方安装，跳过
+                if _remove_owned_install_target(entry):
+                    logger.info("reaped orphaned ecosystem link: %s", entry)
 
     def _uninstall_from_ecosystems(self, repo_dir: Path) -> None:
         uninstall_skill_from_ecosystems(
@@ -422,14 +454,14 @@ def _targets_for_ecosystem(ecosystem: str, skill_name: str,
     return roots.get(ecosystem, [])
 
 
-def _all_install_targets(skill_name: str, home_root: Path) -> list[Path]:
-    """返回当前所有安装器使用的目标；不依赖生态当前是否仍可探测。"""
+def _ecosystem_skill_roots(home_root: Path) -> list[Path]:
+    """所有安装器的 skill 目标根目录；不依赖生态当前是否仍可探测。"""
     from xskill.ecosystems import (
         _agents_skills_path, _cc_skills_path, _cursor_skills_path,
         _nga3_skills_path, _ngagent_skills_path,
     )
 
-    roots = [
+    return [
         _cc_skills_path(home_root),
         _agents_skills_path(home_root),
         _nga3_skills_path(home_root),
@@ -438,7 +470,11 @@ def _all_install_targets(skill_name: str, home_root: Path) -> list[Path]:
         home_root / ".trae-cn" / "skills",
         home_root / ".trae" / "skills",
     ]
-    return [root / skill_name for root in roots]
+
+
+def _all_install_targets(skill_name: str, home_root: Path) -> list[Path]:
+    """返回当前所有安装器使用的目标；不依赖生态当前是否仍可探测。"""
+    return [root / skill_name for root in _ecosystem_skill_roots(home_root)]
 
 
 def _lexical_path_key(path: Path) -> str:

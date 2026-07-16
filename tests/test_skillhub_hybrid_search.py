@@ -420,7 +420,6 @@ def _make_team_client(tmp_path: Path, *, skillhub) -> TestClient:
         client_registry=ClientRegistry(tmp_path / "clients.db"),
         skill_dir=skill_dir,
         traj_root=tmp_path / "team_traj",
-        probability=0.2, ranked_slots=80, total_slots=100,
         register_dir=lambda path, label: None,
         skillhub=skillhub,
     )

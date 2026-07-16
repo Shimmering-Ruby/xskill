@@ -305,7 +305,11 @@ def test_skills_catalog_cache_ttl_reloads_refs_content_and_candidates(
     root = tmp_path / "skills"
     root.mkdir()
     skill = _write_catalog_skill(root, "alpha", "version one", branch="main")
+    # 清单缓存与它内部复用的 sync 仓快照(_rows_from_manifest_snapshot 的
+    # max_age_seconds)同用这个 TTL,两处都要缩短才能观察到过期重扫。
     monkeypatch.setattr(dashboard_metrics, "_SKILLS_CATALOG_TTL_SECONDS", 0.02)
+    monkeypatch.setattr(
+        dashboard_metrics._skills_catalog_cache, "ttl_seconds", 0.02)
 
     first = skills_catalog(root)[0]
     (skill / ".git" / "refs" / "heads" / "staging").write_text("sha2\n", encoding="utf-8")
@@ -422,7 +426,7 @@ def test_skills_catalog_concurrent_failure_is_shared_and_cleans_flight(
     assert all(isinstance(error, FileNotFoundError) for error in errors)
     assert len({id(error) for error in errors}) == len(errors)
     key = dashboard_metrics._skills_catalog_cache_key(root, None)
-    assert key not in dashboard_metrics._skills_catalog_flights
+    assert dashboard_metrics._skills_catalog_cache.in_flight_count == 0
     assert key not in dashboard_metrics._skills_catalog_cache
 
     monkeypatch.setattr(
@@ -431,10 +435,9 @@ def test_skills_catalog_concurrent_failure_is_shared_and_cleans_flight(
 
 
 def test_skills_catalog_cache_has_bounded_number_of_keys(tmp_path, monkeypatch):
-    monkeypatch.setattr(dashboard_metrics, "_SKILLS_CATALOG_CACHE_MAX_ENTRIES", 2)
-    with dashboard_metrics._skills_catalog_cache_lock:
-        dashboard_metrics._skills_catalog_cache.clear()
-        dashboard_metrics._skills_catalog_flights.clear()
+    monkeypatch.setattr(
+        dashboard_metrics._skills_catalog_cache, "max_entries", 2)
+    dashboard_metrics._skills_catalog_cache.clear()
 
     for index in range(3):
         root = tmp_path / f"skills-{index}"
@@ -442,9 +445,8 @@ def test_skills_catalog_cache_has_bounded_number_of_keys(tmp_path, monkeypatch):
         _write_catalog_skill(root, f"skill-{index}", f"description {index}")
         assert len(skills_catalog(root)) == 1
 
-    with dashboard_metrics._skills_catalog_cache_lock:
-        assert len(dashboard_metrics._skills_catalog_cache) == 2
-        assert not dashboard_metrics._skills_catalog_flights
+    assert len(dashboard_metrics._skills_catalog_cache) == 2
+    assert dashboard_metrics._skills_catalog_cache.in_flight_count == 0
 
 
 def test_skills_catalog_returns_independent_copies(tmp_path):
@@ -570,3 +572,171 @@ def test_by_model(tmp_path):
     rows = {r["model"]: r for r in DashboardMetrics(db_path=db).by_model()}
     assert rows["deepseek-v4-flash"]["trajs"] == 3
     assert "skills" not in rows["deepseek-v4-pro"]  # 死列已下线
+
+
+# ── L1:使用打分事实源(.ux_scores.jsonl)的短时缓存 + 单飞 ──────────────
+
+def _write_ux_scores(root, skill_name, records):
+    """在 <root>/<skill>/.ux_scores.jsonl 落几条打分记录（写入侧的真实形态）。"""
+    import json
+    skill = root / skill_name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / ".ux_scores.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8")
+    return skill
+
+
+def _count_ux_reads(monkeypatch):
+    """统计 load_ux_scores 的真实读盘次数（= 每个 skill 目录一次）。"""
+    import xskill.canary as canary_module
+    reads: list[str] = []
+    reads_lock = threading.Lock()
+    real_load = canary_module.load_ux_scores
+
+    def counting_load(skill_dir):
+        with reads_lock:
+            reads.append(str(skill_dir))
+        return real_load(skill_dir)
+
+    monkeypatch.setattr(canary_module, "load_ux_scores", counting_load)
+    return reads
+
+
+def test_load_usage_records_scans_disk_once_across_repeated_calls(
+        tmp_path, monkeypatch):
+    """L1 头号:8 个端点各调一次 load_usage_records,只准扫一次盘。"""
+    root = tmp_path / "skills"
+    for index in range(20):
+        _write_ux_scores(root, f"skill-{index:02d}", [
+            {"skill_name": f"skill-{index:02d}", "side": "main",
+             "commit_sha": "sha1", "score": 8, "scored_at": "2026-07-01T00:00:00",
+             "atom_id": f"atom_traj{index}_0001"},
+        ])
+    dashboard_metrics._usage_records_cache.clear()
+    reads = _count_ux_reads(monkeypatch)
+
+    first = dashboard_metrics.load_usage_records(root)
+    for _ in range(7):
+        assert dashboard_metrics.load_usage_records(root) == first
+
+    assert len(first) == 20
+    assert len(reads) == 20          # 一次扫描 = 每个 skill 目录读一次
+    assert first[0]["traj_id"] == "traj0"   # 归一化口径不变
+
+
+def test_load_usage_records_concurrent_calls_share_one_scan(
+        tmp_path, monkeypatch):
+    """单飞:缓存到期瞬间的并发请求波次只扫一次盘,不惊群。"""
+    root = tmp_path / "skills"
+    for index in range(30):
+        _write_ux_scores(root, f"skill-{index:02d}", [
+            {"skill_name": f"skill-{index:02d}", "side": "main",
+             "commit_sha": "sha1", "score": 5, "scored_at": "2026-07-01T00:00:00",
+             "atom_id": f"atom_traj{index}_0001"},
+        ])
+    dashboard_metrics._usage_records_cache.clear()
+    reads = _count_ux_reads(monkeypatch)
+    barrier = threading.Barrier(32)
+
+    def load():
+        barrier.wait()
+        return dashboard_metrics.load_usage_records(root)
+
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        results = [future.result(timeout=10)
+                   for future in [pool.submit(load) for _ in range(32)]]
+
+    assert len(reads) == 30          # 30 个 skill 各读一次 = 只扫了一遍
+    assert all(len(records) == 30 for records in results)
+
+
+def test_load_usage_records_ttl_expiry_picks_up_new_scores(
+        tmp_path, monkeypatch):
+    """TTL 内读缓存,过期后能看到新写入的打分（缓存不会把看板钉死在旧数据）。"""
+    root = tmp_path / "skills"
+    _write_ux_scores(root, "alpha", [
+        {"skill_name": "alpha", "side": "main", "commit_sha": "sha1",
+         "score": 6, "scored_at": "2026-07-01T00:00:00",
+         "atom_id": "atom_traj_0001"},
+    ])
+    dashboard_metrics._usage_records_cache.clear()
+    monkeypatch.setattr(
+        dashboard_metrics._usage_records_cache, "ttl_seconds", 0.02)
+
+    assert len(dashboard_metrics.load_usage_records(root)) == 1
+    _write_ux_scores(root, "alpha", [
+        {"skill_name": "alpha", "side": "main", "commit_sha": "sha1",
+         "score": 6, "scored_at": "2026-07-01T00:00:00",
+         "atom_id": "atom_traj_0001"},
+        {"skill_name": "alpha", "side": "staging", "commit_sha": "sha2",
+         "score": 9, "scored_at": "2026-07-02T00:00:00",
+         "atom_id": "atom_traj_0002"},
+    ])
+    assert len(dashboard_metrics.load_usage_records(root)) == 1   # TTL 内仍是旧的
+    time.sleep(0.04)
+    refreshed = dashboard_metrics.load_usage_records(root)
+    assert [record["sha"] for record in refreshed] == ["sha1", "sha2"]
+
+
+def test_load_usage_records_isolates_skill_dirs(tmp_path):
+    """不同 skill_dir 各自成键,不会串味。"""
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    _write_ux_scores(root_a, "alpha", [
+        {"skill_name": "alpha", "side": "main", "commit_sha": "sha-a",
+         "score": 1, "scored_at": "2026-07-01T00:00:00"}])
+    _write_ux_scores(root_b, "alpha", [
+        {"skill_name": "alpha", "side": "main", "commit_sha": "sha-b",
+         "score": 2, "scored_at": "2026-07-01T00:00:00"}])
+    dashboard_metrics._usage_records_cache.clear()
+
+    assert [r["sha"] for r in dashboard_metrics.load_usage_records(root_a)] == ["sha-a"]
+    assert [r["sha"] for r in dashboard_metrics.load_usage_records(root_b)] == ["sha-b"]
+
+
+def test_load_usage_records_returns_independent_copies(tmp_path):
+    """调用方改自己那份改不到缓存(缓存内的记录永不被改写)。"""
+    root = tmp_path / "skills"
+    _write_ux_scores(root, "alpha", [
+        {"skill_name": "alpha", "side": "main", "commit_sha": "sha1",
+         "score": 6, "scored_at": "2026-07-01T00:00:00"}])
+    dashboard_metrics._usage_records_cache.clear()
+
+    first = dashboard_metrics.load_usage_records(root)
+    first[0]["skill"] = "caller mutation"
+    first[0]["score"] = 999
+    first.append({"skill": "injected"})
+
+    second = dashboard_metrics.load_usage_records(root)
+    assert len(second) == 1
+    assert (second[0]["skill"], second[0]["score"]) == ("alpha", 6)
+
+
+def test_dashboard_panels_share_one_usage_scan(tmp_path, monkeypatch):
+    """overview / canary / skill 详情 三块面板共用一次扫描（各自独立调用）。"""
+    db = tmp_path / "p.db"
+    conn = get_connection(db)
+    conn.execute("INSERT INTO watch_dirs(id,path,label,ecosystem)"
+                 " VALUES(1,'/cc','cc','claude_code')")
+    conn.execute("INSERT INTO trajectories(watch_dir_id,filename,status,"
+                 "tasks_extracted) VALUES(1,'traj0.md','done',2)")
+    conn.commit()
+    conn.close()
+    root = tmp_path / "skills"
+    _write_ux_scores(root, "alpha", [
+        {"skill_name": "alpha", "side": "main", "commit_sha": "sha1",
+         "score": 8, "scored_at": "2026-07-01T00:00:00",
+         "atom_id": "atom_traj0_0001"}])
+    dashboard_metrics._usage_records_cache.clear()
+    reads = _count_ux_reads(monkeypatch)
+
+    metrics = DashboardMetrics(db_path=db, skill_dir=root)
+    overview = metrics.overview()
+    sides = metrics.canary_sides()
+    detail = metrics.skill_detail("alpha")
+
+    assert len(reads) == 1           # 三块面板 + drill-in 只读了一次盘
+    assert (overview["avg_ux"], overview["ux_n"]) == (8.0, 1)
+    assert sides == [{"side": "main", "uses": 1, "avg_ux": 8.0}]
+    assert detail["total_triggers"] == 1

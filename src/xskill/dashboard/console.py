@@ -9,6 +9,7 @@ team 上下文（skill_dir / slot 配置 / ClientRegistry）在 app startup 才�
 from __future__ import annotations
 
 import logging
+import operator
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -16,11 +17,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from xskill.dashboard.auth import require_admin, require_user
+from xskill.dashboard.metrics import SingleFlightTtlCache
 from xskill.pipeline.registry import (
     GLOBAL_PREF_KEY,
     PinQuotaExceeded,
     clear_skill_pref,
     effective_prefs,
+    manifest_control_plane_snapshot,
     pooled_connection,
     prefs_for,
     purge_skill_records,
@@ -32,10 +35,18 @@ from xskill.pipeline.registry import (
 
 logger = logging.getLogger("xskill.dashboard.console")
 
+# 推荐×触发矩阵一次要读全库 .ux_scores.jsonl + 全量 recommendation_log，而
+# /my/reco-trigger（每个登录用户各一次，只取自己那一行）与 /admin/users-matrix
+# 都靠它——按 (registry.db, skill_dir, client 注册表) 短时缓存 + 单飞，一个请求
+# 波次只算一次全量矩阵。
+_RECO_TRIGGER_TTL_SECONDS = 5.0
+_reco_trigger_cache = SingleFlightTtlCache(
+    ttl_seconds=_RECO_TRIGGER_TTL_SECONDS, max_entries=32)
+
 
 def _team_ctx():
-    from xskill.team.server.api import _ctx
-    return _ctx
+    from xskill.team.server.api import team_context
+    return team_context()
 
 
 def _require_team_ctx():
@@ -48,8 +59,10 @@ def _require_team_ctx():
 
 
 def _total_slots() -> int:
-    ctx = _team_ctx()
-    return int(getattr(ctx, "total_slots", 100) or 100)
+    """现取 team.server.skill_slots——热生效,不吃 _ctx 启动快照。"""
+    from xskill.api import app as app_mod
+    from xskill.config import team_server_slots_config
+    return team_server_slots_config(app_mod._config or {})["skill_slots"]
 
 
 def _traj_user_map(db_path: Optional[Path]) -> dict[str, str]:
@@ -92,54 +105,67 @@ def reco_trigger_for_users(*, db_path: Optional[Path], skill_dir: Path,
         exposures>=5 且 rate<0.1               → 常推不用→建议停推
         rate>=0.5 且 triggers>=2               → 高价值
         其余                                    → 正常
+
+    全量矩阵按 ``_RECO_TRIGGER_TTL_SECONDS`` 短时缓存 + 单飞（键=registry.db +
+    skill_dir + client 注册表库）：/my/reco-trigger 每个用户一次请求、
+    /admin/users-matrix 一次请求，同一波次只算一次。调用方拿到的是独立可改写
+    的副本，缓存内的矩阵永不被改写。
     """
     from xskill.dashboard.metrics import load_usage_records
 
-    c2u = _client_to_user(registry)
-    with pooled_connection(db_path) as conn:
-        reco_rows = conn.execute(
-            "SELECT client_id, skill, ts FROM recommendation_log").fetchall()
+    def build_table() -> dict[str, list[dict]]:
+        c2u = _client_to_user(registry)
+        with pooled_connection(db_path) as conn:
+            reco_rows = conn.execute(
+                "SELECT client_id, skill, ts FROM recommendation_log").fetchall()
 
-    exposures: dict[tuple, int] = {}
-    for r in reco_rows:
-        user = c2u.get(r["client_id"] or "", r["client_id"] or "")
-        key = (user, r["skill"] or "")
-        exposures[key] = exposures.get(key, 0) + 1
+        exposures: dict[tuple, int] = {}
+        for r in reco_rows:
+            user = c2u.get(r["client_id"] or "", r["client_id"] or "")
+            key = (user, r["skill"] or "")
+            exposures[key] = exposures.get(key, 0) + 1
 
-    traj_user = _traj_user_map(db_path)
-    triggers: dict[tuple, int] = {}
-    last_trigger: dict[tuple, str] = {}
-    for rec in load_usage_records(skill_dir):
-        user = traj_user.get(rec.get("traj_id") or "", "")
-        if not user:
-            continue
-        key = (user, rec.get("skill") or "")
-        triggers[key] = triggers.get(key, 0) + 1
-        ts = rec.get("scored_at") or ""
-        if ts > last_trigger.get(key, ""):
-            last_trigger[key] = ts
+        traj_user = _traj_user_map(db_path)
+        triggers: dict[tuple, int] = {}
+        last_trigger: dict[tuple, str] = {}
+        for rec in load_usage_records(skill_dir):
+            user = traj_user.get(rec.get("traj_id") or "", "")
+            if not user:
+                continue
+            key = (user, rec.get("skill") or "")
+            triggers[key] = triggers.get(key, 0) + 1
+            ts = rec.get("scored_at") or ""
+            if ts > last_trigger.get(key, ""):
+                last_trigger[key] = ts
 
-    out: dict[str, list[dict]] = {}
-    for (user, skill), n_exp in exposures.items():
-        n_trig = triggers.get((user, skill), 0)
-        rate = n_trig / n_exp if n_exp else 0.0
-        if n_exp >= 3 and n_trig == 0:
-            verdict = "零触发→建议停推"
-        elif n_exp >= 5 and rate < 0.1:
-            verdict = "常推不用→建议停推"
-        elif rate >= 0.5 and n_trig >= 2:
-            verdict = "高价值"
-        else:
-            verdict = "正常"
-        out.setdefault(user, []).append({
-            "skill": skill, "exposures": n_exp, "triggers": n_trig,
-            "rate": round(rate, 3),
-            "last_trigger": last_trigger.get((user, skill), ""),
-            "verdict": verdict,
-        })
-    for rows in out.values():
-        rows.sort(key=lambda r: (-r["exposures"], r["skill"]))
-    return out
+        out: dict[str, list[dict]] = {}
+        for (user, skill), n_exp in exposures.items():
+            n_trig = triggers.get((user, skill), 0)
+            rate = n_trig / n_exp if n_exp else 0.0
+            if n_exp >= 3 and n_trig == 0:
+                verdict = "零触发→建议停推"
+            elif n_exp >= 5 and rate < 0.1:
+                verdict = "常推不用→建议停推"
+            elif rate >= 0.5 and n_trig >= 2:
+                verdict = "高价值"
+            else:
+                verdict = "正常"
+            out.setdefault(user, []).append({
+                "skill": skill, "exposures": n_exp, "triggers": n_trig,
+                "rate": round(rate, 3),
+                "last_trigger": last_trigger.get((user, skill), ""),
+                "verdict": verdict,
+            })
+        for rows in out.values():
+            # 曝光数降序、同曝光按 skill 名升序（禁 lambda：两段稳定排序）
+            rows.sort(key=operator.itemgetter("skill"))
+            rows.sort(key=operator.itemgetter("exposures"), reverse=True)
+        return out
+
+    cache_key = (str(db_path), str(Path(skill_dir)), str(registry.db_path))
+    cached = _reco_trigger_cache.get_or_build(cache_key, build_table)
+    # 行里全是标量，逐条 dict() 即与深拷贝等价——调用方改副本改不到缓存。
+    return {user: [dict(row) for row in rows] for user, rows in cached.items()}
 
 
 def _emit_pin_event(db_path: Optional[Path], *, actor: str, skill: str,
@@ -187,6 +213,10 @@ class ConfigPayload(BaseModel):
 # llm/watch_dirs 涉及进程级资源(client 连接池/watcher 注册),改动需重启 serve。
 HOT_RELOAD_SECTIONS = ("dashboard", "canary", "recommend", "skillhub")
 RESTART_SECTIONS = ("llm", "llm_skill", "embedding", "watcher", "team")
+# team 段整体是重启域(join_token/路径/registry 接线),但这几个子键是纯调优数字,
+# 由 api.live_manifest_tuning() 每请求现取 → 改它们不需要重启。只有改到 team
+# 下的其它子键才真要重启,否则 needs_restart 会把已经热的改动误标成要重启。
+HOT_TEAM_SERVER_KEYS = ("skill_slots", "ranked_slots")
 
 
 def _validate_config_text(raw: str) -> dict:
@@ -202,10 +232,34 @@ def _validate_config_text(raw: str) -> dict:
     dashboard_config(cfg)  # admins 类型等
     from xskill.canary import CanaryConfig
     CanaryConfig.from_dict(cfg.get("canary", {}) or {})
+    from xskill.config import team_server_slots_config
+    team_server_slots_config(cfg)  # 槽位是热生效的,非法值必须落盘前就拒
     llm = cfg.get("llm", {}) or {}
     if llm and not llm.get("base_url"):
         raise ValueError("llm.base_url 不能为空")
     return cfg
+
+
+def _team_change_is_hot_only(old_cfg: dict, new_cfg: dict) -> bool:
+    """team 段这次的改动是否**只**碰了热子键(HOT_TEAM_SERVER_KEYS)。
+
+    只碰热子键 → 现取即生效,不必重启;碰了 team 下任何其它内容
+    (join_token / 路径 / registry 接线等)→ 仍要重启。
+    """
+    old_team = old_cfg.get("team") or {}
+    new_team = new_cfg.get("team") or {}
+    # team 下 server 之外的任何差异 → 要重启
+    old_rest = {k: v for k, v in old_team.items() if k != "server"}
+    new_rest = {k: v for k, v in new_team.items() if k != "server"}
+    if old_rest != new_rest:
+        return False
+    old_server = dict(old_team.get("server") or {})
+    new_server = dict(new_team.get("server") or {})
+    # 摘掉热子键后仍有差异 → 要重启
+    for key in HOT_TEAM_SERVER_KEYS:
+        old_server.pop(key, None)
+        new_server.pop(key, None)
+    return old_server == new_server
 
 
 # ---------------------------------------------------------------------------
@@ -221,16 +275,19 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
     def my_manifest(ident=Depends(require_user)):
         """登录用户视角的 slot 清单 + 已屏蔽组。槽位 chip 标注注入类型。"""
         ctx = _require_team_ctx()
+        from xskill.team.server.api import live_manifest_tuning
         from xskill.team.server.skill_manifest import build_manifest
         user = ident["user"]
         prefs = effective_prefs(user, db_path=db_path)
         client_id = ctx.client_registry.find_by_user_name(user) or user
+        # 与 /sync 同源现取:面板改完免重启即生效
+        total_slots, ranked_slots, probability = live_manifest_tuning()
         resp = build_manifest(
             client_id=client_id,
             skill_dir=ctx.skill_dir,
-            probability=ctx.probability,
-            ranked_slots=ctx.ranked_slots,
-            total_slots=ctx.total_slots,
+            probability=probability,
+            ranked_slots=ranked_slots,
+            total_slots=total_slots,
             traj_root=ctx.traj_root,
             prefs=prefs,
             retired=retired_skills(db_path=db_path),
@@ -253,7 +310,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                 "blocked": [{"skill_name": r["skill_name"],
                              "set_by": r["set_by"], "ts": r["ts"]}
                             for r in blocked_rows],
-                "total_slots": ctx.total_slots}
+                "total_slots": total_slots}
 
     @router.post("/my/prefs")
     def my_prefs(req: MyPrefRequest, ident=Depends(require_user)):
@@ -333,7 +390,8 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             e["avg_score"] = round(sum(scores) / len(scores), 2) if scores else None
             e["users"] = [{"user": u, "count": c}
                           for u, c in sorted(e["users"].items(),
-                                             key=lambda kv: -kv[1])]
+                                             key=operator.itemgetter(1),
+                                             reverse=True)]
             usage.append(e)
         return {
             "user": user,
@@ -386,16 +444,25 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
 
     @router.get("/admin/users-matrix")
     def admin_users_matrix(_=Depends(require_admin)):
-        """用户 × 推送/配置矩阵：被推荐数/pinned·blocked 计数/触发率。"""
+        """用户 × 推送/配置矩阵：被推荐数/pinned·blocked 计数/触发率。
+
+        偏好走 ``manifest_control_plane_snapshot`` 一次性取全表再按 user_key 分组
+        （口径同 ``prefs_for``：只算该用户自己的行，全局行单独出 global_pinned），
+        不再每个用户各查一次库（N+1）。
+        """
         ctx = _require_team_ctx()
         table = reco_trigger_for_users(
             db_path=db_path, skill_dir=Path(ctx.skill_dir),
             registry=ctx.client_registry)
+        snapshot = manifest_control_plane_snapshot(db_path=db_path)
+        prefs_by_user: dict[str, dict[str, str]] = {}
+        for pref_row in snapshot["prefs"]:
+            prefs_by_user.setdefault(
+                pref_row["user_key"], {})[pref_row["skill_name"]] = pref_row["pref"]
         rows = []
         for client in ctx.client_registry.list():
             user = client.get("user_name") or client["client_id"]
-            prefs = {r["skill_name"]: r["pref"]
-                     for r in prefs_for(user, db_path=db_path)}
+            prefs = prefs_by_user.get(user, {})
             rt = table.get(user, [])
             n_exp = sum(r["exposures"] for r in rt)
             n_trig = sum(r["triggers"] for r in rt)
@@ -410,10 +477,11 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                 "blocked": sum(1 for p in prefs.values() if p == "blocked"),
                 "stale_advice": [r for r in rt if "停推" in r["verdict"]][:5],
             })
-        rows.sort(key=lambda r: r["user"])
-        global_pins = [r["skill_name"] for r in
-                       prefs_for(GLOBAL_PREF_KEY, db_path=db_path)
-                       if r["pref"] == "pinned"]
+        rows.sort(key=operator.itemgetter("user"))
+        # 快照按 (全局行优先, ts) 排序 → 全局行的相对顺序即 prefs_for 的 ts 序
+        global_pins = [pref_row["skill_name"] for pref_row in snapshot["prefs"]
+                       if pref_row["user_key"] == GLOBAL_PREF_KEY
+                       and pref_row["pref"] == "pinned"]
         return {"users": rows, "global_pinned": global_pins}
 
     @router.get("/admin/user/{user_key}/prefs")
@@ -463,31 +531,40 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
 
     @router.get("/admin/skills")
     def admin_skills(_=Depends(require_admin)):
-        """技能生命周期表：状态徽章 + 近 30 日使用数。"""
+        """技能生命周期表：状态徽章 + 近 30 日使用数。
+
+        状态取 ``skills_catalog`` 的短时缓存清单（其 ``state`` 已由同一次扫描读出
+        staging/main/baby 分支），不再逐个 skill 现读一次 git ref——十万级技能库
+        下那是每请求十万次文件读。清单口径比 SkillRepo 宽（它列所有非隐藏目录），
+        故这里补上 SkillRepo 的两条筛选：``references`` 与无 SKILL.md 的目录不是
+        skill，保持响应与旧实现逐条一致。
+        """
         ctx = _require_team_ctx()
-        from xskill.canary import has_staging
-        from xskill.dashboard.metrics import load_usage_records
-        from xskill.skill.repo import SkillRepo
+        from xskill.dashboard.metrics import load_usage_records, skills_catalog
         import datetime as _dt
+        skill_dir = Path(ctx.skill_dir)
         retired = retired_skills(db_path=db_path)
         cutoff = (_dt.datetime.now(_dt.timezone.utc)
                   - _dt.timedelta(days=30)).isoformat()
         usage30: dict[str, int] = {}
-        for rec in load_usage_records(Path(ctx.skill_dir)):
+        for rec in load_usage_records(skill_dir):
             if (rec.get("scored_at") or "") >= cutoff:
                 usage30[rec.get("skill") or ""] = \
                     usage30.get(rec.get("skill") or "", 0) + 1
         out = []
-        for s in SkillRepo(Path(ctx.skill_dir)):
-            if s.name in retired:
+        for entry in skills_catalog(skill_dir):
+            name = entry["name"]
+            if name == "references" or not (skill_dir / name / "SKILL.md").is_file():
+                continue
+            if name in retired:
                 state = "retired"
-            elif has_staging(s.path):
+            elif entry["state"] == "staging":
                 state = "canary"
             else:
                 state = "active"
-            out.append({"name": s.name, "state": state,
-                        "usage_30d": usage30.get(s.name, 0)})
-        out.sort(key=lambda r: r["name"])
+            out.append({"name": name, "state": state,
+                        "usage_30d": usage30.get(name, 0)})
+        out.sort(key=operator.itemgetter("name"))
         return {"skills": out}
 
     @router.post("/admin/skill/{name}/retire")
@@ -595,7 +672,10 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             app_mod._config.update(new_cfg)
         _invalidate_engine_cache()
         needs_restart = [k for k in changed if k in RESTART_SECTIONS]
-        hot = [k for k in changed if k not in RESTART_SECTIONS]
+        # team 段若只改了热子键(推荐个数等),现取即生效,别误标要重启
+        if "team" in needs_restart and _team_change_is_hot_only(old_cfg, new_cfg):
+            needs_restart.remove("team")
+        hot = [k for k in changed if k not in needs_restart]
         logger.info("admin %s reloaded config (hot=%s, needs_restart=%s)",
                     ident["user"], hot, needs_restart)
         return {"ok": True, "hot_reloaded": hot, "needs_restart": needs_restart}

@@ -29,6 +29,7 @@ import logging
 import re
 import sys
 from dataclasses import dataclass
+from operator import itemgetter
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,7 @@ class HybridSearch:
         corpus = [_tokenize(a.summary or a.intent) for a in atoms]
         bm25 = BM25Okapi(corpus)
         scores = bm25.get_scores(tokens)
-        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+        ranked = sorted(enumerate(scores), key=itemgetter(1), reverse=True)
         out: list[dict] = []
         for i, s in ranked[:top_k]:
             if s <= 0:
@@ -98,7 +99,7 @@ def search(
     query_text: str,
     top_k: int = 5,
     min_similarity: float = 0.0,
-    success_filter: str = "all",
+    success_filter: str = "all",  # noqa: ARG001 — atom 层无该字段,保留参数位见 docstring
     config: dict | None = None,
 ) -> list[dict]:
     """AtomTask 检索（HybridSearch union+dedup）。

@@ -8,6 +8,7 @@ skill 漏计——审计 P0-1）。
 from __future__ import annotations
 
 import copy
+import operator
 import threading
 import time
 from pathlib import Path
@@ -41,30 +42,44 @@ def load_usage_records(skill_dir: Optional[Path]) -> list[dict]:
     每条 ``{skill, side, sha, score, scored_at, atom_id, traj_id, user_model}``。
     atom 级记录（AtomCanary.append）与历史 traj 级记录（append_ux_score）
     统一到该视图；一条记录 = 一次真实使用打分（写入侧幂等去重）。
+
+    一次扫描要读遍全库每个 ``<skill>/.ux_scores.jsonl``（十万级 skill 库 = 每次
+    调用十万次文件读），而这份视图被八个看板端点各自独立调用——故按 skill_dir
+    做 ``_USAGE_RECORDS_TTL_SECONDS`` 的短时缓存 + 单飞：一个请求波次只扫一次盘，
+    ttl 到期后自然读到新写入的打分。
+
+    调用方拿到的每条记录都是独立的可改写副本（记录里全是 JSON 标量，逐条
+    ``dict()`` 即与深拷贝等价），缓存内的共享记录永不被调用方改写。
     """
-    from xskill.canary import load_ux_scores
     if not skill_dir:
         return []
     root = Path(skill_dir)
     if not root.is_dir():
         return []
-    out: list[dict] = []
-    for d in sorted(root.iterdir()):
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        for rec in load_ux_scores(d):
-            atom_id = rec.get("atom_id") or ""
-            out.append({
-                "skill": rec.get("skill_name") or d.name,
-                "side": rec.get("side") or "main",
-                "sha": rec.get("commit_sha") or "unknown",
-                "score": rec.get("score"),
-                "scored_at": rec.get("scored_at") or "",
-                "atom_id": atom_id,
-                "traj_id": rec.get("traj_id") or _traj_of_atom(atom_id),
-                "user_model": rec.get("user_model") or "",
-            })
-    return out
+
+    def build_records() -> list[dict]:
+        from xskill.canary import load_ux_scores
+        out: list[dict] = []
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            for rec in load_ux_scores(d):
+                atom_id = rec.get("atom_id") or ""
+                out.append({
+                    "skill": rec.get("skill_name") or d.name,
+                    "side": rec.get("side") or "main",
+                    "sha": rec.get("commit_sha") or "unknown",
+                    "score": rec.get("score"),
+                    "scored_at": rec.get("scored_at") or "",
+                    "atom_id": atom_id,
+                    "traj_id": rec.get("traj_id") or _traj_of_atom(atom_id),
+                    "user_model": rec.get("user_model") or "",
+                })
+        return out
+
+    cached = _usage_records_cache.get_or_build(
+        _catalog_path_key(root), build_records)
+    return [dict(record) for record in cached]
 
 
 def _resolve_local_root(path: str, db_dir: Path) -> Path:
@@ -135,32 +150,159 @@ def _skillhub_entries(skillhub) -> list[dict]:
         include_vec=False, require_description=True)
 
 
+class _CacheFlight:
+    """同一个缓存键只允许一个线程真正执行构建，其余线程等它的结果。"""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+        self.value = None
+        self.built = False
+
+
+def _copy_cached_error(error: BaseException) -> BaseException:
+    """给等待线程独立的异常对象，避免并发改写同一个 traceback。"""
+    try:
+        cloned = copy.copy(error)
+    except Exception:  # pragma: no cover - 极少数自定义异常不可复制
+        try:
+            cloned = type(error)(*error.args)
+        except Exception:
+            cloned = RuntimeError(f"看板缓存构建失败: {error}")
+    cloned.__traceback__ = None
+    cloned.__context__ = None
+    cloned.__cause__ = None
+    return cloned
+
+
+class SingleFlightTtlCache:
+    """短时 TTL 缓存 + 单飞——看板重扫盘端点共用的唯一缓存实现。
+
+    看板每块面板都是"全量扫盘/重算 → 只读聚合"，同一份输入会被十几个面板在
+    几秒内并发请求。本类把这类结果按键缓存 ``ttl_seconds`` 秒，并保证同一个键
+    在同一时刻只有一个线程真的去扫（其余线程等同一次结果），避免缓存到期瞬间
+    的惊群把整台机器打满。
+
+    - 构建抛错：不写缓存，每个等待线程各收到一份独立的异常副本（no-fallback,
+      错误照常向上抛，不退化成空结果）。
+    - ``max_entries``：不同键（不同目录/参数）数量上限，按到期时间淘汰最旧的，
+      防止长跑进程里缓存无界增长。
+
+    ``get_or_build`` 返回的是**缓存内共享的只读对象**：调用方若要把可变数据交
+    给外部，必须自己拷贝要返回的那部分（见 ``skills_catalog_page`` 只深拷贝当页）。
+    """
+
+    def __init__(self, *, ttl_seconds: float, max_entries: int) -> None:
+        self.ttl_seconds = float(ttl_seconds)
+        self.max_entries = max(0, int(max_entries))
+        self._lock = threading.Lock()
+        self._entries: dict = {}
+        self._flights: dict = {}
+
+    def __len__(self) -> int:
+        with self._lock:
+            self._prune_locked(time.monotonic())
+            return len(self._entries)
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            self._prune_locked(time.monotonic())
+            return key in self._entries
+
+    @property
+    def in_flight_count(self) -> int:
+        """正在构建（未完成）的键数量——测试/自检用。"""
+        with self._lock:
+            return len(self._flights)
+
+    def clear(self) -> None:
+        """丢弃全部已缓存结果；在途构建不受影响（其属主线程自行收尾）。"""
+        with self._lock:
+            self._entries.clear()
+
+    def _expires_at(self, key) -> float:
+        return self._entries[key][0]
+
+    def _prune_locked(self, now: float) -> None:
+        for stale_key, (expires_at, _value) in list(self._entries.items()):
+            if expires_at <= now:
+                self._entries.pop(stale_key, None)
+        overflow = len(self._entries) - self.max_entries
+        if overflow > 0:
+            for stale_key in sorted(self._entries, key=self._expires_at)[:overflow]:
+                self._entries.pop(stale_key, None)
+
+    def get_or_build(self, key, builder):
+        """取 ``key`` 的缓存值；没有或已过期则调 ``builder()`` 构建一次。"""
+        while True:
+            with self._lock:
+                self._prune_locked(time.monotonic())
+                cached = self._entries.get(key)
+                if cached is not None:
+                    return cached[1]
+                flight = self._flights.get(key)
+                if flight is None:
+                    flight = _CacheFlight()
+                    self._flights[key] = flight
+                    build = True
+                else:
+                    build = False
+
+            if not build:
+                flight.done.wait()
+                if flight.error is not None:
+                    raise _copy_cached_error(flight.error)
+                # 直接用本轮构建结果。即使它刚好过期或因容量限制被逐出，
+                # 已经合并到本轮的等待者也不该再发起一次相同的扫描。
+                if flight.built:
+                    return flight.value
+                continue
+
+            try:
+                value = builder()
+            except BaseException as exc:
+                with self._lock:
+                    flight.error = exc
+                    if self._flights.get(key) is flight:
+                        self._flights.pop(key, None)
+                    flight.done.set()
+                raise
+
+            with self._lock:
+                try:
+                    flight.value = value
+                    flight.built = True
+                    self._entries[key] = (time.monotonic() + self.ttl_seconds, value)
+                    self._prune_locked(time.monotonic())
+                except BaseException as exc:
+                    # 即使写缓存阶段出异常，也必须唤醒全部等待线程。
+                    flight.built = False
+                    flight.value = None
+                    flight.error = exc
+                    self._entries.pop(key, None)
+                    raise
+                finally:
+                    if self._flights.get(key) is flight:
+                        self._flights.pop(key, None)
+                    flight.done.set()
+            return value
+
+
 _SKILLS_CATALOG_TTL_SECONDS = 5.0
-_SKILLS_CATALOG_CACHE_MAX_ENTRIES = 128
-_skills_catalog_cache: dict[tuple, tuple[float, "_CatalogBundle"]] = {}
-_skills_catalog_flights: dict[tuple, "_CatalogFlight"] = {}
-_skills_catalog_cache_lock = threading.Lock()
+_skills_catalog_cache = SingleFlightTtlCache(
+    ttl_seconds=_SKILLS_CATALOG_TTL_SECONDS, max_entries=128)
 
 _TAG_CLOUD_TTL_SECONDS = 5.0
-_TAG_CLOUD_CACHE_MAX_ENTRIES = 64
-_tag_cloud_cache: dict[tuple, tuple[float, list[dict]]] = {}
-_tag_cloud_cache_lock = threading.Lock()
+_tag_cloud_cache = SingleFlightTtlCache(
+    ttl_seconds=_TAG_CLOUD_TTL_SECONDS, max_entries=64)
 
-
-def _prune_tag_cloud_cache(now: float) -> None:
-    """在持锁状态下清理过期项并限制不同 registry.db/top_n 组合的缓存数量。"""
-    for stale_key, (expires_at, _rows) in list(_tag_cloud_cache.items()):
-        if expires_at <= now:
-            _tag_cloud_cache.pop(stale_key, None)
-    limit = max(0, int(_TAG_CLOUD_CACHE_MAX_ENTRIES))
-    overflow = len(_tag_cloud_cache) - limit
-    if overflow > 0:
-        oldest = sorted(
-            _tag_cloud_cache,
-            key=lambda cache_key: _tag_cloud_cache[cache_key][0],
-        )[:overflow]
-        for stale_key in oldest:
-            _tag_cloud_cache.pop(stale_key, None)
+# 使用打分事实源（每个 skill 一个 .ux_scores.jsonl）：一次调用 = 全库 skill
+# 数量级的文件读。八个看板端点各自独立调它（overview/canary/rates/skill 详情/
+# 贡献去向/用户矩阵/技能表…），十万级 skill 库下这是面板转圈的头号原因——
+# 这里按 skill_dir 缓存并单飞，一个请求波次只扫一次盘。
+_USAGE_RECORDS_TTL_SECONDS = 5.0
+_usage_records_cache = SingleFlightTtlCache(
+    ttl_seconds=_USAGE_RECORDS_TTL_SECONDS, max_entries=64)
 
 
 class _CatalogBundle:
@@ -183,47 +325,6 @@ class _CatalogBundle:
             by_state[state] = by_state.get(state, 0) + 1
         self.by_state = by_state
         self.total = len(rows)
-
-
-class _CatalogFlight:
-    """同一个清单缓存键只允许一个线程扫描磁盘。"""
-
-    def __init__(self) -> None:
-        self.done = threading.Event()
-        self.error: BaseException | None = None
-        self.bundle: "_CatalogBundle | None" = None
-
-
-def _copy_catalog_error(error: BaseException) -> BaseException:
-    """给等待线程独立的异常对象，避免并发改写同一个 traceback。"""
-    try:
-        cloned = copy.copy(error)
-    except Exception:  # pragma: no cover - 极少数自定义异常不可复制
-        try:
-            cloned = type(error)(*error.args)
-        except Exception:
-            cloned = RuntimeError(f"技能清单构建失败: {error}")
-    cloned.__traceback__ = None
-    cloned.__context__ = None
-    cloned.__cause__ = None
-    return cloned
-
-
-def _prune_skills_catalog_cache(now: float) -> None:
-    """在持锁状态下清理过期项并限制短时间内的不同缓存键数量。"""
-    for stale_key, (expires_at, _rows) in list(_skills_catalog_cache.items()):
-        if expires_at <= now:
-            _skills_catalog_cache.pop(stale_key, None)
-
-    limit = max(0, int(_SKILLS_CATALOG_CACHE_MAX_ENTRIES))
-    overflow = len(_skills_catalog_cache) - limit
-    if overflow > 0:
-        oldest = sorted(
-            _skills_catalog_cache,
-            key=lambda cache_key: _skills_catalog_cache[cache_key][0],
-        )[:overflow]
-        for stale_key in oldest:
-            _skills_catalog_cache.pop(stale_key, None)
 
 
 def _catalog_path_key(path: Path | str) -> str:
@@ -331,8 +432,11 @@ def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]
                     "candidates": n_cand,
                 })
     # main/staging（已正式产出）排前,其次 baby,再按名字
+    # （禁 lambda：装饰-排序-还原；下标项保证元组比较永不落到不可比的 dict 上）
     order = {"main": 0, "staging": 0, "baby": 1, "unknown": 2}
-    out.sort(key=lambda s: (order.get(s["state"], 3), s["name"]))
+    out = [row for _rank, _name, _index, row in sorted(
+        (order.get(row["state"], 3), row["name"], index, row)
+        for index, row in enumerate(out))]
     # 三方（skillhub）技能追加在自产之后：独立目录、无 git 分支 → state="skillhub"。
     hub_rows: list[dict] = []
     for e in _skillhub_entries(skillhub):
@@ -345,7 +449,7 @@ def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]
             "description": desc[:300], "version": 0,
             "candidates": 0, "use_count": e.get("use_count", 0) or 0,
         })
-    hub_rows.sort(key=lambda s: (s["hub"], s["name"]))
+    hub_rows.sort(key=operator.itemgetter("hub", "name"))
     out.extend(hub_rows)
     return out
 
@@ -401,66 +505,14 @@ def _skills_catalog_bundle(skill_dir: Path, skillhub) -> "_CatalogBundle":
     candidates。构建失败不会写入缓存，同键并发请求共享一次磁盘扫描。返回的
     bundle 是缓存内共享的只读对象——读取方各自深拷贝所需部分，故不会改写它。
     """
-    key = _skills_catalog_cache_key(skill_dir, skillhub)
-    while True:
-        now = time.monotonic()
-        with _skills_catalog_cache_lock:
-            _prune_skills_catalog_cache(now)
+    def build_bundle() -> "_CatalogBundle":
+        # 行数据此刻是本次扫描独占的新对象，直接封入 bundle 缓存即可；
+        # 读取方总会深拷贝各自返回的部分，缓存里的行永不被改写。
+        return _CatalogBundle(
+            _build_skills_catalog_uncached(skill_dir, skillhub=skillhub))
 
-            cached = _skills_catalog_cache.get(key)
-            if cached is not None:
-                return cached[1]
-
-            flight = _skills_catalog_flights.get(key)
-            if flight is None:
-                flight = _CatalogFlight()
-                _skills_catalog_flights[key] = flight
-                build = True
-            else:
-                build = False
-
-        if not build:
-            flight.done.wait()
-            if flight.error is not None:
-                raise _copy_catalog_error(flight.error)
-            # 直接使用本轮构建结果。即使它刚好过期或因容量限制被逐出，
-            # 已经合并到本轮的等待者也不应再发起一次相同扫描。
-            if flight.bundle is not None:
-                return flight.bundle
-            continue
-
-        try:
-            rows = _build_skills_catalog_uncached(skill_dir, skillhub=skillhub)
-            # 行数据此刻是本次扫描独占的新对象，直接封入 bundle 缓存即可；
-            # 读取方总会深拷贝各自返回的部分，缓存里的行永不被改写。
-            bundle = _CatalogBundle(rows)
-        except BaseException as exc:
-            with _skills_catalog_cache_lock:
-                flight.error = exc
-                if _skills_catalog_flights.get(key) is flight:
-                    _skills_catalog_flights.pop(key, None)
-                flight.done.set()
-            raise
-
-        with _skills_catalog_cache_lock:
-            try:
-                flight.bundle = bundle
-                _skills_catalog_cache[key] = (
-                    time.monotonic() + _SKILLS_CATALOG_TTL_SECONDS,
-                    bundle,
-                )
-                _prune_skills_catalog_cache(time.monotonic())
-            except BaseException as exc:
-                # 即使缓存落盘阶段发生异常，也必须唤醒全部等待线程。
-                flight.bundle = None
-                flight.error = exc
-                _skills_catalog_cache.pop(key, None)
-                raise
-            finally:
-                if _skills_catalog_flights.get(key) is flight:
-                    _skills_catalog_flights.pop(key, None)
-                flight.done.set()
-        return bundle
+    return _skills_catalog_cache.get_or_build(
+        _skills_catalog_cache_key(skill_dir, skillhub), build_bundle)
 
 
 def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
@@ -632,47 +684,44 @@ class DashboardMetrics:
         实现"悬浮用户 → 高亮其标签"。team_client watch_dir 的 label 即 client_id；
         本机(非 team)目录的原子计入 count 但不归属任何用户。
         返回按出现次数降序的 ``[{tag, count, users}]`` 前 top_n。
+
+        全量原子走查按 (registry.db, top_n) 短时缓存并单飞：到期瞬间的并发请求
+        只会有一个线程真的重走全部 watch_dir，其余等它的结果。
         """
         from collections import Counter, defaultdict
         from xskill.pipeline.atom import AtomTaskStore
         from xskill.config import get_registry_db_path
-        cache_key = (str(self._db), int(top_n))
-        now = time.monotonic()
-        with _tag_cloud_cache_lock:
-            _prune_tag_cloud_cache(now)
-            cached = _tag_cloud_cache.get(cache_key)
-            if cached is not None:
-                return copy.deepcopy(cached[1])
-        db_dir = Path(self._db).parent if self._db else get_registry_db_path().parent
-        counter: Counter = Counter()
-        tag_users: dict[str, set] = defaultdict(set)
-        with pooled_connection(self._db) as conn:
-            wds = [(r["path"], r["label"], r["ecosystem"]) for r in conn.execute(
-                "SELECT path, label, ecosystem FROM watch_dirs").fetchall()]
-        for wp, label, eco in wds:
-            root = _resolve_local_root(wp, db_dir)
-            client = label if (eco == "team_client" and label) else None
-            try:
-                if not root.is_dir():
-                    continue
-                # 标签云只需 tags 字段——用 iter_tags 免去构建完整 AtomTask
-                # 对象（审计 L10：缓存未命中时对每个原子省下 dataclass 实例化）。
-                for atom_tags in AtomTaskStore(root=root).iter_tags():
-                    for tag in atom_tags:
-                        t = str(tag).strip().lower()
-                        if t:
-                            counter[t] += 1
-                            if client:
-                                tag_users[t].add(client)
-            except OSError:
-                continue  # 某个目录不可读/路径异常,跳过不阻断整体聚合
-        result = [{"tag": t, "count": n, "users": sorted(tag_users.get(t, ()))}
-                  for t, n in counter.most_common(top_n)]
-        with _tag_cloud_cache_lock:
-            _tag_cloud_cache[cache_key] = (
-                time.monotonic() + _TAG_CLOUD_TTL_SECONDS, copy.deepcopy(result))
-            _prune_tag_cloud_cache(time.monotonic())
-        return result
+
+        def build_tag_cloud() -> list[dict]:
+            db_dir = (Path(self._db).parent if self._db
+                      else get_registry_db_path().parent)
+            counter: Counter = Counter()
+            tag_users: dict[str, set] = defaultdict(set)
+            with pooled_connection(self._db) as conn:
+                wds = [(r["path"], r["label"], r["ecosystem"]) for r in conn.execute(
+                    "SELECT path, label, ecosystem FROM watch_dirs").fetchall()]
+            for wp, label, eco in wds:
+                root = _resolve_local_root(wp, db_dir)
+                client = label if (eco == "team_client" and label) else None
+                try:
+                    if not root.is_dir():
+                        continue
+                    # 标签云只需 tags 字段——用 iter_tags 免去构建完整 AtomTask
+                    # 对象（审计 L10：缓存未命中时对每个原子省下 dataclass 实例化）。
+                    for atom_tags in AtomTaskStore(root=root).iter_tags():
+                        for tag in atom_tags:
+                            t = str(tag).strip().lower()
+                            if t:
+                                counter[t] += 1
+                                if client:
+                                    tag_users[t].add(client)
+                except OSError:
+                    continue  # 某个目录不可读/路径异常,跳过不阻断整体聚合
+            return [{"tag": t, "count": n, "users": sorted(tag_users.get(t, ()))}
+                    for t, n in counter.most_common(top_n)]
+
+        return copy.deepcopy(_tag_cloud_cache.get_or_build(
+            (str(self._db), int(top_n)), build_tag_cloud))
 
     def canary_sides(self) -> list[dict]:
         """灰度分桶分布：使用打分记录按 side 聚合（与 check_and_decide 裁决同源）。
@@ -690,7 +739,7 @@ class DashboardMetrics:
         out = [{"side": side, "uses": n,
                 "avg_ux": round(ssum / sn, 2) if sn else None}
                for side, (n, ssum, sn) in agg.items()]
-        out.sort(key=lambda d: -d["uses"])
+        out.sort(key=operator.itemgetter("uses"), reverse=True)
         return out
 
     def adoption_rate(self) -> dict:
@@ -751,7 +800,8 @@ class DashboardMetrics:
                 adopted_pairs += 1
         by_skill = [{"skill": s, "recommended": a[0], "used": a[1],
                      "rate": _pct(a[1], a[0])}
-                    for s, a in sorted(by_skill_agg.items(), key=lambda kv: -kv[1][0])]
+                    for s, a in by_skill_agg.items()]
+        by_skill.sort(key=operator.itemgetter("recommended"), reverse=True)
         total_pairs = sum(a[0] for a in by_skill_agg.values())
         return {"overall": _pct(adopted_pairs, total_pairs), "by_skill": by_skill}
 
@@ -790,8 +840,10 @@ class DashboardMetrics:
                 "first_ts": ts_list[0] if ts_list else "",
                 "last_ts": ts_list[-1] if ts_list else "",
             })
-        out.sort(key=lambda d: (d["first_ts"] == "", d["first_ts"]))
-        return out
+        # 按首次使用时间升序；从未使用（first_ts=""）的版本排在最后
+        out.sort(key=operator.itemgetter("first_ts"))
+        return ([entry for entry in out if entry["first_ts"]]
+                + [entry for entry in out if not entry["first_ts"]])
 
     def skill_by_user(self, name: str) -> list[dict]:
         """某 skill 按用户分组的触发次数 + 平均 UX（traj→watch_dir 归因）。"""
@@ -807,7 +859,7 @@ class DashboardMetrics:
         out = [{"user": user, "triggers": n,
                 "avg_ux": round(ssum / sn, 2) if sn else None}
                for user, (n, ssum, sn) in agg.items()]
-        out.sort(key=lambda d: -d["triggers"])
+        out.sort(key=operator.itemgetter("triggers"), reverse=True)
         return out
 
     def skill_timeseries(self, name: str, sha: Optional[str] = None) -> list[dict]:
@@ -820,7 +872,7 @@ class DashboardMetrics:
         pts = [{"x": _iso(u["scored_at"]), "ux": u["score"]}
                for u in self._skill_usage(name)
                if u["sha"] == sha and u["score"] is not None]
-        pts.sort(key=lambda p: p["x"])
+        pts.sort(key=operator.itemgetter("x"))
         return pts
 
     def skill_detail(self, name: str) -> dict:

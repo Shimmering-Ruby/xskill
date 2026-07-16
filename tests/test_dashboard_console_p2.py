@@ -61,8 +61,10 @@ def console_env(tmp_path):
     token = reg.ensure_dashboard_token(cid)
     init_team_context(
         join_token="jt", client_registry=reg, skill_dir=skills,
-        traj_root=tmp_path / "traj", probability=0.2, ranked_slots=2,
-        total_slots=3, register_dir=lambda p, l: None)
+        traj_root=tmp_path / "traj", register_dir=lambda p, l: None)
+    # 槽位改由现取 live config(热生效),不再走 init_team_context 快照
+    from xskill.api import app as app_mod
+    app_mod._config = {"team": {"server": {"skill_slots": 3, "ranked_slots": 2}}}
     configure_auth(
         secret=ensure_dashboard_secret(tmp_path / "sec.json"),
         admins=["boss"], admin_password="pw",
@@ -293,3 +295,263 @@ def test_config_validate_and_reload(console_env, tmp_path, monkeypatch):
     assert "canary" in body["hot_reloaded"]
     assert "llm" in body["needs_restart"]
     assert app_mod._config["canary"]["probability"] == 0.5
+
+
+def test_reload_slots_only_change_is_hot_not_restart(console_env, tmp_path, monkeypatch):
+    """只改 team.server 的槽位子键 = 现取即生效 → 不该被标成"需重启"。
+
+    回归:changed 是顶层 key 粒度,改 team.server.skill_slots 会算出
+    changed=["team"] → needs_restart=["team"],把已经热的改动误标成要重启。
+    """
+    import xskill.config as C
+    from xskill.api import app as app_mod
+    cfgp = tmp_path / "config.yaml"
+    base = ("skill_dir: /tmp/s\nteam:\n  server:\n"
+            "    skill_slots: 100\n    ranked_slots: 80\n")
+    cfgp.write_text(base, encoding="utf-8")
+    monkeypatch.setattr(C, "CONFIG_PATH", cfgp)
+    monkeypatch.setattr(app_mod, "_config", {
+        "skill_dir": "/tmp/s",
+        "team": {"server": {"skill_slots": 100, "ranked_slots": 80}},
+    })
+    boss = console_env["boss"]
+
+    # 只动槽位 → hot,不需重启
+    new = ("skill_dir: /tmp/s\nteam:\n  server:\n"
+           "    skill_slots: 42\n    ranked_slots: 40\n")
+    r = boss.post("/api/v1/dashboard/admin/config/reload", json={"raw": new})
+    body = r.json()
+    assert r.status_code == 200
+    assert "team" not in body["needs_restart"], "槽位是热的,不该要求重启"
+    assert "team" in body["hot_reloaded"]
+    assert app_mod._config["team"]["server"]["skill_slots"] == 42
+
+
+def test_reload_other_team_key_still_needs_restart(console_env, tmp_path, monkeypatch):
+    """碰了 team 下的非热子键(进程级接线)→ 仍必须标注需重启。"""
+    import xskill.config as C
+    from xskill.api import app as app_mod
+    cfgp = tmp_path / "config.yaml"
+    cfgp.write_text("skill_dir: /tmp/s\nteam:\n  server:\n    skill_slots: 100\n",
+                    encoding="utf-8")
+    monkeypatch.setattr(C, "CONFIG_PATH", cfgp)
+    monkeypatch.setattr(app_mod, "_config", {
+        "skill_dir": "/tmp/s",
+        "team": {"server": {"skill_slots": 100}},
+    })
+    boss = console_env["boss"]
+
+    new = ("skill_dir: /tmp/s\nteam:\n  server:\n    skill_slots: 100\n"
+           "    allow_anonymous_user: false\n")
+    r = boss.post("/api/v1/dashboard/admin/config/reload", json={"raw": new})
+    body = r.json()
+    assert r.status_code == 200
+    assert "team" in body["needs_restart"], "非热子键改动必须提示重启"
+
+
+def test_reload_rejects_invalid_slots_without_persisting(console_env, tmp_path, monkeypatch):
+    """槽位是热生效的,非法值必须落盘前就拒(不存在"部分生效")。"""
+    import xskill.config as C
+    from xskill.api import app as app_mod
+    cfgp = tmp_path / "config.yaml"
+    base = "skill_dir: /tmp/s\nteam:\n  server:\n    skill_slots: 100\n"
+    cfgp.write_text(base, encoding="utf-8")
+    monkeypatch.setattr(C, "CONFIG_PATH", cfgp)
+    monkeypatch.setattr(app_mod, "_config", {
+        "skill_dir": "/tmp/s", "team": {"server": {"skill_slots": 100}},
+    })
+    boss = console_env["boss"]
+
+    bad = "skill_dir: /tmp/s\nteam:\n  server:\n    skill_slots: -5\n"
+    r = boss.post("/api/v1/dashboard/admin/config/reload", json={"raw": bad})
+    assert r.status_code == 400
+    assert cfgp.read_text() == base                      # 没落盘
+    assert app_mod._config["team"]["server"]["skill_slots"] == 100   # 没生效
+
+
+def test_reload_bare_team_key_is_400_not_500(console_env, tmp_path, monkeypatch):
+    """回归:光杆 `team:`(值为 None)曾让 team_server_slots_config 抛
+    AttributeError,穿透 except ValueError → 500。必须是干净的 400 或被接受,
+    绝不 500。"""
+    import xskill.config as C
+    from xskill.api import app as app_mod
+    cfgp = tmp_path / "config.yaml"
+    cfgp.write_text("skill_dir: /tmp/s\n", encoding="utf-8")
+    monkeypatch.setattr(C, "CONFIG_PATH", cfgp)
+    monkeypatch.setattr(app_mod, "_config", {"skill_dir": "/tmp/s"})
+    boss = console_env["boss"]
+
+    # 光杆 team: = 没配 → 走默认值,应被接受
+    r = boss.post("/api/v1/dashboard/admin/config/reload",
+                  json={"raw": "skill_dir: /tmp/s\nteam:\n"})
+    assert r.status_code == 200, f"光杆 team: 不该报错,got {r.status_code}"
+
+    # 畸形 team(非 mapping)→ 干净 400,不是 500
+    r = boss.post("/api/v1/dashboard/admin/config/reload",
+                  json={"raw": "skill_dir: /tmp/s\nteam: foo\n"})
+    assert r.status_code == 400, f"畸形 team 应 400(带原因),got {r.status_code}"
+
+
+# ── 控制面重算的短时缓存（10k skill 库下面板转圈的根因） ─────────────
+
+def _write_ux_score(skill_path: Path, skill_name: str, atom_id: str,
+                    scored_at: str, score: int = 8) -> None:
+    import json
+    with (skill_path / ".ux_scores.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "skill_name": skill_name, "side": "main", "commit_sha": "sha1",
+            "score": score, "scored_at": scored_at, "atom_id": atom_id}) + "\n")
+
+
+def _seed_traj(db: Path, filename: str, user_key: str) -> None:
+    with R.pooled_connection(db) as conn:
+        conn.execute(
+            "INSERT INTO watch_dirs(id,path,label,ecosystem)"
+            " VALUES(1,'/tc','client-a','team_client')"
+            " ON CONFLICT(id) DO NOTHING")
+        conn.execute(
+            "INSERT INTO trajectories(watch_dir_id,filename,status,user_key)"
+            " VALUES(1,?,'done',?)", (filename, user_key))
+        conn.commit()
+
+
+def _clear_console_caches() -> None:
+    import xskill.dashboard.console as console_module
+    import xskill.dashboard.metrics as dashboard_metrics
+    console_module._reco_trigger_cache.clear()
+    dashboard_metrics._usage_records_cache.clear()
+    dashboard_metrics._skills_catalog_cache.clear()
+
+
+def test_reco_trigger_matrix_computed_once_across_requests(
+        console_env, monkeypatch):
+    """/my/reco-trigger(每用户一次) + /admin/users-matrix 共用一次全量矩阵。"""
+    import xskill.dashboard.metrics as dashboard_metrics
+    db = console_env["db"]
+    cid = console_env["registry"].find_by_user_name("alice")
+    R.record_recommendation(client_id=cid, skill="alpha", side="main",
+                            bucket="ranked", sha="s1", db_path=db)
+    _seed_traj(db, "traj0.md", "alice")
+    _write_ux_score(console_env["skills"] / "alpha", "alpha",
+                    "atom_traj0_0001", "2026-07-01T00:00:00")
+    _clear_console_caches()
+
+    builds: list[int] = []
+    real_load = dashboard_metrics.load_usage_records
+
+    def counting_load(skill_dir):
+        builds.append(1)
+        return real_load(skill_dir)
+
+    monkeypatch.setattr(dashboard_metrics, "load_usage_records", counting_load)
+
+    alice, boss = console_env["alice"], console_env["boss"]
+    rows = [alice.get("/api/v1/dashboard/my/reco-trigger").json() for _ in range(3)]
+    matrices = [boss.get("/api/v1/dashboard/admin/users-matrix").json()
+                for _ in range(2)]
+
+    # 5 次请求只算了一次矩阵（旧实现:每次请求全量重算 + 全库读 .ux_scores.jsonl）
+    assert len(builds) == 1
+    # 口径不变：曝光 1 / 触发 1，/my 只拿自己那一行
+    assert all(row == rows[0] for row in rows)
+    assert rows[0]["user"] == "alice"
+    assert rows[0]["rows"] == [{
+        "skill": "alpha", "exposures": 1, "triggers": 1, "rate": 1.0,
+        "last_trigger": "2026-07-01T00:00:00", "verdict": "正常"}]
+    alice_row = next(u for u in matrices[0]["users"] if u["user"] == "alice")
+    assert (alice_row["exposures"], alice_row["triggers"], alice_row["rate"]) == (1, 1, 1.0)
+
+
+def test_reco_trigger_rows_are_independent_copies(console_env):
+    """调用方改自己那份改不到缓存里的矩阵。"""
+    from xskill.dashboard.console import reco_trigger_for_users
+    db = console_env["db"]
+    cid = console_env["registry"].find_by_user_name("alice")
+    R.record_recommendation(client_id=cid, skill="alpha", side="main",
+                            bucket="ranked", sha="s1", db_path=db)
+    _clear_console_caches()
+
+    kwargs = {"db_path": db, "skill_dir": console_env["skills"],
+              "registry": console_env["registry"]}
+    first = reco_trigger_for_users(**kwargs)
+    first["alice"][0]["exposures"] = 999
+    first["alice"].append({"skill": "injected"})
+    first["intruder"] = []
+
+    second = reco_trigger_for_users(**kwargs)
+    assert set(second) == {"alice"}
+    assert len(second["alice"]) == 1
+    assert second["alice"][0]["exposures"] == 1
+
+
+def test_users_matrix_reads_prefs_in_one_query(console_env, monkeypatch):
+    """用户 × 配置矩阵不再逐用户查库(N+1)，且 pinned/blocked 口径不变：
+    只算用户自己的行，全局 pin 单独出 global_pinned。"""
+    import xskill.dashboard.console as console_module
+    db = console_env["db"]
+    R.set_skill_pref(user_key="alice", skill_name="alpha", pref="pinned",
+                     set_by="alice", db_path=db)
+    R.set_skill_pref(user_key="alice", skill_name="gamma", pref="blocked",
+                     set_by="alice", db_path=db)
+    R.set_skill_pref(user_key=R.GLOBAL_PREF_KEY, skill_name="beta",
+                     pref="pinned", set_by="boss", db_path=db)
+    _clear_console_caches()
+
+    def forbidden_prefs_for(*args, **kwargs):
+        raise AssertionError("users-matrix 不该逐用户查 prefs_for")
+
+    monkeypatch.setattr(console_module, "prefs_for", forbidden_prefs_for)
+
+    matrix = console_env["boss"].get(
+        "/api/v1/dashboard/admin/users-matrix").json()
+    alice_row = next(u for u in matrix["users"] if u["user"] == "alice")
+    assert (alice_row["pinned"], alice_row["blocked"]) == (1, 1)  # 不含全局 pin
+    assert matrix["global_pinned"] == ["beta"]
+    assert alice_row["stale_advice"] == []
+    assert alice_row["rate"] is None
+
+
+def test_admin_skills_uses_cached_catalog_and_keeps_skillrepo_scope(
+        console_env, monkeypatch):
+    """技能生命周期表：状态取共享清单缓存(不再逐 skill 现读 git ref)，
+    但列出的 skill 集合仍与 SkillRepo 完全一致。"""
+    import xskill.dashboard.metrics as dashboard_metrics
+    db = console_env["db"]
+    skills = console_env["skills"]
+    # beta 起灰度 → canary；gamma 下线 → retired；alpha 近 30 日有使用
+    _git(["checkout", "-q", "-b", "staging"], skills / "beta")
+    R.retire_skill(skill_name="gamma", set_by="boss", db_path=db)
+    import datetime as dt
+    recent = dt.datetime.now(dt.timezone.utc).isoformat()
+    _write_ux_score(skills / "alpha", "alpha", "atom_traj0_0001", recent)
+    _write_ux_score(skills / "alpha", "alpha", "atom_traj0_0002", recent)
+    _write_ux_score(skills / "alpha", "alpha", "atom_traj0_0003",
+                    "2020-01-01T00:00:00")           # 30 日外不计
+    # SkillRepo 不认的目录：references / 没有 SKILL.md 的目录
+    (skills / "references").mkdir()
+    (skills / "references" / "SKILL.md").write_text("# ref\n", encoding="utf-8")
+    (skills / "loose-dir").mkdir()
+    (skills / "loose-dir" / "notes.md").write_text("x\n", encoding="utf-8")
+    _clear_console_caches()
+
+    scans: list[int] = []
+    real_build = dashboard_metrics._build_skills_catalog_uncached
+
+    def counting_build(*args, **kwargs):
+        scans.append(1)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(
+        dashboard_metrics, "_build_skills_catalog_uncached", counting_build)
+
+    boss = console_env["boss"]
+    first = boss.get("/api/v1/dashboard/admin/skills").json()
+    second = boss.get("/api/v1/dashboard/admin/skills").json()
+
+    assert len(scans) == 1                    # 两次请求共用一次清单扫描
+    assert first == second
+    assert first["skills"] == [
+        {"name": "alpha", "state": "active", "usage_30d": 2},
+        {"name": "beta", "state": "canary", "usage_30d": 0},
+        {"name": "gamma", "state": "retired", "usage_30d": 0},
+    ]

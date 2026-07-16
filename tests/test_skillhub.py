@@ -397,12 +397,16 @@ class TestSkillhubTeamPush:
             client_registry=reg,
             skill_dir=skill_dir,
             traj_root=tmp_path / "traj",
-            probability=0.0,
-            ranked_slots=0,
-            total_slots=1,
             register_dir=lambda _p, _l: None,
             skillhub=hub,
         )
+        # 槽位/概率改由现取 live config(热生效):本用例要 1 个槽、全给推荐位
+        # (ranked_slots=0)、且恒走 main 侧(probability=0)。
+        from xskill.api import app as app_mod
+        app_mod._config = {
+            "team": {"server": {"skill_slots": 1, "ranked_slots": 0}},
+            "canary": {"probability": 0.0},
+        }
         app = FastAPI()
         app.include_router(server_api.router)
         return TestClient(app)

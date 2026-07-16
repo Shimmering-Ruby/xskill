@@ -27,9 +27,11 @@ def link_env(tmp_path):
     server_api.init_team_context(
         join_token="jt", client_registry=registry,
         skill_dir=tmp_path / "skills", traj_root=tmp_path / "traj",
-        probability=0.2, ranked_slots=2, total_slots=3,
         register_dir=lambda p, l: None,
     )
+    # 槽位改由现取 live config(热生效),不再走 init_team_context 快照
+    from xskill.api import app as app_mod
+    app_mod._config = {"team": {"server": {"skill_slots": 3, "ranked_slots": 2}}}
     configure_auth(
         secret=ensure_dashboard_secret(tmp_path / "sec.json"),
         admins=[], admin_password="",

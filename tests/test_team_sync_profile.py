@@ -131,11 +131,7 @@ def team_runtime(tmp_path):
         client_registry=registry,
         skill_dir=skill_dir,
         traj_root=traj_root,
-        probability=0.2,
-        ranked_slots=80,
-        total_slots=100,
         register_dir=lambda _path, _label: None,
-        allow_anonymous_user=True,
         profile_refresh_service=service,
     )
     app = FastAPI()
@@ -198,7 +194,9 @@ def test_zero_slots_skips_preference_reads_but_still_refreshes_profile(
         "retired_skills",
         lambda: preference_calls.append("retired") or set(),
     )
-    server_api._ctx.total_slots = 0
+    # 停止分发改由 live config 现取(热生效),不再是 _ctx 快照
+    from xskill.api import app as app_mod
+    monkeypatch.setattr(app_mod, "_config", {"team": {"server": {"skill_slots": 0}}})
 
     response = client.get("/api/v1/team/sync", headers=_headers(client_id))
 
@@ -334,9 +332,6 @@ def test_thirty_clients_return_while_embedding_is_bounded(tmp_path, monkeypatch)
         client_registry=registry,
         skill_dir=skill_dir,
         traj_root=traj_root,
-        probability=0.2,
-        ranked_slots=80,
-        total_slots=100,
         register_dir=lambda _path, _label: None,
         profile_refresh_service=service,
     )

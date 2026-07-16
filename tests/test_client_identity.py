@@ -83,14 +83,17 @@ class TestRegistryUserName:
 
 def _make_client(tmp_path, *, allow_anonymous: bool):
     reg = ClientRegistry(tmp_path / "clients.db")
+    # allow_anonymous_user 不再进 _ctx 快照：/register 每请求现取 live config
+    # （conftest 的 _isolate_app_config 负责用例间还原）。
+    from xskill.api import app as app_mod
+    app_mod._config = {
+        "team": {"server": {"allow_anonymous_user": allow_anonymous}}}
     server_api.init_team_context(
         join_token="secret-token",
         client_registry=reg,
         skill_dir=tmp_path / "skill",
         traj_root=tmp_path / "traj",
-        probability=0.2, ranked_slots=80, total_slots=100,
         register_dir=lambda path, label: None,
-        allow_anonymous_user=allow_anonymous,
     )
     app = FastAPI()
     app.include_router(server_api.router)

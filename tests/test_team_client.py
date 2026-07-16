@@ -35,8 +35,7 @@ def server_app(tmp_path):
     reg = ClientRegistry(tmp_path / "clients.db")
     server_api.init_team_context(
         join_token="tok", client_registry=reg, skill_dir=skill_dir,
-        traj_root=tmp_path / "team_traj", probability=0.2,
-        ranked_slots=80, total_slots=100, register_dir=lambda p, l: None,
+        traj_root=tmp_path / "team_traj", register_dir=lambda p, l: None,
     )
     app = FastAPI()
     app.include_router(server_api.router)
@@ -129,3 +128,40 @@ def test_cleanup_removes_skill_not_in_manifest(server_app, tmp_path):
     tc.cleanup(manifest)
     assert not stale.exists()
     assert (tmp_path / "client_home" / ".xskill" / "skill" / "fix-foo").is_dir()   # manifest 里的保留
+
+
+def test_cleanup_reaps_orphaned_ecosystem_links(server_app, tmp_path):
+    """cleanup 按生态目录反向收孤儿 link:工作副本被 out-of-band 删除后残留、
+    指向 xskill 工作副本根、且不在 manifest 的 dangling link 要收掉;第三方 link /
+    手动真目录 / manifest 仍需要的 link 一律不碰。回归"~/.claude/skills 里 xskill
+    link 只增不减、断链越积越多"。"""
+    tc = _client(server_app, tmp_path)
+    manifest = tc.sync()
+    keep = {s.skill_name for s in manifest.slots}
+    skill_root = tmp_path / "client_home" / ".xskill" / "skill"
+    skill_root.mkdir(parents=True, exist_ok=True)
+    cc = tmp_path / "client_home" / ".claude" / "skills"
+    cc.mkdir(parents=True)
+
+    # ① 孤儿:xskill link 指向已不存在的工作副本、名字不在 manifest → 该收
+    orphan = cc / "gone-skill"
+    orphan.symlink_to(skill_root / "gone-skill")           # target 不存在 = dangling
+    # ② 第三方 link 指向 xskill 根之外 → 不该碰
+    elsewhere = tmp_path / "third_party_src"
+    elsewhere.mkdir()
+    foreign = cc / "foreign-skill"
+    foreign.symlink_to(elsewhere)
+    # ③ 手动建的真目录 → 不该碰
+    manual = cc / "manual-skill"
+    manual.mkdir()
+    (manual / "SKILL.md").write_text("# manual", encoding="utf-8")
+    # ④ manifest 仍需要的 skill 的 dangling link → 留给 reconcile 重装,不该收
+    wanted = cc / next(iter(keep))
+    wanted.symlink_to(skill_root / next(iter(keep)))
+
+    tc.cleanup(manifest)
+
+    assert not orphan.is_symlink()   # 孤儿被收
+    assert foreign.is_symlink()      # 第三方 link 保留
+    assert manual.is_dir()           # 手动真目录保留
+    assert wanted.is_symlink()       # keep 内的即便 dangling 也保留

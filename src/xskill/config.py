@@ -598,12 +598,49 @@ def team_sync_config(cfg: Optional[dict] = None) -> dict:
     return {"workers": workers}
 
 
+def _team_server_section(cfg: Optional[dict]) -> dict:
+    """取 ``team.server`` 段，缺省/为空一律 {}；畸形则抛带原因的 ValueError。
+
+    注意不能写 ``.get("team", {})``——YAML 里一个光杆 ``team:`` 会解析成
+    **键存在但值为 None**，默认值不生效，``None.get`` 直接 AttributeError
+    （会穿透调用方的 except ValueError，把 400 变成 500）。故用 ``or {}``。
+    """
+    team = (cfg or {}).get("team") or {}
+    if not isinstance(team, dict):
+        raise ValueError(f"team 必须是 mapping，got {type(team).__name__}")
+    section = team.get("server") or {}
+    if not isinstance(section, dict):
+        raise ValueError(f"team.server 必须是 mapping，got {type(section).__name__}")
+    return section
+
+
+def team_server_slots_config(cfg: Optional[dict] = None) -> dict:
+    """读 ``team.server.skill_slots`` / ``ranked_slots``，缺省 100 / 80。
+
+    这两个是**纯调优数字**，读方每次现取即热生效（不进 ``_ctx`` 启动快照），
+    故此处必须 fail-loud 校验：非法值直接 raise，绝不静默取默认。
+    """
+    section = _team_server_section(cfg)
+    skill_slots = section.get("skill_slots", 100)
+    ranked_slots = section.get("ranked_slots", 80)
+    for name, val in (("skill_slots", skill_slots), ("ranked_slots", ranked_slots)):
+        if isinstance(val, bool) or not isinstance(val, int):
+            raise ValueError(
+                f"team.server.{name} 必须是整数，got {type(val).__name__}")
+        if val < 0:
+            raise ValueError(f"team.server.{name} 不能为负，got {val}")
+    # 不校验 ranked_slots <= skill_slots：skill_slots=0 是合法的"停止分发"配置
+    # （api.team_sync 直接短路），此时 ranked_slots 仍是常规 80；且 build_manifest
+    # 本就用 min(ranked_slots, remaining) 夹取，多出来的部分无害。
+    return {"skill_slots": skill_slots, "ranked_slots": ranked_slots}
+
+
 def allow_anonymous_user(cfg: Optional[dict] = None) -> bool:
     """读 ``team.server.allow_anonymous_user``，缺省 True（向后兼容）。
 
     false 时 team server 拒绝不带 ``--name`` 的匿名注册。
     """
-    section = (cfg or {}).get("team", {}).get("server", {}) or {}
+    section = _team_server_section(cfg)
     val = section.get("allow_anonymous_user", True)
     if not isinstance(val, bool):
         raise ValueError(

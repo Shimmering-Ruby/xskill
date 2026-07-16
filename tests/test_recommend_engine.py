@@ -629,3 +629,70 @@ class TestFindFriendAndTag:
         user = ClientUser("u1", client_interest=ci)
         tags = eng.find_tag_for_user(user)
         assert isinstance(tags, list)
+
+
+# ── recommend.* / canary 热生效（不重建 engine） ──────────────────
+# 回归:quality_ratio / staging_need 曾在 __init__ 里被快照成 self.rcfg /
+# self.staging_need,而 console 的 _invalidate_engine_cache 只清 skill 索引缓存、
+# 不重解析配置 → 面板改完这两个 HOT_RELOAD 字段静默不生效,必须重启 serve。
+# admin_config_reload 是**原地 mutate** serve 的 _config dict(engine 持同一引用),
+# 故下面所有用例都只 mutate 同一个 dict,绝不重建 engine。
+
+class TestLiveRecommendConfig:
+    def test_quality_ratio_hot_without_reconstructing_engine(self, tmp_path):
+        cfg = {"recommend": {"quality_ratio": 0.8}, "canary": {"min_samples": 3}}
+        eng = SkillRecommendEngine(
+            config=cfg, skill_dir=tmp_path / "skills", traj_root=tmp_path / "traj",
+            embed_client=FakeEmbed(dim=5), profile_db=tmp_path / "profile.db",
+        )
+        assert eng.rcfg["quality_ratio"] == 0.8
+        cfg["recommend"]["quality_ratio"] = 0.2      # 面板改配置(原地)
+        assert eng.rcfg["quality_ratio"] == 0.2      # 旧代码:仍是 0.8
+
+    def test_staging_need_hot_and_single_sourced(self, tmp_path):
+        cfg = {"recommend": {"staging_need": 7}, "canary": {"min_samples": 3}}
+        eng = SkillRecommendEngine(
+            config=cfg, skill_dir=tmp_path / "skills", traj_root=tmp_path / "traj",
+            embed_client=FakeEmbed(dim=5), profile_db=tmp_path / "profile.db",
+        )
+        assert eng.staging_need == 7
+        cfg["recommend"]["staging_need"] = 2
+        assert eng.staging_need == 2                 # 旧代码:仍是 7
+        # 显式 staging_need 撤掉 → 单一推导来源:回落 canary.min_samples(也现取)
+        cfg["recommend"]["staging_need"] = None
+        assert eng.staging_need == 3
+        cfg["canary"]["min_samples"] = 9
+        assert eng.staging_need == 9
+
+    def test_canary_probability_hot_when_not_overridden(self, tmp_path):
+        cfg = {"recommend": {}, "canary": {"probability": 0.2}}
+        eng = SkillRecommendEngine(
+            config=cfg, skill_dir=tmp_path / "skills", traj_root=tmp_path / "traj",
+            embed_client=FakeEmbed(dim=5), profile_db=tmp_path / "profile.db",
+        )
+        assert eng.canary_cfg.probability == 0.2
+        cfg["canary"]["probability"] = 0.9
+        assert eng.canary_cfg.probability == 0.9     # 旧代码:仍是 0.2
+
+    def test_explicit_canary_config_still_overrides(self, tmp_path):
+        """构造期显式传入的 CanaryConfig 仍是覆盖(离线 worker / 测试用),
+        不被 config 段现取顶掉——构造契约不变。"""
+        from xskill.canary import CanaryConfig
+        override = CanaryConfig.from_dict({"probability": 0.5, "min_samples": 4})
+        cfg = {"recommend": {}, "canary": {"probability": 0.1, "min_samples": 1}}
+        eng = SkillRecommendEngine(
+            config=cfg, skill_dir=tmp_path / "skills", traj_root=tmp_path / "traj",
+            embed_client=FakeEmbed(dim=5), profile_db=tmp_path / "profile.db",
+            canary_config=override,
+        )
+        assert eng.canary_cfg is override
+        assert eng.staging_need == 4  # recommend.staging_need 未配 → 用覆盖的 min_samples
+
+    def test_malformed_recommend_section_still_fails_loud(self, tmp_path):
+        import pytest
+        with pytest.raises(ValueError, match="quality_ratio"):
+            SkillRecommendEngine(
+                config={"recommend": {"quality_ratio": "high"}},
+                skill_dir=tmp_path / "skills", traj_root=tmp_path / "traj",
+                embed_client=FakeEmbed(dim=5), profile_db=tmp_path / "profile.db",
+            )

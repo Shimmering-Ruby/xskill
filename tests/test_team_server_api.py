@@ -44,7 +44,6 @@ def client(tmp_path):
         client_registry=reg,
         skill_dir=skill_dir,
         traj_root=traj_root,
-        probability=0.2, ranked_slots=80, total_slots=100,
         register_dir=lambda path, label: None,   # 测试不碰真 registry.db
     )
     app = FastAPI()
@@ -118,11 +117,7 @@ def test_sync_auth_uses_current_token_and_delete_revokes_immediately(client):
         client_registry=registry,
         skill_dir=server_api._ctx.skill_dir,
         traj_root=server_api._ctx.traj_root,
-        probability=server_api._ctx.probability,
-        ranked_slots=server_api._ctx.ranked_slots,
-        total_slots=server_api._ctx.total_slots,
         register_dir=server_api._ctx.register_dir,
-        allow_anonymous_user=server_api._ctx.allow_anonymous_user,
         skillhub=server_api._ctx.skillhub,
         profile_refresh_service=server_api._ctx.profile_refresh_service,
     )
@@ -162,11 +157,7 @@ def test_reinitializing_context_flushes_and_closes_previous_registry(
         client_registry=replacement,
         skill_dir=server_api._ctx.skill_dir,
         traj_root=server_api._ctx.traj_root,
-        probability=server_api._ctx.probability,
-        ranked_slots=server_api._ctx.ranked_slots,
-        total_slots=server_api._ctx.total_slots,
         register_dir=server_api._ctx.register_dir,
-        allow_anonymous_user=server_api._ctx.allow_anonymous_user,
         skillhub=server_api._ctx.skillhub,
         profile_refresh_service=server_api._ctx.profile_refresh_service,
     )
@@ -180,11 +171,7 @@ def test_reinitializing_context_flushes_and_closes_previous_registry(
         client_registry=replacement,
         skill_dir=server_api._ctx.skill_dir,
         traj_root=server_api._ctx.traj_root,
-        probability=server_api._ctx.probability,
-        ranked_slots=server_api._ctx.ranked_slots,
-        total_slots=server_api._ctx.total_slots,
         register_dir=server_api._ctx.register_dir,
-        allow_anonymous_user=server_api._ctx.allow_anonymous_user,
         skillhub=server_api._ctx.skillhub,
         profile_refresh_service=server_api._ctx.profile_refresh_service,
     )
@@ -319,3 +306,100 @@ def test_upload_without_model_no_json_sidecar(client, tmp_path):
     sess = tmp_path / "team_traj" / "clients" / cid / "sessions"
     assert (sess / "traj_cc_x_001.md").is_file()
     assert not (sess / "traj_cc_x_001.json").exists()   # 行为不回归
+
+
+# ── 推荐调优热生效(回归:曾被 _ctx 启动快照冻死,面板改完必须重启) ────
+
+def testlive_manifest_tuning_reads_config_without_reinit():
+    """三个调优值必须每次现取 live config,而不是吃 init_team_context 快照。
+
+    回归:probability 源段 canary 在 HOT_RELOAD_SECTIONS(面板改完不提示重启),
+    但值曾被快照进 _ctx → 静默不生效,必须重启 serve。
+    """
+    from xskill.api import app as app_mod
+
+    app_mod._config = {
+        "team": {"server": {"skill_slots": 7, "ranked_slots": 3}},
+        "canary": {"probability": 0.9},
+    }
+    assert server_api.live_manifest_tuning() == (7, 3, 0.9)
+
+    # 原地改(= admin_config_reload 的热加载做法),不重调 init_team_context
+    app_mod._config["team"]["server"]["skill_slots"] = 11
+    app_mod._config["canary"]["probability"] = 0.1
+    assert server_api.live_manifest_tuning() == (11, 3, 0.1)
+
+
+def testlive_manifest_tuning_falls_back_to_defaults_when_unset():
+    from xskill.api import app as app_mod
+    app_mod._config = None
+    assert server_api.live_manifest_tuning() == (100, 80, 0.2)
+
+
+def test_sync_slot_count_follows_config_without_restart(client):
+    """端到端:改 team.server.skill_slots 后,下一次 /sync 立刻按新值分发,
+    无需重启 serve、无需重调 init_team_context。"""
+    from xskill.api import app as app_mod
+
+    r = client.post("/api/v1/team/register", json={"token": "secret-token"})
+    cid = r.json()["client_id"]
+    hdr = {"X-Xskill-Token": "secret-token", "X-Xskill-Client": cid}
+
+    app_mod._config = {"team": {"server": {"skill_slots": 100, "ranked_slots": 80}}}
+    assert "fix-foo" in [s["skill_name"]
+                         for s in client.get("/api/v1/team/sync", headers=hdr).json()["slots"]]
+
+    # 面板把分发关掉 → 下一次 sync 即刻为空(没有任何重启/重init)
+    app_mod._config["team"]["server"]["skill_slots"] = 0
+    assert client.get("/api/v1/team/sync", headers=hdr).json()["slots"] == []
+
+    # 再打开 → 又立刻恢复
+    app_mod._config["team"]["server"]["skill_slots"] = 100
+    assert "fix-foo" in [s["skill_name"]
+                         for s in client.get("/api/v1/team/sync", headers=hdr).json()["slots"]]
+
+
+def test_allow_anonymous_user_is_hot_without_restart(client):
+    """回归:allow_anonymous_user 曾被 init_team_context 快照进 _ctx(只在 serve
+    启动时填一次),面板改完必须重启 serve 才生效。现在 /register 每请求现取
+    live config(admin_config_reload 原地 mutate 的那个 dict)。
+
+    全程不重新 init_team_context——重启即视为不通过。
+    """
+    from xskill.api import app as app_mod
+
+    app_mod._config = {"team": {"server": {"allow_anonymous_user": True}}}
+    allowed = client.post(
+        "/api/v1/team/register",
+        json={"token": "secret-token", "client_label": "x", "hostname": "h"})
+    assert allowed.status_code == 200
+
+    # 面板关掉匿名(原地改同一个 dict) → 下一次注册立刻被拒
+    app_mod._config["team"]["server"]["allow_anonymous_user"] = False
+    rejected = client.post(
+        "/api/v1/team/register",
+        json={"token": "secret-token", "client_label": "x", "hostname": "h"})
+    assert rejected.status_code == 403          # 旧代码:仍是 200
+    assert "anonymous" in rejected.json()["detail"].lower()
+
+    # 具名注册不受影响;再打开 → 匿名又放行
+    named = client.post(
+        "/api/v1/team/register", json={"token": "secret-token", "user_name": "alice"})
+    assert named.status_code == 200
+    app_mod._config["team"]["server"]["allow_anonymous_user"] = True
+    assert client.post(
+        "/api/v1/team/register",
+        json={"token": "secret-token", "client_label": "x", "hostname": "h"},
+    ).status_code == 200
+
+
+def test_register_rejects_malformed_team_section_loudly(client):
+    """畸形 team 段不得把 /register 变成 500 之外的静默放行:
+    config parser 抛 ValueError(fail-loud),不静默取默认值。"""
+    import pytest
+    from xskill.api import app as app_mod
+
+    app_mod._config = {"team": {"server": {"allow_anonymous_user": "no"}}}
+    with pytest.raises(ValueError, match="allow_anonymous_user"):
+        client.post("/api/v1/team/register",
+                    json={"token": "secret-token", "client_label": "x"})

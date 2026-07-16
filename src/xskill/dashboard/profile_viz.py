@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import pickle
@@ -20,11 +21,19 @@ from typing import Optional
 
 import numpy as np
 
+from xskill.dashboard.metrics import SingleFlightTtlCache
 from xskill.recommend.profile_store import ProfileStore
 
 logger = logging.getLogger("xskill.dashboard.profile_viz")
 
 SIMILARITY_THRESHOLD = 0.6   # §2.5:mean_tensor 余弦相似度连边阈值
+
+# 聚类 graph 每次要给每个用户读两次画像库（load + load_points）再做 O(用户²)
+# 的两两相似度，且 §2.5 面板每次打开就整块重算——按 (画像库, 阈值) 短时缓存 +
+# 单飞，一个请求波次只算一次。
+_CLUSTER_GRAPH_TTL_SECONDS = 5.0
+_cluster_graph_cache = SingleFlightTtlCache(
+    ttl_seconds=_CLUSTER_GRAPH_TTL_SECONDS, max_entries=32)
 
 
 def profile_db_for(db_path: Optional[Path]) -> Path:
@@ -503,6 +512,7 @@ class ProfileViz:
     def __init__(self, profile_db: Path, *, skill_dir: Optional[Path] = None,
                  db_path: Optional[Path] = None,
                  skillhub_index: Optional[Path] = None):
+        self._profile_db = Path(profile_db)
         self._store = ProfileStore(profile_db)
         self._skill_dir = skill_dir
         self._db_path = db_path
@@ -622,51 +632,59 @@ class ProfileViz:
 
         边注:共同 top tag（双方各自 top-5 标签的交集）+ 共同 used skill。
         节点大小数据=该用户已落盘原子点数（与散点图同源,不另起口径）。
+
+        结果按 (画像库, 阈值) 短时缓存 + 单飞（``_CLUSTER_GRAPH_TTL_SECONDS``）：
+        每用户两次画像读 + O(用户²) 相似度不再逐请求重算。返回的是独立深拷贝，
+        缓存内的 graph 永不被调用方改写。
         """
-        means = self._store.all_means()
-        users = [u for u, _ in means]
-        vectors = []
-        for _, m in means:
-            v = np.asarray(m, dtype=float).ravel()
-            norm = float(np.linalg.norm(v))
-            vectors.append(v / norm if norm > 0 else v)
+        def build_graph() -> dict:
+            means = self._store.all_means()
+            users = [u for u, _ in means]
+            vectors = []
+            for _, m in means:
+                v = np.asarray(m, dtype=float).ravel()
+                norm = float(np.linalg.norm(v))
+                vectors.append(v / norm if norm > 0 else v)
 
-        nodes = []
-        top_tags: dict[str, list[str]] = {}
-        used_names: dict[str, set] = {}
-        for user in users:
-            profile = self._store.load(user) or {}
-            stored = self._store.load_points(user) or {"meta": []}
-            tag_counter: Counter = Counter()
-            for m in stored["meta"]:
-                for tag in (m.get("tags") or []):
-                    tag = str(tag).strip().lower()
-                    if tag:
-                        tag_counter[tag] += 1
-            top_tags[user] = [t for t, _ in tag_counter.most_common(5)]
-            used_names[user] = {e.get("name") or ""
-                                for e in profile.get("used_skills") or []} - {""}
-            nodes.append({"user": user,
-                          "atoms": len(stored["meta"]),
-                          "top_tags": top_tags[user][:3]})
+            nodes = []
+            top_tags: dict[str, list[str]] = {}
+            used_names: dict[str, set] = {}
+            for user in users:
+                profile = self._store.load(user) or {}
+                stored = self._store.load_points(user) or {"meta": []}
+                tag_counter: Counter = Counter()
+                for m in stored["meta"]:
+                    for tag in (m.get("tags") or []):
+                        tag = str(tag).strip().lower()
+                        if tag:
+                            tag_counter[tag] += 1
+                top_tags[user] = [t for t, _ in tag_counter.most_common(5)]
+                used_names[user] = {e.get("name") or ""
+                                    for e in profile.get("used_skills") or []} - {""}
+                nodes.append({"user": user,
+                              "atoms": len(stored["meta"]),
+                              "top_tags": top_tags[user][:3]})
 
-        edges = []
-        connected: set[str] = set()
-        for i in range(len(users)):
-            for j in range(i + 1, len(users)):
-                if vectors[i].shape != vectors[j].shape:
-                    continue  # 维度不一致(换过 embedding 模型)——不可比,不连边
-                sim = float(vectors[i] @ vectors[j])
-                if sim <= threshold:
-                    continue
-                a, b = users[i], users[j]
-                edges.append({
-                    "source": a, "target": b, "sim": round(sim, 3),
-                    "common_tags": [t for t in top_tags[a]
-                                    if t in top_tags[b]][:3],
-                    "common_skills": sorted(used_names[a] & used_names[b])[:3],
-                })
-                connected.update((a, b))
-        for node in nodes:
-            node["isolated"] = node["user"] not in connected  # 前端灰标"冷启动"
-        return {"threshold": threshold, "nodes": nodes, "edges": edges}
+            edges = []
+            connected: set[str] = set()
+            for i in range(len(users)):
+                for j in range(i + 1, len(users)):
+                    if vectors[i].shape != vectors[j].shape:
+                        continue  # 维度不一致(换过 embedding 模型)——不可比,不连边
+                    sim = float(vectors[i] @ vectors[j])
+                    if sim <= threshold:
+                        continue
+                    a, b = users[i], users[j]
+                    edges.append({
+                        "source": a, "target": b, "sim": round(sim, 3),
+                        "common_tags": [t for t in top_tags[a]
+                                        if t in top_tags[b]][:3],
+                        "common_skills": sorted(used_names[a] & used_names[b])[:3],
+                    })
+                    connected.update((a, b))
+            for node in nodes:
+                node["isolated"] = node["user"] not in connected  # 前端灰标"冷启动"
+            return {"threshold": threshold, "nodes": nodes, "edges": edges}
+
+        return copy.deepcopy(_cluster_graph_cache.get_or_build(
+            (str(self._profile_db), float(threshold)), build_graph))

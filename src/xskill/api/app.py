@@ -1019,18 +1019,16 @@ def create_app(home_root: Path | str | None = None,
                 from xskill.pipeline.scheduler import IntervalSubprocessScheduler
                 from xskill.team.server.state import ensure_join_token
                 from xskill.config import (
-                    allow_anonymous_user as _allow_anonymous,
                     get_team_clients_db_path, get_team_server_state_path,
                     get_team_trajectories_dir,
                 )
                 from xskill.pipeline.registry import register_dir as _register_dir
-                from xskill.canary import CanaryConfig
 
                 join_token = ensure_join_token(get_team_server_state_path())
                 client_registry = ClientRegistry(get_team_clients_db_path())
                 traj_root = get_team_trajectories_dir()
-                team_cfg = _config.get("team", {}).get("server", {})
-                canary_cfg = CanaryConfig.from_dict(_config.get("canary", {}))
+                # team.server 的槽位/allow_anonymous_user 与 canary 都不再在此
+                # 读取快照：它们是 HOT_RELOAD 段，读方每次现取 _config。
 
                 def _team_register_dir(path, label):
                     # team_client 生态标签：watcher 的 CS 归因靠 wd.label 反查 client
@@ -1045,7 +1043,6 @@ def create_app(home_root: Path | str | None = None,
                     config=_config, skill_dir=_skill_dir, traj_root=traj_root,
                     embed_client=_team_embed,
                     profile_db=_xhome / "team_profile.db",
-                    canary_config=canary_cfg,
                     client_registry=client_registry,
                 )
                 set_recommend_engine(_engine)
@@ -1055,11 +1052,7 @@ def create_app(home_root: Path | str | None = None,
                     client_registry=client_registry,
                     skill_dir=_skill_dir,
                     traj_root=traj_root,
-                    probability=canary_cfg.probability,
-                    ranked_slots=int(team_cfg.get("ranked_slots", 80)),
-                    total_slots=int(team_cfg.get("skill_slots", 100)),
                     register_dir=_team_register_dir,
-                    allow_anonymous_user=_allow_anonymous(_config),
                     skillhub=_engine.skillhub,
                     profile_refresh_service=None,
                 )
@@ -1104,7 +1097,8 @@ def create_app(home_root: Path | str | None = None,
                     from xskill.team.server.skill_manifest import set_recommend_engine
                     set_recommend_engine(None)
                 except Exception:  # pylint: disable=broad-exception-caught
-                    pass
+                    logger.warning("failed to detach recommend engine after "
+                                   "partial team init", exc_info=True)
                 logger.warning("team server context init failed", exc_info=True)
 
         # watcher 拆为定时短命子进程(python -m xskill._workers sweep):每轮 spawn 一个子进程跑一轮

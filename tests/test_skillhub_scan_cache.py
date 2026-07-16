@@ -243,3 +243,82 @@ def test_tag_cloud_ttl_cache_hit(tmp_path, monkeypatch):
 
     assert first == second == {"django": 1, "nginx": 1}
     assert len(traversal_calls) == 1
+
+
+def test_tag_cloud_concurrent_calls_walk_atoms_once(tmp_path, monkeypatch):
+    """tag_cloud 的 TTL 缓存到期瞬间不许惊群：并发只走一次全量原子。"""
+    from xskill.pipeline.atom import AtomTask, AtomTaskStore
+    from xskill.pipeline.registry import get_connection
+    from xskill.dashboard.metrics import DashboardMetrics
+    import xskill.dashboard.metrics as dashboard_metrics
+
+    watch_dir = tmp_path / "wd"
+    watch_dir.mkdir()
+    store = AtomTaskStore(root=watch_dir)
+    store.save(AtomTask(
+        atom_id="atom_t_0000", traj_id="t", offset_start=1, offset_end=2,
+        intent="i", summary="s", tags=["django"], used_skills=[], ux_score=7,
+        pre_atom_id=None, post_atom_id=None, context_prefix="", raw_segment=""))
+    db_path = tmp_path / "tg.db"
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO watch_dirs(path,label,ecosystem) VALUES(?,?,?)",
+                 (str(watch_dir), "w", "claude_code"))
+    conn.commit()
+    conn.close()
+
+    dashboard_metrics._tag_cloud_cache.clear()
+    traversal_calls: list[int] = []
+    calls_lock = threading.Lock()
+    real_iter_tags = AtomTaskStore.iter_tags
+
+    def counting_iter_tags(self):
+        with calls_lock:
+            traversal_calls.append(1)
+        yield from real_iter_tags(self)
+
+    monkeypatch.setattr(AtomTaskStore, "iter_tags", counting_iter_tags)
+    metrics = DashboardMetrics(db_path=db_path)
+    barrier = threading.Barrier(16)
+
+    def load():
+        barrier.wait()
+        return metrics.tag_cloud()
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = [future.result(timeout=10)
+                   for future in [pool.submit(load) for _ in range(16)]]
+
+    assert len(traversal_calls) == 1
+    assert all(rows == [{"tag": "django", "count": 1, "users": []}]
+               for rows in results)
+
+
+def test_tag_cloud_returns_independent_copies(tmp_path):
+    """缓存里的行不许被调用方改写（users 是可变 list）。"""
+    from xskill.pipeline.atom import AtomTask, AtomTaskStore
+    from xskill.pipeline.registry import get_connection
+    from xskill.dashboard.metrics import DashboardMetrics
+    import xskill.dashboard.metrics as dashboard_metrics
+
+    watch_dir = tmp_path / "wd"
+    watch_dir.mkdir()
+    AtomTaskStore(root=watch_dir).save(AtomTask(
+        atom_id="atom_t_0000", traj_id="t", offset_start=1, offset_end=2,
+        intent="i", summary="s", tags=["django"], used_skills=[], ux_score=7,
+        pre_atom_id=None, post_atom_id=None, context_prefix="", raw_segment=""))
+    db_path = tmp_path / "tg.db"
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO watch_dirs(path,label,ecosystem) VALUES(?,?,?)",
+                 (str(watch_dir), "boss", "team_client"))
+    conn.commit()
+    conn.close()
+    dashboard_metrics._tag_cloud_cache.clear()
+
+    metrics = DashboardMetrics(db_path=db_path)
+    first = metrics.tag_cloud()
+    first[0]["count"] = 999
+    first[0]["users"].append("intruder")
+    first.append({"tag": "injected"})
+
+    assert metrics.tag_cloud() == [{"tag": "django", "count": 1,
+                                    "users": ["boss"]}]

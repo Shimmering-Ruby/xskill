@@ -1,0 +1,139 @@
+# xskill 自定义门禁规则 —— CLAUDE.md「code 规范」的可扫描子集固化。
+# 跑法：make lint（semgrep scan --config .semgrep/xskill.yml --error）
+rules:
+  # 生产代码禁 time.sleep（限速走限流器，等待走 Event/条件变量）。
+  - id: xskill-no-time-sleep
+    languages: [python]
+    severity: ERROR
+    message: >
+      生产代码禁止 time.sleep：限速用限流器（utils/rate_limit），等待用
+      Event.wait / 条件变量（参考 utils/shutdown.SHUTTING_DOWN）。
+      No time.sleep in production code.
+    paths:
+      include: [src]
+    pattern-either:
+      - pattern: time.sleep(...)
+      - patterns:
+          - pattern: sleep(...)
+          - pattern-inside: |
+              from time import sleep
+              ...
+
+  # 全量禁 lambda（sort/min/max 的 key 用 operator.itemgetter/attrgetter
+  # 或两段稳定排序改写）。
+  - id: xskill-no-lambda
+    languages: [python]
+    severity: ERROR
+    message: >
+      禁止 lambda：sort/min/max 的 key 用 operator.itemgetter/attrgetter，
+      回调用已有函数或方法引用。No lambda expressions.
+    paths:
+      include: [src]
+    pattern: 'lambda $...ARGS: $BODY'
+
+  # 禁止跨模块导入 private 名字（_foo）。dunder（__version__ 等）豁免。
+  - id: xskill-no-private-import
+    languages: [python]
+    severity: ERROR
+    message: >
+      禁止从别的模块导入 private 名字（_foo）：要么把它升为 public API，
+      要么在本模块内实现。No importing another module's private names.
+    paths:
+      include: [src]
+    patterns:
+      - pattern: from $MODULE import $NAME
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '^_[^_].*'
+
+  # Windows 子进程静默无窗 —— os.system/os.popen 直接禁。
+  - id: xskill-no-os-system
+    languages: [python]
+    severity: ERROR
+    message: >
+      禁止 os.system / os.popen：Windows 上会弹黑窗且无法静默。改用
+      subprocess.run(..., **windowless_subprocess_kwargs())。
+    paths:
+      include: [src]
+    pattern-either:
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+
+  # subprocess 调用必须展开 windowless_subprocess_kwargs()。
+  - id: xskill-subprocess-must-be-windowless
+    languages: [python]
+    severity: ERROR
+    message: >
+      subprocess 调用必须带 **windowless_subprocess_kwargs()（utils/proc），
+      否则 Windows 上弹黑窗。Every subprocess call must be windowless on Windows.
+    paths:
+      include: [src]
+      exclude: [src/xskill/utils/proc.py]
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(...)
+          - pattern: subprocess.Popen(...)
+          - pattern: subprocess.check_output(...)
+          - pattern: subprocess.check_call(...)
+          - pattern: subprocess.call(...)
+      - pattern-not: subprocess.run(..., **windowless_subprocess_kwargs(), ...)
+      - pattern-not: subprocess.Popen(..., **windowless_subprocess_kwargs(), ...)
+      - pattern-not: subprocess.check_output(..., **windowless_subprocess_kwargs(), ...)
+      - pattern-not: subprocess.check_call(..., **windowless_subprocess_kwargs(), ...)
+      - pattern-not: subprocess.call(..., **windowless_subprocess_kwargs(), ...)
+
+  # bytes.decode 必须显式处理非 UTF-8 场景 —— 要么给 errors=，
+  # 要么位置参数带上第二个 errors 实参。Windows 子进程输出是 GBK 不是 UTF-8。
+  - id: xskill-decode-needs-errors
+    languages: [python]
+    severity: ERROR
+    message: >
+      .decode() 必须显式传 errors=（如 errors="replace"）或按平台编码解码：
+      Windows 子进程/工具输出是 GBK(cp936)，硬按 UTF-8 解会
+      UnicodeDecodeError。Decode GBK-safe, never assume UTF-8.
+    paths:
+      include: [src]
+    patterns:
+      - pattern: $X.decode(...)
+      - pattern-not: $X.decode(..., errors=$ERR)
+      - pattern-not: $X.decode($ENC, $ERR)
+
+  # subprocess text=True 隐式用 locale 编码解码，必须显式
+  # encoding= 或 errors=，否则解码行为随平台漂移且出错即抛。
+  - id: xskill-subprocess-text-needs-encoding
+    languages: [python]
+    severity: ERROR
+    message: >
+      subprocess 带 text=True/universal_newlines=True 时必须同时给
+      encoding= 或 errors=（如 errors="replace"）：Windows 子进程输出是
+      GBK，隐式解码会 UnicodeDecodeError 打挂调用线程。
+    paths:
+      include: [src]
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$FUNC(..., text=True, ...)
+          - pattern: subprocess.$FUNC(..., universal_newlines=True, ...)
+      - pattern-not: subprocess.$FUNC(..., encoding=$ENC, ...)
+      - pattern-not: subprocess.$FUNC(..., errors=$ERR, ...)
+
+  # 禁止在循环里逐条打 embedding —— 组批一次 HTTP 发一批。
+  # 后端确认不支持数组输入时，在调用行加 nosemgrep 注释并写明原因。
+  - id: xskill-no-embedding-in-loop
+    languages: [python]
+    severity: ERROR
+    message: >
+      禁止循环内逐条调 embedding：组批（batch）一次请求发一批。仅当后端
+      确认不支持数组输入时才允许逐条，并在该行加 nosemgrep 注明原因。
+    paths:
+      include: [src]
+    patterns:
+      - pattern-either:
+          - pattern: $CLIENT.embeddings.create(...)
+          - pattern: $CLIENT.embed(...)
+      - pattern-either:
+          - pattern-inside: |
+              for $ITEM in $ITER:
+                ...
+          - pattern-inside: |
+              while $COND:
+                ...

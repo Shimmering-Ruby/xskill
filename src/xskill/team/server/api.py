@@ -51,21 +51,54 @@ _SKILL_ARCHIVE_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 
 
 class _Ctx:
-    """模块级上下文单例。init_team_context 填，端点读。"""
+    """模块级上下文单例。init_team_context 填，端点读。
+
+    这里**只放进程级资源/接线对象**（重启域）。纯配置开关（skill_slots /
+    ranked_slots / canary.probability / allow_anonymous_user）**刻意不放这里**
+    ——它们要热生效，由 ``live_manifest_tuning()`` / 端点内 ``config.*`` 每请求
+    现取 live config，见 ``live_manifest_tuning`` 的 docstring。
+    """
     join_token: str = ""
     client_registry: ClientRegistry | None = None
     skill_dir: Path | None = None
     traj_root: Path | None = None
-    probability: float = 0.2
-    ranked_slots: int = 80
-    total_slots: int = 100
-    allow_anonymous_user: bool = True
     register_dir: Callable[[Path, str], None] | None = None
     skillhub = None
     profile_refresh_service = None
 
 
 _ctx = _Ctx()
+
+
+def team_context() -> _Ctx:
+    """取 team server 上下文单例（跨模块公开入口）。
+
+    dashboard 控制面等外部模块用它拿 skill_dir / client_registry 等**进程级**
+    引用；调优数字不在这里，走 ``live_manifest_tuning()``（热生效）。
+    """
+    return _ctx
+
+
+def live_manifest_tuning() -> tuple[int, int, float]:
+    """现取 ``(total_slots, ranked_slots, probability)``——热生效的唯一来源。
+
+    ``admin_config_reload`` 会**原地 mutate** ``app.\\_config`` dict（console.py
+    的热加载实现），故每请求现取该 dict 即天然热生效，无需重启、无需回写
+    ``_ctx``（照 app.py 的 /canary 状态端点同款读法）。曾把这三个值快照进
+    ``_ctx``（仅 startup 填一次），导致面板改完静默不生效、必须重启 serve。
+
+    在函数内 import：``app`` 模块 import 本模块，模块级 import 会循环。
+    """
+    from xskill.api import app as app_mod
+    from xskill.canary import CanaryConfig
+    from xskill.config import team_server_slots_config
+
+    cfg = app_mod._config or {}  # pylint: disable=protected-access
+    slots = team_server_slots_config(cfg)
+    probability = CanaryConfig.from_dict(cfg.get("canary", {}) or {}).probability
+    return slots["skill_slots"], slots["ranked_slots"], probability
+
+
 _WHEEL_BUILD_LOCK = threading.Lock()
 _SYNC_EXECUTOR_STATE = "xskill_team_sync_executor"
 _TELEMETRY_EXECUTOR_STATE = "xskill_team_telemetry_executor"
@@ -98,8 +131,12 @@ class _BoundedExecutor:
             except RuntimeError:
                 self._slots.release()
                 return False
-        future.add_done_callback(lambda _future: self._slots.release())
+        future.add_done_callback(self._release_slot)
         return True
+
+    def _release_slot(self, _future) -> None:
+        """done callback：任务落地（成功/异常/取消）后归还并发槽位。"""
+        self._slots.release()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -184,11 +221,7 @@ def init_team_context(
     client_registry: ClientRegistry,
     skill_dir: Path,
     traj_root: Path,
-    probability: float,
-    ranked_slots: int,
-    total_slots: int,
     register_dir: Callable[[Path, str], None],
-    allow_anonymous_user: bool = True,
     skillhub=None,
     profile_refresh_service=None,
 ) -> None:
@@ -212,10 +245,6 @@ def init_team_context(
     _ctx.client_registry = client_registry
     _ctx.skill_dir = Path(skill_dir)
     _ctx.traj_root = Path(traj_root)
-    _ctx.probability = probability
-    _ctx.ranked_slots = ranked_slots
-    _ctx.total_slots = total_slots
-    _ctx.allow_anonymous_user = allow_anonymous_user
     _ctx.register_dir = register_dir
     _ctx.skillhub = skillhub
     _ctx.profile_refresh_service = profile_refresh_service
@@ -246,10 +275,6 @@ def clear_team_context(*, profile_refresh_shutdown_timeout: float = 5.0) -> bool
     _ctx.client_registry = None
     _ctx.skill_dir = None
     _ctx.traj_root = None
-    _ctx.probability = 0.2
-    _ctx.ranked_slots = 80
-    _ctx.total_slots = 100
-    _ctx.allow_anonymous_user = True
     _ctx.register_dir = None
     _ctx.skillhub = None
     _ctx.profile_refresh_service = None
@@ -475,9 +500,11 @@ def _write_wheel_zip(
         for rel, path in entries:
             data = path.read_bytes()
             zf.writestr(rel, data)
+            # errors="strict"：base64 输出恒在 ASCII 字母表内，解不开=编码器坏了，
+            # 属于必须炸出来的程序 bug，不是需要容错的外部 GBK 输入。
             digest = base64.urlsafe_b64encode(
                 hashlib.sha256(data).digest(),
-            ).rstrip(b"=").decode("ascii")
+            ).rstrip(b"=").decode("ascii", errors="strict")
             records.append((rel, f"sha256={digest}", str(len(data))))
 
         record_rel = f"{dist_info_dir}/RECORD"
@@ -565,7 +592,12 @@ async def team_register(req: RegisterRequest) -> RegisterResponse:
     if req.token != _ctx.join_token:
         raise HTTPException(status_code=401, detail="invalid join token")
     user_name = (req.user_name or "").strip() or None
-    if not user_name and not _ctx.allow_anonymous_user:
+    # 每请求现取：面板改 allow_anonymous_user 后下一次 connect 即生效，无需重启
+    # serve（同 live_manifest_tuning 的理由——admin_config_reload 原地 mutate
+    # app._config）。函数内 import：app 模块 import 本模块，模块级会循环。
+    from xskill.api import app as app_mod
+    from xskill.config import allow_anonymous_user
+    if not user_name and not allow_anonymous_user(app_mod._config or {}):  # pylint: disable=protected-access
         raise HTTPException(
             status_code=403, detail="anonymous users not allowed"
         )
@@ -697,14 +729,16 @@ def team_sync(
     慢 embedding 只在独立的 ProfileRefreshService worker 中执行。
     """
     client_id = _auth(x_xskill_token, x_xskill_client, version=x_xskill_version)
-    if _ctx.total_slots <= 0:
+    # 每请求现取：面板改推荐个数/灰度概率后下一轮 sync 即生效，无需重启 serve。
+    total_slots, ranked_slots, probability = live_manifest_tuning()
+    if total_slots <= 0:
         # 明确禁用分发时无需读取 client 行、偏好和 retired 集合。300 并发
         # 冷启动会放大这些无效 SQLite 打开；画像刷新仍按下方路径提交。
         resp = build_manifest(
             client_id=client_id,
             skill_dir=_ctx.skill_dir,
-            probability=_ctx.probability,
-            ranked_slots=_ctx.ranked_slots,
+            probability=probability,
+            ranked_slots=ranked_slots,
             total_slots=0,
             traj_root=_ctx.traj_root,
             telemetry_submit=telemetry_submit,
@@ -724,9 +758,9 @@ def team_sync(
         resp = build_manifest(
             client_id=client_id,
             skill_dir=_ctx.skill_dir,
-            probability=_ctx.probability,
-            ranked_slots=_ctx.ranked_slots,
-            total_slots=_ctx.total_slots,
+            probability=probability,
+            ranked_slots=ranked_slots,
+            total_slots=total_slots,
             traj_root=_ctx.traj_root,
             prefs=prefs,
             retired=retired,
@@ -901,15 +935,19 @@ def _store_user_skill(hub, owner_dir: str, payload: bytes) -> dict:
             raise HTTPException(status_code=413,
                                 detail="skill archive expands beyond 100MB")
         try:
+            # errors="strict" 是**故意**的：非 utf-8 的 SKILL.md 由下面的 except
+            # 转成 400 退回上传方(fail-loud 校验)，而不是 errors="replace" 把乱码
+            # 静默收进 hub 分发给所有人。这里的 GBK 来源是可拒绝的上传请求，
+            # 不是 collector 那种"拒了就停摆"的本地轮询。
             frontmatter, _body = parse_strict(
-                archive.read("SKILL.md").decode("utf-8"))
+                archive.read("SKILL.md").decode("utf-8", errors="strict"))
         except (FrontmatterError, UnicodeDecodeError) as bad_skill:
             raise HTTPException(status_code=400,
                                 detail=f"invalid SKILL.md: {bad_skill}") from bad_skill
         display_name = str(frontmatter["name"]).strip()
-        from xskill.recommend.skillhub import _safe_id_part
+        from xskill.recommend.skillhub import safe_id_part
         dest_dir = (Path(hub.dir) / "user_skill_hub" / owner_dir
-                    / _safe_id_part(display_name))
+                    / safe_id_part(display_name))
         dest_dir.parent.mkdir(parents=True, exist_ok=True)
         tmp_dir = Path(tempfile.mkdtemp(
             prefix=f".{dest_dir.name}.tmp.", dir=dest_dir.parent,

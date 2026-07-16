@@ -59,13 +59,21 @@ def _harness_for(md_path: Path) -> str:
 
 def _sidecar_model(md_path: Path) -> str:
     """读 ``<traj>.md`` 同目录同名 ``.json`` sidecar 里的 ``model``；
-    无 sidecar / 无该键 / 解析失败 → 空串（保持 unknown，不抛错不影响上传）。"""
+    无 sidecar / 无该键 / 解析失败 → 空串（保持 unknown，不抛错不影响上传）。
+
+    ``errors="replace"``：sidecar 可能由 Windows 工具以 GBK(cp936) 写入，严格
+    utf-8 解码会抛 UnicodeDecodeError。它是 ValueError 的子类而**不是**
+    JSONDecodeError，下面的 except 拦不住，会穿透本函数炸掉整个 pending()
+    轮询——一个坏 sidecar 就停掉这台机器的全部上传。
+    """
     jp = md_path.with_suffix(".json")
     if not jp.is_file():
         return ""
     try:
-        return str(json.loads(jp.read_text(encoding="utf-8")).get("model") or "")
-    except (OSError, json.JSONDecodeError):
+        return str(json.loads(
+            jp.read_text(encoding="utf-8", errors="replace")).get("model") or "")
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("读 sidecar 失败,model 记 unknown: %s (%s)", jp, exc)
         return ""
 
 
@@ -172,6 +180,21 @@ class TeamCollector:
         self._ingesters.clear()
 
     # ── pending ─────────────────────────────────────────────────
+    def _read_trajectory_text(self, md_path: Path) -> str:
+        """读一条 traj_*.md。非 utf-8 字节用 U+FFFD 顶掉并告警，不抛错。
+
+        轨迹文件可能由 Windows 上的工具以 GBK(cp936) 写入。严格 utf-8 解码会抛
+        UnicodeDecodeError，从 pending() 里逃出去打断整个 collect/upload 轮询——
+        一条坏编码的轨迹就让这台机器再也不上传任何东西。坏字符只影响这一条轨迹
+        的可读性(且已被 redact 之后的 hash 稳定表达)，故按 CLAUDE.md 的 GBK 规则
+        降级解码 + 落日志，而不是拖垮轮询。
+        """
+        text = md_path.read_text(encoding="utf-8", errors="replace")
+        if "�" in text:
+            logger.warning(
+                "轨迹含非 utf-8 字节(疑似 GBK),已用替换字符降级解码: %s", md_path)
+        return text
+
     def pending(self) -> list[PendingTrajectory]:
         """扫 ``~/.xskill/*_sessions/`` 所有 traj_*.md，吐出满足放行条件的轨迹。
 
@@ -215,7 +238,7 @@ class TeamCollector:
                         self._state_store.clear_waiting(traj_id)
                     continue
                 if not sha:
-                    raw = md.read_text(encoding="utf-8")
+                    raw = self._read_trajectory_text(md)
                     raw_sha = hashlib.sha256(raw.encode("utf-8")).hexdigest()
                     content = redact_text(raw)
                     sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -233,7 +256,7 @@ class TeamCollector:
                 else:
                     content = None
             else:
-                raw = md.read_text(encoding="utf-8")
+                raw = self._read_trajectory_text(md)
                 raw_sha = hashlib.sha256(raw.encode("utf-8")).hexdigest()
                 if state is not None and state["original_content_hash"] == raw_sha:
                     sha = state["cleaned_content_hash"]
@@ -296,7 +319,7 @@ class TeamCollector:
             if (now - waiting_started_at) < self.min_change_interval:
                 continue  # 还没稳定满窗口,继续拦（min_change_interval<=0 时恒放行）
             if content is None:
-                raw = md.read_text(encoding="utf-8")
+                raw = self._read_trajectory_text(md)
                 content = redact_text(raw)
             out.append(PendingTrajectory(traj_id=traj_id, content=content,
                                          sha256=sha, model=model_name,

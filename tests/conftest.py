@@ -59,6 +59,20 @@ def _isolate_ingest_config(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_app_config():
+    """隔离 ``xskill.api.app._config``。
+
+    推荐调优(team.server.skill_slots / ranked_slots、canary.probability)改成
+    每请求现取该全局 dict 后，用例对它的改动必须还原——否则跨用例污染
+    (A 设了 skill_slots=3，期望默认 100 的 B 就会莫名其妙挂)。
+    """
+    from xskill.api import app as app_mod
+    saved = app_mod._config
+    yield
+    app_mod._config = saved
+
+
 # ─────────────────────────────────────────────────────────────────
 # 真实 ~/.claude/skills/ 防污染快照
 # ─────────────────────────────────────────────────────────────────

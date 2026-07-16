@@ -14,8 +14,8 @@ def _team_registry_provider():
 
     非 team 模式 / ctx 未初始化 → None（普通用户登录不可用，仅 admin 口令）。
     """
-    from xskill.team.server.api import _ctx as team_ctx
-    return getattr(team_ctx, "client_registry", None)
+    from xskill.team.server.api import team_context
+    return getattr(team_context(), "client_registry", None)
 
 
 def mount_dashboard(app, cfg: dict, *, db_path: Optional[Path] = None,

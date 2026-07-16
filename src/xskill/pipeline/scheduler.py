@@ -15,6 +15,8 @@ import logging
 import subprocess
 import threading
 
+from xskill.utils.proc import windowless_subprocess_kwargs
+
 logger = logging.getLogger("xskill.pipeline.scheduler")
 
 
@@ -54,13 +56,26 @@ class IntervalSubprocessScheduler:
         # 先等一个周期再首跑:避免 startup 瞬间与其它初始化抢资源(照 AutoUpdater)。
         # Event.wait 返回 True 表示被 stop 竖旗中断 → 退出循环。
         while not self._stop.wait(self._interval):
-            self._run_once()
+            # 本线程是 daemon:任何漏网异常都会让它静默猝死,此后 sweep / 画像
+            # 永不再跑(进程还活着,只是不干活了)。照 daemon._tick 兜住并落日志。
+            try:
+                self._run_once()
+            except Exception:  # noqa: BLE001 — 顶层任务边界,吞掉但必须落日志
+                logger.warning("调度任务 %s 本轮异常,下轮继续", self._name,
+                               exc_info=True)
 
     def _run_once(self) -> None:
         try:
             result = subprocess.run(
-                self._command, capture_output=True, text=True,
+                self._command, capture_output=True,
+                # Windows:不带无窗 flag 会每个周期弹一次 cmd 黑窗给用户。
+                # 编码:子进程输出在中文 Windows 上是 GBK,text=True 默认按 cp936
+                # strict 解码,非法字节会抛 UnicodeDecodeError——那会穿过下面的
+                # except(只接 Timeout/OSError)打死调度线程。显式 utf-8+replace:
+                # 子进程是我们自己的 python -m xskill._workers,统一按 utf-8 出。
+                encoding="utf-8", errors="replace",
                 timeout=self._timeout,
+                **windowless_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             logger.warning("调度任务 %s 超过 %.0fs 上限被杀", self._name, self._timeout)

@@ -142,9 +142,11 @@ class TestPickRecommendedIndexGuard:
         set_recommend_engine(eng)
         server_api.init_team_context(
             join_token="tok", client_registry=reg, skill_dir=skill_dir, traj_root=traj_root,
-            probability=0.2, ranked_slots=2, total_slots=3,
-            register_dir=lambda p, l: None, allow_anonymous_user=True,
+            register_dir=lambda p, l: None,
         )
+        # 槽位改由现取 live config(热生效),不再走 init_team_context 快照
+        from xskill.api import app as app_mod
+        app_mod._config = {"team": {"server": {"skill_slots": 3, "ranked_slots": 2}}}
         app = FastAPI()
         app.include_router(server_api.router)
         tc = TestClient(app)

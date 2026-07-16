@@ -104,7 +104,6 @@ def _make_client(tmp_path) -> TestClient:
         client_registry=reg,
         skill_dir=skill_dir,
         traj_root=traj_root,
-        probability=0.2, ranked_slots=80, total_slots=100,
         register_dir=lambda path, label: None,
     )
     app = FastAPI()
