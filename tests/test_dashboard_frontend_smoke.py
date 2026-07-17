@@ -1,7 +1,10 @@
 """test_dashboard_frontend_smoke.py —— 前端壳与取数脚本静态冒烟"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
+import subprocess
 
 STATIC = Path("src/xskill/dashboard/static")
 
@@ -38,6 +41,105 @@ def test_appjs_fetches_overview_endpoint():
     # 斜杠，对相对/绝对两种写法都成立。
     assert "api/v1/dashboard/overview" in js
     assert "api/v1/dashboard/by-domain" in js
+
+
+def test_avg_atoms_display_uses_metric_nullability():
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "o.avg_atoms_per_traj != null" in js
+    assert "o.trajs > 0 ? o.avg_atoms_per_traj" not in js
+
+
+def test_avg_atoms_display_behavior_executes_load_overview():
+    script = f"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync(
+  {json.dumps(str(STATIC / "app.js"))},
+  'utf8',
+);
+const end = source.indexOf('async function loadRates()');
+if (end < 0) throw new Error('loadRates marker missing');
+const overviewSource = source.slice(0, end)
+  + '\\nthis.loadOverviewForTest = loadOverview;';
+
+async function renderAverage(trajs, average) {{
+  const elements = Object.create(null);
+  const document = {{
+    querySelectorAll(selector) {{
+      if (!elements[selector]) {{
+        let text = '';
+        const element = {{}};
+        Object.defineProperty(element, 'textContent', {{
+          get() {{ return text; }},
+          set(value) {{ text = String(value); }},
+        }});
+        elements[selector] = [element];
+      }}
+      return elements[selector];
+    }},
+    getElementById() {{ return null; }},
+  }};
+  const fetch = async url => ({{
+    ok: true,
+    status: 200,
+    json: async () => url.endsWith('/overview')
+      ? {{
+          trajs,
+          atoms: 0,
+          avg_atoms_per_traj: average,
+          avg_ux: null,
+          ux_n: 0,
+          retry_rate: 0,
+          filtered: 0,
+          success_rate: 0,
+          price_health: null,
+        }}
+      : {{ stages: {{ done: 0, error: 0 }} }},
+  }});
+  const context = vm.createContext({{
+    document,
+    fetch,
+    console: {{ error() {{}} }},
+  }});
+  vm.runInContext(overviewSource, context);
+  await context.loadOverviewForTest();
+  return elements['[data-m="overview.avg_atoms_per_traj"]'][0].textContent;
+}}
+
+(async () => {{
+  const rendered = [];
+  rendered.push(await renderAverage(8, null));
+  rendered.push(await renderAverage(8, 0));
+  rendered.push(await renderAverage(0, 2.75));
+  process.stdout.write(JSON.stringify(rendered));
+}})().catch(error => {{
+  console.error(error);
+  process.exit(1);
+}});
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == ["—", "0", "2.75"]
+
+
+def test_avg_atoms_tooltip_describes_matching_split_scope():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    adjacent_hint = re.search(
+        r'data-m="overview\.avg_atoms_per_traj"[^>]*>[^<]*</span>\s*'
+        r'<span class="hint" title="([^"]+)">ⓘ</span>',
+        html,
+    )
+
+    assert adjacent_hint is not None
+    assert adjacent_hint.group(1) == (
+        "已成功拆分轨迹的原子数之和 ÷ 已成功拆分轨迹数。"
+    )
 
 
 def test_appjs_routes_skillhub_detail_by_source():

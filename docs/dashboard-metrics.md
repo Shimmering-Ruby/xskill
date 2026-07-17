@@ -23,21 +23,21 @@
    但**从不调用 mark_skill_used**。→ team 部署下 `skill_used`/`canary_side` 恒 NULL；
    单机下也只记 header 里那一个 skill，atom 实际用到的多个 skill 被系统性漏计。
 
-另有一个数值正确性 bug：**`tasks_extracted` 增量续拆时被 delta 覆盖**。
-`_on_split_done`（runner.py:1065-1068）把 `update_traj_offset(tasks_extracted=n_atoms)` 写成
-本次 split 新增的 atom 数（`TaskAgent.run` 只返回 ≥ resume_line 的新 atom，task_agent.py:339），
-不是该轨迹累计 atom 数。轨迹追加内容触发续拆后，该列从"全量"被覆盖成"本次增量"
-→ 原子总数、单轨迹均原子、原子采纳率分母、团队用户 atoms 列全部系统性低估。
+历史版本存在一个数值正确性 bug：**`tasks_extracted` 增量续拆时曾被 delta 覆盖**。
+旧版 `_on_split_done` 把本次 split 新增的 atom 数写入 `tasks_extracted`，而不是该轨迹累计
+atom 数。现行代码已经改为写 `AtomTaskStore.list_by_traj()` 返回的当前总数；但升级不会自动
+回填旧 registry 行，因此修复前已经发生过增量续拆、且之后没有重新拆分或回填的存量数据仍
+可能偏低。
 
 ## 结论汇总
 
 | 指标 | 展示位置 | 审计结论 | 处置 |
 |---|---|---|---|
 | 轨迹总数 | 总览卡片 | 可信 | 保留 |
-| 原子总数 | 总览卡片 | 口径修正后可信 | 修 tasks_extracted 覆盖 bug |
+| 原子总数 | 总览卡片 | 口径修正后可信 | 当前写入已用全量口径；旧 registry 行可能仍偏低 |
 | 今日成本 | 总览/成本卡片 | 口径修正后可信 | UTC 日界 → 本地日界 |
 | 平均 ux（轨迹） | 总览卡片 | 不可信-可修 | 死列；改从 .ux_scores.jsonl 聚合 |
-| 单轨迹均原子 | 总览·关键指标 | 口径修正后可信 | 同原子总数；分母含未处理轨迹需注明 |
+| 单轨迹均原子 | 总览·关键指标 | 口径修正后可信 | 分子、分母仅含已成功拆分轨迹；旧 registry 行可能仍偏低 |
 | 技能产出率 | 总览·关键指标 | 不可信-下线 | 死列，前端已显 "—"，建议整卡下线 |
 | 处理成功率 | 总览·关键指标 | 口径修正后可信 | 分母剔除在途/区分 filtered |
 | 重试率 | 总览·关键指标 | 可信 | 保留 |
@@ -49,7 +49,7 @@
 | 成本&用量（累计/By模型/By步骤） | 成本页 | 可信 | 保留 |
 | coding agent 占比 | 画像页 | 可信 | 保留（注明缺失兜底口径） |
 | 用户模型占比 | 画像页 | 口径修正后可信 | unknown 改写为配置桶需在 UI 注明 |
-| 团队用户列表 | 画像页 | 口径修正后可信 | last_active 语义修正；atoms 同覆盖 bug |
+| 团队用户列表 | 画像页 | 口径修正后可信 | last_active 语义修正；旧 registry 行的 atoms 可能偏低 |
 | 标签云 | 画像页 | 可信 | 保留（归因口径注明） |
 | 技能库存清单 | 技能库页 | 口径修正后可信 | "使用次数"列是死数据，删列 |
 | 单 skill 触发率表 | 技能库页 | 不可信-可修 | 同推荐触发率 |
@@ -73,11 +73,11 @@
 - 定义：所有轨迹拆出的 AtomTask 总数。
 - SQL/代码口径：`overview()` — `COALESCE(SUM(tasks_extracted),0)`。
 - 数据源：`trajectories.tasks_extracted`，由 `_on_split_done → update_traj_offset` 写入。
-- 已知误差/偏差：**增量续拆覆盖 bug**（见文首）：轨迹追加内容后该列被覆盖为本次新增数，
-  历史 atom 数丢失 → 系统性低估。对照真值：磁盘 `<traj_id>/tasks/atom_*.json` 文件数
-  （`AtomTaskStore.list_by_traj`）。
-- 审计结论与处置：**口径修正后可信**。修 `_on_split_done`：写 `len(store.list_by_traj(traj_id))`
-  （全量口径）而非 `len(atoms)`（增量口径）。
+- 已知误差/偏差：现行写入使用 `len(store.list_by_traj(traj_id))` 的全量口径；修复前已经
+  发生过增量续拆、且之后没有重新拆分或回填的旧 registry 行可能仍低于磁盘
+  `<traj_id>/tasks/atom_*.json` 文件数。
+- 审计结论与处置：**口径修正后可信**。当前写入链路已修复；需要精确统计旧数据时，应以
+  `AtomTaskStore.list_by_traj` 的结果回填或重新拆分。
 
 ### 今日成本（cost.today）
 - 定义：今天 xskill 流水线 LLM/embedding 调用累计成本（USD）。
@@ -94,11 +94,18 @@
 - 审计结论与处置：**不可信-可修**。改为扫 `skill_dir/*/.ux_scores.jsonl` 聚合全局均分（`canary.load_ux_scores`，可限 days 窗口），或在打分链路回写轨迹级均分。前者与"分析而非埋点"设计一致，推荐前者。
 
 ### 单轨迹均原子（overview.avg_atoms_per_traj）
-- 定义：原子总数 ÷ 轨迹总数。
-- SQL/代码口径：`overview()` — `atoms / trajs`，Python 侧除零保护。
-- 数据源：同原子总数。
-- 已知误差/偏差：(a) 分子受 tasks_extracted 覆盖 bug 低估；(b) 分母含尚未 split 的和 filtered 的轨迹（贡献 0 原子），是"入库轨迹均值"不是"已拆轨迹均值"。
-- 审计结论与处置：**口径修正后可信**。修分子 bug；tooltip 注明分母含未处理轨迹，或分母改 `status IN ('split_done','indexed','done')`。
+- 定义：已成功拆分轨迹的平均原子数。
+- SQL/代码口径：`overview()` 在同一条查询中计算 `split_atoms / split_trajs`。分子
+  `split_atoms` 是状态属于 `split_done`、`indexed`、`clustering`、`done` 的轨迹的
+  `tasks_extracted` 之和；分母 `split_trajs` 使用完全相同的四个状态范围。
+- 空值语义：没有符合状态范围的轨迹时返回 `null`；存在符合状态范围的轨迹、但这些轨迹的
+  原子数之和为零时返回 `0.0`。
+- 数据源：`trajectories.status` 和 `trajectories.tasks_extracted`。`overview.trajs` 与
+  `overview.atoms` 仍统计全表；卡片中的 `overview.atoms` 不是本平均值的分子。
+- 已知误差/偏差：修复前已发生增量续拆、且之后没有重新拆分或回填的旧 registry 行可能
+  仍偏低；现行写入链路已使用累计原子数。
+- 审计结论与处置：**口径修正后可信**。分子和分母已经限定为相同的已成功拆分轨迹范围；
+  存量旧数据可按磁盘原子总数回填。
 
 ### 技能产出率（overview.skill_yield）
 - 定义（tooltip）：生成了 skill 的轨迹数 ÷ 轨迹总数。
@@ -146,9 +153,9 @@
 - SQL/代码口径：`adoption_rate()` — `COUNT(DISTINCT atom_id) FROM atom_adoption` ÷ `SUM(tasks_extracted) FROM trajectories`。
 - 数据源：`atom_adoption`（cluster 落 `.candidates.yml` 后 `record_atom_adoption`，runner.py:1426/1498）；`trajectories.tasks_extracted`。
 - 已知误差/偏差：
-  1. **分子分母时间窗不一致**：分子是全历史累计（仅 `rebuild --force` 经 `clear_rebuild_derived_state` 清空）；分母是 registry 当前值——eco 级 `reset_trajectories` 把 tasks_extracted 清 0 但不动 atom_adoption、`unregister_dir` 级联删轨迹行、tasks_extracted 覆盖 bug 压小分母 → 分子可大于分母，`_pct` **无封顶**，可显示 >100%。
+  1. **分子分母时间窗不一致**：分子是全历史累计（仅 `rebuild --force` 经 `clear_rebuild_derived_state` 清空）；分母是 registry 当前值——eco 级 `reset_trajectories` 把 tasks_extracted 清 0 但不动 atom_adoption、`unregister_dir` 级联删轨迹行、旧 registry 行可能低估 tasks_extracted → 分子可大于分母，`_pct` **无封顶**，可显示 >100%。
   2. `was_new=True` 恒写死（runner.py:1427/1499），列语义（首次/覆盖）名存实亡——不影响本指标（DISTINCT 去重），但列已是摆设。
-- 审计结论与处置：**口径修正后可信**。分子改为只计当前仍存在的 atom（`atom_adoption.atom_id` 与磁盘 atom 交集，或 reset 时同步清对应 atom_adoption 行）；同时修分母覆盖 bug；保险再加 min(...,100)。
+- 审计结论与处置：**口径修正后可信**。分子改为只计当前仍存在的 atom（`atom_adoption.atom_id` 与磁盘 atom 交集，或 reset 时同步清对应 atom_adoption 行）；回填修复前可能偏低的分母；保险再加 min(...,100)。
 
 ### canary 晋升率（rates.promotion / 灰度页）
 - 定义：灰度候选裁决中晋升为正式版的比例 = 晋升 ÷ 已裁决（晋升+拒绝+超时丢弃）。
@@ -196,7 +203,7 @@
 - 定义：team server 上每个 client 的轨迹数/原子数/最近活跃。
 - SQL/代码口径：`users()` — `watch_dirs.ecosystem='team_client'` 按 label(=client_id) 分组，`MAX(t.updated_at)` 作 last_active。
 - 数据源：`watch_dirs`（upload 端点注册，label=client_id）+ `trajectories`。这就是已知问题 3 的现状：**trajectories 无用户归因列**，按用户的一切只能靠 team_client watch_dir 的 label 粗归因；单机轨迹无用户归属。
-- 已知误差/偏差：(a) `last_active` 实为**流水线最后写该行的时间**（重拆/rebuild/打分都会 bump updated_at），不是用户最后上传时间；(b) atoms 列受 tasks_extracted 覆盖 bug；(c) 归因粒度=目录，client 换 id 即算新用户。
+- 已知误差/偏差：(a) `last_active` 实为**流水线最后写该行的时间**（重拆/rebuild/打分都会 bump updated_at），不是用户最后上传时间；(b) 修复前发生过增量续拆、且未重新拆分或回填的旧 registry 行，其 atoms 可能偏低；(c) 归因粒度=目录，client 换 id 即算新用户。
 - 审计结论与处置：**口径修正后可信**。last_active 改 `MAX(discovered_at)`（入库时间近似上传时间）或按轨迹 sidecar 时间；表头注明"目录级归因"。
 
 ### 标签云（profile 页 tagcloud）

@@ -8,9 +8,21 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import xskill.dashboard.metrics as dashboard_metrics
-from xskill.pipeline.registry import get_connection, harness_share, model_share
+from xskill.pipeline.registry import (
+    TrajectoryStatus,
+    get_connection,
+    harness_share,
+    model_share,
+)
 from xskill.dashboard.metrics import (
     DashboardMetrics, skills_catalog, skills_catalog_page)
+
+SUCCESSFULLY_SPLIT_STATUSES = (
+    TrajectoryStatus.SPLIT_DONE,
+    TrajectoryStatus.INDEXED,
+    TrajectoryStatus.CLUSTERING,
+    TrajectoryStatus.DONE,
+)
 
 
 def _seed_team(db):
@@ -127,7 +139,7 @@ def test_overview_ratios(tmp_path):
     _seed(db)
     o = DashboardMetrics(db_path=db).overview()
     assert o["trajs"] == 4 and o["atoms"] == 15
-    assert o["avg_atoms_per_traj"] == 3.75          # 15/4
+    assert o["avg_atoms_per_traj"] == 4.33          # 已成功拆分：13/3
     # 终态口径（审计 P2-10）：3 done + 1 splitting(在途,不进分母) → 100%
     assert o["success_rate"] == 100.0
     assert o["retry_rate"] == 25.0                  # 1 retried / 4
@@ -140,9 +152,127 @@ def test_overview_empty_db_no_zerodiv(tmp_path):
     db = tmp_path / "e.db"
     get_connection(db).close()
     o = DashboardMetrics(db_path=db).overview()
-    assert o == {"trajs": 0, "atoms": 0, "avg_atoms_per_traj": 0.0,
+    assert o == {"trajs": 0, "atoms": 0, "avg_atoms_per_traj": None,
                  "success_rate": 0.0, "filtered": 0, "retry_rate": 0.0,
                  "avg_ux": None, "ux_n": 0}
+
+
+def test_overview_avg_atoms_uses_successfully_split_trajectories(tmp_path):
+    db = tmp_path / "split-average.db"
+    conn = get_connection(db)
+    conn.execute(
+        "INSERT INTO watch_dirs(id,path,label,ecosystem)"
+        " VALUES(1,'/cc','cc','claude_code')")
+    rows = [
+        ("split_done", 2),
+        ("indexed", 5),
+        ("clustering", 11),
+        ("done", 23),
+        ("splitting", 101),
+    ]
+    for index, (status, atoms) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO trajectories(watch_dir_id,filename,status,tasks_extracted)"
+            " VALUES(1,?,?,?)",
+            (f"traj-{index}.md", status, atoms),
+        )
+    conn.commit()
+    conn.close()
+
+    overview = DashboardMetrics(db_path=db).overview()
+
+    assert overview["trajs"] == 5
+    assert overview["atoms"] == 142
+    assert overview["avg_atoms_per_traj"] == 10.25
+
+
+@pytest.mark.parametrize(
+    ("included_status", "included_atoms"),
+    [
+        (TrajectoryStatus.SPLIT_DONE, 3),
+        (TrajectoryStatus.INDEXED, 7),
+        (TrajectoryStatus.CLUSTERING, 13),
+        (TrajectoryStatus.DONE, 29),
+    ],
+)
+def test_overview_avg_atoms_includes_each_split_status_and_excludes_all_others(
+    tmp_path,
+    included_status,
+    included_atoms,
+):
+    db = tmp_path / f"{included_status.value}-average.db"
+    conn = get_connection(db)
+    conn.execute(
+        "INSERT INTO watch_dirs(id,path,label,ecosystem)"
+        " VALUES(1,'/cc','cc','claude_code')")
+    excluded_statuses = [
+        status for status in TrajectoryStatus
+        if status not in SUCCESSFULLY_SPLIT_STATUSES
+    ]
+    rows = [(included_status.value, included_atoms)]
+    rows.extend(
+        (status.value, 100 + index * 17)
+        for index, status in enumerate(excluded_statuses)
+    )
+    for index, (status, atoms) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO trajectories(watch_dir_id,filename,status,tasks_extracted)"
+            " VALUES(1,?,?,?)",
+            (f"traj-{index}.md", status, atoms),
+        )
+    conn.commit()
+    conn.close()
+
+    overview = DashboardMetrics(db_path=db).overview()
+
+    assert TrajectoryStatus.FILTERED in excluded_statuses
+    assert overview["trajs"] == len(rows)
+    assert overview["atoms"] == sum(atoms for _, atoms in rows)
+    assert overview["avg_atoms_per_traj"] == float(included_atoms)
+
+
+def test_overview_avg_atoms_is_zero_when_split_trajectories_have_no_atoms(tmp_path):
+    db = tmp_path / "zero-split-average.db"
+    conn = get_connection(db)
+    conn.execute(
+        "INSERT INTO watch_dirs(id,path,label,ecosystem)"
+        " VALUES(1,'/cc','cc','claude_code')")
+    conn.execute(
+        "INSERT INTO trajectories(watch_dir_id,filename,status,tasks_extracted)"
+        " VALUES(1,'split.md','split_done',0)")
+    conn.execute(
+        "INSERT INTO trajectories(watch_dir_id,filename,status,tasks_extracted)"
+        " VALUES(1,'pending.md','splitting',9)")
+    conn.commit()
+    conn.close()
+
+    overview = DashboardMetrics(db_path=db).overview()
+
+    assert overview["trajs"] == 2
+    assert overview["atoms"] == 9
+    assert overview["avg_atoms_per_traj"] == 0.0
+
+
+def test_overview_avg_atoms_is_none_without_split_trajectories(tmp_path):
+    db = tmp_path / "no-split-average.db"
+    conn = get_connection(db)
+    conn.execute(
+        "INSERT INTO watch_dirs(id,path,label,ecosystem)"
+        " VALUES(1,'/cc','cc','claude_code')")
+    conn.execute(
+        "INSERT INTO trajectories(watch_dir_id,filename,status,tasks_extracted)"
+        " VALUES(1,'pending.md','splitting',7)")
+    conn.execute(
+        "INSERT INTO trajectories(watch_dir_id,filename,status,tasks_extracted)"
+        " VALUES(1,'failed.md','error',11)")
+    conn.commit()
+    conn.close()
+
+    overview = DashboardMetrics(db_path=db).overview()
+
+    assert overview["trajs"] == 2
+    assert overview["atoms"] == 18
+    assert overview["avg_atoms_per_traj"] is None
 
 
 def test_by_ecosystem(tmp_path):

@@ -591,6 +591,12 @@ class DashboardMetrics:
         with pooled_connection(self._db) as conn:
             r = conn.execute(
                 "SELECT COUNT(*) trajs, COALESCE(SUM(tasks_extracted),0) atoms,"
+                " SUM(CASE WHEN status IN"
+                " ('split_done','indexed','clustering','done')"
+                " THEN 1 ELSE 0 END) split_trajs,"
+                " COALESCE(SUM(CASE WHEN status IN"
+                " ('split_done','indexed','clustering','done')"
+                " THEN tasks_extracted ELSE 0 END),0) split_atoms,"
                 " SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) done,"
                 " SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) err,"
                 " SUM(CASE WHEN status='filtered' THEN 1 ELSE 0 END) filtered,"
@@ -598,6 +604,7 @@ class DashboardMetrics:
                 " FROM trajectories"
             ).fetchone()
         n = r["trajs"] or 0
+        split_n = r["split_trajs"] or 0
         # 处理成功率按终态口径：done/(done+error+filtered)，在途轨迹不进分母
         # （否则新批入库时比率被瞬间稀释——审计 P2-10）。
         done, err, filtered = r["done"] or 0, r["err"] or 0, r["filtered"] or 0
@@ -606,7 +613,9 @@ class DashboardMetrics:
         return {
             "trajs": n,
             "atoms": r["atoms"] or 0,
-            "avg_atoms_per_traj": round((r["atoms"] or 0) / n, 2) if n else 0.0,
+            "avg_atoms_per_traj": (
+                round((r["split_atoms"] or 0) / split_n, 2) if split_n else None
+            ),
             "success_rate": _pct(done, done + err + filtered),
             "filtered": filtered,
             "retry_rate": _pct(r["retried"] or 0, n),

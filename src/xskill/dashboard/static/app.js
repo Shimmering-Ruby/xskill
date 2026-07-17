@@ -51,7 +51,7 @@ async function loadOverview() {
   const o = await jc('api/v1/dashboard/overview');
   put('overview.trajs', o.trajs);
   put('overview.atoms', o.atoms);
-  put('overview.avg_atoms_per_traj', o.trajs > 0 ? o.avg_atoms_per_traj : '—');
+  put('overview.avg_atoms_per_traj', o.avg_atoms_per_traj != null ? o.avg_atoms_per_traj : '—');
   put('overview.avg_ux', (o.ux_n > 0 && o.avg_ux != null) ? o.avg_ux : '—');
   put('overview.ux_n', o.ux_n > 0 ? `${o.ux_n} 份使用打分` : '还没有使用打分');
   put('overview.retry_rate', o.trajs > 0 ? o.retry_rate + '%' : '—');
