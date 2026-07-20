@@ -22,6 +22,7 @@ from xskill.pipeline.registry import (
     GLOBAL_PREF_KEY,
     PinQuotaExceeded,
     clear_skill_pref,
+    dashboard_visible_trajectory_sql,
     effective_prefs,
     manifest_control_plane_snapshot,
     pooled_connection,
@@ -69,7 +70,10 @@ def _traj_user_map(db_path: Optional[Path]) -> dict[str, str]:
     """traj_id(stem) → user_key。直接读 trajectories.user_key（P2-2.1）。"""
     with pooled_connection(db_path) as conn:
         rows = conn.execute(
-            "SELECT filename fn, user_key uk FROM trajectories").fetchall()
+            "SELECT t.filename fn, t.user_key uk FROM trajectories t"
+            " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+            f" WHERE {dashboard_visible_trajectory_sql('t', 'w')}"
+        ).fetchall()
     out: dict[str, str] = {}
     for r in rows:
         fn = r["fn"] or ""
@@ -361,13 +365,21 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         with pooled_connection(db_path) as conn:
             row = conn.execute(
                 "SELECT COUNT(*) n, COALESCE(SUM(tasks_extracted),0) atoms"
-                " FROM trajectories WHERE user_key=?", (user,)).fetchone()
+                " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                " WHERE t.user_key=? AND "
+                f"{dashboard_visible_trajectory_sql('t', 'w')}",
+                (user,),
+            ).fetchone()
             my_stems = {
                 (r["filename"][:-3] if r["filename"].endswith(".md")
                  else r["filename"])
                 for r in conn.execute(
-                    "SELECT filename FROM trajectories WHERE user_key=?",
-                    (user,)).fetchall()
+                    "SELECT t.filename FROM trajectories t"
+                    " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                    " WHERE t.user_key=? AND "
+                    f"{dashboard_visible_trajectory_sql('t', 'w')}",
+                    (user,),
+                ).fetchall()
             }
             adoption = conn.execute(
                 "SELECT atom_id, skill, weightscore FROM atom_adoption"

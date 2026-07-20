@@ -72,7 +72,7 @@ def console_env(tmp_path):
     init_team_context(
         join_token="jt", client_registry=reg, skill_dir=skills,
         traj_root=tmp_path / "traj",
-        register_dir=lambda p, l: configure_watch_dir(p, l, True),
+        register_dir=lambda path, label: configure_watch_dir(path, label, True),
         configure_watch_dir=configure_watch_dir)
     # 槽位改由现取 live config(热生效),不再走 init_team_context 快照
     from xskill.api import app as app_mod
@@ -303,8 +303,36 @@ def test_admin_ingest_control_is_authorized_idempotent_and_syncs_watch_dir(
         ecosystem="team_client",
         db_path=db,
     )
+    with R.get_connection(db) as conn:
+        conn.execute(
+            "INSERT INTO trajectories("
+            "watch_dir_id,filename,status,tasks_extracted,user_key"
+            ") VALUES("
+            "(SELECT id FROM watch_dirs WHERE path=?),?,?,?,?"
+            ")",
+            (str(sessions_dir.resolve()), "done.md", "done", 3, "alice"),
+        )
+        conn.execute(
+            "INSERT INTO trajectories("
+            "watch_dir_id,filename,status,tasks_extracted,user_key"
+            ") VALUES("
+            "(SELECT id FROM watch_dirs WHERE path=?),?,?,?,?"
+            ")",
+            (
+                str(sessions_dir.resolve()),
+                "pending.md",
+                "discovered",
+                0,
+                "alice",
+            ),
+        )
+        conn.commit()
     endpoint = f"/api/v1/dashboard/admin/client/{client_id}/ingest"
 
+    assert (
+        alice.get("/api/v1/dashboard/my/contributions").json()["steps"]["trajs"]
+        == 2
+    )
     assert alice.put(
         endpoint, json={"paused": True, "reason": "quality review"},
     ).status_code == 403
@@ -320,6 +348,11 @@ def test_admin_ingest_control_is_authorized_idempotent_and_syncs_watch_dir(
     assert body["auto_index"] is False
     paused_at = body["ingest_paused_at"]
     assert R.get_watch_dir(sessions_dir, db_path=db)["auto_index"] == 0
+    paused_contributions = alice.get(
+        "/api/v1/dashboard/my/contributions"
+    ).json()["steps"]
+    assert paused_contributions["trajs"] == 1
+    assert paused_contributions["atoms"] == 3
 
     repeated = boss.put(
         endpoint, json={"paused": True, "reason": "different"},
@@ -339,6 +372,10 @@ def test_admin_ingest_control_is_authorized_idempotent_and_syncs_watch_dir(
     assert resumed.json()["ingest_paused_at"] == ""
     assert resumed.json()["auto_index"] is True
     assert R.get_watch_dir(sessions_dir, db_path=db)["auto_index"] == 1
+    assert (
+        alice.get("/api/v1/dashboard/my/contributions").json()["steps"]["trajs"]
+        == 2
+    )
 
     unknown = boss.put(
         "/api/v1/dashboard/admin/client/missing/ingest",

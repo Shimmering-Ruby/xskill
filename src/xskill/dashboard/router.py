@@ -14,8 +14,11 @@ from fastapi.responses import HTMLResponse, Response
 
 from xskill.dashboard.metrics import DashboardMetrics, skills_catalog_page
 from xskill.pipeline.registry import (
-    usage_summary, model_share, harness_share, list_watch_dirs,
+    harness_share,
+    list_watch_dirs,
+    model_share,
     trigger_eval_for_skill,
+    usage_summary,
 )
 
 _STATIC = Path(__file__).with_name("static")
@@ -88,12 +91,25 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
 
     @router.get("/api/v1/dashboard/models")
     def models() -> dict:
-        return {"models": model_share(db_path, unknown_label=default_model),
-                "harnesses": harness_share(db_path, unknown_label=default_harness)}
+        return {
+            "models": model_share(
+                db_path,
+                unknown_label=default_model,
+                exclude_paused_backlog=True,
+            ),
+            "harnesses": harness_share(
+                db_path,
+                unknown_label=default_harness,
+                exclude_paused_backlog=True,
+            ),
+        }
 
     @router.get("/api/v1/dashboard/dirs")
     def dirs() -> dict:
-        rows = list_watch_dirs(db_path=db_path)
+        rows = list_watch_dirs(
+            db_path=db_path,
+            exclude_paused_backlog=True,
+        )
         if not expose_sensitive:
             return {"dirs": [{
                 "ecosystem": row.get("ecosystem"),

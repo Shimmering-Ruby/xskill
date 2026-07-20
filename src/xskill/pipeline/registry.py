@@ -84,6 +84,35 @@ PENDING_TRAJECTORY_STATUSES = (
     TrajectoryStatus.CLUSTERING.value,
 )
 
+# 暂停目录在面板上仍保留已有处理结果，只隐藏尚未完成拆分的积压。恢复目录后
+# auto_index=1，所有状态会立即重新纳入展示和统计，无需改写 trajectory 行。
+DASHBOARD_VISIBLE_WHEN_PAUSED_STATUSES = (
+    TrajectoryStatus.SPLIT_DONE.value,
+    TrajectoryStatus.INDEXED.value,
+    TrajectoryStatus.CLUSTERING.value,
+    TrajectoryStatus.DONE.value,
+    TrajectoryStatus.FILTERED.value,
+    TrajectoryStatus.ERROR.value,
+)
+
+
+def dashboard_visible_trajectory_sql(
+    trajectory_alias: str = "t",
+    watch_dir_alias: str = "w",
+) -> str:
+    """返回面板统一使用的轨迹可见性 SQL 条件。
+
+    未暂停目录全量可见；暂停目录只显示已完成拆分或已到终态的轨迹。参数只接受
+    内部调用方传入的固定 SQL alias，不接收请求输入。
+    """
+    statuses = ",".join(
+        f"'{status}'" for status in DASHBOARD_VISIBLE_WHEN_PAUSED_STATUSES
+    )
+    return (
+        f"(COALESCE({watch_dir_alias}.auto_index,1)=1 OR "
+        f"{trajectory_alias}.status IN ({statuses}))"
+    )
+
 # ---------------------------------------------------------------------------
 # Connection
 # ---------------------------------------------------------------------------
@@ -909,17 +938,23 @@ _HARNESS_EXPR = (
 
 
 def harness_share(db_path: Optional[Path] = None, *,
-                  unknown_label: str = "unknown") -> list[dict]:
+                  unknown_label: str = "unknown",
+                  exclude_paused_backlog: bool = False) -> list[dict]:
     """用户 coding agent(harness)分布(按轨迹数),供看板按 coding agent 显示占比。
 
     ``unknown_label``：harness 完全缺失时的归类桶，默认 'unknown'。看板层据
     config 传入 dashboard.default_harness 覆盖；canary/stats 等调用不传，保持
     'unknown' 语义不变。
     """
+    visibility = (
+        f" WHERE {dashboard_visible_trajectory_sql('t', 'wd')}"
+        if exclude_paused_backlog else ""
+    )
     with pooled_connection(db_path) as conn:
         rows = conn.execute(
             f"SELECT {_HARNESS_EXPR} AS harness, COUNT(*) AS trajs"
             " FROM trajectories t JOIN watch_dirs wd ON t.watch_dir_id=wd.id"
+            f"{visibility}"
             f" GROUP BY {_HARNESS_EXPR} ORDER BY trajs DESC",
             {"hlabel": unknown_label},
         ).fetchall()
@@ -929,17 +964,24 @@ def harness_share(db_path: Optional[Path] = None, *,
 
 
 def model_share(db_path: Optional[Path] = None, *,
-                unknown_label: str = "unknown") -> list[dict]:
+                unknown_label: str = "unknown",
+                exclude_paused_backlog: bool = False) -> list[dict]:
     """用户 agent 模型分布(按轨迹数),供 server stats 显示占比。source_model 缺失
     → ``unknown_label``（默认 'unknown'，经命名参数 ``:mlabel`` 注入）。
 
     注意：canary 的 ``eligible_models`` 把 'unknown' 当“未归属、留在 main”的哨兵，
     所以那条路径必须用默认 'unknown'——只有看板展示层才传入 config 的覆盖值。
     """
+    visibility = (
+        f" WHERE {dashboard_visible_trajectory_sql('t', 'wd')}"
+        if exclude_paused_backlog else ""
+    )
     with pooled_connection(db_path) as conn:
         rows = conn.execute(
-            "SELECT COALESCE(source_model,:mlabel) AS model, COUNT(*) AS trajs"
-            " FROM trajectories GROUP BY COALESCE(source_model,:mlabel)"
+            "SELECT COALESCE(t.source_model,:mlabel) AS model, COUNT(*) AS trajs"
+            " FROM trajectories t JOIN watch_dirs wd ON t.watch_dir_id=wd.id"
+            f"{visibility}"
+            " GROUP BY COALESCE(t.source_model,:mlabel)"
             " ORDER BY trajs DESC",
             {"mlabel": unknown_label},
         ).fetchall()
@@ -1007,13 +1049,24 @@ def unregister_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> b
         return cur.rowcount > 0
 
 
-def list_watch_dirs(*, db_path: Optional[Path] = None) -> list[dict]:
+def list_watch_dirs(
+    *,
+    db_path: Optional[Path] = None,
+    exclude_paused_backlog: bool = False,
+) -> list[dict]:
     """返回所有注册目录及统计信息。"""
+    visibility = (
+        f" AND {dashboard_visible_trajectory_sql('t', 'w')}"
+        if exclude_paused_backlog else ""
+    )
     with pooled_connection(db_path) as conn:
         rows = conn.execute(
             "SELECT w.*, "
-            "  (SELECT COUNT(*) FROM trajectories t WHERE t.watch_dir_id=w.id) AS traj_count,"
-            "  (SELECT COUNT(*) FROM trajectories t WHERE t.watch_dir_id=w.id AND t.has_embedding=1) AS indexed_count"
+            "  (SELECT COUNT(*) FROM trajectories t WHERE t.watch_dir_id=w.id"
+            f"{visibility}) AS traj_count,"
+            "  (SELECT COUNT(*) FROM trajectories t WHERE t.watch_dir_id=w.id"
+            "   AND t.has_embedding=1"
+            f"{visibility}) AS indexed_count"
             " FROM watch_dirs w ORDER BY w.id"
         ).fetchall()
         return [dict(r) for r in rows]

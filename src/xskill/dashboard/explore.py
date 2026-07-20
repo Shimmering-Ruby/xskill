@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Optional
 
 from xskill._sqlite_connect import connect_with_lock
-from xskill.pipeline.registry import pooled_connection
+from xskill.pipeline.registry import (
+    dashboard_visible_trajectory_sql,
+    pooled_connection,
+)
 from xskill.dashboard.metrics import _resolve_local_root, load_usage_records
 
 
@@ -31,7 +34,8 @@ class TrajExplorer:
             row = conn.execute(
                 "SELECT t.*, w.path wpath, w.label wlabel, w.ecosystem eco"
                 " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
-                " WHERE t.filename=? OR t.filename=?",
+                " WHERE (t.filename=? OR t.filename=?) AND "
+                f"{dashboard_visible_trajectory_sql('t', 'w')}",
                 (traj_id, f"{traj_id}.md"),
             ).fetchone()
         if row is None:
@@ -152,7 +156,9 @@ def skill_lineage(skill_dir: Path, name: str,
         wd_rows = conn.execute(
             "SELECT t.filename fn, t.source_model model, w.label label,"
             " w.path wpath FROM trajectories t"
-            " JOIN watch_dirs w ON t.watch_dir_id=w.id").fetchall()
+            " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+            f" WHERE {dashboard_visible_trajectory_sql('t', 'w')}"
+        ).fetchall()
     from xskill.config import get_registry_db_path
     db_dir = Path(db_path).parent if db_path else get_registry_db_path().parent
     traj_info: dict[str, dict] = {}
@@ -238,7 +244,10 @@ def pipeline_progress(db_path: Optional[Path],
     """总览页蒸馏管线进度（图⑥）：状态计数 + 冷启动信号 + 候选孵化进度。"""
     with pooled_connection(db_path) as conn:
         rows = dict(conn.execute(
-            "SELECT status, COUNT(*) FROM trajectories GROUP BY status"
+            "SELECT t.status, COUNT(*) FROM trajectories t"
+            " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+            f" WHERE {dashboard_visible_trajectory_sql('t', 'w')}"
+            " GROUP BY t.status"
         ).fetchall())
     stages = {
         "pending_split": rows.get("discovered", 0) + rows.get("meta_done", 0),
@@ -311,17 +320,23 @@ def users_status(db_path: Optional[Path], *,
         trows = conn.execute(
             "SELECT w.label label, COUNT(t.id) trajs,"
             " COALESCE(SUM(t.tasks_extracted),0) atoms"
-            " FROM watch_dirs w LEFT JOIN trajectories t ON t.watch_dir_id=w.id"
+            " FROM watch_dirs w LEFT JOIN trajectories t"
+            " ON t.watch_dir_id=w.id AND "
+            f"{dashboard_visible_trajectory_sql('t', 'w')}"
             " WHERE w.ecosystem='team_client' GROUP BY w.label").fetchall()
         hrows = conn.execute(
             "SELECT w.label label, t.source_harness harness, COUNT(*) n"
             " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
-            " WHERE w.ecosystem='team_client' GROUP BY w.label, t.source_harness"
+            " WHERE w.ecosystem='team_client' AND "
+            f"{dashboard_visible_trajectory_sql('t', 'w')}"
+            " GROUP BY w.label, t.source_harness"
         ).fetchall()
         mrows = conn.execute(
             "SELECT w.label label, t.source_model model, COUNT(*) n"
             " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
-            " WHERE w.ecosystem='team_client' GROUP BY w.label, t.source_model"
+            " WHERE w.ecosystem='team_client' AND "
+            f"{dashboard_visible_trajectory_sql('t', 'w')}"
+            " GROUP BY w.label, t.source_model"
         ).fetchall()
     stats = {r["label"]: {"trajs": r["trajs"], "atoms": r["atoms"]}
              for r in trows}

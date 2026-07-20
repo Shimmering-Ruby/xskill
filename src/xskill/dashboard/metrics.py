@@ -15,7 +15,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from xskill.pipeline.registry import pooled_connection
+from xskill.pipeline.registry import (
+    dashboard_visible_trajectory_sql,
+    pooled_connection,
+)
 
 
 logger = logging.getLogger("xskill.dashboard.metrics")
@@ -585,7 +588,9 @@ class DashboardMetrics:
         source 唯一，不留两条归因链路。非 team 轨迹 user_key 为空 → '(local)'。"""
         with pooled_connection(self._db) as conn:
             rows = conn.execute(
-                "SELECT filename fn, user_key uk FROM trajectories"
+                "SELECT t.filename fn, t.user_key uk FROM trajectories t"
+                " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                f" WHERE {dashboard_visible_trajectory_sql('t', 'w')}"
             ).fetchall()
         out: dict[str, str] = {}
         for r in rows:
@@ -608,7 +613,8 @@ class DashboardMetrics:
                 " SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) err,"
                 " SUM(CASE WHEN status='filtered' THEN 1 ELSE 0 END) filtered,"
                 " SUM(CASE WHEN retry_count>0 THEN 1 ELSE 0 END) retried"
-                " FROM trajectories"
+                " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                f" WHERE {dashboard_visible_trajectory_sql('t', 'w')}"
             ).fetchone()
         n = r["trajs"] or 0
         split_n = r["split_trajs"] or 0
@@ -652,7 +658,9 @@ class DashboardMetrics:
             rows = conn.execute(
                 f"SELECT {eco_expr} ecosystem, COUNT(t.id) trajs,"
                 " COALESCE(SUM(t.tasks_extracted),0) atoms"
-                " FROM watch_dirs wd LEFT JOIN trajectories t ON t.watch_dir_id=wd.id"
+                " FROM watch_dirs wd LEFT JOIN trajectories t"
+                " ON t.watch_dir_id=wd.id AND "
+                f"{dashboard_visible_trajectory_sql('t', 'wd')}"
                 f" GROUP BY {eco_expr} HAVING COUNT(t.id)>0 ORDER BY trajs DESC",
                 {"hlabel": self._unknown_harness},
             ).fetchall()
@@ -661,9 +669,11 @@ class DashboardMetrics:
     def by_model(self) -> list[dict]:
         with pooled_connection(self._db) as conn:
             rows = conn.execute(
-                "SELECT COALESCE(source_model,:mlabel) model, COUNT(*) trajs,"
-                " COALESCE(SUM(tasks_extracted),0) atoms FROM trajectories"
-                " GROUP BY COALESCE(source_model,:mlabel) ORDER BY trajs DESC",
+                "SELECT COALESCE(t.source_model,:mlabel) model, COUNT(*) trajs,"
+                " COALESCE(SUM(t.tasks_extracted),0) atoms FROM trajectories t"
+                " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                f" WHERE {dashboard_visible_trajectory_sql('t', 'w')}"
+                " GROUP BY COALESCE(t.source_model,:mlabel) ORDER BY trajs DESC",
                 {"mlabel": self._unknown_model},
             ).fetchall()
         return [self._row(r, "model") for r in rows]
@@ -680,7 +690,9 @@ class DashboardMetrics:
                 "SELECT wd.label client_id, COUNT(t.id) trajs,"
                 " COALESCE(SUM(t.tasks_extracted),0) atoms,"
                 " MAX(t.discovered_at) last_active"
-                " FROM watch_dirs wd LEFT JOIN trajectories t ON t.watch_dir_id=wd.id"
+                " FROM watch_dirs wd LEFT JOIN trajectories t"
+                " ON t.watch_dir_id=wd.id AND "
+                f"{dashboard_visible_trajectory_sql('t', 'wd')}"
                 " WHERE wd.ecosystem='team_client' AND wd.label IS NOT NULL"
                 " AND wd.label!='' GROUP BY wd.label ORDER BY trajs DESC"
             ).fetchall()
@@ -764,7 +776,10 @@ class DashboardMetrics:
             adopted = conn.execute(
                 "SELECT COUNT(DISTINCT atom_id) FROM atom_adoption").fetchone()[0]
             total = conn.execute(
-                "SELECT COALESCE(SUM(tasks_extracted),0) FROM trajectories").fetchone()[0]
+                "SELECT COALESCE(SUM(t.tasks_extracted),0)"
+                " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                f" WHERE {dashboard_visible_trajectory_sql('t', 'w')}"
+            ).fetchone()[0]
         # 分子是历史累计事件、分母是当前存量，reset/unregister 已同步清理分子；
         # 仍封顶 100% 防残余时间窗错位读成 >100%（审计 P1-7）。
         return {"adopted": adopted, "total": total,
