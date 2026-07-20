@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from tests.live.mock_llm_server import MOCK_REPLY_TEXT, MockLLMServer
-from xskill.ecosystems import OPENCODE_SPEC, SqliteIngester
+from xskill.ecosystems import SqliteIngester
 
 
 # Mark all tests in this file so CI can select with ``-m live_agent``.

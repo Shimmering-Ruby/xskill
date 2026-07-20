@@ -65,7 +65,7 @@ def _clear() -> None:
     try:
         RUNTIME_PATH.unlink(missing_ok=True)
     except Exception:  # pylint: disable=broad-exception-caught
-        pass
+        logger.debug("clear runtime status failed", exc_info=True)
 
 
 def _alive(pid: Optional[int]) -> bool:
@@ -87,7 +87,8 @@ def _alive_windows(pid: int) -> bool:
     try:
         res = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-            capture_output=True, text=True, timeout=2, check=False,
+            capture_output=True, text=True, errors="strict",
+            timeout=2, check=False,
             **windowless_subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):

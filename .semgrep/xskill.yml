@@ -76,11 +76,11 @@ rules:
           - pattern: subprocess.check_output(...)
           - pattern: subprocess.check_call(...)
           - pattern: subprocess.call(...)
-      - pattern-not: subprocess.run(..., **windowless_subprocess_kwargs(), ...)
-      - pattern-not: subprocess.Popen(..., **windowless_subprocess_kwargs(), ...)
-      - pattern-not: subprocess.check_output(..., **windowless_subprocess_kwargs(), ...)
-      - pattern-not: subprocess.check_call(..., **windowless_subprocess_kwargs(), ...)
-      - pattern-not: subprocess.call(..., **windowless_subprocess_kwargs(), ...)
+      - pattern-not: subprocess.run(..., **windowless_subprocess_kwargs(...), ...)
+      - pattern-not: subprocess.Popen(..., **windowless_subprocess_kwargs(...), ...)
+      - pattern-not: subprocess.check_output(..., **windowless_subprocess_kwargs(...), ...)
+      - pattern-not: subprocess.check_call(..., **windowless_subprocess_kwargs(...), ...)
+      - pattern-not: subprocess.call(..., **windowless_subprocess_kwargs(...), ...)
 
   # bytes.decode 必须显式处理非 UTF-8 场景 —— 要么给 errors=，
   # 要么位置参数带上第二个 errors 实参。Windows 子进程输出是 GBK 不是 UTF-8。

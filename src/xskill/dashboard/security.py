@@ -43,7 +43,9 @@ class DashboardAccessMiddleware(BaseHTTPMiddleware):
         if not h.startswith("Basic "):
             return False
         try:
-            _, pw = base64.b64decode(h[6:]).decode().split(":", 1)
+            _, pw = base64.b64decode(h[6:]).decode(
+                "utf-8", errors="strict"
+            ).split(":", 1)
         except Exception:  # pylint: disable=broad-exception-caught
             return False
         return hmac.compare_digest(pw, self._password)

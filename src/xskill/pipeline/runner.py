@@ -418,7 +418,11 @@ class DirectoryWatcher:
             try:
                 stores.append(self._store_for(Path(wd["path"])))
             except Exception:
-                continue
+                logger.warning(
+                    "failed to open atom store for watch dir %s",
+                    wd.get("path"),
+                    exc_info=True,
+                )
         if not stores:
             return
         if len(stores) == 1:

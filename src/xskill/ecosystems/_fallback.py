@@ -83,6 +83,7 @@ from xskill.ecosystems.installation import (
     read_skill_head_sha,
     write_install_metadata,
 )
+from xskill.utils.proc import windowless_subprocess_kwargs
 
 logger = logging.getLogger("xskill.install_fallback")
 
@@ -125,8 +126,7 @@ def _try_junction(src_dir: Path, dest: Path) -> bool:
             ["cmd", "/c", "mklink", "/J", str(dest), str(src_dir)],
             check=True,
             capture_output=True,
-            # CREATE_NO_WINDOW：无 console 的父进程下不弹 cmd 黑窗
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            **windowless_subprocess_kwargs(),
         )
         return True
     except (

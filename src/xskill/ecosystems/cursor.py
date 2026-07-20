@@ -112,6 +112,7 @@ def _read_cwd_from_cursor_jsonl(content: str) -> str:
     只是 traj_id 里 project 段不可读。如果以后要从 encoded slug 反解 cwd，
     需要扩 spec 协议让 cwd_from_content 也接 path（暂不动）。
     """
+    del content  # EcosystemSpec callback signature compatibility.
     return ""
 
 

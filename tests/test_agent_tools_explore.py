@@ -2,7 +2,6 @@
 skill_read 文件树。"""
 from __future__ import annotations
 
-from pathlib import Path
 
 from xskill.agents import agent_tools
 

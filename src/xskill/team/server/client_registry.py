@@ -15,7 +15,6 @@ import re
 import secrets
 import sqlite3
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +29,7 @@ logger = logging.getLogger(__name__)
 _TOUCH_FLUSH_DELAY_SECONDS = 0.05
 _TOUCH_RETRY_DELAY_SECONDS = 0.25
 _TOUCH_CLOSE_ATTEMPTS = 3
+_TOUCH_RETRY_WAITER = threading.Event()
 
 
 def _normalize_user_name(name: str) -> str:
@@ -570,7 +570,7 @@ class ClientRegistry:
             if self._flush_pending_touches():
                 return True
             if attempt + 1 < _TOUCH_CLOSE_ATTEMPTS:
-                time.sleep(_TOUCH_RETRY_DELAY_SECONDS)
+                _TOUCH_RETRY_WAITER.wait(_TOUCH_RETRY_DELAY_SECONDS)
         return False
 
     def get(self, client_id: str) -> dict | None:

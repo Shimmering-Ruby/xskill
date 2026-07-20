@@ -8,6 +8,7 @@ skill 漏计——审计 P0-1）。
 from __future__ import annotations
 
 import copy
+import logging
 import operator
 import threading
 import time
@@ -15,6 +16,9 @@ from pathlib import Path
 from typing import Optional
 
 from xskill.pipeline.registry import pooled_connection
+
+
+logger = logging.getLogger("xskill.dashboard.metrics")
 
 
 def _pct(num: float, den: float) -> float:
@@ -416,7 +420,8 @@ def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]
                         meta = fm.get("metadata", {}) or {}
                         version = meta.get("version", 0)
                     except Exception:  # pylint: disable=broad-exception-caught
-                        pass
+                        logger.warning("failed to read skill metadata: %s",
+                                       smd, exc_info=True)
                 n_cand = 0
                 cand = d / ".candidates.yml"
                 if cand.is_file():
@@ -425,7 +430,8 @@ def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]
                         data = yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
                         n_cand = len(data.get("candidates", []) or [])
                     except Exception:  # pylint: disable=broad-exception-caught
-                        pass
+                        logger.warning("failed to read candidate buffer: %s",
+                                       cand, exc_info=True)
                 out.append({
                     "name": d.name, "state": state, "source": "native",
                     "description": desc[:300], "version": version,
@@ -485,7 +491,8 @@ def _rows_from_manifest_snapshot(
                 ) or {}
                 candidate_count = len(data.get("candidates", []) or [])
             except Exception:  # pylint: disable=broad-exception-caught
-                pass
+                logger.warning("failed to read candidate buffer: %s",
+                               candidate_path, exc_info=True)
         rows.append({
             "name": skill.name,
             "state": state,

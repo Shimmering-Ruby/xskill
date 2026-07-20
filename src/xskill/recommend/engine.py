@@ -308,7 +308,7 @@ class SkillRecommendEngine:
     def update_user_interest(
         self,
         client_interest: "ClientInterest",
-        task_atom=None,  # noqa: ARG002 — 触发事件；当前以 atom store 为单一真源重扫
+        task_atom=None,
         *,
         should_commit: Optional[Callable[[], bool]] = None,
     ) -> ProfileUpdateResult:
@@ -317,7 +317,7 @@ class SkillRecommendEngine:
         ``task_atom`` 为触发事件（增量优化预留，当前以 atom store 为单一真源重扫）。
         新鲜度版本持久化到 SQLite；只有完整计算和 upsert 成功后才推进版本。
         """
-        # pylint: disable=unused-argument
+        del task_atom  # Preserve keyword compatibility; the store is authoritative.
         user_id = client_interest.user_id
         snapshot = sorted(self._user_atoms(user_id), key=attrgetter("atom_id"))
         revision = self._atom_revision(snapshot)

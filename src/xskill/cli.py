@@ -22,6 +22,8 @@ from xskill._sqlite_connect import connect_with_lock
 from xskill.config import set_overrides
 from xskill.ecosystems import SQLITE_SPEC_BY_ECO
 
+logger = logging.getLogger("xskill.cli")
+
 
 # ═══════════════════════════════════════════════════════════════
 # 子命令
@@ -238,7 +240,7 @@ def cmd_init(args) -> int:
             from xskill.team.client.state import load_client_state
             current_server = load_client_state(get_team_client_state_path()).server_url
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("读取当前 team server 地址失败", exc_info=True)
         print(f"检测到常驻连接正在运行：server={current_server}  "
               f"pid={daemon_state.get('pid')}  backend={daemon_state.get('backend')}")
         should_stop = args.force
@@ -527,7 +529,7 @@ def cmd_update(args) -> int:
             print(f"已是最新版本 ({current})")
             return 0
     except Exception:
-        pass
+        logger.warning("PyPI 返回的版本号无法比较：%s", latest, exc_info=True)
     print(f"发现新版本: {latest}，开始升级...")
     if not updater._install(latest):
         print("pip 升级失败，尝试 team server 通道...")
@@ -545,6 +547,7 @@ def cmd_update(args) -> int:
 
 def cmd_dashboard(args) -> int:
     """向 server 要一条免密登录链接并打印：点开即以自己的身份进入看板。"""
+    del args  # CLI handler signature compatibility.
     import json
     import urllib.error
     import urllib.request
@@ -574,7 +577,9 @@ def cmd_dashboard(args) -> int:
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            link_info = json.loads(response.read().decode("utf-8"))
+            link_info = json.loads(
+                response.read().decode("utf-8", errors="strict")
+            )
     except urllib.error.HTTPError as http_error:
         detail = http_error.read().decode("utf-8", "replace")[:300]
         if http_error.code == 404:
@@ -634,7 +639,7 @@ def cmd_stats(args) -> int:
     路径，与此互不串）。
     """
     import json as _json
-    import time
+    import threading
     from xskill.config import dashboard_attribution_defaults
     from xskill.pipeline.registry import model_share, usage_summary
     from xskill.runtime import read_status
@@ -653,11 +658,12 @@ def cmd_stats(args) -> int:
             print(render_stats(s, status=st, models=ms))
 
     if args.watch and not args.json:
+        refresh_waiter = threading.Event()
         try:
             while True:
                 print("\033[2J\033[H", end="")  # 清屏 + 光标归位
                 _emit()
-                time.sleep(2)
+                refresh_waiter.wait(2)
         except KeyboardInterrupt:
             return 0
     _emit()
@@ -1018,6 +1024,7 @@ def cmd_upload(args, http=None, headers=None) -> int:
 
 def cmd_read(args, xskill) -> int:
     """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
+    del xskill  # CLI handler signature compatibility.
     from xskill.pipeline.db_ingest import read_db_files
     try:
         summary = read_db_files(

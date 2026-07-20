@@ -8,7 +8,6 @@ test_ssl_verify.py -- T2S_SSL_VERIFY 环境变量 + agno kwarg 注入
 """
 from __future__ import annotations
 
-import os
 import pytest
 
 

@@ -110,4 +110,4 @@ def fetch_branch_from_bundle(
                 )
             sha = bundle.references[src_ref]
             repo.refs[dest_ref_b] = sha
-            return sha.decode("ascii")
+            return sha.decode("ascii", errors="strict")

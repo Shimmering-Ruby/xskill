@@ -441,7 +441,8 @@ def _parse_score(raw: str) -> dict:
     try:
         return json.loads(raw)
     except Exception:
-        pass
+        logger.debug("score response was not a standalone JSON object",
+                     exc_info=True)
     m = _JSON_RE.search(raw)
     if m:
         try:

@@ -83,7 +83,8 @@ def _scan_skill_state(skill_dir: Path) -> list[tuple[str, str, str]]:
                 fm, _ = fm_parse(skill_md.read_text(encoding="utf-8"))
                 desc = (fm.get("description") or "").strip().replace("\n", " ")
             except Exception:
-                pass
+                logger.warning("failed to read skill metadata: %s",
+                               skill_md, exc_info=True)
 
         # baby 状态额外拼 buffer 计数让 agent 看到"还差多少分到阈值"
         if state == "baby":
@@ -95,7 +96,8 @@ def _scan_skill_state(skill_dir: Path) -> list[tuple[str, str, str]]:
                     data = yaml.safe_load(cand_yml.read_text(encoding="utf-8")) or {}
                     n_cand = len(data.get("candidates", []) or [])
                 except Exception:
-                    pass
+                    logger.warning("failed to read candidate buffer: %s",
+                                   cand_yml, exc_info=True)
             desc = f"{desc} ({n_cand} cand in buffer)" if desc else f"({n_cand} cand)"
         out.append((name, state, desc))
     return out

@@ -6,6 +6,23 @@
 此清单是门禁落地当日的存量违规快照。清零工作按类别推进，全部清零前 `make lint` 为红。
 清零时以重跑 `make lint` 的实时输出为准，本文件只作规模参考。
 
+## 2026-07-20 清理进度
+
+分支: `chore/clean-lint`
+
+| 检查 | 清理前 | 当前 | 结果 |
+|---|---:|---:|---|
+| Semgrep 自定义规则 | 183 | 133 | `lambda` 100、跨模块 private import 33 待处理 |
+| Semgrep 官方规则 | 39 | 39 | 需按信任边界逐条审查，不能机械修改 |
+| Ruff | 110 | 0 | 已清零 |
+| Pylint `invalid-name` | 593 | 593 | 需单独重命名，避免大范围行为变化 |
+| Vulture | 3 | 0 | 已清零 |
+
+本轮已将 `decode-needs-errors`、`subprocess-text-needs-encoding`、
+`subprocess-must-be-windowless`、`no-time-sleep` 四条自定义规则清零。
+`make lint` 仍会在 Semgrep 阶段因 172 条存量命中退出；Ruff、Pylint 和
+Vulture 的数量通过各自命令单独复核。
+
 ## 1. semgrep 自定义规则 (.semgrep/xskill.yml)
 
 | 规则 | 命中数 |

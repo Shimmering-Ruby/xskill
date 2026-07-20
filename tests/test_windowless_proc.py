@@ -22,6 +22,15 @@ def test_windowless_kwargs_off_windows(monkeypatch):
     assert proc.windowless_subprocess_kwargs() == {}
 
 
+def test_windowless_kwargs_merge_extra_creationflags(monkeypatch):
+    monkeypatch.setattr(proc.sys, "platform", "win32")
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+    kwargs = proc.windowless_subprocess_kwargs(extra_creationflags=0x00000008)
+
+    assert kwargs == {"creationflags": no_window | 0x00000008}
+
+
 def test_updater_pip_install_passes_no_window_on_windows(monkeypatch):
     """updater 的 pip 升级子进程在 Windows 分支必须带 creationflags——否则每次
     自动更新都会闪黑窗（issue #125 同源）。"""

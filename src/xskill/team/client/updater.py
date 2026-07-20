@@ -253,14 +253,15 @@ def _spawn_detached(argv: list[str]) -> subprocess.Popen:
     起不来（OSError）或起来就退（非零/零都算）一律抛错：调用方据此**放弃重启、
     保持老进程在线**。宁可继续跑老版本，也不能退出后没人接班 = 永久掉线。
     """
-    no_window = windowless_subprocess_kwargs()
     proc = subprocess.Popen(
         argv,
-        creationflags=no_window.get("creationflags", 0) | _DETACHED_PROCESS,
         close_fds=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **windowless_subprocess_kwargs(
+            extra_creationflags=_DETACHED_PROCESS
+        ),
     )
     try:
         proc.wait(timeout=_SPAWN_LIVENESS_TIMEOUT)

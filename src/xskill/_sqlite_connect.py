@@ -11,6 +11,7 @@ commit.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
@@ -18,6 +19,7 @@ from typing import Any, TypeVar
 
 
 _ConnectionT = TypeVar("_ConnectionT")
+logger = logging.getLogger("xskill.sqlite")
 
 try:  # api.app prefers this newer SQLite build when it is installed.
     import pysqlite3 as _pysqlite3
@@ -158,7 +160,7 @@ class _LockedBlob:
         try:
             connection._sqlite_call(blob.close)
         except Exception:
-            pass
+            logger.debug("failed to finalize SQLite blob", exc_info=True)
 
 
 class _LockedCursor(sqlite3.Cursor):
@@ -207,7 +209,7 @@ class _LockedCursor(sqlite3.Cursor):
                 return
             self._call(lambda: sqlite3.Cursor.close(self))
         except Exception:
-            pass
+            logger.debug("failed to finalize SQLite cursor", exc_info=True)
 
 
 class _LockedConnection(sqlite3.Connection):
@@ -389,7 +391,7 @@ class _LockedConnection(sqlite3.Connection):
         try:
             self.close()
         except Exception:
-            pass
+            logger.debug("failed to finalize SQLite connection", exc_info=True)
 
 
 if _pysqlite3 is not None:
@@ -449,7 +451,7 @@ if _pysqlite3 is not None:
                     return
                 self._call(lambda: _pysqlite3.Cursor.close(self))
             except Exception:
-                pass
+                logger.debug("failed to finalize pysqlite cursor", exc_info=True)
 
 
     class _PysqliteLockedConnection(_pysqlite3.Connection):
@@ -554,7 +556,7 @@ if _pysqlite3 is not None:
             try:
                 self.close()
             except Exception:
-                pass
+                logger.debug("failed to finalize pysqlite connection", exc_info=True)
 else:  # Keep the name available for factory-selection code and type checks.
     _PysqliteLockedConnection = None
 
@@ -624,7 +626,8 @@ class _SerializedCursor(Iterator[Any]):
         try:
             connection._sqlite_call(cursor.close)
         except Exception:
-            pass
+            logger.debug("failed to finalize serialized SQLite cursor",
+                         exc_info=True)
 
 
 class _SerializedConnection:
@@ -723,7 +726,8 @@ class _SerializedConnection:
         try:
             self.close()
         except Exception:
-            pass
+            logger.debug("failed to finalize serialized SQLite connection",
+                         exc_info=True)
 
 
 def connect_with_lock(

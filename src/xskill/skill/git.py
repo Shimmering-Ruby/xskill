@@ -30,7 +30,6 @@ import hashlib
 import io
 import logging
 import os
-import stat
 import threading
 from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
@@ -336,7 +335,9 @@ def _resolve_rev(repo: Repo, rev: str) -> bytes | None:
     if b"~" in rev_b:
         base, _, n_str = rev_b.partition(b"~")
         n = int(n_str or b"1")
-        base_sha = _resolve_rev(repo, base.decode("utf-8") or "HEAD")
+        base_sha = _resolve_rev(
+            repo, base.decode("utf-8", errors="strict") or "HEAD"
+        )
         if base_sha is None:
             return None
         cur = base_sha
@@ -384,7 +385,9 @@ def _current_branch_name(repo: Repo) -> str:
         if last == b"HEAD":
             return ""
         if last.startswith(b"refs/heads/"):
-            return last[len(b"refs/heads/"):].decode("utf-8")
+            return last[len(b"refs/heads/"):].decode(
+                "utf-8", errors="strict"
+            )
         return ""
     except (KeyError, IndexError):
         return ""
@@ -394,7 +397,11 @@ def _list_branches(repo: Repo) -> list[str]:
     out = []
     for ref in repo.refs.keys():
         if ref.startswith(b"refs/heads/"):
-            out.append(ref[len(b"refs/heads/"):].decode("utf-8"))
+            out.append(
+                ref[len(b"refs/heads/"):].decode(
+                    "utf-8", errors="strict"
+                )
+            )
     return sorted(out)
 
 
@@ -500,7 +507,6 @@ def _stage_all(repo: Repo, root: Path) -> bool:
     dulwich.add 不处理 deletion；用 staged() 比对，把工作区不存在但 index 里有
     的路径 ``stage`` 为删除（直接 del index[name]）。
     """
-    import fnmatch
 
     ignore_patterns = _load_gitignore_patterns(root)
     rel_paths: list[str] = []
@@ -533,7 +539,11 @@ def _stage_all(repo: Repo, root: Path) -> bool:
     deleted_any = False
     workdir_set = set(rel_paths)
     for entry_path in list(index):
-        path_str = entry_path.decode("utf-8") if isinstance(entry_path, bytes) else entry_path
+        path_str = (
+            entry_path.decode("utf-8", errors="strict")
+            if isinstance(entry_path, bytes)
+            else entry_path
+        )
         if path_str not in workdir_set:
             full = root / path_str
             if not full.exists():
@@ -718,7 +728,11 @@ def _checkout_paths_from_ref(repo: Repo, ref: str, paths: list[str]) -> tuple[in
                 any_changed = True
             # index 里删
             for entry_path in list(index):
-                p_str = entry_path.decode("utf-8") if isinstance(entry_path, bytes) else entry_path
+                p_str = (
+                    entry_path.decode("utf-8", errors="strict")
+                    if isinstance(entry_path, bytes)
+                    else entry_path
+                )
                 if p_str == spec or p_str.startswith(spec + "/"):
                     del index[entry_path]
                     any_changed = True
@@ -730,10 +744,7 @@ def _checkout_paths_from_ref(repo: Repo, ref: str, paths: list[str]) -> tuple[in
             full.write_bytes(data)
             # update index
             st = full.stat()
-            try:
-                from dulwich.index import IndexEntry, _fs_to_tree_path
-            except ImportError:
-                from dulwich.index import IndexEntry  # type: ignore
+            from dulwich.index import IndexEntry
             entry = IndexEntry(
                 ctime=(int(st.st_ctime), 0),
                 mtime=(int(st.st_mtime), 0),
@@ -800,7 +811,7 @@ def _collect_blobs_under_path(
         if not isinstance(t, Tree):
             return
         for entry in t.items():
-            name = entry.path.decode("utf-8")
+            name = entry.path.decode("utf-8", errors="strict")
             rel = f"{prefix}/{name}" if prefix else name
             obj = repo[entry.sha]
             if isinstance(obj, Tree):
@@ -829,11 +840,19 @@ def _status_porcelain(repo: Repo, root: Path) -> str:
     staged = status.staged or {}
     for key, sym in (("add", "A"), ("modify", "M"), ("delete", "D")):
         for path in staged.get(key, []):
-            p = path.decode("utf-8") if isinstance(path, bytes) else path
+            p = (
+                path.decode("utf-8", errors="strict")
+                if isinstance(path, bytes)
+                else path
+            )
             lines.append(f"{sym}  {p}")
 
     for path in status.unstaged or []:
-        p = path.decode("utf-8") if isinstance(path, bytes) else path
+        p = (
+            path.decode("utf-8", errors="strict")
+            if isinstance(path, bytes)
+            else path
+        )
         # 区分 modify vs delete
         full = root / p
         if not full.exists():
@@ -842,7 +861,11 @@ def _status_porcelain(repo: Repo, root: Path) -> str:
             lines.append(f" M {p}")
 
     for path in status.untracked or []:
-        p = path.decode("utf-8") if isinstance(path, bytes) else path
+        p = (
+            path.decode("utf-8", errors="strict")
+            if isinstance(path, bytes)
+            else path
+        )
         # 忽略 .gitignore 已忽略的（porcelain.status 默认会 filter，但保险起见跳过）
         lines.append(f"?? {p}")
 
@@ -949,7 +972,7 @@ def run_git(args: list[str], cwd: str) -> tuple[int, str, str]:
 
 # ── handler 列表 ──────────────────────────────────────────────────
 
-def _h_init(args: list[str], cwd: str) -> tuple[int, str, str]:
+def _h_init(_args: list[str], cwd: str) -> tuple[int, str, str]:
     """``git init``。"""
     Path(cwd).mkdir(parents=True, exist_ok=True)
     repo = porcelain.init(cwd, bare=False)
@@ -976,11 +999,10 @@ def _h_config(args: list[str], cwd: str) -> tuple[int, str, str]:
 
 def _h_rev_parse(args: list[str], cwd: str) -> tuple[int, str, str]:
     """``git rev-parse [--verify] <ref>``。"""
-    verify_only = False
     refs: list[str] = []
     for a in args:
         if a == "--verify":
-            verify_only = True
+            continue
         elif a.startswith("--"):
             continue
         else:
@@ -992,7 +1014,7 @@ def _h_rev_parse(args: list[str], cwd: str) -> tuple[int, str, str]:
         sha = _resolve_rev(repo, ref)
         if sha is None:
             return 128, "", f"fatal: bad revision '{ref}'"
-        return 0, sha.decode("ascii"), ""
+        return 0, sha.decode("ascii", errors="strict"), ""
 
 
 def _h_log(args: list[str], cwd: str) -> tuple[int, str, str]:
@@ -1009,7 +1031,6 @@ def _h_log(args: list[str], cwd: str) -> tuple[int, str, str]:
     n_limit: int | None = None
     fmt: str | None = None
     oneline = False
-    follow = False
     paths: list[str] = []
     ref: str | None = None
 
@@ -1029,7 +1050,7 @@ def _h_log(args: list[str], cwd: str) -> tuple[int, str, str]:
         elif a == "--oneline":
             oneline = True
         elif a == "--follow":
-            follow = True
+            continue
         elif a.startswith("-") and a[1:].isdigit():
             n_limit = int(a[1:])
         elif a.startswith("--"):
@@ -1054,7 +1075,7 @@ def _h_log(args: list[str], cwd: str) -> tuple[int, str, str]:
             if fmt == "%s":
                 return 0, _commit_subject(repo, target), ""
             if fmt == "%H":
-                return 0, target.decode("ascii"), ""
+                return 0, target.decode("ascii", errors="strict"), ""
             return 0, "", f"unsupported format: {fmt}"
 
         # log --oneline --follow -N -- <path>: 列出 N 条 commit
@@ -1064,7 +1085,9 @@ def _h_log(args: list[str], cwd: str) -> tuple[int, str, str]:
             lines = []
             for s in shas:
                 subj = _commit_subject(repo, s)
-                lines.append(f"{s[:7].decode('ascii')} {subj}")
+                lines.append(
+                    f"{s[:7].decode('ascii', errors='strict')} {subj}"
+                )
             return 0, "\n".join(lines), ""
 
         return 1, "", f"unsupported log args: {args}"
@@ -1176,7 +1199,9 @@ def _h_rev_list(args: list[str], cwd: str) -> tuple[int, str, str]:
         out.sort(key=lambda s: repo[s].commit_time)
         if not reverse:
             out.reverse()
-        return 0, "\n".join(s.decode("ascii") for s in out), ""
+        return 0, "\n".join(
+            s.decode("ascii", errors="strict") for s in out
+        ), ""
 
 
 def _h_status(args: list[str], cwd: str) -> tuple[int, str, str]:
@@ -1188,7 +1213,7 @@ def _h_status(args: list[str], cwd: str) -> tuple[int, str, str]:
         return 0, out, ""
 
 
-def _h_add(args: list[str], cwd: str) -> tuple[int, str, str]:
+def _h_add(_args: list[str], cwd: str) -> tuple[int, str, str]:
     """``git add . / -A``."""
     with _open_repo(cwd) as repo:
         _stage_all(repo, Path(cwd))
@@ -1211,7 +1236,9 @@ def _h_commit(args: list[str], cwd: str) -> tuple[int, str, str]:
         if err == "nothing to commit":
             return 1, "", "nothing to commit"
         return 1, "", err
-    return 0, f"[{sha[:7].decode('ascii')}] {msg}", ""
+    return 0, (
+        f"[{sha[:7].decode('ascii', errors='strict')}] {msg}"
+    ), ""
 
 
 def _h_branch(args: list[str], cwd: str) -> tuple[int, str, str]:
@@ -1476,14 +1503,21 @@ def _h_diff(args: list[str], cwd: str) -> tuple[int, str, str]:
             index_tree_sha = index.commit(repo.object_store)
             if head_tree_sha is None:
                 # 全部 staged 算 added
-                paths = sorted(p.decode("utf-8") if isinstance(p, bytes) else p for p in index)
+                paths = sorted(
+                    p.decode("utf-8", errors="strict")
+                    if isinstance(p, bytes)
+                    else p
+                    for p in index
+                )
                 return 0, "\n".join(paths), ""
             from dulwich.diff_tree import tree_changes
             names: list[str] = []
             for change in tree_changes(repo.object_store, head_tree_sha, index_tree_sha):
                 for tp in (change.new, change.old):
                     if tp.path:
-                        names.append(tp.path.decode("utf-8"))
+                        names.append(
+                            tp.path.decode("utf-8", errors="strict")
+                        )
                         break
             return 0, "\n".join(sorted(set(names))), ""
 
@@ -1526,13 +1560,17 @@ def _h_diff(args: list[str], cwd: str) -> tuple[int, str, str]:
     return 1, "", f"unsupported diff args: {args}"
 
 
-def _h_clean(args: list[str], cwd: str) -> tuple[int, str, str]:
+def _h_clean(_args: list[str], cwd: str) -> tuple[int, str, str]:
     """``git clean -fd``——删未追踪文件 + 目录。"""
     # 简化实现：把 status untracked 的全删
     with _open_repo(cwd) as repo:
         status = porcelain.status(repo=repo, untracked_files="all")
         for p in status.untracked or []:
-            ps = p.decode("utf-8") if isinstance(p, bytes) else p
+            ps = (
+                p.decode("utf-8", errors="strict")
+                if isinstance(p, bytes)
+                else p
+            )
             full = Path(cwd) / ps
             try:
                 if full.is_file() or full.is_symlink():
@@ -1593,7 +1631,10 @@ def _h_merge(args: list[str], cwd: str) -> tuple[int, str, str]:
                 porcelain.reset(repo=repo, mode="hard", treeish=target_sha)
             except Exception as e:
                 return 1, "", f"reset failed: {e}"
-            return 0, f"Fast-forward to {target_sha[:7].decode('ascii')}", ""
+            return 0, (
+                "Fast-forward to "
+                f"{target_sha[:7].decode('ascii', errors='strict')}"
+            ), ""
 
         if ff_only:
             return 1, "", "Not possible to fast-forward, aborting."
@@ -1622,7 +1663,10 @@ def _h_merge(args: list[str], cwd: str) -> tuple[int, str, str]:
             porcelain.reset(repo=repo, mode="hard", treeish=new_commit.id)
         except Exception as e:
             return 1, "", f"reset failed: {e}"
-        return 0, f"Merge made (sha={new_commit.id[:7].decode('ascii')})", ""
+        return 0, (
+            "Merge made "
+            f"(sha={new_commit.id[:7].decode('ascii', errors='strict')})"
+        ), ""
 
 
 def _h_for_each_ref(args: list[str], cwd: str) -> tuple[int, str, str]:
@@ -1635,10 +1679,12 @@ def _h_for_each_ref(args: list[str], cwd: str) -> tuple[int, str, str]:
     with _open_repo(cwd) as repo:
         lines = []
         for ref, sha in sorted(repo.refs.as_dict().items()):
-            name = ref.decode("utf-8")
+            name = ref.decode("utf-8", errors="strict")
             if prefix and not name.startswith(prefix):
                 continue
-            lines.append(f"{sha.decode('ascii')} {name}")
+            lines.append(
+                f"{sha.decode('ascii', errors='strict')} {name}"
+            )
         return 0, "\n".join(lines), ""
 
 
@@ -1834,7 +1880,11 @@ def commit_to_staging_branch(skill_dir: str, message: str) -> bool:
                 try:
                     porcelain.reset(repo=repo, mode="hard", treeish=_ref_for_branch("main"))
                 except Exception:
-                    pass
+                    logger.warning(
+                        "staging commit 回滚时重置 main 失败：%s",
+                        skill_dir,
+                        exc_info=True,
+                    )
                 return False
 
             # 物化 + 回 main
@@ -1987,7 +2037,11 @@ def _ensure_repo_locked(skill_dir: str) -> None:
                 try:
                     porcelain.reset(repo=repo, mode="hard", treeish=_ref_for_branch("main"))
                 except Exception:
-                    pass
+                    logger.warning(
+                        "修复 skill 仓库时重置 main 失败：%s",
+                        skill_dir,
+                        exc_info=True,
+                    )
                 if cur and _has_branch(repo, cur):
                     _branch_delete(repo, cur)
                 logger.info(f"🧹 修复: 回到 main，清理残留分支 {cur}")

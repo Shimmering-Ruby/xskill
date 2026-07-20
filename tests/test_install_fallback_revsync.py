@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 import time
 from pathlib import Path
@@ -29,7 +28,6 @@ from xskill.ecosystems.installation import InstallSafetyError
 from xskill.ecosystems._fallback import (
     _install_meta_path,
     _is_link_or_junction,
-    _maybe_reverse_sync_before_overwrite,
     _reset_dest,
     install_dir,
 )

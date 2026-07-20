@@ -6,7 +6,6 @@ import pickle
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from xskill.skill import trigger_probe as tp
 
@@ -31,7 +30,7 @@ class _FakeAgent:
                 try:
                     t()
                 except Exception:  # StopAgentRun 之类 —— agno 内部会吞
-                    pass
+                    return
                 return
 
 

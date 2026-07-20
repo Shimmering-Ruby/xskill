@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from xskill.ecosystems import (
-    TraeIngester,
     adapt_trajectory,
     detect_known_ecosystems,
     detect_trae_record,

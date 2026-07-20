@@ -360,7 +360,6 @@ class Skill:
         out: list[_Traj] = []
         for traj_id in self.source_trajs:
             # 在 registry 中按 filename 反查（traj_id 形如 "traj_0042"）
-            paths = self._registry.trajectories_using(self.name)  # 备选反查
             # 直接按 filename 找
             from xskill.pipeline import registry as _r
             with _r.pooled_connection(self._registry._db_path) as conn:
@@ -429,7 +428,7 @@ def _load_skill(skill_path: Path) -> tuple[dict, str, Path]:
             if abstract.get("eval_result"):
                 meta["eval"] = abstract["eval_result"]
         except Exception:
-            pass
+            logger.warning("读取旧版 skill 元数据失败：%s", abstract_path, exc_info=True)
     return synth, text, p
 
 

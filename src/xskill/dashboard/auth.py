@@ -66,7 +66,9 @@ def ensure_dashboard_secret(path: Path | str) -> str:
 # ---------------------------------------------------------------------------
 
 def _b64e(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return base64.urlsafe_b64encode(raw).decode(
+        "ascii", errors="strict"
+    ).rstrip("=")
 
 
 def _b64d(s: str) -> bytes:

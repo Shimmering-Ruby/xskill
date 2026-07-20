@@ -425,7 +425,8 @@ def _git(root: Path, args: list[str]) -> str:
     from xskill.utils.proc import windowless_subprocess_kwargs
     try:
         result = subprocess.run(["git", "-C", str(root)] + args,
-                                capture_output=True, text=True, timeout=10,
+                                capture_output=True, text=True, errors="strict",
+                                timeout=10,
                                 **windowless_subprocess_kwargs())
         return result.stdout
     except (OSError, subprocess.SubprocessError):

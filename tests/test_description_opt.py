@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from xskill.skill import description_opt as DO
 from xskill.skill import frontmatter as FM
@@ -76,7 +75,7 @@ class _StubProbeAgent:
                     try:
                         t()
                     except Exception:  # StopAgentRun —— agno 内部会吞
-                        pass
+                        return
                     return
 
 
