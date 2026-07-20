@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from unittest.mock import patch
-from pathlib import Path
 
-import pytest
 
 from xskill.utils.search import search_all
 

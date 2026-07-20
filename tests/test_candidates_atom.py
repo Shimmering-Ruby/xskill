@@ -1,9 +1,7 @@
 """Candidates v2：以 atom_id 为单位累计 weightscore，阈值 ≥ 10 即 ready"""
 from __future__ import annotations
 
-from pathlib import Path
 
-import pytest
 
 from xskill.skill import candidates as C
 

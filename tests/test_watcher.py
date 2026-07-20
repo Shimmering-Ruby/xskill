@@ -16,12 +16,10 @@ v2 AtomTask 流水线特有的测试（splitting/split_done/clustering 状态流
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from xskill.pipeline.registry import register_dir, discover_trajectories, get_unindexed
+from xskill.pipeline.registry import register_dir
 from xskill.pipeline.runner import DirectoryWatcher
 
 

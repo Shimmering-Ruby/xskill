@@ -10,7 +10,6 @@ ClientRegistry.register() 的三级判定：
 """
 from __future__ import annotations
 
-import socket as _socket
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

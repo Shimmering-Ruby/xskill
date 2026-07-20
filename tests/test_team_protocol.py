@@ -3,7 +3,7 @@ from __future__ import annotations
 from xskill.team.shared.protocol import (
     RegisterRequest, RegisterResponse,
     UploadTrajectory, UploadRequest, UploadResponse,
-    SkillSlot, SyncResponse, PushEditResponse,
+    SkillSlot, SyncResponse,
 )
 
 

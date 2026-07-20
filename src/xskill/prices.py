@@ -72,7 +72,7 @@ def parse_litellm(raw: Dict[str, dict]) -> Dict[str, dict]:
 def fetch_and_build(timeout: int = 30) -> Dict[str, dict]:
     """拉取并解析价格表,返回带 ``_meta`` 的完整 payload。失败/条目过少 → 抛错。"""
     with urllib.request.urlopen(PRICES_URL, timeout=timeout) as r:  # noqa: S310
-        raw = json.loads(r.read().decode("utf-8"))
+        raw = json.loads(r.read().decode("utf-8", errors="strict"))
     models = parse_litellm(raw)
     if len(models) < MIN_ENTRIES:
         raise ValueError(f"解析到的条目过少({len(models)}),疑似源格式变更")

@@ -1,7 +1,6 @@
 """score_atom: atom 粒度打分 + used_skills 信号"""
 from __future__ import annotations
 
-import pytest
 
 from xskill.pipeline.atom import AtomTask
 from xskill.pipeline.atom import score_atom

@@ -174,4 +174,18 @@ __all__ = [
     "read_install_metadata_file", "read_skill_head_sha",
     "link_install_metadata_is_current",
     "write_install_metadata",
+    # Compatibility re-exports used by historical callers and tests.
+    "_agents_skills_path", "_sanitize_for_filename",
+    "_cc_projects_path", "_cc_skills_path", "_cc_traj_id",
+    "_codex_sessions_path", "_codex_session_id_from_path",
+    "_read_cwd_from_codex_jsonl",
+    "_nga3_projects_path", "_nga3_skills_path",
+    "_nga3_session_id_from_path", "_read_cwd_from_nga3_jsonl_content",
+    "_cursor_projects_path", "_cursor_skills_path",
+    "_cursor_session_id_from_path", "_read_cwd_from_cursor_jsonl",
+    "_trae_skills_roots", "_trae_workspace_storage_roots",
+    "_sessions_from_chat_blob",
+    "_openclaw_agents_path", "_openclaw_session_id_from_path",
+    "_read_workspace_dir_from_openclaw_jsonl",
+    "_opencode_db_path", "_ngagent_db_path", "_ngagent_skills_path",
 ]

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from xskill import canary
 from xskill.canary import AtomCanary

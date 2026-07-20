@@ -36,6 +36,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -83,7 +84,8 @@ def _pid_alive_windows(pid: int) -> bool:
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-            capture_output=True, text=True, check=False, timeout=2,
+            capture_output=True, text=True, errors="strict",
+            check=False, timeout=2,
             **windowless_subprocess_kwargs(),
         ).stdout
     except (OSError, subprocess.SubprocessError):
@@ -302,7 +304,8 @@ class WindowsTaskSchedulerBackend(ConnectServiceBackend):
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
         """跑一条 schtasks 子命令。text 模式拿输出，不 check（自行判 returncode）。"""
         return subprocess.run(
-            ["schtasks", *args], capture_output=True, text=True, check=False,
+            ["schtasks", *args], capture_output=True, text=True,
+            errors="strict", check=False,
             **windowless_subprocess_kwargs(),
         )
 
@@ -376,15 +379,16 @@ class WindowsTaskSchedulerBackend(ConnectServiceBackend):
 
         # 立即 detach 启动：无窗 flag 叠加 DETACHED_PROCESS（0x00000008）
         DETACHED_PROCESS = 0x00000008
-        no_window = windowless_subprocess_kwargs()
         try:
             proc = subprocess.Popen(
                 argv,
-                creationflags=no_window.get("creationflags", 0) | DETACHED_PROCESS,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                **windowless_subprocess_kwargs(
+                    extra_creationflags=DETACHED_PROCESS
+                ),
             )
             pid = proc.pid
         except OSError as e:
@@ -528,7 +532,9 @@ def _systemd_user_available() -> bool:
     try:
         cp = subprocess.run(
             ["systemctl", "--user", "show-environment"],
-            capture_output=True, text=True, check=False, timeout=5,
+            capture_output=True, text=True, errors="strict",
+            check=False, timeout=5,
+            **windowless_subprocess_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -552,7 +558,8 @@ class SystemdUserBackend(ConnectServiceBackend):
         try:
             return subprocess.run(
                 ["systemctl", "--user", *args], capture_output=True,
-                text=True, check=False, timeout=15,
+                text=True, errors="strict", check=False, timeout=15,
+                **windowless_subprocess_kwargs(),
             )
         except (OSError, subprocess.SubprocessError) as e:
             raise ServiceError(f"systemd --user 执行失败：{e}") from e
@@ -583,7 +590,8 @@ class SystemdUserBackend(ConnectServiceBackend):
         try:
             linger = subprocess.run(
                 ["loginctl", "enable-linger", user], capture_output=True,
-                text=True, check=False, timeout=5,
+                text=True, errors="strict", check=False, timeout=5,
+                **windowless_subprocess_kwargs(),
             )
         except (OSError, subprocess.SubprocessError):
             return False
@@ -713,6 +721,7 @@ class DetachedProcessBackend(ConnectServiceBackend):
                     argv, cwd=str(Path.home()), stdin=subprocess.DEVNULL,
                     stdout=log_file, stderr=subprocess.STDOUT,
                     start_new_session=True, close_fds=True,
+                    **windowless_subprocess_kwargs(),
                 )
         except OSError as e:
             raise ServiceError(f"启动 detached connect 进程失败：{e}") from e
@@ -730,8 +739,9 @@ class DetachedProcessBackend(ConnectServiceBackend):
             try:
                 os.kill(pid, signal.SIGTERM)
                 deadline = time.time() + 5
+                stop_waiter = threading.Event()
                 while _pid_alive(pid) and time.time() < deadline:
-                    time.sleep(0.05)
+                    stop_waiter.wait(0.05)
                 if _pid_alive(pid):
                     os.kill(pid, signal.SIGKILL)
             except OSError as e:

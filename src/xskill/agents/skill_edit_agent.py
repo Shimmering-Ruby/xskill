@@ -788,7 +788,8 @@ class SkillEditAgent:
                 scenario_lines.append(f"现有 SKILL.md description: {cur_desc[:200]}")
                 scenario_lines.append(f"现有 SKILL.md version: {cur_ver}")
             except Exception:
-                pass
+                logger.warning("failed to read existing skill metadata: %s",
+                               skill_md, exc_info=True)
         scenario_lines.extend(self._skill_tree_context_lines())
         scenario_lines.append("")
         scenario_lines.append("# 待整理 candidates（按 weightscore 倒序）")

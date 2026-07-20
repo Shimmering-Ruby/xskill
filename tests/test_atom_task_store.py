@@ -5,7 +5,6 @@ import hashlib
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 

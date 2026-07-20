@@ -16,7 +16,7 @@ from pathlib import Path
 
 from xskill.pipeline.atom import AtomTaskStore
 from xskill.pipeline.registry import (
-    register_dir, update_traj_status, get_trajs_by_status, get_status_counts,
+    register_dir, update_traj_status, get_trajs_by_status,
 )
 from xskill.pipeline.runner import DirectoryWatcher
 from xskill.skill import candidates as C

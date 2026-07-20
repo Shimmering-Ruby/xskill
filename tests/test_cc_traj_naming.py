@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from xskill.ecosystems import _cc_traj_id, _sanitize_for_filename
 

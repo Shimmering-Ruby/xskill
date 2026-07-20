@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from xskill._sqlite_connect import connect_with_lock
 from xskill.ecosystems._fallback import install_dir

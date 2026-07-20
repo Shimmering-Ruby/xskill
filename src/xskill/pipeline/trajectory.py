@@ -132,7 +132,7 @@ def _read_trajectory_text(path: Path) -> tuple[str | None, str | None]:
     if raw == b"":
         return "", None
     try:
-        return raw.decode("utf-8"), None
+        return raw.decode("utf-8", errors="strict"), None
     except UnicodeDecodeError as e:
         return None, f"{type(e).__name__}: {e}"
 

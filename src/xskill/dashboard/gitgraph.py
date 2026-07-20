@@ -32,7 +32,7 @@ def skill_commit_graph(skill_dir: Path, name: str,
         refs = repo.refs.as_dict()
         tips: dict[str, list[bytes]] = {"main": [], "staging": [], "rejected": []}
         for ref, sha in refs.items():
-            rname = ref.decode("utf-8")
+            rname = ref.decode("utf-8", errors="strict")
             if rname == "refs/heads/main":
                 tips["main"].append(sha)
             elif rname == "refs/heads/staging":
@@ -64,8 +64,10 @@ def skill_commit_graph(skill_dir: Path, name: str,
                 continue
             lanes = [lane for lane, s in lane_sets.items() if sha in s]
             nodes.append({
-                "sha": sha.decode("ascii"),
-                "parents": [p.decode("ascii") for p in c.parents],
+                "sha": sha.decode("ascii", errors="strict"),
+                "parents": [
+                    p.decode("ascii", errors="strict") for p in c.parents
+                ],
                 "subject": c.message.decode("utf-8", "replace")
                             .splitlines()[0][:120] if c.message else "",
                 "ts": int(c.commit_time),
@@ -73,8 +75,11 @@ def skill_commit_graph(skill_dir: Path, name: str,
             })
         nodes.sort(key=lambda n: -n["ts"])
         nodes = nodes[:_MAX_COMMITS]
-        head_main = (tips["main"][0].decode("ascii") if tips["main"] else None)
-        head_staging = (tips["staging"][0].decode("ascii")
+        head_main = (
+            tips["main"][0].decode("ascii", errors="strict")
+            if tips["main"] else None
+        )
+        head_staging = (tips["staging"][0].decode("ascii", errors="strict")
                         if tips["staging"] else None)
     finally:
         repo.close()

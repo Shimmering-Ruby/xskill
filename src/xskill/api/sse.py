@@ -16,15 +16,11 @@ import asyncio
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
-from xskill.config import load_config, get_skill_dir, get_traj_dir, interests_config
-from xskill.utils.llm import create_llm_client, create_embed_client
 
 logger = logging.getLogger("xskill.tasks")
 
@@ -96,7 +92,7 @@ def make_sse_log(queue: "ThreadSafeQueue"):
         try:
             queue.put_nowait(("log", {"tag": tag, "msg": msg}))
         except Exception:
-            pass  # queue full / closed — drop silently
+            logger.debug("dropping SSE log event", exc_info=True)
 
     return log_fn
 
@@ -106,7 +102,7 @@ def _push(queue: "ThreadSafeQueue", event: str, data: dict):
     try:
         queue.put_nowait((event, data))
     except Exception:
-        pass
+        logger.debug("dropping SSE event %s", event, exc_info=True)
 
 
 def _finish(queue: "ThreadSafeQueue", data: dict):

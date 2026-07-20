@@ -823,7 +823,8 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
             path.unlink()
             logger.info(f"removed legacy {path}")
         except Exception:
-            pass
+            logger.warning("failed to remove legacy skill file %s",
+                           path, exc_info=True)
 
     # delete legacy .abstract if present
     old_abstract = target / ".abstract"
@@ -832,7 +833,8 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None 
             old_abstract.unlink()
             logger.info(f"removed legacy .abstract for {skill_name}")
         except Exception:
-            pass
+            logger.warning("failed to remove legacy abstract %s",
+                           old_abstract, exc_info=True)
 
     logger.info(f"📋 frontmatter updated: {upper} (v{meta.get('version')})")
     return json.dumps(meta, ensure_ascii=False, indent=2, default=str)
@@ -940,7 +942,7 @@ def skill_read(skill_name: str) -> str:
         from xskill.skill.git import current_branch
         header += f"   (branch: {current_branch(str(skill_path))})"
     except Exception:
-        pass
+        logger.debug("failed to read branch for %s", skill_path, exc_info=True)
     markdown_path = skill_path / "SKILL.md"
     if markdown_path.is_file():
         markdown_text = markdown_path.read_text(encoding="utf-8")

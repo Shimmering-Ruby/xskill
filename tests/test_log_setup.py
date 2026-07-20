@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import pytest
 
@@ -98,7 +97,9 @@ def _flush_all():
             try:
                 h.flush()
             except Exception:  # pylint: disable=broad-exception-caught
-                pass
+                logging.getLogger(__name__).debug(
+                    "handler flush failed", exc_info=True,
+                )
 
 
 # (primary logger, declared file, level) —— 每个声明文件至少有一个主 logger 往里写

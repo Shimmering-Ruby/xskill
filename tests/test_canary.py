@@ -10,11 +10,9 @@ test_canary.py -- canary.py 灰度发布模块单元测试
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from xskill import canary
 from xskill.skill.git import run_git
