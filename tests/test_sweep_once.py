@@ -2,6 +2,7 @@
 ingester 一次性入库调 run_once() 而非 start()(不起常驻线程)。"""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -283,7 +284,7 @@ class _FakeIngester:
 
 
 def test_run_once_and_drain_sequence_and_pool_shutdown(monkeypatch):
-    """run_once_and_drain = _scan_once → 排空线程池 → _harvest,完事线程池已关(不留活)。"""
+    """空轮次也收割一次，退出后线程池已关闭。"""
     import pytest
 
     from xskill.pipeline.runner import DirectoryWatcher
@@ -304,6 +305,52 @@ def test_run_once_and_drain_sequence_and_pool_shutdown(monkeypatch):
     # 线程池已 shutdown:再 submit 抛 RuntimeError(无残留可复用的池)。
     with pytest.raises(RuntimeError):
         watcher._pool.submit(len, [])
+
+
+def test_run_once_and_drain_harvests_fast_task_before_slowest(monkeypatch):
+    """同轮慢请求不能阻塞已完成拆分任务的状态回写。"""
+    from xskill.pipeline.runner import DirectoryWatcher
+
+    watcher = DirectoryWatcher(max_concurrent=2)
+    fast_finished = threading.Event()
+    fast_harvested = threading.Event()
+    release_slow = threading.Event()
+
+    def fast_task():
+        fast_finished.set()
+        return "fast"
+
+    def slow_task():
+        assert release_slow.wait(2.0)
+        return "slow"
+
+    def fake_scan():
+        fast = watcher._pool.submit(fast_task)
+        slow = watcher._pool.submit(slow_task)
+        watcher._futures[fast] = {"stage": "test"}
+        watcher._futures[slow] = {"stage": "test"}
+
+    def fake_harvest():
+        for future in [item for item in watcher._futures if item.done()]:
+            result = future.result(timeout=0)
+            watcher._futures.pop(future)
+            if result == "fast":
+                fast_harvested.set()
+
+    monkeypatch.setattr(watcher, "_scan_once", fake_scan)
+    monkeypatch.setattr(watcher, "_harvest", fake_harvest)
+    runner = threading.Thread(target=watcher.run_once_and_drain)
+    runner.start()
+    try:
+        assert fast_finished.wait(1.0)
+        assert fast_harvested.wait(1.0)
+        assert runner.is_alive(), "慢任务未结束时 run_once_and_drain 应仍在等待"
+    finally:
+        release_slow.set()
+        runner.join(2.0)
+
+    assert not runner.is_alive()
+    assert not watcher._futures
 
 
 def test_ingest_once_calls_run_once_not_start(tmp_path, monkeypatch):

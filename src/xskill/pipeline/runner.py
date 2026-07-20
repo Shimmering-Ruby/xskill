@@ -28,7 +28,7 @@ import hashlib
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from xskill.config import (
@@ -335,15 +335,22 @@ class DirectoryWatcher:
             self._reconcile_skill_sides()
 
     def run_once_and_drain(self) -> None:
-        """跑一轮 ``_scan_once`` → 排空线程池等所有在飞任务完成 → 再收割一次。
+        """跑一轮 ``_scan_once``，并在每个任务完成后立即收割，最后退出。
 
         供短命 ``sweep --once`` 子进程调:一次调用 = daemon 的一个 poll 周期(提交本轮
-        任务 → 阻塞等完成 → ``_harvest`` 推进 traj 状态/落审计),完事即退,不留常驻
-        线程(不调 ``start()``,无 daemon 线程)。多阶段流水线(split→embed→cluster→
-        done)靠调度器按 ``poll_interval`` 反复 spawn 逐轮推进,与 daemon 逐 poll 等价。
+        任务 → 按完成顺序 ``_harvest`` 推进 traj 状态/落审计 → 等全部完成),完事即退,
+        不留常驻线程(不调 ``start()``,无 daemon 线程)。逐个收割避免一个慢请求把同轮
+        已完成任务的状态更新一直拖到整个进程退出。多阶段流水线(split→embed→cluster
+        →done)靠调度器按 ``poll_interval`` 反复 spawn 逐轮推进,与 daemon 逐 poll 等价。
         """
         self._scan_once()
-        self._pool.shutdown(wait=True)  # 阻塞等在飞 future(禁 sleep,用 join 语义)
+        # 禁止再提交，但不能先 shutdown(wait=True)：否则本轮最慢请求会挡住所有
+        # 已完成 future 的状态回写；进程若在此期间被终止，DB 会长期停在 splitting。
+        self._pool.shutdown(wait=False)
+        while self._futures:
+            wait(tuple(self._futures), return_when=FIRST_COMPLETED)
+            self._harvest()
+        # 保留空轮次的收割语义，也兜住 _harvest 回调间接完成的 future。
         self._harvest()
 
     def _run_skill_edit_step(self):
