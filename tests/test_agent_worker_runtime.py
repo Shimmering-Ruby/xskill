@@ -1,6 +1,7 @@
 """v0.6.28 four-pool runtime and Cluster write-queue acceptance tests."""
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from tests.pool_helpers import pool_config
-from xskill.config import agent_worker_config
+from xskill.config import agent_worker_config, load_config, normalize_runtime_config
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.pipeline.runner import DirectoryWatcher, process_atom_batch
 from xskill.pipeline.worker_runtime import BoundedExecutor, ClusterWriteQueue
@@ -19,18 +20,6 @@ from xskill.utils.rate_limit import SharedRequestLimiter
 
 def _thread_name():
     return threading.current_thread().name
-
-
-def _set_legacy_max_concurrent(config):
-    config["watcher"]["max_concurrent"] = 4
-
-
-def _set_legacy_cluster_batch_size(config):
-    config["watcher"]["cluster_batch_size"] = 8
-
-
-def _set_legacy_burst(config):
-    config["llm"]["rate_limit"]["burst"] = 4
 
 
 def _set_explicit_queue_size(config):
@@ -177,32 +166,123 @@ def test_embedding_client_uses_its_independent_inflight_limit(monkeypatch):
     executor.shutdown(wait=True)
 
 
+def _legacy_config() -> dict:
+    return {
+        "llm": {
+            "api_key": "llm-secret",
+            "rate_limit": {"rpm": 120, "tpm": 6000, "burst": 12},
+        },
+        "embedding": {"api_key": "embed-secret"},
+        "dashboard": {"password": "admin-secret"},
+        "watcher": {
+            "poll_interval": 7,
+            "max_concurrent": 32,
+            "cluster_batch_size": 5,
+        },
+    }
+
+
+def test_v0627_config_gets_runtime_defaults_without_mutating_user_input():
+    original = _legacy_config()
+    before = copy.deepcopy(original)
+
+    effective = normalize_runtime_config(original)
+
+    assert original == before
+    assert effective["watcher"] == {"poll_interval": 7}
+    assert effective["agent_worker"]["pools"] == {
+        "split": {"workers": 24, "llm_weight": 6},
+        "cluster": {"workers": 8, "batch_size": 5, "llm_weight": 3},
+        "edit": {"workers": 4, "llm_weight": 1},
+        "embed": {"workers": 4},
+    }
+    assert effective["llm"]["rate_limit"] == {
+        "rpm": 120,
+        "tpm": 6000,
+        "request_burst": 12,
+        "max_inflight": 32,
+        "token_burst": 12,
+    }
+    assert effective["embedding"]["rate_limit"] == {"max_inflight": 4}
+    assert effective["llm"]["api_key"] == "llm-secret"
+    assert effective["embedding"]["api_key"] == "embed-secret"
+    assert effective["dashboard"]["password"] == "admin-secret"
+
+
+def test_explicit_new_values_win_and_missing_pool_fields_get_defaults():
+    config = _legacy_config()
+    config["llm"]["rate_limit"].update({
+        "request_burst": 3,
+        "max_inflight": 11,
+    })
+    config["agent_worker"] = {
+        "pools": {
+            "split": {"workers": 9},
+            "cluster": {"workers": 3, "batch_size": 2},
+        },
+    }
+
+    effective = normalize_runtime_config(config)
+    pools = effective["agent_worker"]["pools"]
+
+    assert pools["split"] == {"workers": 9, "llm_weight": 6}
+    assert pools["cluster"] == {
+        "workers": 3, "batch_size": 2, "llm_weight": 3,
+    }
+    assert pools["edit"] == {"workers": 4, "llm_weight": 1}
+    assert pools["embed"] == {"workers": 4}
+    assert effective["llm"]["rate_limit"]["request_burst"] == 3
+    assert effective["llm"]["rate_limit"]["max_inflight"] == 11
+    assert agent_worker_config(config)["pools"] == pools
+
+
+def test_missing_new_sections_use_release_defaults():
+    effective = normalize_runtime_config({"llm": {}, "embedding": {}})
+
+    assert effective["llm"]["rate_limit"] == {
+        "rpm": 240,
+        "request_burst": 8,
+        "max_inflight": 8,
+    }
+    assert effective["embedding"]["rate_limit"] == {"max_inflight": 4}
+    assert effective["agent_worker"]["pools"]["cluster"]["batch_size"] == 8
+
+
+def test_load_config_accepts_old_yaml_without_rewriting_it(tmp_path):
+    path = tmp_path / "config.yaml"
+    old_yaml = """\
+llm:
+  api_key: llm-secret
+embedding:
+  api_key: embed-secret
+watcher:
+  poll_interval: 30
+  max_concurrent: 6
+"""
+    path.write_text(old_yaml, encoding="utf-8")
+
+    effective = load_config(path)
+
+    assert path.read_text(encoding="utf-8") == old_yaml
+    assert effective["llm"]["rate_limit"]["max_inflight"] == 6
+    assert effective["agent_worker"]["pools"]["split"]["workers"] == 24
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
-        (
-            _set_legacy_max_concurrent,
-            "agent_worker.pools",
-        ),
-        (
-            _set_legacy_cluster_batch_size,
-            "agent_worker.pools.cluster.batch_size",
-        ),
-        (
-            _set_legacy_burst,
-            "request_burst",
-        ),
-        (
-            _set_explicit_queue_size,
-            "等待容量自动",
-        ),
+        (lambda config: config["watcher"].update(max_concurrent=0),
+         "watcher.max_concurrent"),
+        (lambda config: config["watcher"].update(cluster_batch_size=False),
+         "watcher.cluster_batch_size"),
+        (_set_explicit_queue_size, "等待容量自动"),
     ],
 )
-def test_legacy_config_paths_fail_with_migration_hint(mutate, message):
+def test_invalid_legacy_or_unsupported_values_still_fail(mutate, message):
     config = _valid_config()
     mutate(config)
     with pytest.raises(ValueError, match=message):
-        agent_worker_config(config)
+        normalize_runtime_config(config)
 
 
 def test_cluster_write_queue_serializes_same_slug_creation(tmp_path):

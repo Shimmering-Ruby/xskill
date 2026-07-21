@@ -305,14 +305,9 @@ def test_build_watcher_defaults_and_history_stay_in_explicit_instance(
 
     watcher = watcher_factory.build_watcher(
         {
-            "watcher": {},
-            "agent_worker": {"pools": pool_config()},
-            "llm": {"rate_limit": {
-                "rpm": 240,
-                "request_burst": 8,
-                "max_inflight": 8,
-            }},
-            "embedding": {"rate_limit": {"max_inflight": 4}},
+            "watcher": {"max_concurrent": 6, "cluster_batch_size": 3},
+            "llm": {"rate_limit": {"burst": 5}},
+            "embedding": {},
         },
         xskill_home=instance_xskill_home,
         server_mode=True,
@@ -337,6 +332,23 @@ def test_build_watcher_defaults_and_history_stay_in_explicit_instance(
             instance_xskill_home / "tmp" / "spill"
         ).resolve()
         assert watcher.usage_ledger.db_path == watcher.db_path
+        assert watcher.pool_config == pool_config(
+            workers=2,
+            split_workers=24,
+            cluster_workers=8,
+            edit_workers=4,
+            embed_workers=4,
+            batch_size=3,
+        )
+        effective_config = create_llm_client.call_args.args[0]
+        assert effective_config["llm"]["rate_limit"] == {
+            "rpm": 240,
+            "request_burst": 5,
+            "max_inflight": 6,
+        }
+        assert create_embed_client.call_args.args[0]["embedding"] == {
+            "rate_limit": {"max_inflight": 4},
+        }
         assert (
             create_llm_client.call_args.kwargs["usage_ledger"]
             is watcher.usage_ledger

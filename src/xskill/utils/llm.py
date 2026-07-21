@@ -434,6 +434,11 @@ def create_llm_client(
     if role in ("skill", "eval"):
         override_cfg = config.get("llm_skill", {}) or {}
         merged = {**base_cfg, **{k: v for k, v in override_cfg.items() if v}}
+        if override_cfg.get("rate_limit"):
+            merged["rate_limit"] = {
+                **(base_cfg.get("rate_limit") or {}),
+                **override_cfg["rate_limit"],
+            }
     else:
         merged = base_cfg
 

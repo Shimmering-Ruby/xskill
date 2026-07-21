@@ -15,7 +15,13 @@ from __future__ import annotations
 
 import pytest
 
-from xskill.utils.llm import LLMClient, EmbedClient, _resolve_embed_api_style
+from xskill.config import normalize_runtime_config
+from xskill.utils.llm import (
+    EmbedClient,
+    LLMClient,
+    _resolve_embed_api_style,
+    create_llm_client,
+)
 
 
 class TestLLMClientDefaults:
@@ -65,6 +71,33 @@ class TestLLMClientFromConfig:
     def test_missing_model_raises(self):
         with pytest.raises(ValueError):
             LLMClient.from_config({"base_url": "http://x", "api_key": "k"})
+
+    def test_skill_override_inherits_legacy_concurrency_and_pool_weights(self):
+        config = normalize_runtime_config({
+            "llm": {
+                "base_url": "http://x",
+                "model": "base",
+                "api_key": "k",
+                "rate_limit": {"burst": 5},
+            },
+            "llm_skill": {
+                "model": "skill",
+                "rate_limit": {"rpm": 60},
+            },
+            "embedding": {},
+            "watcher": {"max_concurrent": 7},
+        })
+
+        client = create_llm_client(config, role="skill")
+
+        assert client is not None
+        assert client.model == "skill"
+        assert client.rate_limit_cfg == {
+            "rpm": 60,
+            "request_burst": 5,
+            "max_inflight": 7,
+            "_pool_weights": {"split": 6, "cluster": 3, "edit": 1},
+        }
 
 
 class TestEmbedApiStyle:
