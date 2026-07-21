@@ -28,13 +28,22 @@ from pathlib import Path
 _REC = {"sessions": 0, "input_chars": 0}
 
 
+def _tool_name(tool) -> str:
+    return getattr(tool, "__name__", None) or getattr(tool, "name", "")
+
+
+def _call_tool(tool, *args):
+    entrypoint = tool if callable(tool) else getattr(tool, "entrypoint")
+    return entrypoint(*args)
+
+
 def _make_stub():
     import re
 
     class _Stub:
         def __init__(self, *, instructions, tools):
             self.instructions = instructions
-            self.tools = {getattr(t, "__name__", ""): t for t in tools}
+            self.tools = {_tool_name(t): t for t in tools}
 
         def run(self, user_msg, **kw):
             head = (self.instructions[0] if self.instructions else "")[:80]
@@ -47,13 +56,25 @@ def _make_stub():
                 # 真实输入 = system prompt（含 skill 路由表）+ user 消息
                 _REC["input_chars"] += len(self.instructions[0]) + len(user_msg)
                 atom_ids = re.findall(r"atom_id:\s*(\S+)", user_msg)
+                grouped: dict[str, list[str]] = {}
                 for aid in atom_ids:
                     # round-robin 路由到 8 个 skill，形成一个真实（小）的 catalog
                     sk = f"skill-{abs(hash(aid)) % 8}"
+                    grouped.setdefault(sk, []).append(aid)
+                for sk, grouped_atom_ids in grouped.items():
                     if "new_skill_folder" in self.tools:
-                        self.tools["new_skill_folder"](sk, "bench skill")
-                    if "add_task_to_skill" in self.tools:
-                        self.tools["add_task_to_skill"](sk, aid, 3)
+                        _call_tool(
+                            self.tools["new_skill_folder"], sk, "bench skill",
+                        )
+                    if "add_tasks_to_skill" in self.tools:
+                        _call_tool(
+                            self.tools["add_tasks_to_skill"],
+                            sk,
+                            [
+                                {"atom_id": aid, "weightscore": 3}
+                                for aid in grouped_atom_ids
+                            ],
+                        )
                 return _R()
             # split / edit / 其它：noop
             return _R()
@@ -73,8 +94,10 @@ def _run(traj_atoms: dict[str, int], batch_size: int):
     _REC["input_chars"] = 0
 
     tmp = Path(tempfile.mkdtemp(prefix="bench_cluster_"))
-    wd = tmp / "wd"; wd.mkdir()
-    skill_dir = tmp / "skill"; skill_dir.mkdir()
+    wd = tmp / "wd"
+    wd.mkdir()
+    skill_dir = tmp / "skill"
+    skill_dir.mkdir()
     db = tmp / "bench.db"
     store = AtomTaskStore(root=wd)
 
@@ -99,12 +122,18 @@ def _run(traj_atoms: dict[str, int], batch_size: int):
         config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
         skill_dir=skill_dir,
         poll_interval=0.0,
-        max_concurrent=4,
+        pool_config={
+            "split": {"workers": 4, "llm_weight": 6},
+            "cluster": {
+                "workers": 4, "batch_size": batch_size, "llm_weight": 3,
+            },
+            "edit": {"workers": 4, "llm_weight": 1},
+            "embed": {"workers": 4},
+        },
         db_path=db,
         store=store,
         agno_agent_factory=_make_stub(),
         home_root=tmp,
-        cluster_batch_size=batch_size,
     )
 
     t0 = time.monotonic()
@@ -119,7 +148,7 @@ def _run(traj_atoms: dict[str, int], batch_size: int):
             break
     wall = time.monotonic() - t0
     done = len(get_trajs_by_status(wd_id, "done", db_path=db))
-    watcher._pool.shutdown(wait=False)
+    watcher.stop()
     return {"sessions": _REC["sessions"], "input_chars": _REC["input_chars"],
             "wall": wall, "done": done, "n_trajs": len(traj_atoms)}
 
