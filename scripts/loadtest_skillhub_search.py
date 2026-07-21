@@ -130,15 +130,26 @@ def prepare_search_home(run_dir: Path, mock_base_url: str, args: argparse.Namesp
             "base_url": mock_base_url, "model": "mock-tool-model", "api_key": "mock-key",
             "max_context": 200000, "request_timeout": 120, "connect_timeout": 5,
             "client_max_retries": 0, "max_retries": 1,
+            "rate_limit": {"rpm": 240, "request_burst": 8, "max_inflight": 8},
         },
         "embedding": {
             "base_url": mock_base_url, "model": "mock-embed-model", "api_key": "mock-key",
             "dim": 8, "api": "openai",
             "max_embed": args.max_embed_low, "search_timeout_s": args.search_timeout_s,
+            # This smoke measures SkillHub's max_embed=1/4 semaphore while up
+            # to eight profile-refresh requests run beside it. Keep the shared
+            # endpoint gate large enough for both independently bounded paths.
+            "rate_limit": {"max_inflight": 8 + args.max_embed_high},
         },
         "skillhub": {"enabled": True, "dir": str(skillhub_dir)},
         "skill_opt": {"enabled": False},
-        "watcher": {"poll_interval": 0.5, "max_concurrent": 8, "cluster_batch_size": 8},
+        "watcher": {"poll_interval": 0.5},
+        "agent_worker": {"pools": {
+            "split": {"workers": 8, "llm_weight": 6},
+            "cluster": {"workers": 8, "batch_size": 8, "llm_weight": 3},
+            "edit": {"workers": 8, "llm_weight": 1},
+            "embed": {"workers": 8},
+        }},
         "server": {
             "thread_pool_tokens": 80, "team_sync_workers": args.team_sync_workers,
             "profile_refresh_workers": 8, "profile_refresh_queue_size": 1024,

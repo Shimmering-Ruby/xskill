@@ -463,6 +463,11 @@ def prepare_home(
             "connect_timeout": 5,
             "client_max_retries": 0,
             "max_retries": 1,
+            "rate_limit": {
+                "rpm": 60000,
+                "request_burst": max_concurrent,
+                "max_inflight": max_concurrent,
+            },
         },
         "embedding": {
             "base_url": mock_base_url,
@@ -470,6 +475,7 @@ def prepare_home(
             "api_key": "mock-key",
             "dim": 8,
             "api": "openai",
+            "rate_limit": {"max_inflight": profile_refresh_workers},
         },
         "skill_opt": {"enabled": False},
         "canary": {
@@ -483,9 +489,17 @@ def prepare_home(
         },
         "watcher": {
             "poll_interval": 0.5,
-            "max_concurrent": max_concurrent,
-            "cluster_batch_size": 8,
         },
+        "agent_worker": {"pools": {
+            "split": {"workers": max_concurrent, "llm_weight": 6},
+            "cluster": {
+                "workers": max_concurrent,
+                "batch_size": 8,
+                "llm_weight": 3,
+            },
+            "edit": {"workers": max_concurrent, "llm_weight": 1},
+            "embed": {"workers": profile_refresh_workers},
+        }},
         "server": {
             "thread_pool_tokens": thread_pool_tokens,
             "team_sync_workers": team_sync_workers,
@@ -1519,7 +1533,7 @@ def validate_result(result: dict[str, Any]) -> list[str]:
         failures.append(f"LLM request split incorrect: {llm}")
     if llm.get("started") != 2 * skills or llm.get("completed") != 2 * skills:
         failures.append(f"LLM completion count incorrect: {llm}")
-    if int(llm.get("max_active", workers + 1)) > int(config["watcher_max_concurrent"]):
+    if int(llm.get("max_active", workers + 1)) > int(config["llm_max_inflight"]):
         failures.append(f"LLM active limit exceeded: {llm.get('max_active')}")
 
     embedding = mock.get("embedding", {})
@@ -1778,7 +1792,7 @@ def main() -> int:
         "config": {
             "skills": args.skills,
             "clients": args.clients,
-            "watcher_max_concurrent": args.max_concurrent,
+            "llm_max_inflight": args.max_concurrent,
             "thread_pool_tokens": args.thread_pool_tokens,
             "team_sync_workers": args.team_sync_workers,
             "skill_slots": args.skill_slots,
