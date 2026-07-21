@@ -1,5 +1,7 @@
 """Small four-pool configs for focused unit tests."""
 
+from __future__ import annotations
+
 
 def pool_config(
     workers: int = 2,
