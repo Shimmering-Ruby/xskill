@@ -41,6 +41,7 @@ from xskill.pipeline.runner import DirectoryWatcher
 
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM
 from tests.test_watcher_atom import _StubAgno
+from tests.pool_helpers import pool_config
 from tests.test_atom_task_store import _FakeEmbed
 
 
@@ -55,7 +56,7 @@ def _make_watcher(*, db, wd, skill_dir, store, server_mode):
         config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
         skill_dir=skill_dir,
         poll_interval=0.0,
-        max_concurrent=4,
+        pool_config=pool_config(workers=4),
         db_path=db,
         store=store,
         agno_agent_factory=_StubAgno,

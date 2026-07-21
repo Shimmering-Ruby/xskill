@@ -1,13 +1,13 @@
 """内部子进程 worker(**非用户 CLI**)。
 
-watcher 是常驻子进程；画像重计算仍是短命子进程。web 进程的
+agent-worker 是常驻子进程；画像重计算仍是短命子进程。web 进程的
 ``IntervalSubprocessScheduler`` 用
 ``[sys.executable, "-m", "xskill._workers", <kind>]`` 启动它们，重计算与 web
 事件循环保持 GIL 隔离。
 
 这些是**内部管道**,刻意不注册进 ``xskill`` 用户 CLI(``cli.build_parser``)——用户
 ``xskill --help`` 看不到它们。调度器直接调本模块的 SDK 函数
-(``run_watcher_forever`` / ``run_profile_refresh_once``),或经
+(``run_agent_worker_forever`` / ``run_profile_refresh_once``),或经
 ``python -m xskill._workers`` 入口。
 """
 from __future__ import annotations
@@ -45,14 +45,14 @@ def _restore_signal_handlers(previous) -> None:
         signal.signal(signum, handler)
 
 
-def run_watcher_forever(
+def run_agent_worker_forever(
     *,
     server: bool = False,
     home: str | None = None,
     stop_event=None,
     status_interval: float = 5.0,
 ) -> int:
-    """构造一次 watcher 并常驻运行，直到收到 TERM/INT。
+    """构造四池 agent worker 并常驻运行，直到收到 TERM/INT。
 
     ``DirectoryWatcher.start()`` 的扫描线程每个 poll 都继续提交和收割
     任务，Future 跨轮保留；LLM 长尾任务不会阻止后续扫描。
@@ -70,7 +70,11 @@ def run_watcher_forever(
         build_watcher,
         ingest_detected_ecosystems_once,
     )
-    from xskill.utils.status_file import WATCHER_STATUS_FILE, write_status_file
+    from xskill.utils.status_file import (
+        AGENT_WORKER_STATUS_FILE,
+        WATCHER_STATUS_FILE,
+        write_status_file,
+    )
 
     if status_interval <= 0:
         raise ValueError("status_interval 必须 > 0")
@@ -78,6 +82,7 @@ def run_watcher_forever(
     config = load_config()
     home_root = Path(home).expanduser().resolve() if home else Path.home()
     status_path = XSKILL_HOME / WATCHER_STATUS_FILE
+    worker_status_path = XSKILL_HOME / AGENT_WORKER_STATUS_FILE
     event = stop_event if stop_event is not None else threading.Event()
     previous_handlers = _install_stop_signal_handlers(event)
     watcher = None
@@ -121,17 +126,27 @@ def run_watcher_forever(
         )
         watcher.start()
         write_status_file(status_path, watcher.stats, ok=True)
+        write_status_file(
+            worker_status_path,
+            getattr(watcher, "agent_worker_status", watcher.stats),
+            ok=True,
+        )
 
         while not event.wait(status_interval):
             if not watcher.is_running:
                 raise RuntimeError("watcher thread exited unexpectedly")
             write_status_file(status_path, watcher.stats, ok=True)
+            write_status_file(
+                worker_status_path,
+                getattr(watcher, "agent_worker_status", watcher.stats),
+                ok=True,
+            )
 
         ok = True
         return 0
     except Exception as exc:  # noqa: BLE001 — 常驻 worker 顶层边界
         error = str(exc)
-        logger.exception("persistent watcher failed")
+        logger.exception("persistent agent worker failed")
         return 1
     finally:
         if watcher is not None:
@@ -142,6 +157,16 @@ def run_watcher_forever(
         write_status_file(
             status_path,
             watcher.stats if watcher is not None else {},
+            ok=ok,
+            error=error,
+        )
+        write_status_file(
+            worker_status_path,
+            (
+                getattr(watcher, "agent_worker_status", watcher.stats)
+                if watcher is not None
+                else {}
+            ),
             ok=ok,
             error=error,
         )
@@ -325,9 +350,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="xskill._workers")
     sub = parser.add_subparsers(dest="kind", required=True)
-    p_watcher = sub.add_parser("watcher")
-    p_watcher.add_argument("--server", action="store_true")
-    p_watcher.add_argument("--home", default=None)
+    p_worker = sub.add_parser("agent-worker")
+    p_worker.add_argument("--server", action="store_true")
+    p_worker.add_argument("--home", default=None)
     p_ingest = sub.add_parser("ecosystem-ingest")
     p_ingest.add_argument("--home", default=None)
     p_ingest.add_argument("--loop", action="store_true")
@@ -336,8 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     configure_logging(get_logs_dir(), debug=False, quiet=False, stdout=True)
-    if args.kind == "watcher":
-        return run_watcher_forever(server=args.server, home=args.home)
+    if args.kind == "agent-worker":
+        return run_agent_worker_forever(server=args.server, home=args.home)
     if args.kind == "ecosystem-ingest":
         if args.loop:
             return run_ecosystem_ingest_loop(

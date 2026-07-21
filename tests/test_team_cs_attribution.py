@@ -36,18 +36,9 @@ def test_server_mode_scores_each_used_skill(tmp_path, monkeypatch):
     store.save(AtomTask(
         atom_id="atom_traj_cc_x_001_0001", traj_id="traj_cc_x_001",
         offset_start=0, offset_end=6, intent="i", summary="s",
-        tags=[], used_skills=["fix-foo"], ux_score=None,
+        tags=[], used_skills=["fix-foo"], ux_score=8,
         pre_atom_id=None, post_atom_id=None, context_prefix="", raw_segment="# body",
     ))
-
-    # 桩掉 score_atom，断言它对 fix-foo 被调用、side=main（无 staging）
-    scored = []
-
-    def _fake_score_atom(*, llm, atom, side):
-        scored.append((atom.atom_id, side))
-        return {"score": 8, "reasons": "ok"}
-
-    monkeypatch.setattr("xskill.pipeline.atom.score_atom", _fake_score_atom)
 
     w = DirectoryWatcher(llm=object(), skill_dir=skill_dir, store=store,
                          config={"canary": {"probability": 0.2}}, server_mode=True)
@@ -56,6 +47,5 @@ def test_server_mode_scores_each_used_skill(tmp_path, monkeypatch):
                         lambda **kw: [{"id": 1, "path": str(sessions), "label": "cid-1"}])
     w._score_atoms_for_traj_server(1, "traj_cc_x_001.md")
 
-    assert scored == [("atom_traj_cc_x_001_0001", "main")]
     rows = load_ux_scores(skill_dir / "fix-foo")
     assert len(rows) == 1 and rows[0]["side"] == "main" and rows[0]["score"] == 8.0

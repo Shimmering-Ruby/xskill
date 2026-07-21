@@ -46,7 +46,9 @@ def test_noop_when_already_exists(tmp_path):
 def test_template_is_valid_yaml_with_required_sections():
     parsed = yaml.safe_load(CONFIG_TEMPLATE)
     # 必填段都在
-    for key in ("skill_dir", "llm", "embedding", "canary", "watcher"):
+    for key in (
+        "skill_dir", "llm", "embedding", "canary", "watcher", "agent_worker",
+    ):
         assert key in parsed, f"template missing {key}"
     # llm / embedding 带 api_key 占位符（用户要填）
     assert parsed["llm"]["api_key"] == "PUT_YOUR_LLM_API_KEY_HERE"
@@ -61,7 +63,8 @@ def test_template_top_level_keys_are_exactly_live_set():
     """
     parsed = yaml.safe_load(CONFIG_TEMPLATE)
     assert set(parsed.keys()) == {
-        "skill_dir", "llm", "embedding", "canary", "watcher", "team", "dashboard",
+        "skill_dir", "llm", "embedding", "canary", "watcher", "agent_worker",
+        "team", "dashboard",
         "skill_opt", "ingest", "interests", "server",
         # ingest 段由 config.ingest_config 消费（settle 屏障/去壳掩码）
         # recommend 段由 config.recommend_config 消费（推荐引擎参数）

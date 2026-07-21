@@ -937,15 +937,37 @@ def create_app(home_root: Path | str | None = None,
             return {"running": False, "message": "watcher has not started yet"}
         return status
 
+    @app.get("/api/v1/agent-worker/status")
+    async def api_agent_worker_status():
+        from xskill.config import XSKILL_HOME
+        from xskill.utils.status_file import (
+            AGENT_WORKER_STATUS_FILE,
+            read_status_file,
+        )
+
+        status = read_status_file(XSKILL_HOME / AGENT_WORKER_STATUS_FILE)
+        if status is None:
+            return {
+                "running": False,
+                "message": "agent-worker has not started yet",
+            }
+        return status
+
     # -- Usage / cost stats (Issue #43) --
     @app.get("/api/v1/stats")
     async def api_stats():
         # watcher 读常驻子进程心跳；画像仍读短命子进程的最近一轮状态。
         from xskill.config import XSKILL_HOME
         from xskill.utils.status_file import (
-            PROFILE_STATUS_FILE, WATCHER_STATUS_FILE, read_status_file,
+            AGENT_WORKER_STATUS_FILE,
+            PROFILE_STATUS_FILE,
+            WATCHER_STATUS_FILE,
+            read_status_file,
         )
         watcher = read_status_file(XSKILL_HOME / WATCHER_STATUS_FILE)
+        agent_worker = read_status_file(
+            XSKILL_HOME / AGENT_WORKER_STATUS_FILE,
+        )
         profile_refresh = read_status_file(XSKILL_HOME / PROFILE_STATUS_FILE)
 
         def _read_registry_stats():
@@ -957,7 +979,8 @@ def create_app(home_root: Path | str | None = None,
             "role": "server" if _config.get("team", {}).get("server") else "client",
             "cost": cost,
             "models": models,
-            "pipeline": watcher,
+            "pipeline": agent_worker,
+            "watcher": watcher,
             "profile_refresh": profile_refresh,
         }
 
@@ -1150,27 +1173,29 @@ def create_app(home_root: Path | str | None = None,
                 logger.exception("team server context init failed")
                 raise
 
-        # watcher 在常驻子进程中持续运行(python -m xskill._workers watcher)。web
+        # agent-worker 在常驻子进程中持续运行。
         # 进程只留一个轻量守护线程，负责启动、监测和异常退出后重启子进程；重计算
         # 仍与 web 事件循环保持 GIL 隔离。DirectoryWatcher 自己按 poll_interval
         # 持续扫描，Future 跨轮保留，不再等待一批全部结束后才启动下一轮。
         from xskill.pipeline.scheduler import IntervalSubprocessScheduler as _WorkerSched
-        poll_interval = float(_config.get("watcher", {}).get("poll_interval", 30))
-        watcher_command = [_sys.executable, "-m", "xskill._workers", "watcher"]
+        poll_interval = float(_config.get("watcher", {}).get("poll_interval", 5))
+        agent_worker_command = [
+            _sys.executable, "-m", "xskill._workers", "agent-worker",
+        ]
         if team_server:
-            watcher_command.append("--server")
+            agent_worker_command.append("--server")
         else:
-            watcher_command.extend(["--home", str(ecosystem_home_root)])
-        watcher_scheduler = _WorkerSched(
-            "watcher", watcher_command,
+            agent_worker_command.extend(["--home", str(ecosystem_home_root)])
+        agent_worker_scheduler = _WorkerSched(
+            "agent-worker", agent_worker_command,
             interval=poll_interval,
             timeout=5.0,
             persistent=True,
         )
-        watcher_scheduler.start()
-        _schedulers.append(watcher_scheduler)
+        agent_worker_scheduler.start()
+        _schedulers.append(agent_worker_scheduler)
         logger.info(
-            "persistent watcher worker started (team_server=%s, poll every %.0fs)",
+            "persistent agent worker started (team_server=%s, poll every %.0fs)",
             team_server,
             poll_interval,
         )

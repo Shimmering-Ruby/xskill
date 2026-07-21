@@ -207,12 +207,23 @@ def team_server(tmp_path, fake_server):
     config_yaml = {
         "skill_dir": str(skill_dir),
         "llm": {"base_url": fake_server.base_url, "model": "fake-llm",
-                "api_key": "fake-key"},
+                "api_key": "fake-key",
+                "rate_limit": {"rpm": 240, "request_burst": 8,
+                               "max_inflight": 8}},
         "embedding": {"base_url": fake_server.base_url, "model": "fake-embed",
-                      "api_key": "fake-key", "dim": 0},
+                      "api_key": "fake-key", "dim": 0,
+                      "rate_limit": {"max_inflight": 4}},
         "canary": {"enabled": True, "probability": 0.5, "min_samples": 5,
                    "max_days_hold": 14, "rotate_interval": 300},
         "watcher": {"poll_interval": 2},
+        "agent_worker": {
+            "pools": {
+                "split": {"workers": 4, "llm_weight": 6},
+                "cluster": {"workers": 4, "batch_size": 4, "llm_weight": 3},
+                "edit": {"workers": 2, "llm_weight": 1},
+                "embed": {"workers": 2},
+            },
+        },
         "team": {"server": {"skill_slots": 100, "ranked_slots": 80}},
     }
     (xhome / "config.yaml").write_text(

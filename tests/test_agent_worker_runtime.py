@@ -1,0 +1,421 @@
+"""v0.6.28 four-pool runtime and Cluster write-queue acceptance tests."""
+from __future__ import annotations
+
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+from tests.pool_helpers import pool_config
+from xskill.config import agent_worker_config
+from xskill.pipeline.atom import AtomTask, AtomTaskStore
+from xskill.pipeline.runner import DirectoryWatcher, process_atom_batch
+from xskill.pipeline.worker_runtime import BoundedExecutor, ClusterWriteQueue
+from xskill.skill.git import init_skill_repo_on_baby
+from xskill.utils.llm import EmbedClient
+from xskill.utils.rate_limit import SharedRequestLimiter
+
+
+def _thread_name():
+    return threading.current_thread().name
+
+
+def _set_legacy_max_concurrent(config):
+    config["watcher"]["max_concurrent"] = 4
+
+
+def _set_legacy_cluster_batch_size(config):
+    config["watcher"]["cluster_batch_size"] = 8
+
+
+def _set_legacy_burst(config):
+    config["llm"]["rate_limit"]["burst"] = 4
+
+
+def _set_explicit_queue_size(config):
+    config["agent_worker"]["pools"]["split"]["queue_size"] = 1
+
+
+def _valid_config() -> dict:
+    return {
+        "llm": {
+            "rate_limit": {
+                "rpm": 240,
+                "request_burst": 8,
+                "max_inflight": 8,
+            },
+        },
+        "embedding": {"rate_limit": {"max_inflight": 4}},
+        "agent_worker": {"pools": pool_config()},
+        "watcher": {"poll_interval": 5},
+    }
+
+
+def test_pool_capacity_is_workers_times_three_and_other_pools_keep_running():
+    release = threading.Event()
+    started = threading.Event()
+
+    def block():
+        started.set()
+        release.wait(5)
+
+    edit = BoundedExecutor("edit", 1)
+    split = BoundedExecutor("split", 1)
+    try:
+        futures = [edit.submit(block) for _ in range(3)]
+        assert all(future is not None for future in futures)
+        assert started.wait(1)
+        assert edit.submit(block) is None
+        assert edit.status["queue_capacity"] == 2
+        assert edit.status["total_capacity"] == 3
+        assert edit.status["running"] == 1
+        assert edit.status["queued"] == 2
+
+        thread_name = split.submit(_thread_name).result(1)
+        assert thread_name.startswith("xskill-split_")
+        assert split.status["completed"] == 1
+    finally:
+        release.set()
+        edit.shutdown(wait=True)
+        split.shutdown(wait=True)
+
+
+def test_all_pool_thread_names_are_visible():
+    pools = {
+        name: BoundedExecutor(name, 1)
+        for name in ("split", "cluster", "edit", "embed")
+    }
+    try:
+        for name, pool in pools.items():
+            thread_name = pool.submit(
+                _thread_name,
+            ).result(1)
+            assert thread_name.startswith(f"xskill-{name}_")
+    finally:
+        for pool in pools.values():
+            pool.shutdown(wait=True)
+
+
+def test_shared_request_limiter_caps_real_http_inflight():
+    limiter = SharedRequestLimiter(
+        max_inflight=2,
+        weights={"split": 6, "cluster": 3, "edit": 1},
+    )
+    release = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def inner():
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        release.wait(5)
+        with lock:
+            active -= 1
+        return {}
+
+    executor = ThreadPoolExecutor(max_workers=8)
+    futures = [
+        executor.submit(limiter.call, prompt="x", inner_call=inner)
+        for _ in range(8)
+    ]
+    try:
+        deadline = time.time() + 2
+        status = limiter.status
+        while (
+            (status["inflight"] < 2 or status["waiting"] < 6)
+            and time.time() < deadline
+        ):
+            time.sleep(0.01)
+            status = limiter.status
+        assert status["inflight"] == 2
+        assert status["waiting"] == 6
+    finally:
+        release.set()
+    assert [future.result(2) for future in futures] == [{}] * 8
+    executor.shutdown(wait=True)
+    assert maximum == 2
+
+
+def test_embedding_client_uses_its_independent_inflight_limit(monkeypatch):
+    release = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def fake_call(_self, _text):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        release.wait(5)
+        with lock:
+            active -= 1
+        return [1.0]
+
+    client = EmbedClient(
+        base_url="https://embedding-limit.example.test",
+        model="embed",
+        api_key="test",
+        dim=1,
+        rate_limit_cfg={"max_inflight": 2},
+    )
+    monkeypatch.setattr(
+        EmbedClient, "_call_api_single_unlimited", fake_call,
+    )
+    executor = ThreadPoolExecutor(max_workers=6)
+    futures = [executor.submit(client._call_api_single, "x") for _ in range(6)]
+    deadline = time.time() + 2
+    while maximum < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    assert maximum == 2
+    release.set()
+    assert [future.result(2) for future in futures] == [[1.0]] * 6
+    executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            _set_legacy_max_concurrent,
+            "agent_worker.pools",
+        ),
+        (
+            _set_legacy_cluster_batch_size,
+            "agent_worker.pools.cluster.batch_size",
+        ),
+        (
+            _set_legacy_burst,
+            "request_burst",
+        ),
+        (
+            _set_explicit_queue_size,
+            "等待容量自动",
+        ),
+    ],
+)
+def test_legacy_config_paths_fail_with_migration_hint(mutate, message):
+    config = _valid_config()
+    mutate(config)
+    with pytest.raises(ValueError, match=message):
+        agent_worker_config(config)
+
+
+def test_cluster_write_queue_serializes_same_slug_creation(tmp_path):
+    from tests.test_cluster_batch import _call_tool
+    from xskill.agents import agent_tools
+
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    queue = ClusterWriteQueue()
+    context = agent_tools.create_agent_tool_context(
+        atom_skill_dir=skill_root,
+        cluster_write_queue=queue,
+    )
+
+    def create():
+        with agent_tools.use_agent_tool_context(context):
+            return _call_tool(
+                agent_tools.new_skill_folder,
+                "same-slug",
+                "same description",
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result(5) for future in [
+            executor.submit(create), executor.submit(create),
+        ]]
+    queue.shutdown(wait=True)
+    assert sum("created on baby" in result for result in results) == 1
+    assert sum("already exists" in result for result in results) == 1
+    assert [
+        path.name for path in skill_root.iterdir()
+        if not path.name.startswith(".")
+    ] == ["same-slug"]
+
+
+def test_candidate_writes_follow_cluster_queue_order(tmp_path):
+    from tests.test_cluster_batch import _call_tool
+    from xskill.agents import agent_tools
+    from xskill.skill.candidates import load_candidates
+
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    init_skill_repo_on_baby(
+        str(skill_root / "target"),
+        name="target",
+        description="target description",
+    )
+    queue = ClusterWriteQueue()
+    context = agent_tools.create_agent_tool_context(
+        atom_skill_dir=skill_root,
+        cluster_write_queue=queue,
+    )
+    release = threading.Event()
+    executor = ThreadPoolExecutor(max_workers=3)
+
+    def block_write():
+        return release.wait(5)
+
+    blocker = executor.submit(queue.call, block_write)
+    deadline = time.time() + 1
+    while queue.status["running"] != 1 and time.time() < deadline:
+        time.sleep(0.01)
+
+    def add(atom_id):
+        with agent_tools.use_agent_tool_context(context):
+            return _call_tool(
+                agent_tools.add_task_to_skill, "target", atom_id, 5,
+            )
+
+    first = executor.submit(add, "atom-a")
+    deadline = time.time() + 1
+    while queue.status["queued"] != 1 and time.time() < deadline:
+        time.sleep(0.01)
+    second = executor.submit(add, "atom-b")
+    deadline = time.time() + 1
+    while queue.status["queued"] != 2 and time.time() < deadline:
+        time.sleep(0.01)
+    release.set()
+    blocker.result(2)
+    first.result(2)
+    second.result(2)
+    executor.shutdown(wait=True)
+    queue.shutdown(wait=True)
+
+    candidates = load_candidates(skill_root / "target")["candidates"]
+    assert [item["atom_id"] for item in candidates] == ["atom-a", "atom-b"]
+
+
+def test_clustered_marker_rereads_atom_and_preserves_queued_score(tmp_path):
+    from tests.test_cluster_batch import _call_tool, _tool_name
+
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    init_skill_repo_on_baby(
+        str(skill_root / "target"),
+        name="target",
+        description="target description",
+    )
+    store = AtomTaskStore(root=tmp_path / "watch")
+    store.root.mkdir()
+    atom = AtomTask(
+        atom_id="atom_traj_x_0000",
+        traj_id="traj_x",
+        offset_start=1,
+        offset_end=2,
+        intent="intent",
+        summary="summary",
+        tags=[],
+        used_skills=[],
+        ux_score=1,
+    )
+    store.save(atom)
+
+    class Agent:
+        def __init__(self, *, instructions, tools):
+            del instructions
+            self.tools = {_tool_name(tool): tool for tool in tools}
+
+        def run(self, _message):
+            _call_tool(self.tools["score_task"], atom.atom_id, 9)
+            _call_tool(
+                self.tools["add_tasks_to_skill"],
+                "target",
+                [{"atom_id": atom.atom_id, "weightscore": 7}],
+            )
+            return type("Result", (), {"content": "ok"})()
+
+    queue = ClusterWriteQueue()
+    result = process_atom_batch(
+        atom_ids=[atom.atom_id],
+        config={"llm": {}},
+        skill_dir=skill_root,
+        store=store,
+        embed_client=None,
+        agno_agent_factory=Agent,
+        cluster_write_queue=queue,
+    )
+    queue.shutdown(wait=True)
+    latest = store.load(atom.atom_id)
+    assert result[0]["skill_name"] == "target"
+    assert result[0]["weightscore"] == 7
+    assert latest.clustered is True
+    assert latest.ux_score == 9
+
+
+def test_successful_cluster_write_is_marked_when_agent_fails_later(tmp_path):
+    from tests.test_cluster_batch import _call_tool, _tool_name
+
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    init_skill_repo_on_baby(
+        str(skill_root / "target"),
+        name="target",
+        description="target description",
+    )
+    store = AtomTaskStore(root=tmp_path / "watch")
+    store.root.mkdir()
+    atom = AtomTask(
+        atom_id="atom_traj_partial_0000",
+        traj_id="traj_partial",
+        offset_start=1,
+        offset_end=2,
+        intent="intent",
+        summary="summary",
+        tags=[],
+        used_skills=[],
+        ux_score=7,
+    )
+    store.save(atom)
+
+    class Agent:
+        def __init__(self, *, instructions, tools):
+            del instructions
+            self.tools = {_tool_name(tool): tool for tool in tools}
+
+        def run(self, _message):
+            _call_tool(
+                self.tools["add_tasks_to_skill"],
+                "target",
+                [{"atom_id": atom.atom_id, "weightscore": 6}],
+            )
+            raise RuntimeError("later model failure")
+
+    queue = ClusterWriteQueue()
+    with pytest.raises(RuntimeError, match="later model failure"):
+        process_atom_batch(
+            atom_ids=[atom.atom_id],
+            config={"llm": {}},
+            skill_dir=skill_root,
+            store=store,
+            embed_client=None,
+            agno_agent_factory=Agent,
+            cluster_write_queue=queue,
+        )
+    queue.shutdown(wait=True)
+    assert store.load(atom.atom_id).clustered is True
+
+
+def test_agent_worker_status_exposes_all_four_pools(tmp_path):
+    watcher = DirectoryWatcher(
+        skill_dir=tmp_path,
+        pool_config=pool_config(workers=1),
+    )
+    try:
+        status = watcher.agent_worker_status
+        assert set(status["pools"]) == {"split", "cluster", "edit", "embed"}
+        assert status["cluster"] == {
+            "pending_atoms": 0,
+            "claimed_atoms": 0,
+            "running_batches": 0,
+        }
+        assert "failed" in status["cluster_write_queue"]
+        assert "inflight" in status["llm"]
+        assert "inflight" in status["embedding"]
+    finally:
+        watcher.stop()

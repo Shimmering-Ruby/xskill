@@ -24,7 +24,7 @@ from xskill.pipeline.runner import DirectoryWatcher
 
 
 def _drain(watcher: DirectoryWatcher) -> None:
-    """等所有提交到 watcher._pool 的 future 跑完，再触发一次 _harvest 把
+    """等所有提交到 watcher pools 的 future 跑完，再触发一次 _harvest 把
     收割回调（更新 DB 状态、移除 future 记录）跑齐。供测试用。
     """
     for fut in list(watcher._futures):

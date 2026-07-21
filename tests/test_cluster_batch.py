@@ -1,13 +1,13 @@
 """跨轨迹批量聚类（cluster batch）验收单测
 ================================================
 
-ClusterAgent 由"每次消费 1 个 atom"改为"每次消费 cluster_batch_size 个 atom 的
+ClusterAgent 由"每次消费 1 个 atom"改为"每次消费 cluster batch_size 个 atom 的
 位置（非内容）"。本文件三组验收对应需求三条：
 
 1. **批量生效**：构造 N 条 indexed 轨迹（N > batch_size），观察 ClusterAgent
    调用次数 == ceil(总未归类 atom 数 / batch_size)，而**非** == 总 atom 数。
 2. **已落地过滤**：构造已在某 skill ``.candidates.yml`` 的 atom，确认被
-   ``_collect_cluster_batch`` 过滤、永不进入任何 batch、不送 LLM。
+   ``_collect_cluster_atoms`` 过滤、永不进入任何 batch、不送 LLM。
 3. **断点续传**：消费中途"kill 进程"（丢弃 watcher + 线程池），重启（新 watcher
    同一 wd/db/skill_dir/store）后从断点继续，已落地 atom 不重复消费。
 
@@ -32,6 +32,7 @@ from xskill.skill import candidates as C
 
 from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM
+from tests.pool_helpers import pool_config
 
 
 def _tool_name(tool) -> str:
@@ -134,12 +135,15 @@ def _build_watcher(wd: Path, skill_dir: Path, db: Path, store: AtomTaskStore,
         config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
         skill_dir=skill_dir,
         poll_interval=0.0,
-        max_concurrent=4,
+        pool_config=pool_config(
+            workers=4,
+            cluster_workers=8,
+            batch_size=batch_size,
+        ),
         db_path=db,
         store=store,
         agno_agent_factory=_BatchCountingStub,
         home_root=wd.parent,
-        cluster_batch_size=batch_size,
     )
 
 
@@ -283,21 +287,17 @@ class TestResumeAfterKill:
         total = n_trajs * k
         wd_id = _seed_indexed_trajs(wd, store, db, n_trajs, k)
 
-        # ── 进程 1：只跑到落地一批（4 个）就"被 kill" ──
+        # ── 进程 1：完成一批（4 个）后退出 ──
         w1 = _build_watcher(wd, skill_dir, db, store, batch_size=4)
-        for _ in range(30):
-            w1._scan_once()
-            for _ in range(40):
-                if not w1._futures:
-                    break
-                time.sleep(0.02)
-                w1._harvest()
-            if _BatchCountingStub.cluster_calls >= 1 and not w1._futures:
-                break
+        first_batch = [
+            f"atom_traj_{traj_index}_{atom_index:04d}"
+            for traj_index in range(2)
+            for atom_index in range(2)
+        ]
+        w1._do_cluster_batch(first_batch)
         landed_after_kill = list(_BatchCountingStub.sent_atoms)
         assert len(landed_after_kill) == 4, "进程 1 应恰好落地一批 4 个"
-        # 模拟 kill：丢弃线程池，不再用 w1
-        w1._pool.shutdown(wait=False)
+        w1.stop()
 
         # ── 进程 2：新 watcher 同一 wd/db/skill_dir/store，从断点继续 ──
         w2 = _build_watcher(wd, skill_dir, db, store, batch_size=4)

@@ -1,4 +1,4 @@
-"""常驻 watcher worker：生命周期、server 隔离、心跳和生态入库。"""
+"""常驻 agent-worker：生命周期、server 隔离、心跳和生态入库。"""
 from __future__ import annotations
 
 import threading
@@ -10,6 +10,7 @@ import pytest
 from xskill import _workers
 from xskill.pipeline import watcher_factory
 from xskill.utils.status_file import WATCHER_STATUS_FILE, read_status_file
+from tests.pool_helpers import pool_config
 
 
 class _FakeWatcher:
@@ -92,7 +93,7 @@ def test_watcher_server_mode_starts_and_stops_persistent_instance(
     stop_event = threading.Event()
     stop_event.set()
 
-    rc = _workers.run_watcher_forever(server=True, stop_event=stop_event)
+    rc = _workers.run_agent_worker_forever(server=True, stop_event=stop_event)
 
     assert rc == 0
     assert ingest_calls == []
@@ -109,7 +110,7 @@ def test_watcher_standalone_ingests_on_each_poll(tmp_path, monkeypatch):
     stop_event = threading.Event()
     stop_event.set()
 
-    rc = _workers.run_watcher_forever(server=False, stop_event=stop_event)
+    rc = _workers.run_agent_worker_forever(server=False, stop_event=stop_event)
 
     assert rc == 0
     assert ingest_calls == []
@@ -119,15 +120,15 @@ def test_watcher_standalone_ingests_on_each_poll(tmp_path, monkeypatch):
 
 
 def test_internal_cli_dispatches_to_persistent_watcher(monkeypatch, tmp_path):
-    run_watcher = Mock(return_value=0)
-    monkeypatch.setattr(_workers, "run_watcher_forever", run_watcher)
+    run_worker = Mock(return_value=0)
+    monkeypatch.setattr(_workers, "run_agent_worker_forever", run_worker)
     monkeypatch.setattr("xskill.utils.logging.configure_logging", Mock())
     monkeypatch.setattr("xskill.config.get_logs_dir", Mock(return_value=tmp_path))
 
     assert _workers.main([
-        "watcher", "--server", "--home", str(tmp_path),
+        "agent-worker", "--server", "--home", str(tmp_path),
     ]) == 0
-    run_watcher.assert_called_once_with(server=True, home=str(tmp_path))
+    run_worker.assert_called_once_with(server=True, home=str(tmp_path))
 
 
 def test_watcher_build_failure_writes_error_status(tmp_path, monkeypatch):
@@ -136,7 +137,7 @@ def test_watcher_build_failure_writes_error_status(tmp_path, monkeypatch):
         tmp_path,
         build_exception=RuntimeError("llm down"),
     )
-    rc = _workers.run_watcher_forever(
+    rc = _workers.run_agent_worker_forever(
         server=True,
         stop_event=threading.Event(),
         status_interval=0.01,
@@ -156,7 +157,7 @@ def test_watcher_thread_exit_is_reported_and_preserves_stats(
         running_after_start=False,
     )
 
-    return_code = _workers.run_watcher_forever(
+    return_code = _workers.run_agent_worker_forever(
         server=True,
         stop_event=threading.Event(),
         status_interval=0.01,
@@ -175,7 +176,10 @@ def test_persistent_watcher_starts_next_poll_while_future_is_still_running(
     """长尾 Future 不得阻塞下一轮扫描。"""
     from xskill.pipeline.runner import DirectoryWatcher
 
-    watcher = DirectoryWatcher(poll_interval=0.01, max_concurrent=1)
+    watcher = DirectoryWatcher(
+        poll_interval=0.01,
+        pool_config=pool_config(workers=1),
+    )
     release_slow = threading.Event()
     second_poll = threading.Event()
     poll_count = 0
@@ -184,7 +188,7 @@ def test_persistent_watcher_starts_next_poll_while_future_is_still_running(
         nonlocal poll_count
         poll_count += 1
         if poll_count == 1:
-            future = watcher._pool.submit(release_slow.wait, 2.0)
+            future = watcher._pools["split"].submit(release_slow.wait, 2.0)
             watcher._futures[future] = {"stage": "test"}
         elif poll_count == 2:
             second_poll.set()
@@ -238,7 +242,7 @@ def test_worker_passes_ecosystem_home_separately_from_xskill_home(
     stop_event = threading.Event()
     stop_event.set()
 
-    assert _workers.run_watcher_forever(
+    assert _workers.run_agent_worker_forever(
         home=home_argument,
         stop_event=stop_event,
     ) == 0
@@ -300,7 +304,16 @@ def test_build_watcher_defaults_and_history_stay_in_explicit_instance(
     )
 
     watcher = watcher_factory.build_watcher(
-        {"watcher": {}},
+        {
+            "watcher": {},
+            "agent_worker": {"pools": pool_config()},
+            "llm": {"rate_limit": {
+                "rpm": 240,
+                "request_burst": 8,
+                "max_inflight": 8,
+            }},
+            "embedding": {"rate_limit": {"max_inflight": 4}},
+        },
         xskill_home=instance_xskill_home,
         server_mode=True,
     )

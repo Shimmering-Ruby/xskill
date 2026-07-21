@@ -28,6 +28,7 @@ from xskill.pipeline.runner import DirectoryWatcher
 from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM
 from tests.test_watcher_atom import _StubAgno
+from tests.pool_helpers import pool_config
 
 
 REAL_HOME = Path(os.path.expanduser("~"))
@@ -79,7 +80,7 @@ class TestNoRealHomePollution:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=4,
+            pool_config=pool_config(workers=4),
             db_path=db,
             store=store,
             agno_agent_factory=_StubAgno,
@@ -96,7 +97,7 @@ class TestNoRealHomePollution:
                 watcher._harvest()
             if get_status_counts(db_path=db).get("done"):
                 break
-        watcher._pool.shutdown(wait=False)
+        watcher.stop()
 
         # 关键断言 1：真 ~/.claude/skills/ 子项 + mtime 必须完全没变
         after = _real_skills_snapshot()

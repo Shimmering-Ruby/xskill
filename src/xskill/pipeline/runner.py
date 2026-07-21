@@ -2,7 +2,7 @@
 pipeline/runner.py -- 流水线式目录监听器 + AtomTask 流水线核心入口
 ====================================================================
 
-每条轨迹独立流转，不分批不阻塞：
+每条轨迹独立流转，四类任务互不占用线程：
 
   discovered → meta_extracting → meta_done → indexed → processing → done
 
@@ -11,10 +11,10 @@ pipeline/runner.py -- 流水线式目录监听器 + AtomTask 流水线核心入�
   2. 对每条 discovered 提交 meta 提取任务（不等待）
   3. 对每条 meta_done 提交 embedding 任务（不等待）
   4. 对每条 indexed 提交 process_traj 任务（不等待）
-  5. 收割已完成的 futures，更新状态
+  5. 提交全局 Cluster batch、收割已完成的 futures
   6. 解析 xskill header → ux_score
 
-所有耗时操作都在 ThreadPoolExecutor 中异步执行，扫描本身秒完。
+split / cluster / edit / embed 各自在独立的有界线程池中异步执行。
 
 本模块还含 AtomTask 流水线核心入口 ``process_atom_task``（原 process.py）：
 v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是单一原子
@@ -26,9 +26,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import Future
 from pathlib import Path
 
 from xskill.config import (
@@ -85,14 +87,13 @@ class DirectoryWatcher:
     - splitting 阶段调 TaskAgent 拆 AtomTask，落盘到 ``<traj_root>/<traj_id>/tasks/``
     - indexed 阶段以 AtomTask 为单位整批重建 ``<traj_root>/index.pkl``
     - cluster 阶段**跨轨迹池化**：把所有 indexed 轨迹里尚未落地的 atom 汇成一池，
-      按 ``cluster_batch_size`` 分批，逐批喂**一个** ClusterAgent（串行，同 wd
-      同时只一个 batch future），一次 LLM 往返处理多个 atom 的位置。
-    - indexed → done 由 ``_sweep_done_trajs`` 标：一条轨迹的 atom 全部落进某个
+      按 ``cluster.batch_size`` 分批，提交给全局 cluster pool。
+    - indexed → done 由 ``_finalize_completed_trajs`` 标：一条轨迹的 atom 全部落进某个
       skill 的 ``.candidates.yml`` 时才 done（文件系统即队列，天然去重+断点续传）。
     """
 
     def __init__(self, *, llm=None, embed_client=None, config=None,
-                 skill_dir=None, poll_interval=30.0, max_concurrent=30,
+                 skill_dir=None, poll_interval=5.0, pool_config=None,
                  max_retries=3, db_path=None,
                  store=None, agno_agent_factory=None, home_root=None,
                  xskill_home=None, config_path=None,
@@ -100,7 +101,7 @@ class DirectoryWatcher:
                  spill_root=None,
                  usage_ledger=None,
                  server_mode=False, install_history_path=None,
-                 on_poll_hook=None, cluster_batch_size=8):
+                 on_poll_hook=None):
         self.llm = llm
         self.embed_client = embed_client
         self.usage_ledger = usage_ledger
@@ -146,7 +147,6 @@ class DirectoryWatcher:
             else xskill_state_root / "tmp" / "spill"
         ).expanduser().resolve()
         self.poll_interval = poll_interval
-        self.max_concurrent = max_concurrent
         self.max_retries = max_retries
         self.db_path = db_path
         # 每轮 _loop 在 _scan_once 之前调一次的钩子，用来让 server 端的"生态
@@ -155,12 +155,14 @@ class DirectoryWatcher:
         # 钩子抛异常不应导致 watcher 死循环退出——catch 后只记日志。
         self.on_poll_hook = on_poll_hook
 
-        # 每次 ClusterAgent 调用消费的 atom 数（位置批量，非内容）。watcher 把所有
-        # indexed 轨迹里"尚未落进任何 skill .candidates.yml"的 atom 汇成一个跨轨迹
-        # 池，每批取 ≤ cluster_batch_size 条喂一个 ClusterAgent——一次 LLM 往返处理
-        # 多个 atom 的位置，减少往返次数提速。聚类仍串行（同 wd 同时只一个 batch
-        # future）。1 = 退回逐 atom 一次往返的旧行为。
-        self.cluster_batch_size = max(1, int(cluster_batch_size))
+        default_pools = {
+            "split": {"workers": 24, "llm_weight": 6},
+            "cluster": {"workers": 8, "batch_size": 8, "llm_weight": 3},
+            "edit": {"workers": 4, "llm_weight": 1},
+            "embed": {"workers": 4},
+        }
+        self.pool_config = pool_config or default_pools
+        self.cluster_batch_size = int(self.pool_config["cluster"]["batch_size"])
         self.interests = interests_config(self.config)
         self.interest_fingerprint = interests_fingerprint(self.interests)
 
@@ -172,10 +174,19 @@ class DirectoryWatcher:
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._thread: threading.Thread | None = None
-        self._pool = ThreadPoolExecutor(
-            max_workers=max_concurrent, initializer=_install_thread_event_loop)
+        from xskill.pipeline.worker_runtime import BoundedExecutor, ClusterWriteQueue
+        self._pools = {
+            name: BoundedExecutor(name, int(self.pool_config[name]["workers"]))
+            for name in ("split", "cluster", "edit", "embed")
+        }
+        self.cluster_write_queue = ClusterWriteQueue()
         self._futures: dict[Future, dict] = {}
+        # Only the watcher thread mutates these scheduling collections.
+        self.pending_atoms: deque[str] = deque()
+        self.claimed_atoms: set[str] = set()
+        self.cluster_futures: set[Future] = set()
         self._last_poll: float | None = None
+        self._started_at = time.time()
         # 单机 canary 轮转节流：上次真跑 _reconcile_skill_sides 的时间戳。
         # None = 从未跑过（首轮 scan 必跑一次）。
         self._last_rotate_ts: float | None = None
@@ -194,7 +205,7 @@ class DirectoryWatcher:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="xskill-watcher")
         self._thread.start()
-        logger.info("watcher started (interval=%.1fs, concurrent=%d)", self.poll_interval, self.max_concurrent)
+        logger.info("watcher started (interval=%.1fs, four independent pools)", self.poll_interval)
 
     def stop(self):
         self._stop.set()
@@ -204,7 +215,9 @@ class DirectoryWatcher:
             self._thread.join(timeout=5)
         # cancel_futures：排队未跑的任务直接丢弃。在跑的 worker 由
         # SHUTTING_DOWN 事件叫停（agno_factory 重试循环），不在这里等。
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        for pool in self._pools.values():
+            pool.shutdown(wait=False, cancel_futures=True)
+        self.cluster_write_queue.shutdown(wait=False)
         logger.info("watcher stopped")
 
     def pause(self):
@@ -225,12 +238,33 @@ class DirectoryWatcher:
 
     @property
     def stats(self):
+        """Watcher-only scan state retained by ``/watcher/status``."""
         return {
             **self._stats,
-            "last_poll": self._last_poll,
+            "last_scan": self._last_poll,
+            "scans": self._stats["polls"],
             "running": self.is_running,
             "paused": self.is_paused,
-            "in_flight": len(self._futures),
+        }
+
+    @property
+    def agent_worker_status(self):
+        from xskill.utils.rate_limit import request_limiter_status
+
+        return {
+            "pid": os.getpid(),
+            "started_at": self._started_at,
+            "heartbeat_at": time.time(),
+            "watcher": self.stats,
+            "pools": {name: pool.status for name, pool in self._pools.items()},
+            "cluster": {
+                "pending_atoms": len(self.pending_atoms),
+                "claimed_atoms": len(self.claimed_atoms),
+                "running_batches": len(self.cluster_futures),
+            },
+            "cluster_write_queue": self.cluster_write_queue.status,
+            "llm": request_limiter_status("llm"),
+            "embedding": request_limiter_status("embedding"),
         }
 
     def _db_kw(self):
@@ -294,13 +328,29 @@ class DirectoryWatcher:
         from xskill.skill.candidates import LazyConsumedIndex
         consumed_index = LazyConsumedIndex(self.skill_dir)
 
-        # ── Step 1-4: 对每个目录扫描 + 提交任务 ──
-        for wd in list_watch_dirs(**kw):
+        # ── Step 1-4: 对每个目录扫描 + 提交 split/embed + 收集 cluster atom ──
+        watch_dirs = list_watch_dirs(**kw)
+        active_watch_dirs = []
+        for wd in watch_dirs:
             if self._stop.is_set():
                 break
             if not wd.get("auto_index"):
                 continue
+            active_watch_dirs.append(wd)
             self._scan_dir(wd, consumed_index, **kw)
+
+        # 全部 watch_dir 共用一个 pending/claimed 队列；持续提交到 cluster 池满。
+        # 最后不足 batch_size 的尾批也立即提交。
+        self._submit_cluster_batches()
+
+        # 已完成归类的轨迹在下一次 durable atom 检查中进入 done。
+        if self.skill_dir:
+            for wd in active_watch_dirs:
+                dir_path = Path(wd["path"])
+                if dir_path.is_dir():
+                    self._finalize_completed_trajs(
+                        wd["id"], dir_path, consumed_index, **kw,
+                    )
 
         # ── Step 5: 独立扫所有 skill 目录的 candidates buffer ──
         # 这步与具体 atom 处理解耦：即便某些 atom cluster 失败，buffer
@@ -482,7 +532,9 @@ class DirectoryWatcher:
         for d in skill_dirs:
             if d in skill_edit_in_flight:
                 continue
-            fut = self._pool.submit(_run_one, d)
+            fut = self._pools["edit"].submit(_run_one, d)
+            if fut is None:
+                break
             self._futures[fut] = {"stage": "skill_edit", "skill_dir": d}
 
     def _on_skill_edit_done(self, result) -> None:
@@ -1782,7 +1834,7 @@ class DirectoryWatcher:
 
         cluster batch 与 split/embed 不同：一个 batch future 覆盖一批跨轨迹的
         atom，没有单一 fname。它只负责"把 atom 写进 candidates"（agent 用工具
-        完成）+ 记日志；轨迹 done 由 ``_sweep_done_trajs`` 独立核对落地情况后标。
+        完成）+ 记日志；轨迹 done 由 ``_finalize_completed_trajs`` 独立核对落地情况后标。
         batch 整体抛异常（如 LLM 余额耗尽）时，atom 留在未落地池，下一轮 scan
         重新进池重试——无单独重试计数，靠重池化自愈（cluster prompt 要求每个
         atom 必落地，永久失败不会发生，失败都是瞬时的）。
@@ -1793,6 +1845,8 @@ class DirectoryWatcher:
             stage = info["stage"]
             kw = self._db_kw()
             if stage == "cluster":
+                atom_ids = list(info.get("atom_ids") or [])
+                self.cluster_futures.discard(fut)
                 try:
                     self._on_cluster_batch_done(fut.result(timeout=0))
                 except Exception as e:
@@ -1800,8 +1854,12 @@ class DirectoryWatcher:
                     logger.warning(
                         "cluster batch failed (%d atoms); atoms stay unlanded, "
                         "will re-pool next scan: %s",
-                        len(info.get("atom_ids") or []), e,
+                        len(atom_ids), e,
                     )
+                finally:
+                    # Successful writes now have durable ``clustered`` markers;
+                    # failures and silent drops are eligible for the next scan.
+                    self.claimed_atoms.difference_update(atom_ids)
                 continue
             if stage == "skill_edit":
                 # SkillEditAgent.maybe_run() 自己吞异常返回 (d, False)——正常
@@ -1852,7 +1910,7 @@ class DirectoryWatcher:
                 update_traj_status(wd_id, fname, "discovered", **kw)
 
         # 跨轨迹批处理下 watcher 不再把轨迹置 "clustering"（done 由
-        # _sweep_done_trajs 按 atom 落地情况标）。任何遗留的 "clustering"
+        # _finalize_completed_trajs 按 atom 落地情况标）。任何遗留的 "clustering"
         # （旧 daemon 升级残留 / 历史数据）一律回退 "indexed" 让其重新进池——
         # 已落地的 atom 会在 _collect_cluster_batch 被去重跳过，不会重复消费。
         for fname in get_trajs_by_status(wd_id, "clustering", **kw):
@@ -1877,10 +1935,10 @@ class DirectoryWatcher:
         if self.llm is not None:
             for status in ("discovered", "updated"):
                 for fname in get_trajs_by_status(
-                    wd_id, status, limit=self.max_concurrent * 2, **kw,
+                    wd_id, status,
+                    limit=self._pools["split"].total_capacity,
+                    **kw,
                 ):
-                    if self._too_many_in_flight():
-                        break
                     validation = validate_trajectory_source(dir_path / fname)
                     if not validation.valid:
                         update_traj_status(
@@ -1893,8 +1951,12 @@ class DirectoryWatcher:
                             fname, validation.reason,
                         )
                         continue
+                    fut = self._pools["split"].submit(
+                        self._do_split, dir_path, fname,
+                    )
+                    if fut is None:
+                        break
                     update_traj_status(wd_id, fname, "splitting", **kw)
-                    fut = self._pool.submit(self._do_split, dir_path, fname)
                     self._futures[fut] = {
                         "wd_id": wd_id, "fname": fname, "stage": "split",
                     }
@@ -1905,42 +1967,21 @@ class DirectoryWatcher:
             if split_done_files and not any(
                 i["stage"] == "embed" and i["wd_id"] == wd_id for i in self._futures.values()
             ):
-                fut = self._pool.submit(self._do_atom_index, dir_path, wd_id,
-                                         split_done_files)
-                self._futures[fut] = {"wd_id": wd_id, "fname": "_batch_embed", "stage": "embed"}
-
-        # ── Cluster：跨轨迹池化 + 单批串行 ──
-        # 把所有 indexed 轨迹里"尚未落进任何 skill .candidates.yml"的 atom 汇成
-        # 一个跨轨迹池，取 ≤ cluster_batch_size 条喂给**一个** ClusterAgent 调用
-        # （一次 LLM 往返处理多个 atom 的位置）。同 wd 同时只允许一个 cluster
-        # batch future 在飞（串行——逐批让 catalog 演化可见，避免并发 agent 各自
-        # 创建近义 baby slug）。轨迹 done 不在这里标，交给 _sweep_done_trajs。
-        if self.skill_dir:
-            cluster_in_flight = any(
-                i["stage"] == "cluster" and i["wd_id"] == wd_id
-                for i in self._futures.values()
-            )
-            if not cluster_in_flight and not self._too_many_in_flight():
-                batch = self._collect_cluster_batch(dir_path, wd_id, consumed_index, **kw)
-                if batch:
-                    fut = self._pool.submit(self._do_cluster_batch, dir_path, batch)
+                fut = self._pools["embed"].submit(
+                    self._do_atom_index, dir_path, wd_id, split_done_files,
+                )
+                if fut is not None:
                     self._futures[fut] = {
-                        "wd_id": wd_id, "stage": "cluster", "atom_ids": batch,
+                        "wd_id": wd_id,
+                        "fname": "_batch_embed",
+                        "stage": "embed",
                     }
-                    cluster_in_flight = True
 
-            # ── done 标记：轨迹的 atom 全部落地 → done（+ 触发 ux 打分）──
-            # Windows 对正在被 cluster future 原子替换的 atom JSON 会报
-            # PermissionError；等 future 被 harvest 后下一轮再扫描。
-            if not cluster_in_flight:
-                self._sweep_done_trajs(wd_id, dir_path, consumed_index, **kw)
-
-        # ── ux_score（对有 xskill header 的新轨迹）──
-        if self.llm and self.skill_dir and new:
-            self._score_new(wd_id, dir_path, new, **kw)
-
-    def _too_many_in_flight(self):
-        return len(self._futures) >= self.max_concurrent * 3
+        # ── Cluster：只收集到全局 pending，不在目录循环内等待或串行 ──
+        if self.skill_dir:
+            self._collect_cluster_atoms(
+                dir_path, wd_id, consumed_index, **kw,
+            )
 
     # ───────────────────────────────────────────────────────────
     # Helpers: store / agno factory 按需获取
@@ -2066,9 +2107,8 @@ class DirectoryWatcher:
         store.rebuild_vector_index(self.embed_client)
         return (wd_id, filenames)
 
-    def _collect_cluster_batch(self, dir_path, wd_id, consumed_index, **kw):
-        """跨所有 indexed 轨迹收集"尚未落进任何 skill .candidates.yml"的 atom，
-        按 ``cluster_batch_size`` 截断，返回 atom_id 列表（≤ batch_size）。
+    def _collect_cluster_atoms(self, dir_path, wd_id, consumed_index, **kw):
+        """Collect every new unclustered atom into the global pending queue.
 
         过滤靠 atom 的耐久 ``clustered`` 标记——已消费 atom（含上一批刚写入的、
         以及进程被 kill 前已消费的）一律跳过。这从机制上同时实现了**去重**与
@@ -2077,19 +2117,37 @@ class DirectoryWatcher:
         ``.candidates.yml`` 成员判定——后者会被 SkillEdit 晋升清空，会让已消费
         atom 看起来又"未消费"而被重复送 LLM。
 
-        "待消费 ≥ batch_size 取 batch_size，< batch_size 全取"。
+        ``claimed_atoms`` covers both pending and running batches, so repeated
+        scans never enqueue the same atom twice.
         """
         store = self._store_for(dir_path)
-        batch: list[str] = []
         for fname in get_trajs_by_status(wd_id, "indexed", **kw):
             traj_id = (dir_path / fname).stem
             for atom in store.list_by_traj(traj_id):
                 if self._atom_consumed(atom, consumed_index):
                     continue  # 已消费 → 跳过（去重 + 断点续传）
-                batch.append(atom.atom_id)
-                if len(batch) >= self.cluster_batch_size:
-                    return batch
-        return batch
+                if atom.atom_id in self.claimed_atoms:
+                    continue
+                self.claimed_atoms.add(atom.atom_id)
+                self.pending_atoms.append(atom.atom_id)
+
+    def _submit_cluster_batches(self) -> None:
+        """Fill the cluster pool without ever waiting in the watcher thread."""
+        while self.pending_atoms:
+            batch_size = min(self.cluster_batch_size, len(self.pending_atoms))
+            atom_ids = list(self.pending_atoms)[:batch_size]
+            future = self._pools["cluster"].submit(
+                self._do_cluster_batch, atom_ids,
+            )
+            if future is None:
+                return
+            for _ in atom_ids:
+                self.pending_atoms.popleft()
+            self._futures[future] = {
+                "stage": "cluster",
+                "atom_ids": atom_ids,
+            }
+            self.cluster_futures.add(future)
 
     def _atom_consumed(self, atom, consumed_index) -> bool:
         """atom 是否已被 cluster 消费。耐久标记 ``clustered`` 为主（O(1)，扛得住
@@ -2101,7 +2159,7 @@ class DirectoryWatcher:
             return True
         return consumed_index.contains(atom.atom_id)
 
-    def _do_cluster_batch(self, dir_path, atom_ids):
+    def _do_cluster_batch(self, atom_ids):
         """对一批（可能跨多条轨迹）atom 调**一个** ClusterAgent，只跑 cluster。
 
         把"逐 atom 一次 LLM 往返"压成"一批一次往返"。edit 触发独立由
@@ -2112,7 +2170,16 @@ class DirectoryWatcher:
 
         返回 ``[result_dict, ...]``（顺序同 atom_ids）。
         """
-        store = self._store_for(dir_path)
+        from xskill.pipeline.atom import MultiAtomTaskStore
+
+        stores = [
+            self._store_for(Path(wd["path"]))
+            for wd in list_watch_dirs(**self._db_kw())
+            if wd.get("auto_index") and Path(wd["path"]).is_dir()
+        ]
+        if not stores:
+            raise RuntimeError("cluster batch has no active AtomTaskStore")
+        store = stores[0] if len(stores) == 1 else MultiAtomTaskStore(stores)
         factory = self._factory()
         return process_atom_batch(
             atom_ids=atom_ids,
@@ -2125,6 +2192,7 @@ class DirectoryWatcher:
             usage_ledger=self.usage_ledger,
             logs_dir=self.logs_dir,
             spill_root=self.spill_root,
+            cluster_write_queue=self.cluster_write_queue,
         )
 
     # ───────────────────────────────────────────────────────────
@@ -2185,7 +2253,7 @@ class DirectoryWatcher:
         轨迹状态。
 
         轨迹 done 与具体 batch 解耦——一个 batch 跨多条轨迹，done 由
-        ``_sweep_done_trajs`` 按"该轨迹 atom 是否全落地"独立判定。
+        ``_finalize_completed_trajs`` 按"该轨迹 atom 是否全落地"独立判定。
         """
         n_total = len(results)
         in_skills = [r for r in results if r.get("skill_name")]
@@ -2215,7 +2283,7 @@ class DirectoryWatcher:
             )
         self._stats["atoms_clustered"] += len(in_skills)
 
-    def _sweep_done_trajs(self, wd_id, dir_path, consumed_index, **kw):
+    def _finalize_completed_trajs(self, wd_id, dir_path, consumed_index, **kw):
         """把"所有 atom 都已落进某个 skill .candidates.yml"的 indexed 轨迹标
         done，并触发该轨迹的 ux 打分。
 
@@ -2247,15 +2315,6 @@ class DirectoryWatcher:
     # ux_score
     # ───────────────────────────────────────────────────────────
 
-    def _score_new(self, _watch_dir_id, _dir_path, _filenames, **_kwargs):
-        """v2: 不在发现新 traj 时打分（那时 atom 还没拆）。
-
-        实际打分在 ``_sweep_done_trajs`` → ``_score_atoms_for_traj`` 触发。
-        此方法保留 hook 兼容 ``_scan_dir`` 末尾的调用；只在 traj 没有
-        ``xskill:`` header 时早返回，避免无谓 IO。
-        """
-        return  # noop: 打分时机改到 cluster 完成后
-
     def _score_atoms_for_traj(self, wd_id, fname, **kw):
         """对一条已跑完 cluster 的 traj 扫所有 atom 打 ux_score。
 
@@ -2263,7 +2322,8 @@ class DirectoryWatcher:
         - traj.md 顶部含 ``<!-- xskill:skill=X side=Y sha=Z -->`` header
         - 该 traj 已拆出 atom
 
-        每个 atom 独立调 ``score_atom`` + ``AtomCanary.append``。同一 atom
+        每个 atom 直接使用 TaskAgent 拆分时生成的 ``ux_score``，再调
+        ``AtomCanary.append``。同一 atom
         在同 (skill, side) 上幂等：``AtomCanary.append`` 自带去重。
         所有 atom 处理完调一次 ``check_and_decide`` 让 staging 该升的升 /
         该弃的弃。
@@ -2273,9 +2333,8 @@ class DirectoryWatcher:
         sha = ``SKILL.md`` 内容哈希前 16 位）。两处都无 → 该 skill 未装/未索引，
         跳过（不报错）。
         """
-        if self.llm is None or self.skill_dir is None:
+        if self.skill_dir is None:
             return
-        from xskill.pipeline.atom import score_atom
         from xskill.canary import AtomCanary
         # 找到该 wd 的 dir_path
         for wd in list_watch_dirs(**kw):
@@ -2305,18 +2364,16 @@ class DirectoryWatcher:
         new_scores: list[float] = []
         for atom in atoms:
             try:
-                result = score_atom(
-                    llm=self.llm, atom=atom, side=side,
-                )
-                if result["score"] is None:
+                if atom.ux_score is None:
                     continue
                 if ac.append(
                     atom_id=atom.atom_id, skill_name=skill_name,
                     side=side, commit_sha=commit_sha,
-                    score=result["score"], reasons=result["reasons"],
+                    score=atom.ux_score,
+                    reasons=["TaskAgent split ux_score"],
                     user_model=atom.source_model,
                 ):
-                    new_scores.append(float(result["score"]))
+                    new_scores.append(float(atom.ux_score))
                 self._stats["scores"] += 1
             except Exception:
                 logger.exception("score_atom failed: %s/%s",
@@ -2366,11 +2423,10 @@ class DirectoryWatcher:
         路由），未命中再查三方 ``skillhub_dir/<name>``（无 git → side 恒 ``main``、
         sha = 内容哈希）。两处都无 → 跳过该 skill（不报错）。
         """
-        if self.llm is None or self.skill_dir is None:
+        if self.skill_dir is None:
             return
         from xskill.canary import AtomCanary
         from xskill.canary import CanaryConfig, eligible_models
-        from xskill.pipeline.atom import score_atom
         from xskill.pipeline.registry import model_share
         from xskill.recommend.skillhub import SkillHub
 
@@ -2408,19 +2464,19 @@ class DirectoryWatcher:
                 if skill_sub is None:
                     continue
                 try:
-                    result = score_atom(llm=self.llm, atom=atom, side=side)
-                    if result["score"] is None:
+                    if atom.ux_score is None:
                         continue
                     if AtomCanary(skill_dir=skill_sub).append(
                         atom_id=atom.atom_id, skill_name=skill_name,
                         side=side, commit_sha=sha,
-                        score=result["score"], reasons=result["reasons"],
+                        score=atom.ux_score,
+                        reasons=["TaskAgent split ux_score"],
                         user_model=atom.source_model,
                     ):
                         entry = new_by_skill.setdefault(
                             skill_name,
                             {"scores": [], "side": side, "sha": sha})
-                        entry["scores"].append(float(result["score"]))
+                        entry["scores"].append(float(atom.ux_score))
                     self._stats["scores"] += 1
                     used_any = True
                 except Exception:
@@ -2505,10 +2561,13 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
                       db_path: Path | None = None,
                       usage_ledger=None,
                       logs_dir: Path | None = None,
-                      spill_root: Path | None = None) -> dict:
+                      spill_root: Path | None = None,
+                      cluster_write_queue=None) -> dict:
     """Run one atom with an isolated AgentToolContext."""
     from xskill.agents import agent_tools
 
+    from xskill.pipeline.worker_runtime import ClusterResultRecorder
+    recorder = ClusterResultRecorder()
     tool_context = agent_tools.create_agent_tool_context(
         skill_dir=skill_dir,
         data_dir=skill_dir,
@@ -2518,6 +2577,8 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         default_traj_root=store.root,
         spill_root=spill_root,
         usage_ledger=usage_ledger,
+        cluster_write_queue=cluster_write_queue,
+        cluster_result_recorder=recorder,
     )
     with agent_tools.use_agent_tool_context(tool_context):
         return _process_atom_task_bound(
@@ -2529,6 +2590,7 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
             agno_agent_factory=agno_agent_factory,
             db_path=db_path,
             logs_dir=logs_dir,
+            cluster_result_recorder=recorder,
         )
 
 
@@ -2536,7 +2598,8 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
                              skill_dir: Path, store, embed_client,
                              agno_agent_factory,
                              db_path: Path | None = None,
-                             logs_dir: Path | None = None) -> dict:
+                             logs_dir: Path | None = None,
+                             cluster_result_recorder=None) -> dict:
     """处理一个 AtomTask：只跑 cluster，**不跑 edit**。
 
     edit 触发由 watcher 每轮独立扫描所有 skill 目录完成（见
@@ -2574,25 +2637,32 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
             agent_tools.atom_task_read, agent_tools.read_traj,
             agent_tools.skill_read, agent_tools.read_skill_tasks,
             agent_tools.new_skill_folder, agent_tools.add_task_to_skill,
-            agent_tools.rename_skill, agent_tools.move_task_to,
+            agent_tools.move_task_to,
             agent_tools.score_task,
         ],
     )
-    cluster_content = cluster.process(atom)
+    cluster_error = None
+    cluster_content = ""
+    try:
+        cluster_content = cluster.process(atom)
+    except BaseException as error:  # preserve successful tool writes before failure
+        cluster_error = (error, error.__traceback__)
 
-    # cluster 跑完后回查 .candidates.yml 看 atom 实际落到了哪个 skill。
-    # 新 prompt 要求"任何分数都必须 add_task_to_skill"，正常情况下应该总能
-    # 找到；找不到 (skill_name=None) 即为 silent drop，被上层 logger 升 WARN。
-    from xskill.skill.candidates import find_atom_entry_in_any_skill
-    hit = find_atom_entry_in_any_skill(skill_dir, atom_id)
+    hit = (
+        cluster_result_recorder.get(atom_id)
+        if cluster_result_recorder is not None
+        else None
+    )
     skill_name = hit[0] if hit else None
     weightscore = hit[1] if hit else None
 
     # 落地即打耐久消费标记（与批量版 process_atom_batch 一致），让 watcher 的
     # 去重/done 判定不依赖会被 SkillEdit 晋升清空的 .candidates.yml。
-    if skill_name and not atom.clustered:
-        atom.clustered = True
-        store.save(atom)
+    if skill_name:
+        latest_atom = store.load(atom_id)
+        if not latest_atom.clustered:
+            latest_atom.clustered = True
+            store.save(latest_atom)
 
     # 埋点：atom 实际落到某 skill = 一次采纳(best-effort，失败不阻断)。
     # 在 cluster(大模型调用,按秒)之后,这条数据库写入(毫秒级)可忽略——和
@@ -2605,6 +2675,10 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
                                  db_path=db_path)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.debug("atom adoption telemetry skipped", exc_info=True)
+
+    if cluster_error is not None:
+        error, traceback = cluster_error
+        raise error.with_traceback(traceback)
 
     return {
         "action": "clustered",
@@ -2620,10 +2694,13 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
                        db_path: Path | None = None,
                        usage_ledger=None,
                        logs_dir: Path | None = None,
-                       spill_root: Path | None = None) -> list[dict]:
+                       spill_root: Path | None = None,
+                       cluster_write_queue=None) -> list[dict]:
     """Run one atom batch with an isolated AgentToolContext."""
     from xskill.agents import agent_tools
 
+    from xskill.pipeline.worker_runtime import ClusterResultRecorder
+    recorder = ClusterResultRecorder()
     tool_context = agent_tools.create_agent_tool_context(
         skill_dir=skill_dir,
         data_dir=skill_dir,
@@ -2633,6 +2710,8 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
         default_traj_root=store.root,
         spill_root=spill_root,
         usage_ledger=usage_ledger,
+        cluster_write_queue=cluster_write_queue,
+        cluster_result_recorder=recorder,
     )
     with agent_tools.use_agent_tool_context(tool_context):
         return _process_atom_batch_bound(
@@ -2644,6 +2723,7 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
             agno_agent_factory=agno_agent_factory,
             db_path=db_path,
             logs_dir=logs_dir,
+            cluster_result_recorder=recorder,
         )
 
 
@@ -2651,13 +2731,14 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
                               skill_dir: Path, store, embed_client,
                               agno_agent_factory,
                               db_path: Path | None = None,
-                              logs_dir: Path | None = None) -> list[dict]:
+                              logs_dir: Path | None = None,
+                              cluster_result_recorder=None) -> list[dict]:
     """批量版 ``process_atom_task``：一次 LLM 会话覆盖**多个 atom 的位置**，只跑 cluster。
 
     与单 atom 版语义等价，只是把"逐 atom 一次往返"压成"一批一次往返"——
-    ``atom_ids`` 可能跨多条轨迹（watcher 跨轨迹池化后传入）。batch 跑完后逐个回查
-    各 atom 的 ``.candidates.yml`` 落点，构造与单 atom 版同形的 result dict 列表
-    （顺序同 ``atom_ids``）。
+    ``atom_ids`` 可能跨多条轨迹（watcher 跨轨迹池化后传入）。batch 跑完后直接读取
+    当前执行上下文的写入结果，构造与单 atom 版同形的 result dict 列表（顺序同
+    ``atom_ids``），不再遍历所有 candidates 文件反查落点。
 
     Args 同 ``process_atom_task``，只是 ``atom_id`` → ``atom_ids``（list）。
 
@@ -2667,7 +2748,6 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
     """
     from xskill.agents.task_cluster_agent import TaskClusterAgent
     from xskill.agents import agent_tools
-    from xskill.skill.candidates import find_atom_entry_in_any_skill
 
     del embed_client  # kept for API compatibility; cluster tools no longer use it
 
@@ -2683,22 +2763,33 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
             agent_tools.atom_task_read, agent_tools.read_traj,
             agent_tools.skill_read, agent_tools.read_skill_tasks,
             agent_tools.new_skill_folder, agent_tools.add_tasks_to_skill,
-            agent_tools.rename_skill, agent_tools.move_task_to,
+            agent_tools.move_task_to,
             agent_tools.score_task,
         ],
     )
-    cluster_content = cluster.process_batch(atoms)
+    cluster_error = None
+    cluster_content = ""
+    try:
+        cluster_content = cluster.process_batch(atoms)
+    except BaseException as error:  # tools may already have committed part of the batch
+        cluster_error = (error, error.__traceback__)
 
     results: list[dict] = []
     for aid in atom_ids:
-        hit = find_atom_entry_in_any_skill(skill_dir, aid)
+        hit = (
+            cluster_result_recorder.get(aid)
+            if cluster_result_recorder is not None
+            else None
+        )
         skill_name = hit[0] if hit else None
         weightscore = hit[1] if hit else None
         # 落地即打耐久消费标记（在 SkillEdit 可能清空 .candidates.yml 之前完成
         # 这次回查），让 watcher 的去重/done 判定不受后续 skill 晋升影响。
-        if skill_name and aid in atom_by_id and not atom_by_id[aid].clustered:
-            atom_by_id[aid].clustered = True
-            store.save(atom_by_id[aid])
+        if skill_name and aid in atom_by_id:
+            latest_atom = store.load(aid)
+            if not latest_atom.clustered:
+                latest_atom.clustered = True
+                store.save(latest_atom)
         # 埋点：atom 落到某 skill = 一次采纳（best-effort，失败不阻断）。
         if skill_name:
             try:
@@ -2715,4 +2806,7 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
             "weightscore": weightscore,
             "cluster_log": (cluster_content or "")[:500],
         })
+    if cluster_error is not None:
+        error, traceback = cluster_error
+        raise error.with_traceback(traceback)
     return results

@@ -479,9 +479,9 @@ def _prepend_xskill_header(
 ) -> bool:
     """把 ``<!-- xskill:skill=X side=Y sha=Z -->`` 注到 traj_*.md 顶部。
 
-    watcher._score_new 通过 parse_traj_header 抽这个 marker 来决定要不要给
-    这条 traj 跑 LLM ux 评分。CC native 桥过来的 traj 默认没有 header，
-    ingester 在确认 session 应当被哪 side 标注后补上。
+    watcher 通过 parse_traj_header 抽这个 marker 来决定 TaskAgent 生成的
+    atom ux_score 应归因到哪个 side。CC native 桥过来的 traj 默认没有
+    header，ingester 在确认 session 应当被哪 side 标注后补上。
     """
     header = f"<!-- xskill:skill={skill} side={side} sha={sha} -->\n"
     text = traj_md_path.read_text(encoding="utf-8")
@@ -879,7 +879,7 @@ class CCSessionIngester:
     3. 对每条新桥的 traj：用 ``install_history.lookup(session_start_t)``
        倒查"那一刻 daemon 给这个 skill 装的是哪 side"，把
        ``<!-- xskill:skill=X side=Y sha=Z -->`` 注到 traj_*.md 顶部——
-       这是 watcher._score_new 触发 LLM ux 评分的唯一门槛。
+       这是 watcher 将 TaskAgent ux_score 归因到对应 side 的唯一门槛。
     4. **翻牌子**：对每个 staging-active 的 skill，往 history 查当前 side，
        下次装 install_to_claude_code(side=opposite) + history.record。
 
@@ -1535,7 +1535,7 @@ class CCSessionIngester:
                 rec["xskill_used_skill"] = False
                 continue
 
-            # 真用了 → 打 header 让 watcher._score_new 触发 ux 评分员
+            # 真用了 → 打 header，让 watcher 归因 TaskAgent 已生成的 ux_score
             traj_md = Path(rec["path"])
             _prepend_xskill_header(traj_md, skill=canary_skill, side=side, sha=sha)
             rec["xskill_used_skill"] = True

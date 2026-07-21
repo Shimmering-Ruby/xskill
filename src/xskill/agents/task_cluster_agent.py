@@ -158,11 +158,8 @@ NewSkillFolder 再添加）。**每个 AtomTask 都必须通过添加工具落�
 - add_tasks_to_skill(skill_name, tasks) — 同一批有多个 atom 归入同一个 skill
   时优先使用；tasks 每项含 atom_id、weightscore，可选 note。整批只读写一次
   candidates 文件，不能把不同目标 skill 混进同一次调用。
-- RenameSkill(old_name, new_name) — **仅 baby 状态可改名**。合并近义 slug 的关键
-  工具：发现两个 baby 同义但 new_name 还没存在 → 把 less-specific 的改成
-  more-specific。如果 new_name 已存在 → 用 MoveTaskTo 而不是 RenameSkill。
 - MoveTaskTo(skill_from, skill_to, atom_id) — 把 atom 从一个 buffer 移到另一个。
-  合并近义 baby 的第二步：两个 baby 都已存在 → MoveTaskTo 把 atom 全搬到主 slug。
+  合并近义 baby 时用 MoveTaskTo 把 atom 全搬到主 slug。
   之后 from baby 空 buffer 但仍存在（保留以防后续 cluster 又往里写）。
 - score_task(atom_id, score) — 修改 atom 自身的 ux_score
 
@@ -202,7 +199,7 @@ NewSkillFolder 再添加）。**每个 AtomTask 都必须通过添加工具落�
   1   atom 跟路由表所有 skill 都没明显交叉。挑 desc 最不远的那个强 add，
       weightscore=1。不要为 ws=1 atom 新开 skill（守住"≥7 才新建"门槛）。
 
-# 处理流程（v2.2 重点：复用 > 整合 > 新建）
+# 处理流程（复用 > 整合 > 新建）
 
 ## Step 1: 看路由表
 - 路由表里所有 baby/main/staging skill 全看一遍，重点找 desc 同类的
@@ -212,12 +209,11 @@ NewSkillFolder 再添加）。**每个 AtomTask 都必须通过添加工具落�
 - 找到 ≥2 个 desc 同类的 baby（近义 slug 泛滥）→ 进入"整合"步骤
 - 没找到合适候选 → 跳到 Step 4
 
-## Step 3: 整合近义 baby（用 RenameSkill / MoveTaskTo）
+## Step 3: 整合近义 baby（用 MoveTaskTo）
 - ReadSkillTasks 查每个 baby 的 buffer 里都有什么 atom——判断哪个 slug 是"主"
 - 选 desc 最精准的 baby 当主 slug
-- **场景 A**：主 slug 名字还不存在 → 把次要 baby 用 RenameSkill 改成主 slug
-- **场景 B**：主 slug 名字已被另一个 baby 占用 → 用 MoveTaskTo 把次要 baby
-  的 atom 全搬到主 slug。次要 baby 留下空 buffer（不删，避免后续 cluster
+- 用 MoveTaskTo 把次要 baby 的 atom 全搬到主 slug。次要 baby 留下空 buffer
+  （不删，避免后续 cluster
   又往里塞重复 atom）
 - 整合完再 add_task_to_skill 把当前 atom 加进主 slug
 
@@ -234,17 +230,16 @@ NewSkillFolder 再添加）。**每个 AtomTask 都必须通过添加工具落�
 
 # 渐进收敛策略
 
-cluster 在 watcher 层**始终串行**（同一目录同时只跑一个 batch），所以你**逐批**
-看到 catalog 演化，每一批都能看见前一批 cluster 的产物。这避免了并发创建近义
-slug。同一批里如给了多个 atom，仍要逐个判断、彼此独立；判断完成后，将归入
-同一个 skill 的 atom 合并成一次 add_tasks_to_skill 调用。
+多个 ClusterAgent 可以并行推理；所有目录修改会进入单线程写入队列。相同 slug 的
+并发创建会按顺序处理，后续请求复用已经创建的目录。同一批里如给了多个 atom，
+仍要逐个判断、彼此独立；判断完成后，将归入同一个 skill 的 atom 合并成一次
+add_tasks_to_skill 调用。
 
 # 硬禁止
 - 不要为了"做点事"乱打高分。低质 atom 就别加，会污染 candidates 触发劣质 skill。
 - 不要伪造 atom_id；只用我给的真实 id。
 - 不要直接写 SKILL.md——那是 SkillEditAgent 的职责。
-- RenameSkill 只对 baby 用；main/staging 工具会拒绝。
-- 两个 baby 都已存在时 → 用 MoveTaskTo 而不是 RenameSkill（避免冲突）。
+- 使用 MoveTaskTo 整合已有 baby；ClusterAgent 暂不提供 rename_skill。
 """
 
 

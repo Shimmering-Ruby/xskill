@@ -14,6 +14,7 @@ from xskill.agents import agent_tools
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.pipeline.runner import DirectoryWatcher, process_atom_batch
 from xskill.usage import PriceTable, UsageLedger
+from tests.pool_helpers import pool_config
 
 
 def _tool_name(tool) -> str:
@@ -343,7 +344,7 @@ def _build_skill_edit_watcher(
     return DirectoryWatcher(
         config={"skill_opt": {"enabled": False}},
         skill_dir=skill_dir,
-        max_concurrent=1,
+        pool_config=pool_config(workers=1),
         db_path=db_path,
         store=AtomTaskStore(root=watch_dir),
         agno_agent_factory=_unused_agent_factory,
@@ -396,7 +397,7 @@ def test_skill_edit_workers_bind_each_instance_and_reset_after_completion(
             assert _usage_models(
                 tmp_path / suffix / "registry.db"
             ) == [f"edit-model-{suffix}"]
-            assert watcher._pool.submit(
+            assert watcher._pools["edit"].submit(
                 _current_atom_skill_dir
             ).result(timeout=5) is None
     finally:

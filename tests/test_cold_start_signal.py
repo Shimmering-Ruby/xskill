@@ -20,6 +20,7 @@ from xskill.pipeline.cold_start import (
 )
 from xskill.pipeline.registry import get_connection, register_dir
 from xskill.pipeline.runner import DirectoryWatcher
+from tests.pool_helpers import pool_config
 from xskill.skill import candidates
 from xskill.skill.git import init_skill_repo_on_baby, current_branch
 from tests.test_atom_task_store import _FakeEmbed
@@ -54,7 +55,7 @@ def _make_watcher(tmp_path, skill_root):
         config=config,
         skill_dir=skill_root,
         poll_interval=0.0,
-        max_concurrent=4,
+        pool_config=pool_config(workers=4),
         db_path=database_path,
         store=atom_store,
         agno_agent_factory=_make_barrier_agno(1, threading.Barrier(1)),

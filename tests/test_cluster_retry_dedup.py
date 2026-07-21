@@ -23,6 +23,7 @@ from xskill.skill import candidates as C
 
 from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM, autosplit_submit
+from tests.pool_helpers import pool_config
 
 
 def _tool_name(tool) -> str:
@@ -146,13 +147,12 @@ def _build_watcher(tmp_path: Path, db: Path, factory, *, batch_size=8):
         config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
         skill_dir=skill_dir,
         poll_interval=0.0,
-        max_concurrent=2,
+        pool_config=pool_config(workers=2, batch_size=batch_size),
         db_path=db,
         max_retries=0,
         store=store,
         agno_agent_factory=factory,
         home_root=tmp_path,
-        cluster_batch_size=batch_size,
     ), wd, skill_dir
 
 
