@@ -6,13 +6,21 @@ llm:
   base_url: http://127.0.0.1:19999
   model: fake-llm
   api_key: fake-key
+  rate_limit: {rpm: 240, request_burst: 8, max_inflight: 8}
 embedding:
   base_url: http://127.0.0.1:19999
   model: fake-embed
   api_key: fake-key
   dim: 0
+  rate_limit: {max_inflight: 4}
 watcher:
   poll_interval: 3      # 短 poll 让 scenario 不用等太久
+agent_worker:
+  pools:
+    split: {workers: 2, llm_weight: 6}
+    cluster: {workers: 2, batch_size: 8, llm_weight: 3}
+    edit: {workers: 1, llm_weight: 1}
+    embed: {workers: 1}
 candidates:
   threshold: 3
   stale_days: 60

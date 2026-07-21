@@ -1,4 +1,4 @@
-"""server 启动必起常驻 watcher worker —— 即便 registry 为空。
+"""server 启动必起常驻 agent-worker —— 即便 registry 为空。
 
 回归锚点:web startup 无条件启动常驻 watcher 子进程，即便空 home /
 空 registry。历史上 watcher 启动
@@ -9,7 +9,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
-def test_persistent_watcher_starts_even_with_empty_registry(tmp_path):
+def test_persistent_agent_worker_starts_even_with_empty_registry(tmp_path):
     from xskill.api import app as srv
     from starlette.testclient import TestClient
 
@@ -30,12 +30,12 @@ def test_persistent_watcher_starts_even_with_empty_registry(tmp_path):
             app = create_app()
             # 进入 context = startup 事件已跑完;退出 = shutdown 停掉调度器
             with TestClient(app):
-                names = [scheduler._name for scheduler in srv._schedulers]
-                watcher = next(
+                worker = next(
                     scheduler for scheduler in srv._schedulers
-                    if scheduler._name == "watcher"
+                    if scheduler._name == "agent-worker"
                 )
-                assert watcher._persistent is True
+                assert worker._persistent is True
+                assert worker._command[3] == "agent-worker"
     finally:
         srv._schedulers.clear()
         srv._config = None

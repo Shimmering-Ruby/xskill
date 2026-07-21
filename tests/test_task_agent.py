@@ -139,9 +139,7 @@ Editing CSS...
 class _AutoSplitLLM:
     """``.chat`` 形态的 LLM 占位（watcher 的 ``llm=`` 参数用）。
 
-    弃窗后 split 走 agno 工厂,``llm`` 只用于 ``score_atom`` 闸门。watcher 等
-    下游测试把它注入当 ``llm=`` 占位——保留 ``.chat`` 行为,返回一个合法的
-    ux_score JSON,避免 score_atom 解析失败。
+    弃窗后 split 走 agno 工厂；watcher 下游测试仍把它注入为 ``llm=`` 占位。
     """
     model = "stub-autosplit"
 

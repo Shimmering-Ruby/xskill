@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+import threading
 import time
 from unittest.mock import Mock
 
@@ -14,6 +15,7 @@ from xskill.config import interests_fingerprint
 from xskill.pipeline.runner import DirectoryWatcher
 from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _TRAJ_MD, _AutoSplitLLM, autosplit_submit
+from tests.pool_helpers import pool_config
 
 
 def _tool_name(tool) -> str:
@@ -143,7 +145,7 @@ class TestZombieCleanup:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=2,
+            pool_config=pool_config(workers=2),
             db_path=db,
             store=store,
             agno_agent_factory=_StubAgno,
@@ -178,7 +180,7 @@ class TestZombieCleanup:
             config={},
             skill_dir=skill_directory,
             poll_interval=0.0,
-            max_concurrent=2,
+            pool_config=pool_config(workers=2),
             db_path=database_path,
             home_root=tmp_path,
         )
@@ -195,7 +197,7 @@ class TestZombieCleanup:
             watch_dir_id, "discovered", db_path=database_path,
         )
         assert watcher._futures[cluster_future]["stage"] == "cluster"
-        watcher._pool.shutdown(wait=False)
+        watcher.stop()
 
     def test_clustering_zombie_rolls_back_to_indexed(self, tmp_path):
         db = tmp_path / "test.db"
@@ -214,7 +216,7 @@ class TestZombieCleanup:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=2,
+            pool_config=pool_config(workers=2),
             db_path=db,
             store=store,
             agno_agent_factory=_StubAgno,
@@ -244,30 +246,30 @@ def _seed_indexed_with_atoms(wd, store, db, n_trajs, atoms_per_traj):
     return wd_id
 
 
-class TestClusterSerial:
-    """聚类始终串行：同 wd 同时只允许一个 cluster batch future 在飞——逐批让
-    catalog 演化可见，避免并发 cluster agent 创建近义 baby slug。"""
+class TestClusterParallel:
+    """Cluster batch 填满独立池，同一 Atom 在重复扫描中只认领一次。"""
 
-    def _blocking_factory(self):
+    def _blocking_factory(self, started, release):
         class _BlockingStub:
             def __init__(self, **kw):
                 pass
 
             def run(self, _message, **_keyword_arguments):
-                import time
-                time.sleep(5)  # 模拟 cluster 长时间运行，让 future 留在飞
+                started.append(threading.current_thread().name)
+                release.wait(5)
                 class _R: pass
                 r = _R(); r.content = ""; return r
         return lambda **k: _BlockingStub(**k)
 
-    def test_only_one_cluster_batch_in_flight(self, tmp_path):
+    def test_cluster_batches_fill_independent_pool(self, tmp_path):
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
         store = AtomTaskStore(root=wd)
-        # 4 条 indexed 轨迹 × 2 atom，batch_size=2 → 即便有 8 个待消费 atom、
-        # 4 个批次的量，同 wd 也只起 1 个 batch future（串行）。
-        _seed_indexed_with_atoms(wd, store, db, n_trajs=4, atoms_per_traj=2)
+        # 8 条 indexed 轨迹 × 2 atom，batch_size=2 → 8 个 Agent 同时运行。
+        _seed_indexed_with_atoms(wd, store, db, n_trajs=8, atoms_per_traj=2)
+        started = []
+        release = threading.Event()
 
         watcher = DirectoryWatcher(
             llm=_AutoSplitLLM(),
@@ -275,27 +277,34 @@ class TestClusterSerial:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=30,
+            pool_config=pool_config(
+                workers=2, cluster_workers=8, batch_size=2,
+            ),
             db_path=db,
             store=store,
-            agno_agent_factory=self._blocking_factory(),
+            agno_agent_factory=self._blocking_factory(started, release),
             home_root=tmp_path,
-            cluster_batch_size=2,
         )
         watcher._scan_once()
         cluster_in_flight = sum(
             1 for i in watcher._futures.values() if i["stage"] == "cluster"
         )
-        assert cluster_in_flight == 1, (
-            f"cluster 应串行（1 batch in-flight），实际 {cluster_in_flight}"
+        deadline = time.time() + 2
+        while len(started) < 8 and time.time() < deadline:
+            time.sleep(0.01)
+        assert cluster_in_flight == 8, (
+            f"cluster 应同时提交 8 个 batch，实际 {cluster_in_flight}"
         )
-        # 再 scan 一次：上一个 batch 还在飞 → 不应再提交新的
+        assert len(started) == 8
+        assert all(name.startswith("xskill-cluster_") for name in started)
+        # 再 scan 一次：claimed atoms 不应重复提交。
         watcher._scan_once()
         cluster_in_flight = sum(
             1 for i in watcher._futures.values() if i["stage"] == "cluster"
         )
-        assert cluster_in_flight == 1, "batch 在飞时第二轮 scan 不应再起新 batch"
-        watcher._pool.shutdown(wait=False)
+        assert cluster_in_flight == 8, "第二轮 scan 不应重复提交 claimed atoms"
+        release.set()
+        watcher.stop()
 
 
 class TestClusterAllFailed:
@@ -332,7 +341,7 @@ class TestClusterAllFailed:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=2,
+            pool_config=pool_config(workers=2),
             db_path=db,
             store=store,
             max_retries=0,
@@ -416,7 +425,7 @@ class TestIndependentSkillEditScan:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=2,
+            pool_config=pool_config(workers=2),
             db_path=db,
             store=store,
             agno_agent_factory=lambda **kw: _MixedStub(**kw),
@@ -446,10 +455,9 @@ class TestIndependentSkillEditScan:
 
 
 class TestUxScoreAtomLevel:
-    """cluster 完成后该 traj 的所有 atom 应被逐个调 score_atom + AtomCanary.append。"""
+    """cluster 完成后复用 TaskAgent 的 atom ux_score 写入 AtomCanary。"""
 
     def test_with_header_triggers_atom_scoring(self, tmp_path):
-        from unittest.mock import patch
         db = tmp_path / "test.db"
         wd = tmp_path / "wd"; wd.mkdir()
         skill_dir = tmp_path / "skill"; skill_dir.mkdir()
@@ -478,31 +486,22 @@ class TestUxScoreAtomLevel:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=2,
+            pool_config=pool_config(workers=2),
             db_path=db,
             store=store,
             agno_agent_factory=_StubAgno,
             home_root=tmp_path,
         )
-        # mock score_atom 返回固定分数
-        with patch("xskill.pipeline.atom.score_atom",
-                   return_value={"score": 8, "reasons": "ok"}) as mock_score:
-            # 多轮推进到 done
-            for _ in range(20):
-                watcher._scan_once()
-                for _ in range(30):
-                    if not watcher._futures:
-                        break
-                    time.sleep(0.05)
-                    watcher._harvest()
-                counts = get_status_counts(db_path=db)
-                if counts.get("done"):
+        for _ in range(20):
+            watcher._scan_once()
+            for _ in range(30):
+                if not watcher._futures:
                     break
-            # _TRAJ_MD 有 2 个 ## User → 2 个 atom → score_atom 调 2 次
-            assert mock_score.call_count == 2
-            # 验证传给 score_atom 的 side 来自 header
-            call_kw = mock_score.call_args[1]
-            assert call_kw["side"] == "staging"
+                time.sleep(0.05)
+                watcher._harvest()
+            counts = get_status_counts(db_path=db)
+            if counts.get("done"):
+                break
 
         # 落盘到 .ux_scores.jsonl，主键是 atom_id
         import json
@@ -515,6 +514,7 @@ class TestUxScoreAtomLevel:
             assert rec["atom_id"].startswith("atom_traj_z_")
             assert rec["side"] == "staging"
             assert rec["commit_sha"] == "abc123"
+            assert rec["score"] == 7
 
     def test_no_header_no_scoring(self, tmp_path):
         from unittest.mock import patch
@@ -531,7 +531,7 @@ class TestUxScoreAtomLevel:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=2,
+            pool_config=pool_config(workers=2),
             db_path=db,
             store=store,
             agno_agent_factory=_StubAgno,
@@ -581,7 +581,7 @@ class TestContinuationResplit:
             config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=4,
+            pool_config=pool_config(workers=4),
             db_path=db,
             store=store,
             agno_agent_factory=_StubAgno,
@@ -654,7 +654,7 @@ class TestInterestFiltering:
             },
             skill_dir=skill_directory,
             poll_interval=0.0,
-            max_concurrent=1,
+            pool_config=pool_config(workers=1),
             db_path=db_path,
             store=AtomTaskStore(root=watch_directory),
             agno_agent_factory=_NotFitAgno,
@@ -711,7 +711,7 @@ class TestInterestFiltering:
             },
             skill_dir=skill_directory,
             poll_interval=0.0,
-            max_concurrent=1,
+            pool_config=pool_config(workers=1),
             db_path=db_path,
             store=AtomTaskStore(root=watch_directory),
             agno_agent_factory=_StubAgno,
@@ -747,7 +747,7 @@ class TestPipelineRun:
             config={"llm": {"base_url": "test://", "model": "stub", "api_key": "k"}},
             skill_dir=skill_dir,
             poll_interval=0.0,
-            max_concurrent=4,
+            pool_config=pool_config(workers=4),
             db_path=db,
             store=store,
             agno_agent_factory=_StubAgno,

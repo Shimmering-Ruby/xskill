@@ -688,12 +688,16 @@ def sandbox(tmp_path, fake_server):
             "base_url": fake_server.base_url,
             "model": "fake-llm",
             "api_key": "fake-key",
+            "rate_limit": {
+                "rpm": 240, "request_burst": 8, "max_inflight": 8,
+            },
         },
         "embedding": {
             "base_url": fake_server.base_url,
             "model": "fake-embed",
             "api_key": "fake-key",
             "dim": 0,
+            "rate_limit": {"max_inflight": 4},
         },
         "canary": {
             "enabled": True, "probability": 0.5,
@@ -704,6 +708,14 @@ def sandbox(tmp_path, fake_server):
             "total_samples": CANARY_MIN_SAMPLES,
         },
         "watcher": {"poll_interval": 2},
+        "agent_worker": {
+            "pools": {
+                "split": {"workers": 4, "llm_weight": 6},
+                "cluster": {"workers": 4, "batch_size": 4, "llm_weight": 3},
+                "edit": {"workers": 2, "llm_weight": 1},
+                "embed": {"workers": 2},
+            },
+        },
         # 入库完成屏障（settle barrier，src/xskill 的 ingest 路径，默认 120s）
         # 会把"刚写完即扫描"的 session 全挡在窗口外 → daemon 子进程读本
         # config.yaml 拿到默认值，E2E 等不到桥接而超时。评测场景里 session

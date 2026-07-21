@@ -2,7 +2,7 @@
 
 修复对象：DirectoryWatcher._check_pending_skill_edits 原来用同步 for 循环
 顺序对每个 skill 调 SkillEditAgent.maybe_run()（每个 ~LLM 一次写正文，串行
-= N×耗时）。修复把每个 skill 的 maybe_run() 提交到 self._pool 并发跑，结果
+= N×耗时）。修复把每个 skill 的 maybe_run() 提交到 edit pool 并发跑，结果
 收齐后回主线程串行做 _stats 自增 + install。
 
 本测试验证：
@@ -23,6 +23,7 @@ from xskill.pipeline.atom import AtomTaskStore
 from xskill.pipeline.registry import register_dir
 from xskill.pipeline.runner import DirectoryWatcher
 from xskill.skill import candidates as C
+from tests.pool_helpers import pool_config
 from xskill.skill.git import init_skill_repo_on_baby, current_branch
 from tests.test_atom_task_store import _FakeEmbed
 from tests.test_task_agent import _AutoSplitLLM
@@ -106,7 +107,7 @@ def _make_barrier_agno(expected_workers, barrier):
     return barrier_agent_factory
 
 
-def _make_watcher(tmp_path, skill_root, factory, max_concurrent):
+def _make_watcher(tmp_path, skill_root, factory, edit_workers):
     db = tmp_path / "test.db"
     wd = tmp_path / "wd"
     wd.mkdir(exist_ok=True)
@@ -118,7 +119,7 @@ def _make_watcher(tmp_path, skill_root, factory, max_concurrent):
         config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
         skill_dir=skill_root,
         poll_interval=0.0,
-        max_concurrent=max_concurrent,
+        pool_config=pool_config(workers=1, edit_workers=edit_workers),
         db_path=db,
         store=store,
         agno_agent_factory=factory,
@@ -139,7 +140,7 @@ def _make_watcher_with_config(tmp_path, skill_root, factory, config):
         config=config,
         skill_dir=skill_root,
         poll_interval=0.0,
-        max_concurrent=1,
+        pool_config=pool_config(workers=1),
         db_path=db,
         store=store,
         agno_agent_factory=factory,
@@ -190,11 +191,11 @@ class TestSkillEditParallel:
         for s, sd in skill_dirs.items():
             assert current_branch(str(sd)) == "baby"
 
-        # barrier 需要凑齐 N 个并发线程才放行 → 必须 max_concurrent>=N 且真并发
+        # barrier 需要凑齐 N 个并发线程才放行 → edit workers 必须足够且真并发
         barrier = threading.Barrier(N_SKILLS)
         factory = _make_barrier_agno(N_SKILLS, barrier)
         watcher = _make_watcher(tmp_path, skill_root, factory,
-                                max_concurrent=N_SKILLS)
+                                edit_workers=N_SKILLS)
 
         t0 = time.time()
         watcher._check_pending_skill_edits()
@@ -223,7 +224,7 @@ class TestSkillEditParallel:
         assert watcher._stats["skills_edited"] == N_SKILLS
 
     def test_equivalent_to_serial(self, tmp_path):
-        """并行版毕业结果与串行版（max_concurrent=1, 无 barrier）等价：
+        """并行版毕业结果与单 edit worker（无 barrier）等价：
         同一组 baby skill，两种执行模式下毕业集合 + 正文内容一致。"""
         def _run(max_conc, use_barrier):
             sub = tmp_path / f"root_{max_conc}_{int(use_barrier)}"
@@ -236,10 +237,10 @@ class TestSkillEditParallel:
                 barrier = threading.Barrier(len(slugs))
                 factory = _make_barrier_agno(len(slugs), barrier)
             else:
-                # 串行版不用 barrier（max_conc=1 时 barrier 会死锁）
+                # 单 worker 版不用 barrier（否则会死锁）
                 noop = threading.Barrier(1)
                 factory = _make_barrier_agno(1, noop)
-            w = _make_watcher(sub, skill_root, factory, max_concurrent=max_conc)
+            w = _make_watcher(sub, skill_root, factory, edit_workers=max_conc)
             w._check_pending_skill_edits()
             w._drain_futures(stage="skill_edit")
             graduated = {s: current_branch(str(d)) for s, d in dirs.items()}

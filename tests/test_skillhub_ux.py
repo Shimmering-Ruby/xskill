@@ -129,18 +129,10 @@ class TestSingleMachineScoresSkillhub:
         store.save(AtomTask(
             atom_id="atom_traj_t_0001", traj_id="traj_t",
             offset_start=0, offset_end=2, intent="i", summary="s",
-            tags=[], used_skills=["extfoo"], ux_score=None,
+            tags=[], used_skills=["extfoo"], ux_score=9,
             pre_atom_id=None, post_atom_id=None,
             context_prefix="", raw_segment="# body",
         ))
-
-        scored = []
-
-        def _fake_score_atom(*, llm, atom, side):
-            scored.append((atom.atom_id, side))
-            return {"score": 9, "reasons": "ok"}
-
-        monkeypatch.setattr("xskill.pipeline.atom.score_atom", _fake_score_atom)
 
         w = DirectoryWatcher(
             llm=object(), skill_dir=skill_dir, store=store,
@@ -153,7 +145,6 @@ class TestSingleMachineScoresSkillhub:
         w._score_atoms_for_traj(1, "traj_t.md")
 
         # side 被强制成 main（三方无 staging），sha = 内容哈希
-        assert scored == [("atom_traj_t_0001", "main")]
         rows = load_ux_scores(sub)
         assert len(rows) == 1
         assert rows[0]["side"] == "main"
@@ -175,14 +166,10 @@ class TestSingleMachineScoresSkillhub:
         store.save(AtomTask(
             atom_id="atom_traj_t_0001", traj_id="traj_t",
             offset_start=0, offset_end=2, intent="i", summary="s",
-            tags=[], used_skills=["dup"], ux_score=None,
+            tags=[], used_skills=["dup"], ux_score=7,
             pre_atom_id=None, post_atom_id=None,
             context_prefix="", raw_segment="# body",
         ))
-
-        monkeypatch.setattr(
-            "xskill.pipeline.atom.score_atom",
-            lambda *, llm, atom, side: {"score": 7, "reasons": "ok"})
 
         w = DirectoryWatcher(
             llm=object(), skill_dir=skill_dir, store=store,
@@ -245,18 +232,10 @@ class TestServerScoresSkillhub:
         store.save(AtomTask(
             atom_id="atom_traj_cc_x_001_0001", traj_id="traj_cc_x_001",
             offset_start=0, offset_end=6, intent="i", summary="s",
-            tags=[], used_skills=["extfoo"], ux_score=None,
+            tags=[], used_skills=["extfoo"], ux_score=8,
             pre_atom_id=None, post_atom_id=None,
             context_prefix="", raw_segment="# body",
         ))
-
-        scored = []
-
-        def _fake_score_atom(*, llm, atom, side):
-            scored.append((atom.atom_id, side))
-            return {"score": 8, "reasons": "ok"}
-
-        monkeypatch.setattr("xskill.pipeline.atom.score_atom", _fake_score_atom)
 
         w = DirectoryWatcher(
             llm=object(), skill_dir=skill_dir, store=store,
@@ -271,7 +250,6 @@ class TestServerScoresSkillhub:
             "xskill.pipeline.registry.model_share", lambda **kw: [])
         w._score_atoms_for_traj_server(1, "traj_cc_x_001.md")
 
-        assert scored == [("atom_traj_cc_x_001_0001", "main")]
         rows = load_ux_scores(sub)
         assert len(rows) == 1
         assert rows[0]["side"] == "main"
@@ -291,14 +269,10 @@ class TestServerScoresSkillhub:
         store.save(AtomTask(
             atom_id="atom_traj_cc_0001", traj_id="traj_cc",
             offset_start=0, offset_end=6, intent="i", summary="s",
-            tags=[], used_skills=["fix-foo"], ux_score=None,
+            tags=[], used_skills=["fix-foo"], ux_score=8,
             pre_atom_id=None, post_atom_id=None,
             context_prefix="", raw_segment="# body",
         ))
-
-        monkeypatch.setattr(
-            "xskill.pipeline.atom.score_atom",
-            lambda *, llm, atom, side: {"score": 8, "reasons": "ok"})
 
         w = DirectoryWatcher(
             llm=object(), skill_dir=skill_dir, store=store,
