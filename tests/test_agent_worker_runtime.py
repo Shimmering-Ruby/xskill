@@ -122,12 +122,19 @@ def test_shared_request_limiter_caps_real_http_inflight():
         executor.submit(limiter.call, prompt="x", inner_call=inner)
         for _ in range(8)
     ]
-    deadline = time.time() + 2
-    while limiter.status["inflight"] < 2 and time.time() < deadline:
-        time.sleep(0.01)
-    assert limiter.status["inflight"] == 2
-    assert limiter.status["waiting"] == 6
-    release.set()
+    try:
+        deadline = time.time() + 2
+        status = limiter.status
+        while (
+            (status["inflight"] < 2 or status["waiting"] < 6)
+            and time.time() < deadline
+        ):
+            time.sleep(0.01)
+            status = limiter.status
+        assert status["inflight"] == 2
+        assert status["waiting"] == 6
+    finally:
+        release.set()
     assert [future.result(2) for future in futures] == [{}] * 8
     executor.shutdown(wait=True)
     assert maximum == 2
