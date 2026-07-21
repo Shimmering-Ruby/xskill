@@ -1,6 +1,8 @@
 # Release: triggered by pushing a version tag (v*).
 # Tag is the source of truth; setuptools-scm derives the package version from it.
-# Pre-release tags (e.g. v0.4.0a1, v0.4.0rc1) are supported.
+# Pre-release tags (e.g. v0.6.28a1, v0.6.28rc1) create a GitHub Prerelease
+# only. They deliberately do not upload to PyPI, so existing clients cannot
+# auto-install an observation build.
 # Publishing is gated by the test matrix and SkillHub search smoke test.
 # The 300×300 control-plane stress test runs independently in the nightly workflow.
 
@@ -79,6 +81,7 @@ jobs:
         run: pip install build twine setuptools-scm
 
       - name: Assert tag matches setuptools-scm derived version
+        id: release_kind
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           BUILD_VERSION=$(python -m setuptools_scm)
@@ -87,6 +90,14 @@ jobs:
             echo "::error::Tag ($TAG_VERSION) != setuptools_scm version ($BUILD_VERSION). Working tree may be dirty or commits exist after the tag."
             exit 1
           fi
+          python - "$TAG_VERSION" "$GITHUB_OUTPUT" <<'PY'
+          import sys
+          from packaging.version import Version
+
+          version = Version(sys.argv[1])
+          with open(sys.argv[2], "a", encoding="utf-8") as output:
+              output.write(f"prerelease={'true' if version.is_prerelease else 'false'}\n")
+          PY
 
       - name: Build sdist and wheel
         run: python -m build
@@ -106,6 +117,7 @@ jobs:
 
           required = {
               "xskill/__init__.py",
+              "xskill/pipeline/worker_runtime.py",
               "xskill/team/client/updater.py",
               "xskill/team/server/api.py",
           }
@@ -123,7 +135,12 @@ jobs:
       - name: Twine check
         run: twine check dist/*
 
+      - name: Stage pre-release migration utility
+        if: github.ref_name == 'v0.6.28a1'
+        run: cp scripts/xskill_v0_6_28a1_migrate.py dist/x.py
+
       - name: Publish to PyPI
+        if: steps.release_kind.outputs.prerelease != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
@@ -140,7 +157,16 @@ jobs:
             echo "release $GITHUB_REF_NAME already exists, skipping"
             exit 0
           fi
+          prerelease_args=()
+          assets=(dist/*.whl dist/*.tar.gz)
+          if [ "${{ steps.release_kind.outputs.prerelease }}" = "true" ]; then
+            prerelease_args+=(--prerelease)
+          fi
+          if [ "$GITHUB_REF_NAME" = "v0.6.28a1" ]; then
+            assets+=(dist/x.py)
+          fi
           gh release create "$GITHUB_REF_NAME" \
-            dist/*.whl dist/*.tar.gz \
+            "${assets[@]}" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes
+            --generate-notes \
+            "${prerelease_args[@]}"
