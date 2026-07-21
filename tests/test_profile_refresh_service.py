@@ -139,9 +139,11 @@ def test_worker_concurrency_is_fixed_and_threads_are_daemon():
 
 def test_settle_delay_keeps_profile_work_behind_sync_burst():
     entered = threading.Event()
+    entered_at: list[float] = []
 
     class Engine:
         def update_user_interest(self, _interest, *, should_commit=None):
+            entered_at.append(time.monotonic())
             entered.set()
             return _Result()
 
@@ -151,9 +153,8 @@ def test_settle_delay_keeps_profile_work_behind_sync_burst():
     started = time.monotonic()
     assert service.request("u1")
     assert service.request("u2")
-    assert not entered.wait(0.05)
     assert entered.wait(1)
-    assert time.monotonic() - started >= 0.14
+    assert entered_at[0] - started >= 0.14
     assert service.wait_idle(timeout=2)
     assert service.stop(timeout=2)
 
