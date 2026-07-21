@@ -1,4 +1,4 @@
-"""watcher 构造 + 生态一次性入库，供常驻 watcher worker 使用。
+"""watcher 构造 + 生态一次性入库，供常驻 agent-worker 使用。
 
 web startup 原有的生态检测闭包收敛为
 ``ingest_detected_ecosystems_once``：watcher 每次 poll 对检测到的生态调
@@ -27,6 +27,7 @@ def build_watcher(config: dict, *, home_root: Path | None = None,
     """
     from xskill.config import (
         XSKILL_HOME,
+        agent_worker_config,
         get_registry_db_path,
         get_skill_dir,
     )
@@ -70,6 +71,7 @@ def build_watcher(config: dict, *, home_root: Path | None = None,
         db_path=resolved_db_path,
     )
     watcher_cfg = config.get("watcher", {})
+    worker_cfg = agent_worker_config(config)
     return DirectoryWatcher(
         llm=create_llm_client(config, usage_ledger=usage_ledger),
         embed_client=create_embed_client(
@@ -77,9 +79,8 @@ def build_watcher(config: dict, *, home_root: Path | None = None,
         ),
         config=config,
         skill_dir=resolved_skill_dir,
-        poll_interval=float(watcher_cfg.get("poll_interval", 30)),
-        max_concurrent=int(watcher_cfg.get("max_concurrent", 30)),
-        cluster_batch_size=int(watcher_cfg.get("cluster_batch_size", 8)),
+        poll_interval=float(watcher_cfg.get("poll_interval", 5)),
+        pool_config=worker_cfg["pools"],
         server_mode=server_mode,
         home_root=home_root,
         xskill_home=state_root,

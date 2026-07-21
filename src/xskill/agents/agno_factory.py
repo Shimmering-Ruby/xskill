@@ -17,6 +17,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+from functools import partial
 from typing import Any, Callable
 
 from xskill.utils.logging import StreamLog
@@ -113,32 +114,27 @@ def _wrap_with_rate_limit(
         model.invoke = record_only_invoke
         return model
 
-    from xskill.utils.rate_limit import (
-        get_or_create_bucket, estimate_tokens, extract_total_tokens,
-    )
-    bucket = get_or_create_bucket(
+    from xskill.utils.rate_limit import get_or_create_request_limiter
+    limiter = get_or_create_request_limiter(
+        "llm",
         llm_cfg.get("base_url", ""),
         rpm=rl_cfg.get("rpm"),
         tpm=rl_cfg.get("tpm"),
-        burst=rl_cfg.get("burst"),
+        request_burst=rl_cfg.get("request_burst", rl_cfg.get("burst")),
+        token_burst=rl_cfg.get("token_burst", rl_cfg.get("burst")),
+        max_inflight=rl_cfg.get("max_inflight"),
+        weights=llm_cfg.get("_pool_weights"),
     )
 
     def rate_limited_invoke(messages, **kwargs):
-        # agno 把 messages 列表传进来,估算用拼起来的总字符
         prompt_text = "\n".join(
             getattr(m, "content", str(m)) or "" for m in (messages or [])
         )
-        wait = bucket.acquire_rpm(timeout=60)
-        if wait > 0:
-            raise RuntimeError(f"RPM exhausted, wait {wait:.1f}s")
-        estimated = estimate_tokens(prompt_text)
-        wait = bucket.acquire_tpm(estimated, timeout=60)
-        if wait > 0:
-            raise RuntimeError(f"TPM exhausted, wait {wait:.1f}s")
-        resp = original_invoke(messages, **kwargs)
-        actual = extract_total_tokens(resp)
-        if actual is not None:
-            bucket.reconcile_tpm(estimated=estimated, actual=actual)
+        resp = limiter.call(
+            prompt=prompt_text,
+            inner_call=partial(original_invoke, messages, **kwargs),
+            timeout=60,
+        )
         # 旁路记账;record_llm 内部 best-effort,绝不抛。
         ledger.record_llm(current_step(), model_name, resp)
         return resp
@@ -269,6 +265,7 @@ def _wrap_with_retry(model, llm_cfg: dict):
     base = float(llm_cfg.get("retry_base_delay", 2.0) or 2.0)
     cap = float(llm_cfg.get("retry_max_delay", 60.0) or 60.0)
     original_invoke = model.invoke
+    base_url = llm_cfg.get("base_url", "")
 
     def retrying_invoke(messages, **kwargs):
         attempt = 0
@@ -286,8 +283,13 @@ def _wrap_with_retry(model, llm_cfg: dict):
                     attempt, max_retries, delay, str(exc)[:160])
                 # 用 Event.wait 代替 time.sleep：进程优雅退出时立即放弃重试，
                 # 否则退避睡眠会把 worker join 拖到分钟级 → supervisor SIGKILL
-                if SHUTTING_DOWN.wait(delay):
-                    raise
+                from xskill.utils.rate_limit import begin_retry_wait, end_retry_wait
+                begin_retry_wait("llm", base_url)
+                try:
+                    if SHUTTING_DOWN.wait(delay):
+                        raise
+                finally:
+                    end_retry_wait("llm", base_url)
 
     model.invoke = retrying_invoke
     return model
@@ -327,6 +329,11 @@ def make_default_factory(
     base_cfg = config.get("llm", {}) or {}
     override_cfg = config.get("llm_skill", {}) or {}
     llm_cfg = {**base_cfg, **{k: v for k, v in override_cfg.items() if v}}
+    pool_cfg = (config.get("agent_worker", {}) or {}).get("pools", {}) or {}
+    llm_cfg["_pool_weights"] = {
+        name: int((pool_cfg.get(name, {}) or {}).get("llm_weight", 1))
+        for name in ("split", "cluster", "edit")
+    }
 
     def factory(*, instructions, tools, **kwargs):
         model = build_chat_model(

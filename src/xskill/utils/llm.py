@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Literal, Optional
 
 import numpy as np
@@ -60,7 +61,7 @@ class LLMClient:
     # 里可覆盖；缩小可省 token 费但要承担更高 fallback 率。
     max_tokens: int = 10000
     temperature: float = 0.0
-    # 限流配置；None = 不限流(快路径)。结构: {rpm, tpm, burst} 任一可缺。
+    # 限流配置；None = 不限流(快路径)。
     # 详见 src/xskill/utils/rate_limit.py 与 docs/adr/0001。
     rate_limit_cfg: "Optional[dict]" = field(default=None)
     usage_ledger: Any = field(default=None, repr=False)
@@ -112,15 +113,23 @@ class LLMClient:
         if self.rate_limit_cfg:
             # 走限流 wrapper —— 共享按 base_url 注册的桶
             from xskill.utils.rate_limit import (
-                RateLimitedLLM, get_or_create_bucket,
+                RateLimitedLLM, get_or_create_request_limiter,
             )
-            bucket = get_or_create_bucket(
+            limiter = get_or_create_request_limiter(
+                "llm",
                 self.base_url,
                 rpm=self.rate_limit_cfg.get("rpm"),
                 tpm=self.rate_limit_cfg.get("tpm"),
-                burst=self.rate_limit_cfg.get("burst"),
+                request_burst=self.rate_limit_cfg.get(
+                    "request_burst", self.rate_limit_cfg.get("burst"),
+                ),
+                token_burst=self.rate_limit_cfg.get(
+                    "token_burst", self.rate_limit_cfg.get("burst"),
+                ),
+                max_inflight=self.rate_limit_cfg.get("max_inflight"),
+                weights=self.rate_limit_cfg.get("_pool_weights"),
             )
-            wrapper = RateLimitedLLM(bucket=bucket, inner_call=self._raw_chat)
+            wrapper = RateLimitedLLM(limiter=limiter, inner_call=self._raw_chat)
             resp = wrapper.call(prompt=prompt, system=system, timeout=60.0)
             self._record(resp)
             return resp.choices[0].message.content
@@ -218,6 +227,7 @@ class EmbedClient:
     api_key: str
     dim: int = 0  # 0 = 未探测
     api_style: EmbedApiStyle = "openai"
+    rate_limit_cfg: "Optional[dict]" = field(default=None, repr=False)
     usage_ledger: Any = field(default=None, repr=False)
     _client: Any = field(default=None, repr=False)
 
@@ -242,6 +252,7 @@ class EmbedClient:
             api_key=api_key,
             dim=dim,
             api_style=api_style,
+            rate_limit_cfg=cfg.get("rate_limit"),
             usage_ledger=usage_ledger,
         )
         return inst
@@ -293,10 +304,25 @@ class EmbedClient:
             raise ValueError(f"embedding response missing data: {data!r}")
         return items[0]["embedding"]
 
-    def _call_api_single(self, text: str) -> list[float]:
+    def _call_api_single_unlimited(self, text: str) -> list[float]:
         if self.api_style == "multimodal":
             return self._call_api_multimodal(text)
         return self._call_api_openai(text)
+
+    def _call_api_single(self, text: str) -> list[float]:
+        if not self.rate_limit_cfg:
+            return self._call_api_single_unlimited(text)
+        from xskill.utils.rate_limit import get_or_create_request_limiter
+
+        limiter = get_or_create_request_limiter(
+            "embedding",
+            self.base_url,
+            max_inflight=self.rate_limit_cfg.get("max_inflight"),
+        )
+        return limiter.call(
+            prompt="",
+            inner_call=partial(self._call_api_single_unlimited, text),
+        )
 
     def probe_dim(self) -> int:
         """发送测试文本，探测 embedding 维度"""
@@ -395,7 +421,16 @@ def create_llm_client(
         model: "doubao-seed-2-0-pro-260215"    # agent + eval 换大模型
         # base_url / api_key 缺省 → 继承 llm.*
     """
-    base_cfg = config.get("llm", {}) or {}
+    base_cfg = dict(config.get("llm", {}) or {})
+    pool_cfg = (config.get("agent_worker", {}) or {}).get("pools", {}) or {}
+    if base_cfg.get("rate_limit"):
+        base_cfg["rate_limit"] = {
+            **base_cfg["rate_limit"],
+            "_pool_weights": {
+                name: int((pool_cfg.get(name, {}) or {}).get("llm_weight", 1))
+                for name in ("split", "cluster", "edit")
+            },
+        }
     if role in ("skill", "eval"):
         override_cfg = config.get("llm_skill", {}) or {}
         merged = {**base_cfg, **{k: v for k, v in override_cfg.items() if v}}

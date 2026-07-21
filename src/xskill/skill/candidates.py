@@ -497,7 +497,7 @@ class LazyConsumedIndex:
 
     watcher 一轮 scan 里,只要 atom 都已打 ``clustered`` 快标记(稳态),就完全不碰
     磁盘;唯有冷启动那种存量未打标 atom 才触发一次 ``build_atom_consumed_index``。
-    这避免了"1 万 skill 下每轮 sweep 无条件读 1 万个 .candidates.yml"的纯浪费。
+    这避免了"1 万 skill 下每轮扫描无条件读 1 万个 .candidates.yml"的纯浪费。
     """
 
     def __init__(self, skill_dir):

@@ -80,10 +80,12 @@ llm:
   # client_max_retries: 0 # optional; openai-SDK client retries (default 0 —
                          # transient-error retries are handled by xskill's own
                          # retry wrapper; client retries would multiply).
-  # rate_limit:          # optional; absent = unlimited (good for self-hosted)
-  #   rpm: 60            # requests per minute; match your provider plan
-  #   tpm: 100000        # tokens per minute (optional within rate_limit)
-  #   burst: 10          # optional; default = ceil(rate/6)
+  rate_limit:
+    rpm: 240             # requests per minute shared by split/cluster/edit
+    request_burst: 8     # short request burst capacity
+    max_inflight: 8      # simultaneous LLM HTTP requests across all three pools
+    # tpm: 100000        # optional tokens per minute
+    # token_burst: 20000 # optional token burst capacity (separate from requests)
   # See docs/adr/0001-rate-limit-diy-not-litellm.md for the design rationale.
 
 # ===== Embedding (vector retrieval) =====
@@ -99,6 +101,8 @@ embedding:
   model:    text-embedding-v4
   api_key:  PUT_YOUR_EMBEDDING_API_KEY_HERE
   dim:      0
+  rate_limit:
+    max_inflight: 4      # embedding HTTP concurrency, independent from LLM
   # api: openai | multimodal   # optional; default openai. "multimodal" for
                                # vision-style embedding endpoints.
   # max_embed: 2               # optional; skill_hub/search 语义通道的全局并发上限
@@ -172,25 +176,27 @@ server:
   profile_refresh_interval: 600    # 画像短命子进程调度周期(秒;画像变化慢,默认 10min,与 watcher 解耦)
   profile_refresh_timeout: 1800    # 单轮画像子进程硬上限(秒;冷启动大量 client 兜底)
 
-# ===== Watcher (the directory poller inside `serve`) =====
+# ===== Watcher (scan scheduling only) =====
 watcher:
-  poll_interval:  30            # seconds between scans of every watch_dir
-  max_concurrent: 4             # parallel LLM calls per scan. Conservative
-                                # placeholder that pairs with llm.rate_limit
-                                # above. Raise to 20-30 for self-hosted vLLM
-                                # or accounts with no concurrency cap. See
-                                # docs/adr/0001-rate-limit-diy-not-litellm.md
-  # cluster_batch_size: 8       # atoms consumed per ClusterAgent call. The
-                                # watcher pools un-clustered atoms ACROSS all
-                                # indexed trajectories, drops those already in a
-                                # skill's .candidates.yml, then feeds up to N at
-                                # a time to ONE ClusterAgent (one LLM round-trip
-                                # handles N atom positions instead of one). The
-                                # agent still reads each atom's content on demand
-                                # via tools — only the positions are batched.
-                                # Clustering stays serial (one batch in flight per
-                                # watch dir). Default 8; set 1 for the old
-                                # one-atom-per-call behavior.
+  poll_interval: 5              # seconds between scans of every watch_dir
+
+# ===== Persistent agent worker =====
+# Every pool has an automatic waiting capacity of workers * 2. Running plus
+# waiting capacity is workers * 3; a full pool never blocks the watcher.
+agent_worker:
+  pools:
+    split:
+      workers: 24
+      llm_weight: 6
+    cluster:
+      workers: 8
+      batch_size: 8
+      llm_weight: 3
+    edit:
+      workers: 4
+      llm_weight: 1
+    embed:
+      workers: 4
 
 # ===== Ingest (bridging native agent sessions into traj_*.md) =====
 # 各生态 session ingester（claude_code / codex / openclaw / cursor 的 JSONL
@@ -266,6 +272,95 @@ def ensure_config_exists(path: Optional[Path] = None) -> bool:
     return False
 
 
+def _positive_int(value, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{path} 必须是正整数")
+    return value
+
+
+def agent_worker_config(config_data: dict) -> dict:
+    """Validate and normalize the v0.6.28 four-pool configuration."""
+    if not isinstance(config_data, dict):
+        raise ValueError("config.yaml 顶层必须是 mapping")
+    watcher = config_data.get("watcher") or {}
+    if not isinstance(watcher, dict):
+        raise ValueError("watcher 必须是 mapping")
+    if "max_concurrent" in watcher:
+        raise ValueError(
+            "旧配置 watcher.max_concurrent 已移除；请分别配置 "
+            "agent_worker.pools.split/cluster/edit/embed.workers"
+        )
+    if "cluster_batch_size" in watcher:
+        raise ValueError(
+            "旧配置 watcher.cluster_batch_size 已移至 "
+            "agent_worker.pools.cluster.batch_size"
+        )
+
+    for llm_path, llm_cfg in (
+        ("llm", config_data.get("llm") or {}),
+        ("llm_skill", config_data.get("llm_skill") or {}),
+    ):
+        if not isinstance(llm_cfg, dict):
+            raise ValueError(f"{llm_path} 必须是 mapping")
+        rate_cfg = llm_cfg.get("rate_limit") or {}
+        if not isinstance(rate_cfg, dict):
+            raise ValueError(f"{llm_path}.rate_limit 必须是 mapping")
+        if "burst" in rate_cfg:
+            raise ValueError(
+                f"旧配置 {llm_path}.rate_limit.burst 已移除；请求突发量改用 "
+                f"{llm_path}.rate_limit.request_burst，TPM 突发量单独使用 "
+                f"{llm_path}.rate_limit.token_burst"
+            )
+
+    worker = config_data.get("agent_worker")
+    if not isinstance(worker, dict) or not isinstance(worker.get("pools"), dict):
+        raise ValueError(
+            "缺少 agent_worker.pools；请配置 split、cluster、edit、embed 四个池"
+        )
+    pools = worker["pools"]
+    normalized: dict[str, dict] = {}
+    for name in ("split", "cluster", "edit", "embed"):
+        pool = pools.get(name)
+        if not isinstance(pool, dict):
+            raise ValueError(f"缺少 agent_worker.pools.{name}")
+        if "queue_size" in pool:
+            raise ValueError(
+                f"不接受 agent_worker.pools.{name}.queue_size；等待容量自动为 workers × 2"
+            )
+        normalized[name] = dict(pool)
+        normalized[name]["workers"] = _positive_int(
+            pool.get("workers"), f"agent_worker.pools.{name}.workers"
+        )
+        if name in ("split", "cluster", "edit"):
+            normalized[name]["llm_weight"] = _positive_int(
+                pool.get("llm_weight"),
+                f"agent_worker.pools.{name}.llm_weight",
+            )
+    normalized["cluster"]["batch_size"] = _positive_int(
+        pools["cluster"].get("batch_size"),
+        "agent_worker.pools.cluster.batch_size",
+    )
+
+    llm_rate = (config_data.get("llm") or {}).get("rate_limit")
+    if not isinstance(llm_rate, dict):
+        raise ValueError("缺少 llm.rate_limit")
+    for key in ("rpm", "request_burst", "max_inflight"):
+        _positive_int(llm_rate.get(key), f"llm.rate_limit.{key}")
+    if "tpm" in llm_rate:
+        _positive_int(llm_rate["tpm"], "llm.rate_limit.tpm")
+    if "token_burst" in llm_rate:
+        _positive_int(llm_rate["token_burst"], "llm.rate_limit.token_burst")
+
+    embedding_rate = (config_data.get("embedding") or {}).get("rate_limit")
+    if not isinstance(embedding_rate, dict):
+        raise ValueError("缺少 embedding.rate_limit.max_inflight")
+    _positive_int(
+        embedding_rate.get("max_inflight"),
+        "embedding.rate_limit.max_inflight",
+    )
+    return {"pools": normalized}
+
+
 def load_config(path: Optional[Path] = None) -> dict:
     """加载 ~/.xskill/config.yaml；不存在直接抛 FileNotFoundError。
 
@@ -282,6 +377,7 @@ def load_config(path: Optional[Path] = None) -> dict:
         )
     with open(cfg_path, encoding="utf-8") as f:
         _config = yaml.safe_load(f) or {}
+    agent_worker_config(_config)
     if not _config.get("llm", {}).get("api_key"):
         raise KeyError(f"llm.api_key missing in {cfg_path}")
     if not _config.get("embedding", {}).get("api_key"):

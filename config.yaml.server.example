@@ -9,7 +9,8 @@ llm:
   max_context: 131071                   # 模型上下文窗口大小（token），按实际填写
   rate_limit:
     rpm: 240                            # 每分钟最大请求数，按你的账号配额填
-    burst: 100                          # 突发上限
+    request_burst: 8                    # 短时请求突发量
+    max_inflight: 8                     # split/cluster/edit 合计 HTTP 并发上限
 
 embedding:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1  # 任何 OpenAI 兼容 embedding 端点
@@ -18,6 +19,8 @@ embedding:
   model: text-embedding-v4              # 换成你的 embedding 模型名
   api_key: PUT_YOUR_EMBEDDING_API_KEY_HERE
   dim: 1024                             # embedding 维度，填 0 则首次调用时自动探测
+  rate_limit:
+    max_inflight: 4                     # embedding 独立 HTTP 并发上限
 
 # ===== Server runtime =====
 server:
@@ -43,8 +46,21 @@ canary:
 watcher:
   poll_interval: 30      # 每隔 30 秒扫描一次所有 watch_dir，检测新轨迹
                          # 调小加快入库，但会增加 LLM 调用频率
-  max_concurrent: 4      # 每轮扫描最多同时跑 4 个 LLM 调用
-                         # 自建 vLLM 无并发限制时可调到 20~30
+
+agent_worker:
+  pools:
+    split:
+      workers: 24
+      llm_weight: 6
+    cluster:
+      workers: 8
+      batch_size: 8
+      llm_weight: 3
+    edit:
+      workers: 4
+      llm_weight: 1
+    embed:
+      workers: 4
 
 dashboard:
   enabled: true

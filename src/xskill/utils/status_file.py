@@ -1,7 +1,7 @@
-"""跨进程状态文件:常驻 watcher 定期写心跳，短命 profile-refresh 写一轮结果，
-常驻 api 进程的 /watcher/status、/stats 端点读它们派生状态。
+"""跨进程状态文件:常驻 agent-worker 定期写心跳，短命 profile-refresh 写一轮结果，
+常驻 api 进程的 /agent-worker/status、/watcher/status、/stats 端点读取状态。
 
-watcher / 画像拆成独立子进程后,api 进程不再持有它们的内存对象(原来
+agent-worker / 画像拆成独立子进程后,api 进程不再持有它们的内存对象(原来
 ``_watcher_ref["instance"].stats`` / ``_profile_refresh_ref["instance"].metrics``),
 故改经磁盘 JSON 通信。写为原子(临时文件 + os.replace),避免读到半截 JSON。
 """
@@ -17,6 +17,7 @@ from typing import Optional
 logger = logging.getLogger("xskill.utils.status_file")
 
 WATCHER_STATUS_FILE = "watcher_status.json"
+AGENT_WORKER_STATUS_FILE = "agent_worker_status.json"
 PROFILE_STATUS_FILE = "profile_refresh_status.json"
 
 

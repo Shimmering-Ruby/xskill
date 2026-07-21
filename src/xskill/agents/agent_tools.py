@@ -77,6 +77,8 @@ class AgentToolContext:
     default_traj_root: Path | None = None
     spill_root: Path | None = None
     usage_ledger: Any = None
+    cluster_write_queue: Any = None
+    cluster_result_recorder: Any = None
     grep_fallback_warned: bool = False
 
     def __post_init__(self) -> None:
@@ -106,6 +108,8 @@ def create_agent_tool_context(
     default_traj_root=None,
     spill_root=None,
     usage_ledger=None,
+    cluster_write_queue=None,
+    cluster_result_recorder=None,
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -124,6 +128,8 @@ def create_agent_tool_context(
         ),
         spill_root=Path(spill_root) if spill_root is not None else None,
         usage_ledger=usage_ledger,
+        cluster_write_queue=cluster_write_queue,
+        cluster_result_recorder=cluster_result_recorder,
     )
 
 
@@ -207,6 +213,8 @@ class AgentToolConfig:
             "default_traj_root": current.default_traj_root,
             "spill_root": current.spill_root,
             "usage_ledger": current.usage_ledger,
+            "cluster_write_queue": current.cluster_write_queue,
+            "cluster_result_recorder": current.cluster_result_recorder,
             "grep_fallback_warned": current.grep_fallback_warned,
         }
 
@@ -220,6 +228,8 @@ class AgentToolConfig:
             default_traj_root=snapshot.get("default_traj_root"),
             spill_root=snapshot.get("spill_root"),
             usage_ledger=snapshot.get("usage_ledger"),
+            cluster_write_queue=snapshot.get("cluster_write_queue"),
+            cluster_result_recorder=snapshot.get("cluster_result_recorder"),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()
@@ -289,6 +299,26 @@ class AgentToolConfig:
 
 
 agent_tool_config = AgentToolConfig()
+
+
+def _run_cluster_mutation(operation):
+    """Run one ClusterAgent filesystem mutation in queue order."""
+    context = current_agent_tool_context()
+    queue = context.cluster_write_queue
+    if queue is None:
+        return operation()
+
+    def run_bound():
+        with use_agent_tool_context(context):
+            return operation()
+
+    return queue.call(run_bound)
+
+
+def _record_cluster_result(atom_id: str, skill_name: str, weightscore: int) -> None:
+    recorder = current_agent_tool_context().cluster_result_recorder
+    if recorder is not None:
+        recorder.record(atom_id, skill_name, weightscore)
 
 
 def init_atom_task_tool_context(
@@ -921,12 +951,15 @@ def new_skill_folder(skill_name: str, description: str) -> str:
                 "（2-3 句中文，让后续 cluster agent 能判断同类）")
     slug = _slugify(skill_name)
     target = skill_dir / slug
-    if target.exists():
-        return f"already exists: {target}"
-    # 初始化 git + baby 分支 + stub SKILL.md
-    from xskill.skill.git import init_skill_repo_on_baby
-    init_skill_repo_on_baby(str(target), name=slug, description=desc)
-    return f"created on baby branch: {target}  desc={desc[:60]!r}"
+
+    def mutate():
+        if target.exists():
+            return f"already exists: {target}"
+        from xskill.skill.git import init_skill_repo_on_baby
+        init_skill_repo_on_baby(str(target), name=slug, description=desc)
+        return f"created on baby branch: {target}  desc={desc[:60]!r}"
+
+    return _run_cluster_mutation(mutate)
 
 
 @tool(name="skill_read")
@@ -1003,17 +1036,21 @@ def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
             "error: weightscore must be 1..10 "
             f"(got {weightscore_value})"
         )
-    new_flags, buffer_total = C.add_atom_contributions(
-        target,
-        [(atom_id, weightscore_value, "")],
-    )
-    was_new = new_flags[0]
-    verb = "new" if was_new else "overwrite"
-    return (
-        f"{verb}: skill={slug} atom={atom_id} "
-        f"weightscore={weightscore_value} "
-        f"buffer_total={buffer_total}/10"
-    )
+    def mutate():
+        new_flags, buffer_total = C.add_atom_contributions(
+            target,
+            [(atom_id, weightscore_value, "")],
+        )
+        _record_cluster_result(atom_id, slug, weightscore_value)
+        was_new = new_flags[0]
+        verb = "new" if was_new else "overwrite"
+        return (
+            f"{verb}: skill={slug} atom={atom_id} "
+            f"weightscore={weightscore_value} "
+            f"buffer_total={buffer_total}/10"
+        )
+
+    return _run_cluster_mutation(mutate)
 
 
 class CandidateTaskInput(BaseModel):
@@ -1094,17 +1131,24 @@ def add_tasks_to_skill(
             return "error: each task.note must be a string"
         contributions.append((atom_id, weightscore_value, note))
 
-    new_flags, buffer_total = C.add_atom_contributions(
-        target,
-        contributions,
-    )
-    new_count = sum(new_flags)
-    overwrite_count = len(new_flags) - new_count
-    return (
-        f"batched: skill={slug} atoms={len(new_flags)} "
-        f"new={new_count} overwrite={overwrite_count} "
-        f"buffer_total={buffer_total}/10"
-    )
+    def mutate():
+        new_flags, buffer_total = C.add_atom_contributions(
+            target,
+            contributions,
+        )
+        for contribution_atom_id, contribution_score, _note in contributions:
+            _record_cluster_result(
+                contribution_atom_id, slug, contribution_score,
+            )
+        new_count = sum(new_flags)
+        overwrite_count = len(new_flags) - new_count
+        return (
+            f"batched: skill={slug} atoms={len(new_flags)} "
+            f"new={new_count} overwrite={overwrite_count} "
+            f"buffer_total={buffer_total}/10"
+        )
+
+    return _run_cluster_mutation(mutate)
 
 
 @tool(name="score_task")
@@ -1119,13 +1163,16 @@ def score_task(atom_id: str, score: int) -> str:
         return f"error: score must be int 1..10 (got {score!r})"
     if not (1 <= sc <= 10):
         return f"error: score must be 1..10 (got {sc})"
-    try:
-        a = store.load(atom_id)
-    except FileNotFoundError as e:
-        return f"error: {e}"
-    a.ux_score = sc
-    store.save(a)
-    return f"scored: {atom_id} → {sc}"
+    def mutate():
+        try:
+            atom = store.load(atom_id)
+        except FileNotFoundError as error:
+            return f"error: {error}"
+        atom.ux_score = sc
+        store.save(atom)
+        return f"scored: {atom_id} → {sc}"
+
+    return _run_cluster_mutation(mutate)
 
 
 @tool(name="add_task")
@@ -1747,19 +1794,22 @@ def move_task_to(skill_from: str, skill_to: str, atom_id: str) -> str:
         return f"noop: 源和目标是同一 skill ({from_slug})"
     from_path = skill_dir / from_slug
     to_path = skill_dir / to_slug
-    if not from_path.is_dir():
-        return f"error: source skill {from_slug} not found"
-    if not to_path.is_dir():
-        return f"error: target skill {to_slug} not found"
 
-    weightscore = C.move_atom_contribution(
-        from_path,
-        to_path,
-        atom_id,
-    )
-    if weightscore is None:
-        return f"error: atom_id {atom_id} 不在 {from_slug} buffer 中"
+    def mutate():
+        if not from_path.is_dir():
+            return f"error: source skill {from_slug} not found"
+        if not to_path.is_dir():
+            return f"error: target skill {to_slug} not found"
+        weightscore = C.move_atom_contribution(
+            from_path,
+            to_path,
+            atom_id,
+        )
+        if weightscore is None:
+            return f"error: atom_id {atom_id} 不在 {from_slug} buffer 中"
+        _record_cluster_result(atom_id, to_slug, weightscore)
+        logger.info(f"moved task: atom={atom_id} {from_slug} → {to_slug}")
+        return (f"moved: atom={atom_id} from {from_slug} to {to_slug} "
+                f"(weightscore={weightscore})")
 
-    logger.info(f"moved task: atom={atom_id} {from_slug} → {to_slug}")
-    return (f"moved: atom={atom_id} from {from_slug} to {to_slug} "
-            f"(weightscore={weightscore})")
+    return _run_cluster_mutation(mutate)

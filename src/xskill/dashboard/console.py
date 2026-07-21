@@ -219,9 +219,11 @@ class ConfigPayload(BaseModel):
 
 
 # 热加载范围显式声明(2.9):这些段改完即生效(读方每次现取);
-# llm/watch_dirs 涉及进程级资源(client 连接池/watcher 注册),改动需重启 serve。
+# llm/embedding/agent_worker/watcher 涉及进程级资源，改动需重启 serve。
 HOT_RELOAD_SECTIONS = ("dashboard", "canary", "recommend", "skillhub")
-RESTART_SECTIONS = ("llm", "llm_skill", "embedding", "watcher", "team")
+RESTART_SECTIONS = (
+    "llm", "llm_skill", "embedding", "watcher", "agent_worker", "team",
+)
 # team 段整体是重启域(join_token/路径/registry 接线),但这几个子键是纯调优数字,
 # 由 api.live_manifest_tuning() 每请求现取 → 改它们不需要重启。只有改到 team
 # 下的其它子键才真要重启,否则 needs_restart 会把已经热的改动误标成要重启。
