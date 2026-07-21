@@ -27,14 +27,15 @@ def build_watcher(config: dict, *, home_root: Path | None = None,
     """
     from xskill.config import (
         XSKILL_HOME,
-        agent_worker_config,
         get_registry_db_path,
         get_skill_dir,
+        normalize_runtime_config,
     )
     from xskill.pipeline.runner import DirectoryWatcher
     from xskill.usage import UsageLedger, load_price_table
     from xskill.utils.llm import create_embed_client, create_llm_client
 
+    config = normalize_runtime_config(config)
     state_root = (
         Path(xskill_home) if xskill_home is not None else XSKILL_HOME
     ).expanduser().resolve()
@@ -71,7 +72,7 @@ def build_watcher(config: dict, *, home_root: Path | None = None,
         db_path=resolved_db_path,
     )
     watcher_cfg = config.get("watcher", {})
-    worker_cfg = agent_worker_config(config)
+    worker_cfg = config["agent_worker"]
     return DirectoryWatcher(
         llm=create_llm_client(config, usage_ledger=usage_ledger),
         embed_client=create_embed_client(

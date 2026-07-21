@@ -7,6 +7,7 @@ config.py — 全局路径与配置加载
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -26,6 +27,19 @@ LOGS_DIR = XSKILL_HOME / "logs"
 
 _config: dict = {}
 _overrides: dict = {}
+
+DEFAULT_AGENT_WORKER_POOLS = {
+    "split": {"workers": 24, "llm_weight": 6},
+    "cluster": {"workers": 8, "batch_size": 8, "llm_weight": 3},
+    "edit": {"workers": 4, "llm_weight": 1},
+    "embed": {"workers": 4},
+}
+DEFAULT_LLM_RATE_LIMIT = {
+    "rpm": 240,
+    "request_burst": 8,
+    "max_inflight": 8,
+}
+DEFAULT_EMBEDDING_MAX_INFLIGHT = 4
 
 
 def set_overrides(**kwargs):
@@ -278,87 +292,162 @@ def _positive_int(value, path: str) -> int:
     return value
 
 
-def agent_worker_config(config_data: dict) -> dict:
-    """Validate and normalize the v0.6.28 four-pool configuration."""
+def _positive_int_or_default(value, path: str, default: int) -> int:
+    if value is None:
+        return default
+    return _positive_int(value, path)
+
+
+def normalize_runtime_config(config_data: dict) -> dict:
+    """Return a validated runtime copy compatible with v0.6.27 configs.
+
+    Compatibility defaults are deliberately applied in memory.  The user's
+    YAML remains untouched, while every runtime consumer sees the canonical
+    four-pool and request-limit shape introduced in v0.6.28.
+    """
     if not isinstance(config_data, dict):
         raise ValueError("config.yaml 顶层必须是 mapping")
-    watcher = config_data.get("watcher") or {}
+    runtime_config = copy.deepcopy(config_data)
+
+    watcher = runtime_config.get("watcher") or {}
     if not isinstance(watcher, dict):
         raise ValueError("watcher 必须是 mapping")
+    legacy_max_concurrent = None
     if "max_concurrent" in watcher:
-        raise ValueError(
-            "旧配置 watcher.max_concurrent 已移除；请分别配置 "
-            "agent_worker.pools.split/cluster/edit/embed.workers"
+        legacy_max_concurrent = _positive_int(
+            watcher["max_concurrent"], "watcher.max_concurrent",
         )
+    legacy_batch_size = None
     if "cluster_batch_size" in watcher:
-        raise ValueError(
-            "旧配置 watcher.cluster_batch_size 已移至 "
-            "agent_worker.pools.cluster.batch_size"
+        legacy_batch_size = _positive_int(
+            watcher["cluster_batch_size"], "watcher.cluster_batch_size",
         )
+    watcher.pop("max_concurrent", None)
+    watcher.pop("cluster_batch_size", None)
+    runtime_config["watcher"] = watcher
 
-    for llm_path, llm_cfg in (
-        ("llm", config_data.get("llm") or {}),
-        ("llm_skill", config_data.get("llm_skill") or {}),
-    ):
-        if not isinstance(llm_cfg, dict):
-            raise ValueError(f"{llm_path} 必须是 mapping")
-        rate_cfg = llm_cfg.get("rate_limit") or {}
-        if not isinstance(rate_cfg, dict):
-            raise ValueError(f"{llm_path}.rate_limit 必须是 mapping")
-        if "burst" in rate_cfg:
-            raise ValueError(
-                f"旧配置 {llm_path}.rate_limit.burst 已移除；请求突发量改用 "
-                f"{llm_path}.rate_limit.request_burst，TPM 突发量单独使用 "
-                f"{llm_path}.rate_limit.token_burst"
-            )
-
-    worker = config_data.get("agent_worker")
-    if not isinstance(worker, dict) or not isinstance(worker.get("pools"), dict):
-        raise ValueError(
-            "缺少 agent_worker.pools；请配置 split、cluster、edit、embed 四个池"
-        )
-    pools = worker["pools"]
-    normalized: dict[str, dict] = {}
-    for name in ("split", "cluster", "edit", "embed"):
+    worker = runtime_config.get("agent_worker")
+    if worker is None:
+        worker = {}
+    if not isinstance(worker, dict):
+        raise ValueError("agent_worker 必须是 mapping")
+    pools = worker.get("pools")
+    if pools is None:
+        pools = {}
+    if not isinstance(pools, dict):
+        raise ValueError("agent_worker.pools 必须是 mapping")
+    normalized_pools: dict[str, dict] = {}
+    for name, defaults in DEFAULT_AGENT_WORKER_POOLS.items():
         pool = pools.get(name)
+        if pool is None:
+            pool = {}
         if not isinstance(pool, dict):
-            raise ValueError(f"缺少 agent_worker.pools.{name}")
+            raise ValueError(f"agent_worker.pools.{name} 必须是 mapping")
         if "queue_size" in pool:
             raise ValueError(
                 f"不接受 agent_worker.pools.{name}.queue_size；等待容量自动为 workers × 2"
             )
-        normalized[name] = dict(pool)
-        normalized[name]["workers"] = _positive_int(
-            pool.get("workers"), f"agent_worker.pools.{name}.workers"
+        normalized_pool = {**defaults, **pool}
+        normalized_pool["workers"] = _positive_int(
+            normalized_pool["workers"], f"agent_worker.pools.{name}.workers"
         )
         if name in ("split", "cluster", "edit"):
-            normalized[name]["llm_weight"] = _positive_int(
-                pool.get("llm_weight"),
+            normalized_pool["llm_weight"] = _positive_int(
+                normalized_pool["llm_weight"],
                 f"agent_worker.pools.{name}.llm_weight",
             )
-    normalized["cluster"]["batch_size"] = _positive_int(
-        pools["cluster"].get("batch_size"),
+        normalized_pools[name] = normalized_pool
+    cluster_batch_size = normalized_pools["cluster"].get("batch_size")
+    if "cluster" not in pools or "batch_size" not in pools["cluster"]:
+        cluster_batch_size = (
+            legacy_batch_size
+            if legacy_batch_size is not None
+            else DEFAULT_AGENT_WORKER_POOLS["cluster"]["batch_size"]
+        )
+    normalized_pools["cluster"]["batch_size"] = _positive_int(
+        cluster_batch_size,
         "agent_worker.pools.cluster.batch_size",
     )
+    worker = dict(worker)
+    worker["pools"] = normalized_pools
+    runtime_config["agent_worker"] = worker
 
-    llm_rate = (config_data.get("llm") or {}).get("rate_limit")
+    llm = runtime_config.get("llm") or {}
+    if not isinstance(llm, dict):
+        raise ValueError("llm 必须是 mapping")
+    llm = dict(llm)
+    llm_rate = llm.get("rate_limit") or {}
     if not isinstance(llm_rate, dict):
-        raise ValueError("缺少 llm.rate_limit")
-    for key in ("rpm", "request_burst", "max_inflight"):
-        _positive_int(llm_rate.get(key), f"llm.rate_limit.{key}")
+        raise ValueError("llm.rate_limit 必须是 mapping")
+    llm_rate = dict(llm_rate)
+    legacy_burst = llm_rate.pop("burst", None)
+    if legacy_burst is not None:
+        legacy_burst = _positive_int(legacy_burst, "llm.rate_limit.burst")
+    llm_rate["rpm"] = _positive_int_or_default(
+        llm_rate.get("rpm"), "llm.rate_limit.rpm",
+        DEFAULT_LLM_RATE_LIMIT["rpm"],
+    )
+    llm_rate["request_burst"] = _positive_int_or_default(
+        llm_rate.get("request_burst"), "llm.rate_limit.request_burst",
+        legacy_burst or DEFAULT_LLM_RATE_LIMIT["request_burst"],
+    )
+    llm_rate["max_inflight"] = _positive_int_or_default(
+        llm_rate.get("max_inflight"), "llm.rate_limit.max_inflight",
+        legacy_max_concurrent or DEFAULT_LLM_RATE_LIMIT["max_inflight"],
+    )
     if "tpm" in llm_rate:
-        _positive_int(llm_rate["tpm"], "llm.rate_limit.tpm")
+        tpm = _positive_int(llm_rate["tpm"], "llm.rate_limit.tpm")
+        llm_rate["token_burst"] = _positive_int_or_default(
+            llm_rate.get("token_burst"), "llm.rate_limit.token_burst",
+            legacy_burst or max(1, tpm // 6),
+        )
     if "token_burst" in llm_rate:
         _positive_int(llm_rate["token_burst"], "llm.rate_limit.token_burst")
+    llm["rate_limit"] = llm_rate
+    runtime_config["llm"] = llm
 
-    embedding_rate = (config_data.get("embedding") or {}).get("rate_limit")
+    llm_skill = runtime_config.get("llm_skill")
+    if llm_skill is not None:
+        if not isinstance(llm_skill, dict):
+            raise ValueError("llm_skill 必须是 mapping")
+        llm_skill = dict(llm_skill)
+        if "rate_limit" in llm_skill:
+            skill_rate = llm_skill.get("rate_limit") or {}
+            if not isinstance(skill_rate, dict):
+                raise ValueError("llm_skill.rate_limit 必须是 mapping")
+            skill_rate = dict(skill_rate)
+            skill_burst = skill_rate.pop("burst", None)
+            if skill_burst is not None:
+                skill_burst = _positive_int(
+                    skill_burst, "llm_skill.rate_limit.burst",
+                )
+                skill_rate.setdefault("request_burst", skill_burst)
+                if "tpm" in skill_rate:
+                    skill_rate.setdefault("token_burst", skill_burst)
+            llm_skill["rate_limit"] = skill_rate
+        runtime_config["llm_skill"] = llm_skill
+
+    embedding = runtime_config.get("embedding") or {}
+    if not isinstance(embedding, dict):
+        raise ValueError("embedding 必须是 mapping")
+    embedding = dict(embedding)
+    embedding_rate = embedding.get("rate_limit") or {}
     if not isinstance(embedding_rate, dict):
-        raise ValueError("缺少 embedding.rate_limit.max_inflight")
-    _positive_int(
+        raise ValueError("embedding.rate_limit 必须是 mapping")
+    embedding_rate = dict(embedding_rate)
+    embedding_rate["max_inflight"] = _positive_int_or_default(
         embedding_rate.get("max_inflight"),
         "embedding.rate_limit.max_inflight",
+        DEFAULT_EMBEDDING_MAX_INFLIGHT,
     )
-    return {"pools": normalized}
+    embedding["rate_limit"] = embedding_rate
+    runtime_config["embedding"] = embedding
+    return runtime_config
+
+
+def agent_worker_config(config_data: dict) -> dict:
+    """Return the validated four-pool config, including legacy defaults."""
+    return normalize_runtime_config(config_data)["agent_worker"]
 
 
 def load_config(path: Optional[Path] = None) -> dict:
@@ -376,8 +465,8 @@ def load_config(path: Optional[Path] = None) -> dict:
             f"or call config.ensure_config_exists()."
         )
     with open(cfg_path, encoding="utf-8") as f:
-        _config = yaml.safe_load(f) or {}
-    agent_worker_config(_config)
+        raw_config = yaml.safe_load(f) or {}
+    _config = normalize_runtime_config(raw_config)
     if not _config.get("llm", {}).get("api_key"):
         raise KeyError(f"llm.api_key missing in {cfg_path}")
     if not _config.get("embedding", {}).get("api_key"):
