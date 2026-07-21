@@ -155,7 +155,7 @@ def ensure_claude_code_install(
     *,
     target_root: Path,
 ) -> Optional[dict]:
-    """按安装历史恢复 Claude Code 目标，不在 sweep 启动时强制回 main。"""
+    """按安装历史恢复 Claude Code 目标，不在 watcher 启动时强制回 main。"""
     from xskill.canary import canary_generation
 
     resolved_skill_path = Path(skill_path).resolve()
@@ -1297,7 +1297,7 @@ class CCSessionIngester:
             self._stop.wait(self.poll_interval)
 
     def run_once(self) -> list[dict]:
-        """跨进程串行一轮桥接，避免 sweep 与轻量调度器重复写同一轨迹。"""
+        """跨进程串行一轮桥接，避免 watcher 与轻量调度器重复写同一轨迹。"""
         from xskill.ecosystems._history import exclusive_path_lock
 
         lock_root = (

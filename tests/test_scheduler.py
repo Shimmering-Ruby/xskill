@@ -61,8 +61,8 @@ def test_run_once_invokes_subprocess_with_command_and_timeout(monkeypatch):
         return process
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    _sched(command=["xskill", "sweep", "--once"], timeout=42.0)._run_once()
-    assert seen["command"] == ["xskill", "sweep", "--once"]
+    _sched(command=["xskill", "profile-refresh"], timeout=42.0)._run_once()
+    assert seen["command"] == ["xskill", "profile-refresh"]
     assert process.communicate_timeout == 42.0
     assert seen["kwargs"]["stdout"] is subprocess.PIPE
     assert seen["kwargs"]["stderr"] is subprocess.PIPE
@@ -141,7 +141,7 @@ def test_stop_joins_thread_promptly():
 
 
 def test_nonpersistent_child_is_terminated_and_reaped_on_stop(monkeypatch):
-    """停服不能遗留仍在运行或已退出未回收的 sweep 子进程。"""
+    """停服不能遗留仍在运行或已退出未回收的短命子进程。"""
     started = threading.Event()
     finished = threading.Event()
 
@@ -235,7 +235,7 @@ def test_subprocess_is_windowless_and_gbk_safe(monkeypatch):
     ① 不带无窗 flag → Windows 上 `xskill serve` 每 30s 弹一次 cmd 黑窗给用户;
     ② text=True 不带 errors → 中文 Windows 上子进程输出按 cp936 strict 解码,
        非法字节抛 UnicodeDecodeError,而 _run_once 只接 Timeout/OSError,
-       异常会穿出去打死调度线程 → sweep/画像从此永不再跑。
+       异常会穿出去打死调度线程 → 画像从此永不再跑。
     """
     captured: dict = {}
 
@@ -256,7 +256,7 @@ def test_subprocess_is_windowless_and_gbk_safe(monkeypatch):
 
 def test_loop_survives_run_once_exception(monkeypatch, caplog):
     """回归:_loop 无兜底时,_run_once 漏网异常会让 daemon 调度线程静默猝死,
-    进程还活着但 sweep/画像再也不跑。异常必须被吞掉+落日志,下轮继续。"""
+    进程还活着但画像再也不跑。异常必须被吞掉+落日志,下轮继续。"""
     calls: list[int] = []
     scheduler = _sched()
 

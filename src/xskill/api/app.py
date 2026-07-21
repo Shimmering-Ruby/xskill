@@ -928,20 +928,19 @@ def create_app(home_root: Path | str | None = None,
     # -- Watcher status endpoint --
     @app.get("/api/v1/watcher/status")
     async def api_watcher_status():
-        # watcher 拆为短命 sweep 子进程,web 进程不再持有其内存对象——读子进程每轮
-        # 落盘的状态文件(最近一轮 sweep 的 ok/stats);尚无子进程跑过则为未启动。
+        # watcher 位于常驻子进程，web 进程不持有其内存对象；
+        # 读子进程定期落盘的心跳和统计。
         from xskill.config import XSKILL_HOME
         from xskill.utils.status_file import WATCHER_STATUS_FILE, read_status_file
         status = read_status_file(XSKILL_HOME / WATCHER_STATUS_FILE)
         if status is None:
-            return {"running": False, "message": "no sweep has run yet"}
+            return {"running": False, "message": "watcher has not started yet"}
         return status
 
     # -- Usage / cost stats (Issue #43) --
     @app.get("/api/v1/stats")
     async def api_stats():
-        # watcher / 画像均拆为短命子进程,web 进程不再持有其内存对象——两者都改读
-        # 子进程每轮落盘的状态文件(最近一轮的 ok/stats);尚无子进程跑过则为 None。
+        # watcher 读常驻子进程心跳；画像仍读短命子进程的最近一轮状态。
         from xskill.config import XSKILL_HOME
         from xskill.utils.status_file import (
             PROFILE_STATUS_FILE, WATCHER_STATUS_FILE, read_status_file,
@@ -993,7 +992,7 @@ def create_app(home_root: Path | str | None = None,
                 "LLM client could not be created — check ~/.xskill/config.yaml: "
                 "llm.base_url / llm.model / llm.api_key must all be valid"
             )
-        # 构造即校验(fail-loud):api 进程本身不 embed,实际 embed 在 sweep/profile
+        # 构造即校验(fail-loud):api 进程本身不 embed,实际 embed 在 watcher/profile
         # 子进程各自构造;这里仅确认配置可用,配错早报错。
         create_embed_client(_config)
         # data_dir 在 server 端点路径上不被消费（trajectory 搜索走 Registry），
@@ -1010,7 +1009,7 @@ def create_app(home_root: Path | str | None = None,
             _skill_dir,
         )
 
-        # 生态自动检测 + 一次性入库已迁到短命 sweep 子进程
+        # 生态自动检测 + 一次性入库已迁到常驻 watcher 子进程
         # (pipeline.watcher_factory.ingest_detected_ecosystems_once),web 进程不再起
         # 常驻 ingester 线程。
 
@@ -1151,33 +1150,33 @@ def create_app(home_root: Path | str | None = None,
                 logger.exception("team server context init failed")
                 raise
 
-        # watcher 拆为定时短命子进程(python -m xskill._workers sweep):每轮 spawn 一个子进程跑一轮
-        # 采集/拆分/聚类/灰度即退,重计算(含 30 线程池)全在独立子进程,GIL 与 web 事件
-        # 循环隔离——这是消除"watcher 烧核饿死探针"的根治。web 进程只留一个轻量调度线程
-        # (只 spawn+等子进程,I/O 阻塞不占事件循环)。多阶段流水线(split→embed→cluster→
-        # done)靠调度器按 poll_interval 反复 spawn 逐轮推进,与旧 daemon 逐 poll 等价。
-        from xskill.pipeline.scheduler import IntervalSubprocessScheduler as _SweepSched
+        # watcher 在常驻子进程中持续运行(python -m xskill._workers watcher)。web
+        # 进程只留一个轻量守护线程，负责启动、监测和异常退出后重启子进程；重计算
+        # 仍与 web 事件循环保持 GIL 隔离。DirectoryWatcher 自己按 poll_interval
+        # 持续扫描，Future 跨轮保留，不再等待一批全部结束后才启动下一轮。
+        from xskill.pipeline.scheduler import IntervalSubprocessScheduler as _WorkerSched
         poll_interval = float(_config.get("watcher", {}).get("poll_interval", 30))
-        sweep_timeout = float(
-            _config.get("server", {}).get("sweep_timeout", 1800)
-        )
-        sweep_command = [_sys.executable, "-m", "xskill._workers", "sweep"]
+        watcher_command = [_sys.executable, "-m", "xskill._workers", "watcher"]
         if team_server:
-            sweep_command.append("--server")
+            watcher_command.append("--server")
         else:
-            sweep_command.extend(["--home", str(ecosystem_home_root)])
-        sweep_scheduler = _SweepSched(
-            "sweep", sweep_command,
+            watcher_command.extend(["--home", str(ecosystem_home_root)])
+        watcher_scheduler = _WorkerSched(
+            "watcher", watcher_command,
             interval=poll_interval,
-            timeout=sweep_timeout,
+            timeout=5.0,
+            persistent=True,
         )
-        sweep_scheduler.start()
-        _schedulers.append(sweep_scheduler)
-        logger.info("sweep scheduler started (team_server=%s, every %.0fs via subprocess)",
-                    team_server, poll_interval)
+        watcher_scheduler.start()
+        _schedulers.append(watcher_scheduler)
+        logger.info(
+            "persistent watcher worker started (team_server=%s, poll every %.0fs)",
+            team_server,
+            poll_interval,
+        )
         if not team_server:
             ingest_interval = min(poll_interval, 1.0)
-            ingest_scheduler = _SweepSched(
+            ingest_scheduler = _WorkerSched(
                 "ecosystem-ingest",
                 [
                     _sys.executable,
@@ -1233,8 +1232,8 @@ def create_app(home_root: Path | str | None = None,
             finally:
                 from xskill.team.server.skill_manifest import set_recommend_engine
                 set_recommend_engine(None)
-        # watcher / ingester 已拆为短命 sweep 子进程,web 进程无常驻实例可停;
-        # 上面已 stop 全部 _schedulers(含 sweep 调度器),在跑的子进程由其 timeout 收敛。
+        # watcher / ingester 位于常驻子进程，web 进程无内存实例可停；上面 stop
+        # 全部调度器时会向子进程发 TERM 并等待其收敛。
 
     # 看板:仅当 config.dashboard.enabled 时挂载(默认不挂)
     from xskill.dashboard.mount import mount_dashboard

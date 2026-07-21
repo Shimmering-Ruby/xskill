@@ -1,5 +1,6 @@
-"""定时短命子进程调度器:daemon 线程周期性 spawn 一个短命子进程跑重活(sweep /
-画像 batch),算完即退。子进程在独立解释器进程里跑,GIL 与 web 事件循环彻底隔离。
+"""子进程调度器：支持守护常驻 worker 和定时运行短命任务。
+
+子进程在独立解释器进程里运行，GIL 与 web 事件循环隔离。
 
 沿用 ``team/client/updater.py`` AutoUpdater 的"daemon 线程 + Event.wait + 短命子进程
 (带 timeout 硬上限)"范式:
@@ -21,7 +22,7 @@ logger = logging.getLogger("xskill.pipeline.scheduler")
 
 
 class IntervalSubprocessScheduler:
-    """每隔 ``interval`` 秒 spawn 一次 ``command`` 短命子进程,算完即退。"""
+    """调度子进程；``persistent=True`` 时守护单个常驻子进程。"""
 
     def __init__(
         self,
@@ -115,7 +116,7 @@ class IntervalSubprocessScheduler:
         # 先等一个周期再首跑:避免 startup 瞬间与其它初始化抢资源(照 AutoUpdater)。
         # Event.wait 返回 True 表示被 stop 竖旗中断 → 退出循环。
         while not self._stop.wait(self._interval):
-            # 本线程是 daemon:任何漏网异常都会让它静默猝死,此后 sweep / 画像
+            # 本线程是 daemon:任何漏网异常都会让它静默猝死,此后画像
             # 永不再跑(进程还活着,只是不干活了)。照 daemon._tick 兜住并落日志。
             try:
                 self._run_once()

@@ -1,7 +1,7 @@
-"""跨进程状态文件:短命子进程(sweep / profile-refresh)把一轮结果原子写到磁盘,
-常驻 api 进程的 /watcher/status、/stats 端点读它派生状态。
+"""跨进程状态文件:常驻 watcher 定期写心跳，短命 profile-refresh 写一轮结果，
+常驻 api 进程的 /watcher/status、/stats 端点读它们派生状态。
 
-watcher / 画像拆成独立短命子进程后,api 进程不再持有它们的内存对象(原来
+watcher / 画像拆成独立子进程后,api 进程不再持有它们的内存对象(原来
 ``_watcher_ref["instance"].stats`` / ``_profile_refresh_ref["instance"].metrics``),
 故改经磁盘 JSON 通信。写为原子(临时文件 + os.replace),避免读到半截 JSON。
 """
@@ -22,7 +22,7 @@ PROFILE_STATUS_FILE = "profile_refresh_status.json"
 
 def write_status_file(path: Path, stats: dict, *, ok: bool,
                       error: Optional[str] = None) -> None:
-    """原子写一轮任务的结果状态。状态是观测数据,写失败只落 warning、不抛——
+    """原子写心跳或一轮任务结果。状态是观测数据,写失败只落 warning、不抛——
     绝不因为写不了状态文件而让子进程的核心任务失败(与后台刷新 best-effort 一致)。"""
     payload = {
         "ok": ok,
@@ -39,7 +39,7 @@ def write_status_file(path: Path, stats: dict, *, ok: bool,
 
 
 def read_status_file(path: Path) -> Optional[dict]:
-    """读最近一轮状态;文件不存在返回 None(尚无子进程跑过,合法状态,非错误)。"""
+    """读最近状态;文件不存在返回 None(子进程尚未启动)。"""
     if not path.is_file():
         return None
     try:

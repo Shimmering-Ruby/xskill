@@ -1,5 +1,4 @@
-"""块 2 watcher 短命子进程:sweep --once 跑一轮即退、server 跳过采集、失败可控;
-ingester 一次性入库调 run_once() 而非 start()(不起常驻线程)。"""
+"""常驻 watcher worker：生命周期、server 隔离、心跳和生态入库。"""
 from __future__ import annotations
 
 import threading
@@ -14,23 +13,29 @@ from xskill.utils.status_file import WATCHER_STATUS_FILE, read_status_file
 
 
 class _FakeWatcher:
-    def __init__(self, *, run_exception=None):
-        self.drained = False
+    def __init__(self, *, running_after_start=True, on_poll_hook=None):
+        self.started = False
+        self.stopped = False
+        self.is_running = False
+        self.running_after_start = running_after_start
+        self.on_poll_hook = on_poll_hook
         self.stats = {"polls": 1, "new_trajs": 0}
-        self.run_exception = run_exception
 
-    def run_once_and_drain(self):
-        if self.run_exception is not None:
-            raise self.run_exception
-        self.drained = True
+    def start(self):
+        self.started = True
+        self.is_running = self.running_after_start
+
+    def stop(self):
+        self.stopped = True
+        self.is_running = False
 
 
-def _patch_sweep(
+def _patch_watcher(
     monkeypatch,
     tmp_path,
     *,
     build_exception=None,
-    run_exception=None,
+    running_after_start=True,
 ):
     monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path)
 
@@ -41,10 +46,13 @@ def _patch_sweep(
 
     built = []
 
-    def fake_build(_config, **_kwargs):
+    def fake_build(_config, **kwargs):
         if build_exception is not None:
             raise build_exception
-        watcher = _FakeWatcher(run_exception=run_exception)
+        watcher = _FakeWatcher(
+            running_after_start=running_after_start,
+            on_poll_hook=kwargs.get("on_poll_hook"),
+        )
         built.append(watcher)
         return watcher
 
@@ -57,6 +65,7 @@ def _patch_sweep(
         *,
         registry_db_path,
         install_history_path,
+        excluded_ecosystems=None,
     ):
         ingest_calls.append(
             (
@@ -64,6 +73,7 @@ def _patch_sweep(
                 skill_dir,
                 registry_db_path,
                 install_history_path,
+                excluded_ecosystems,
             )
         )
 
@@ -71,54 +81,122 @@ def _patch_sweep(
         "xskill.pipeline.watcher_factory.build_watcher", fake_build)
     monkeypatch.setattr(
         "xskill.pipeline.watcher_factory.ingest_detected_ecosystems_once", fake_ingest)
+    monkeypatch.setattr("xskill.utils.shutdown.request_shutdown", Mock())
     return built, ingest_calls
 
 
-def test_sweep_server_mode_skips_ingest_and_writes_ok(tmp_path, monkeypatch):
-    built, ingest_calls = _patch_sweep(monkeypatch, tmp_path)
-    rc = _workers.run_sweep_once(server=True)
+def test_watcher_server_mode_starts_and_stops_persistent_instance(
+    tmp_path, monkeypatch,
+):
+    built, ingest_calls = _patch_watcher(monkeypatch, tmp_path)
+    stop_event = threading.Event()
+    stop_event.set()
+
+    rc = _workers.run_watcher_forever(server=True, stop_event=stop_event)
+
     assert rc == 0
-    assert ingest_calls == []  # server 模式跳过本机生态采集
-    assert built[0].drained is True  # 跑了一轮 run_once_and_drain
+    assert ingest_calls == []
+    assert built[0].started is True
+    assert built[0].stopped is True
+    assert built[0].on_poll_hook is None
     status = read_status_file(tmp_path / WATCHER_STATUS_FILE)
     assert status["ok"] is True
     assert status["stats"] == {"polls": 1, "new_trajs": 0}
 
 
-def test_sweep_standalone_runs_ecosystem_ingest(tmp_path, monkeypatch):
-    _built, ingest_calls = _patch_sweep(monkeypatch, tmp_path)
-    rc = _workers.run_sweep_once(server=False)
+def test_watcher_standalone_ingests_on_each_poll(tmp_path, monkeypatch):
+    built, ingest_calls = _patch_watcher(monkeypatch, tmp_path)
+    stop_event = threading.Event()
+    stop_event.set()
+
+    rc = _workers.run_watcher_forever(server=False, stop_event=stop_event)
+
     assert rc == 0
-    assert len(ingest_calls) == 1  # 非 server 模式跑一次生态一次性入库
+    assert ingest_calls == []
+    built[0].on_poll_hook()
+    assert len(ingest_calls) == 1
+    assert ingest_calls[0][-1] == {"claude_code"}
 
 
-def test_sweep_failure_writes_error_status_and_returns_1(tmp_path, monkeypatch):
-    _patch_sweep(
+def test_internal_cli_dispatches_to_persistent_watcher(monkeypatch, tmp_path):
+    run_watcher = Mock(return_value=0)
+    monkeypatch.setattr(_workers, "run_watcher_forever", run_watcher)
+    monkeypatch.setattr("xskill.utils.logging.configure_logging", Mock())
+    monkeypatch.setattr("xskill.config.get_logs_dir", Mock(return_value=tmp_path))
+
+    assert _workers.main([
+        "watcher", "--server", "--home", str(tmp_path),
+    ]) == 0
+    run_watcher.assert_called_once_with(server=True, home=str(tmp_path))
+
+
+def test_watcher_build_failure_writes_error_status(tmp_path, monkeypatch):
+    _patch_watcher(
         monkeypatch,
         tmp_path,
         build_exception=RuntimeError("llm down"),
     )
-    rc = _workers.run_sweep_once(server=True)
+    rc = _workers.run_watcher_forever(
+        server=True,
+        stop_event=threading.Event(),
+        status_interval=0.01,
+    )
     assert rc == 1
     status = read_status_file(tmp_path / WATCHER_STATUS_FILE)
     assert status["ok"] is False
     assert "llm down" in status["error"]
 
 
-def test_sweep_run_failure_preserves_watcher_stats(tmp_path, monkeypatch):
-    _patch_sweep(
+def test_watcher_thread_exit_is_reported_and_preserves_stats(
+    tmp_path, monkeypatch,
+):
+    _patch_watcher(
         monkeypatch,
         tmp_path,
-        run_exception=RuntimeError("drain failed"),
+        running_after_start=False,
     )
 
-    return_code = _workers.run_sweep_once(server=True)
+    return_code = _workers.run_watcher_forever(
+        server=True,
+        stop_event=threading.Event(),
+        status_interval=0.01,
+    )
 
     assert return_code == 1
     status = read_status_file(tmp_path / WATCHER_STATUS_FILE)
     assert status["ok"] is False
     assert status["stats"] == {"polls": 1, "new_trajs": 0}
-    assert "drain failed" in status["error"]
+    assert "exited unexpectedly" in status["error"]
+
+
+def test_persistent_watcher_starts_next_poll_while_future_is_still_running(
+    monkeypatch,
+):
+    """长尾 Future 不得阻塞下一轮扫描。"""
+    from xskill.pipeline.runner import DirectoryWatcher
+
+    watcher = DirectoryWatcher(poll_interval=0.01, max_concurrent=1)
+    release_slow = threading.Event()
+    second_poll = threading.Event()
+    poll_count = 0
+
+    def fake_scan():
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            future = watcher._pool.submit(release_slow.wait, 2.0)
+            watcher._futures[future] = {"stage": "test"}
+        elif poll_count == 2:
+            second_poll.set()
+
+    monkeypatch.setattr(watcher, "_scan_once", fake_scan)
+    watcher.start()
+    try:
+        assert second_poll.wait(1.0)
+        assert not next(iter(watcher._futures)).done()
+    finally:
+        release_slow.set()
+        watcher.stop()
 
 
 @pytest.mark.parametrize("use_explicit_home", [False, True])
@@ -155,25 +233,20 @@ def test_worker_passes_ecosystem_home_separately_from_xskill_home(
         "xskill.pipeline.watcher_factory.build_watcher",
         fake_build,
     )
+    monkeypatch.setattr("xskill.utils.shutdown.request_shutdown", Mock())
     home_argument = str(explicit_home) if use_explicit_home else None
+    stop_event = threading.Event()
+    stop_event.set()
 
-    assert _workers.run_sweep_once(home=home_argument) == 0
+    assert _workers.run_watcher_forever(
+        home=home_argument,
+        stop_event=stop_event,
+    ) == 0
+    captured_arguments[0][2]["on_poll_hook"]()
     expected_home = explicit_home.resolve() if use_explicit_home else Path.home()
     expected_skill_dir = (xskill_home / "skill").resolve()
     expected_registry_db_path = (xskill_home / "registry.db").resolve()
     assert captured_arguments == [
-        (
-            "ingest",
-            {"watcher": {}, "skill_dir": "skill"},
-            expected_home,
-            expected_skill_dir,
-            {
-                "registry_db_path": expected_registry_db_path,
-                "install_history_path": (
-                    xskill_home / "install_history.jsonl"
-                ).resolve(),
-            },
-        ),
         (
             "build",
             {"watcher": {}, "skill_dir": "skill"},
@@ -184,6 +257,20 @@ def test_worker_passes_ecosystem_home_separately_from_xskill_home(
                 "skill_dir": expected_skill_dir,
                 "home_root": expected_home,
                 "server_mode": False,
+                "on_poll_hook": captured_arguments[0][2]["on_poll_hook"],
+            },
+        ),
+        (
+            "ingest",
+            {"watcher": {}, "skill_dir": "skill"},
+            expected_home,
+            expected_skill_dir,
+            {
+                "registry_db_path": expected_registry_db_path,
+                "install_history_path": (
+                    xskill_home / "install_history.jsonl"
+                ).resolve(),
+                "excluded_ecosystems": {"claude_code"},
             },
         ),
     ]
@@ -283,76 +370,6 @@ class _FakeIngester:
         _FakeIngester.calls["start"] += 1
 
 
-def test_run_once_and_drain_sequence_and_pool_shutdown(monkeypatch):
-    """空轮次也收割一次，退出后线程池已关闭。"""
-    import pytest
-
-    from xskill.pipeline.runner import DirectoryWatcher
-
-    watcher = DirectoryWatcher()
-    order = []
-
-    def fake_scan():
-        order.append("scan")
-
-    def fake_harvest():
-        order.append("harvest")
-
-    monkeypatch.setattr(watcher, "_scan_once", fake_scan)
-    monkeypatch.setattr(watcher, "_harvest", fake_harvest)
-    watcher.run_once_and_drain()
-    assert order == ["scan", "harvest"]
-    # 线程池已 shutdown:再 submit 抛 RuntimeError(无残留可复用的池)。
-    with pytest.raises(RuntimeError):
-        watcher._pool.submit(len, [])
-
-
-def test_run_once_and_drain_harvests_fast_task_before_slowest(monkeypatch):
-    """同轮慢请求不能阻塞已完成拆分任务的状态回写。"""
-    from xskill.pipeline.runner import DirectoryWatcher
-
-    watcher = DirectoryWatcher(max_concurrent=2)
-    fast_finished = threading.Event()
-    fast_harvested = threading.Event()
-    release_slow = threading.Event()
-
-    def fast_task():
-        fast_finished.set()
-        return "fast"
-
-    def slow_task():
-        assert release_slow.wait(2.0)
-        return "slow"
-
-    def fake_scan():
-        fast = watcher._pool.submit(fast_task)
-        slow = watcher._pool.submit(slow_task)
-        watcher._futures[fast] = {"stage": "test"}
-        watcher._futures[slow] = {"stage": "test"}
-
-    def fake_harvest():
-        for future in [item for item in watcher._futures if item.done()]:
-            result = future.result(timeout=0)
-            watcher._futures.pop(future)
-            if result == "fast":
-                fast_harvested.set()
-
-    monkeypatch.setattr(watcher, "_scan_once", fake_scan)
-    monkeypatch.setattr(watcher, "_harvest", fake_harvest)
-    runner = threading.Thread(target=watcher.run_once_and_drain)
-    runner.start()
-    try:
-        assert fast_finished.wait(1.0)
-        assert fast_harvested.wait(1.0)
-        assert runner.is_alive(), "慢任务未结束时 run_once_and_drain 应仍在等待"
-    finally:
-        release_slow.set()
-        runner.join(2.0)
-
-    assert not runner.is_alive()
-    assert not watcher._futures
-
-
 def test_ingest_once_calls_run_once_not_start(tmp_path, monkeypatch):
     """生态一次性入库对每个检测到的生态调 run_once(),绝不 start()(不起常驻线程)。"""
     _FakeIngester.calls = {"run_once": 0, "start": 0}
@@ -387,3 +404,32 @@ def test_ingest_once_calls_run_once_not_start(tmp_path, monkeypatch):
     assert _FakeIngester.registry_db_paths == [
         tmp_path / "registry.db"
     ]
+
+
+def test_ingest_once_skips_excluded_ecosystem(tmp_path, monkeypatch):
+    bridge = tmp_path / "bridge"
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: [  # noqa: ARG005
+            {"ecosystem": "codex", "bridge": bridge, "source": "test"},
+        ],
+    )
+    register_dir = Mock()
+    install = Mock()
+    ingester = Mock(side_effect=AssertionError("excluded ingester constructed"))
+    monkeypatch.setattr("xskill.pipeline.registry.register_dir", register_dir)
+    monkeypatch.setattr("xskill.ecosystems.install_all_to_codex", install)
+    monkeypatch.setattr("xskill.ecosystems.JsonlIngester", ingester)
+
+    watcher_factory.ingest_detected_ecosystems_once(
+        {"watcher": {}},
+        tmp_path,
+        tmp_path / "skill",
+        registry_db_path=tmp_path / "registry.db",
+        install_history_path=tmp_path / "install_history.jsonl",
+        excluded_ecosystems={"codex"},
+    )
+
+    register_dir.assert_not_called()
+    install.assert_not_called()
+    ingester.assert_not_called()

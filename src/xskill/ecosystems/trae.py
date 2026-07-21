@@ -565,7 +565,7 @@ class TraeIngester:
             self._stop.wait(self.poll_interval)
 
     def run_once(self) -> list[dict]:
-        """单轮扫盘 + 桥接(供短命 sweep 子进程调;_loop 每轮也调它,source 唯一)。"""
+        """单轮扫盘 + 桥接（常驻 worker 每轮调用，source 唯一）。"""
         submitted = self.scan_and_bridge(seen_sessions=self._seen)
         self._stats["polls"] += 1
         self._stats["last_poll"] = time.time()

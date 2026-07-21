@@ -1,12 +1,14 @@
-"""内部短命子进程 worker(**非用户 CLI**)。
+"""内部子进程 worker(**非用户 CLI**)。
 
-watcher / 画像重计算拆成短命子进程:web 进程的 ``IntervalSubprocessScheduler`` 用
-``[sys.executable, "-m", "xskill._workers", <kind>]`` spawn 一个全新解释器进程,跑一轮
-即退,GIL 与 web 事件循环彻底隔离。
+watcher 是常驻子进程；画像重计算仍是短命子进程。web 进程的
+``IntervalSubprocessScheduler`` 用
+``[sys.executable, "-m", "xskill._workers", <kind>]`` 启动它们，重计算与 web
+事件循环保持 GIL 隔离。
 
 这些是**内部管道**,刻意不注册进 ``xskill`` 用户 CLI(``cli.build_parser``)——用户
-``xskill --help`` 看不到它们。调度器直接调本模块的 SDK 函数(``run_sweep_once`` /
-``run_profile_refresh_once``),或经 ``python -m xskill._workers`` 入口。
+``xskill --help`` 看不到它们。调度器直接调本模块的 SDK 函数
+(``run_watcher_forever`` / ``run_profile_refresh_once``),或经
+``python -m xskill._workers`` 入口。
 """
 from __future__ import annotations
 
@@ -17,13 +19,47 @@ from pathlib import Path
 logger = logging.getLogger("xskill._workers")
 
 
-def run_sweep_once(*, server: bool = False, home: str | None = None) -> int:
-    """跑一轮 watcher sweep(采集→拆分→聚类→灰度)即退,状态落 watcher_status.json。
+def _install_stop_signal_handlers(stop_event):
+    """在 worker 主线程把 TERM/INT 转成可等待事件；返回原 handler。"""
+    import signal
+    import threading
 
-    非 server 先对本机各生态一次性入库(ingest_detected_ecosystems_once),再
-    ``build_watcher`` + ``run_once_and_drain``(一轮 = daemon 一个 poll)。多阶段流水线
-    靠调度器反复 spawn 逐轮推进。team_server 模式跳过本机生态采集。
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    previous = {}
+
+    def request_stop(_signum, _frame):
+        stop_event.set()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_stop)
+    return previous
+
+
+def _restore_signal_handlers(previous) -> None:
+    """恢复 ``_install_stop_signal_handlers`` 保存的 handler。"""
+    import signal
+
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+def run_watcher_forever(
+    *,
+    server: bool = False,
+    home: str | None = None,
+    stop_event=None,
+    status_interval: float = 5.0,
+) -> int:
+    """构造一次 watcher 并常驻运行，直到收到 TERM/INT。
+
+    ``DirectoryWatcher.start()`` 的扫描线程每个 poll 都继续提交和收割
+    任务，Future 跨轮保留；LLM 长尾任务不会阻止后续扫描。
+    ``stop_event`` 仅供测试和嵌入调用注入；生产由信号 handler 设置内部事件。
     """
+    import threading
+
     from xskill.config import (
         XSKILL_HOME,
         get_registry_db_path,
@@ -36,10 +72,17 @@ def run_sweep_once(*, server: bool = False, home: str | None = None) -> int:
     )
     from xskill.utils.status_file import WATCHER_STATUS_FILE, write_status_file
 
+    if status_interval <= 0:
+        raise ValueError("status_interval 必须 > 0")
+
     config = load_config()
     home_root = Path(home).expanduser().resolve() if home else Path.home()
     status_path = XSKILL_HOME / WATCHER_STATUS_FILE
+    event = stop_event if stop_event is not None else threading.Event()
+    previous_handlers = _install_stop_signal_handlers(event)
     watcher = None
+    ok = False
+    error = None
     try:
         skill_dir = get_skill_dir(
             config,
@@ -51,14 +94,21 @@ def run_sweep_once(*, server: bool = False, home: str | None = None) -> int:
         install_history_path = (
             XSKILL_HOME / "install_history.jsonl"
         ).expanduser().resolve()
+
+        on_poll_hook = None
         if not server:
-            ingest_detected_ecosystems_once(
-                config,
-                home_root,
-                skill_dir,
-                registry_db_path=registry_db_path,
-                install_history_path=install_history_path,
-            )
+            def ingest_on_poll() -> None:
+                ingest_detected_ecosystems_once(
+                    config,
+                    home_root,
+                    skill_dir,
+                    registry_db_path=registry_db_path,
+                    install_history_path=install_history_path,
+                    excluded_ecosystems={"claude_code"},
+                )
+
+            on_poll_hook = ingest_on_poll
+
         watcher = build_watcher(
             config,
             xskill_home=XSKILL_HOME,
@@ -67,19 +117,35 @@ def run_sweep_once(*, server: bool = False, home: str | None = None) -> int:
             skill_dir=skill_dir,
             home_root=home_root,
             server_mode=server,
+            on_poll_hook=on_poll_hook,
         )
-        watcher.run_once_and_drain()
+        watcher.start()
         write_status_file(status_path, watcher.stats, ok=True)
+
+        while not event.wait(status_interval):
+            if not watcher.is_running:
+                raise RuntimeError("watcher thread exited unexpectedly")
+            write_status_file(status_path, watcher.stats, ok=True)
+
+        ok = True
         return 0
-    except Exception as exc:  # noqa: BLE001 — 顶层任务边界,落状态文件+日志后报错
-        logger.exception("sweep once failed")
+    except Exception as exc:  # noqa: BLE001 — 常驻 worker 顶层边界
+        error = str(exc)
+        logger.exception("persistent watcher failed")
+        return 1
+    finally:
+        if watcher is not None:
+            from xskill.utils.shutdown import request_shutdown
+
+            request_shutdown()
+            watcher.stop()
         write_status_file(
             status_path,
             watcher.stats if watcher is not None else {},
-            ok=False,
-            error=str(exc),
+            ok=ok,
+            error=error,
         )
-        return 1
+        _restore_signal_handlers(previous_handlers)
 
 
 def _build_claude_code_ingester(*, home: str | None = None):
@@ -191,7 +257,7 @@ def run_ecosystem_ingest_loop(
     home: str | None = None,
     interval: float = 0.5,
 ) -> int:
-    """常驻轻量进程：保留 seen 索引，重 sweep 堵塞时仍逐 session 轮转。"""
+    """常驻轻量进程：保留 seen 索引，watcher 忙时仍逐 session 轮转。"""
     import threading
 
     if interval <= 0:
@@ -259,9 +325,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="xskill._workers")
     sub = parser.add_subparsers(dest="kind", required=True)
-    p_sweep = sub.add_parser("sweep")
-    p_sweep.add_argument("--server", action="store_true")
-    p_sweep.add_argument("--home", default=None)
+    p_watcher = sub.add_parser("watcher")
+    p_watcher.add_argument("--server", action="store_true")
+    p_watcher.add_argument("--home", default=None)
     p_ingest = sub.add_parser("ecosystem-ingest")
     p_ingest.add_argument("--home", default=None)
     p_ingest.add_argument("--loop", action="store_true")
@@ -270,8 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     configure_logging(get_logs_dir(), debug=False, quiet=False, stdout=True)
-    if args.kind == "sweep":
-        return run_sweep_once(server=args.server, home=args.home)
+    if args.kind == "watcher":
+        return run_watcher_forever(server=args.server, home=args.home)
     if args.kind == "ecosystem-ingest":
         if args.loop:
             return run_ecosystem_ingest_loop(

@@ -76,7 +76,7 @@ def test_startup_raises_when_create_embed_client_fails(monkeypatch, tmp_path, _s
 def test_standalone_worker_commands_share_resolved_ecosystem_home(
     monkeypatch, tmp_path, _stub_loaded,
 ):
-    """standalone 的 sweep/轻量 ingester 都只能访问同一个显式生态 HOME。"""
+    """standalone 的 watcher/轻量 ingester 都只能访问同一个显式生态 HOME。"""
     from xskill.api import app as srv
     from xskill.pipeline import scheduler as scheduler_module
 
@@ -127,8 +127,9 @@ def test_standalone_worker_commands_share_resolved_ecosystem_home(
         "--home",
         str(ecosystem_home.resolve()),
     ]
-    assert set(records_by_name) == {"sweep", "ecosystem-ingest"}
-    assert records_by_name["sweep"].command[-2:] == expected_home_arguments
+    assert set(records_by_name) == {"watcher", "ecosystem-ingest"}
+    assert records_by_name["watcher"].command[-2:] == expected_home_arguments
+    assert records_by_name["watcher"].keyword_arguments["persistent"] is True
     ingest_command = records_by_name["ecosystem-ingest"].command
     home_argument_index = ingest_command.index("--home")
     assert ingest_command[
@@ -138,10 +139,10 @@ def test_standalone_worker_commands_share_resolved_ecosystem_home(
     assert all(record.stopped for record in scheduler_records)
 
 
-def test_team_server_schedules_only_server_sweep(
+def test_team_server_schedules_only_server_watcher(
     monkeypatch, tmp_path, _stub_loaded,
 ):
-    """team server 只跑 server sweep，不得启动任何本机生态采集子进程。"""
+    """team server 只跑 server watcher，不得启动本机生态采集子进程。"""
     from xskill import config as config_module
     from xskill.api import app as srv
     from xskill.pipeline import scheduler as scheduler_module
@@ -237,10 +238,12 @@ def test_team_server_schedules_only_server_sweep(
     records_by_name = {
         record.name: record for record in scheduler_records
     }
-    assert set(records_by_name) == {"profile-refresh", "sweep"}
-    sweep_command = records_by_name["sweep"].command
-    assert sweep_command[-1] == "--server"
-    assert "--home" not in sweep_command
+    assert set(records_by_name) == {"profile-refresh", "watcher"}
+    watcher_command = records_by_name["watcher"].command
+    assert watcher_command[-1] == "--server"
+    assert "--home" not in watcher_command
+    assert records_by_name["watcher"].keyword_arguments["persistent"] is True
+    assert "persistent" not in records_by_name["profile-refresh"].keyword_arguments
     assert "ecosystem-ingest" not in records_by_name
     assert all(record.stopped for record in scheduler_records)
 

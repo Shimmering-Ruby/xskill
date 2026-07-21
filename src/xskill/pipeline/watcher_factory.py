@@ -1,10 +1,8 @@
-"""watcher 构造 + 生态一次性入库,供 web startup(已移除)与短命 ``sweep --once``
-子进程共用——construct 逻辑收敛到一处,source 唯一。
+"""watcher 构造 + 生态一次性入库，供常驻 watcher worker 使用。
 
-watcher 拆成短命子进程后,原 web startup 里的 ``_ensure_ingesters_for_detected_
-ecosystems`` daemon-hook 闭包(每 poll 起常驻 ingester 线程)迁到本模块的
-``ingest_detected_ecosystems_once``:每次 sweep 对每个检测到的生态调
-``ingester.run_once()``(单轮桥接即返回),不起常驻线程。
+web startup 原有的生态检测闭包收敛为
+``ingest_detected_ecosystems_once``：watcher 每次 poll 对检测到的生态调
+``ingester.run_once()``(单轮桥接即返回)，不再另起生态线程。
 """
 from __future__ import annotations
 
@@ -24,8 +22,8 @@ def build_watcher(config: dict, *, home_root: Path | None = None,
                   server_mode: bool = False, on_poll_hook=None):
     """构造 ``DirectoryWatcher``(读 watcher 段 + 造 llm/embed 客户端)。
 
-    与原 web startup 的构造收敛到一处。``on_poll_hook`` 给短命 sweep 传 None
-    (生态一次性入库由 ``ingest_detected_ecosystems_once`` 显式调,不走 poll hook)。
+    与原 web startup 的构造收敛到一处。``on_poll_hook`` 用于常驻
+    worker 在每轮扫描前执行本机生态检测与入库。
     """
     from xskill.config import (
         XSKILL_HOME,
@@ -97,12 +95,14 @@ def build_watcher(config: dict, *, home_root: Path | None = None,
 def ingest_detected_ecosystems_once(config: dict, home_root: Path,
                                     skill_dir: Path, *,
                                     registry_db_path: Path,
-                                    install_history_path: Path) -> None:
+                                    install_history_path: Path,
+                                    excluded_ecosystems: set[str] | None = None,
+                                    ) -> None:
     """检测本机各生态 → 装 skill → 对每个生态一次性桥接其 session。
 
     替代常驻 ingester 线程:每个生态调 ``ingester.run_once()``(单轮即返回)。整体
-    catch:自动检测失败只 warn,不影响 sweep 主流程(与原 daemon-hook 一致)。
-    ``team_server`` 模式由调用方(_workers.run_sweep_once)判定后不调本函数——纯 server 不采集本机
+    catch:自动检测失败只 warn,不影响 watcher 主流程(与原 daemon-hook 一致)。
+    ``team_server`` 模式由调用方判定后不调本函数——纯 server 不采集本机
     本地轨迹。
     """
     from xskill.canary import CanaryConfig
@@ -130,8 +130,11 @@ def ingest_detected_ecosystems_once(config: dict, home_root: Path,
         logger.warning("ecosystem auto-detect failed", exc_info=True)
         return
 
+    excluded = excluded_ecosystems or set()
     for det in detections:
         eco = det["ecosystem"]
+        if eco in excluded:
+            continue
         bridge: Path = det["bridge"]
         bridge.mkdir(parents=True, exist_ok=True)
         register_dir(
