@@ -436,14 +436,15 @@ class TestWritingDisciplineInPrompt:
         assert "[单例]" in SYSTEM_PROMPT_TEMPLATE
         assert "[推断]" in SYSTEM_PROMPT_TEMPLATE
 
-    def test_keeps_atom_ids_out_of_user_visible_artifacts(self):
-        """atom/traj id 只作内部来源信息，不得诱导用户 agent 回查。"""
-        assert "用户可见产物不得出现 ``atom_id`` / ``traj_id``" in SYSTEM_PROMPT_TEMPLATE
-        assert "不得要求读者查找原始 atom / traj" in SYSTEM_PROMPT_TEMPLATE
-        assert "只允许保留在" in SYSTEM_PROMPT_TEMPLATE
-        assert "``metadata.source_atoms``、commit message 和系统日志中" in SYSTEM_PROMPT_TEMPLATE
+    def test_marks_atom_ids_as_server_only_non_actionable_evidence(self):
+        """允许保留服务器端证据标记，但不得诱导用户 agent 回查。"""
+        assert "atom/traj id 可以保留为服务器端证据标记" in SYSTEM_PROMPT_TEMPLATE
+        assert "[XSkill 服务器端证据标记：atom_xxx_0001]" in SYSTEM_PROMPT_TEMPLATE
+        assert "用户 agent 没有读取原始 atom / traj 的接口" in SYSTEM_PROMPT_TEMPLATE
+        assert "不得用“见、参见、读取、查找”等" in SYSTEM_PROMPT_TEMPLATE
+        assert "标记前的结论也必须完整、自包含" in SYSTEM_PROMPT_TEMPLATE
+        assert "用户可见产物不得出现 ``atom_id`` / ``traj_id``" not in SYSTEM_PROMPT_TEMPLATE
         assert '见 atom_xxx_0001' not in SYSTEM_PROMPT_TEMPLATE
-        assert '3/5 atoms 表明' not in SYSTEM_PROMPT_TEMPLATE
         # 内部来源信息仍需保留，不能误删现有 provenance 契约。
         assert 'source_atoms: ["atom_xxx_0001", ...]' in SYSTEM_PROMPT_TEMPLATE
         assert "commit message 写明本次基于哪些 atom_id" in SYSTEM_PROMPT_TEMPLATE
