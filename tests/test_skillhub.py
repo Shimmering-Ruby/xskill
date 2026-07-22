@@ -23,7 +23,9 @@ from xskill.team.client.daemon import TeamClient
 from xskill.team.client.state import ClientState
 from xskill.team.server import api as server_api
 from xskill.team.server.client_registry import ClientRegistry
-from xskill.team.server.skill_manifest import build_manifest, set_recommend_engine
+from xskill.team.server.skill_manifest import (
+    build_manifest, manifest_catalog_snapshot, set_recommend_engine,
+)
 from xskill.team.shared.protocol import SkillSlot, SyncResponse
 
 
@@ -220,7 +222,7 @@ class TestEngineSkillhubPool:
         hub_dir = tmp_path / "hub"
         _write_hub_skill(hub_dir, "extfoo", "django migration helper")
         eng = self._engine(tmp_path, skillhub_enabled=True, hub_dir=hub_dir)
-        # 用与 extfoo description 同向的 query 向量检索
+        # 推荐画像侧原有向量池接口保持不变；team search 不再旁路它做纯语义检索。
         q = FakeEmbed(dim=4).encode("django migration helper")
         q = q / np.linalg.norm(q)
         results = eng.relevance_search(q, top_k=5)
@@ -243,6 +245,50 @@ class TestEngineSkillhubPool:
         results = eng.relevance_search(q, top_k=5)
         names = [n for n, _h in results]
         assert "extfoo" not in names
+
+    def test_repo_search_corpus_keeps_bm25_docs_and_exact_vectors(self, tmp_path):
+        skill_dir = tmp_path / "skills"
+        exact = _make_main_skill(skill_dir, "exact", "exact description")
+        _make_main_skill(skill_dir, "stale", "current description")
+        with open(skill_dir / ".skill_index.pkl", "wb") as index_file:
+            pickle.dump({
+                "skill_names": ["exact", "stale"],
+                "texts": ["exact description", "old description"],
+                "embeddings": np.eye(2, dtype=float),
+                "model": "",
+            }, index_file)
+        engine = SkillRecommendEngine(
+            config={"recommend": {"quality_ratio": 0.8}},
+            skill_dir=skill_dir,
+            traj_root=tmp_path / "traj",
+            embed_client=FakeEmbed(dim=2),
+            profile_db=tmp_path / "p.db",
+        )
+        catalog = manifest_catalog_snapshot(skill_dir)
+
+        corpus = engine.repo_search_corpus(catalog)
+
+        assert corpus is not None
+        by_name = {entry["repo_name"]: entry for entry in corpus}
+        assert set(by_name) == {"exact", "stale"}
+        assert np.array_equal(by_name["exact"]["vec"], np.array([1.0, 0.0]))
+        assert "vec" not in by_name["stale"]
+        assert by_name["exact"]["path"] == exact
+        assert engine.repo_search_corpus(catalog) is corpus
+        refreshed_catalog = type(catalog)(
+            catalog.skills, catalog.refs, catalog.search_by_id, catalog.built_at + 1,
+        )
+        assert engine.repo_search_corpus(refreshed_catalog) is corpus
+
+        with open(skill_dir / ".skill_index.pkl", "rb") as index_file:
+            mismatched = pickle.load(index_file)
+        mismatched["model"] = "another-model"
+        with open(skill_dir / ".skill_index.pkl", "wb") as index_file:
+            pickle.dump(mismatched, index_file)
+        engine.invalidate_cache()
+        refreshed = engine.repo_search_corpus(catalog)
+        assert refreshed is not corpus
+        assert all("vec" not in entry for entry in refreshed)
 
     def test_recommends_existing_skillhub_entries_and_skips_deleted_cache(
         self, tmp_path,

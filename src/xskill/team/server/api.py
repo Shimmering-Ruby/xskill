@@ -28,15 +28,25 @@ import time
 from typing import Callable
 import zipfile
 
+from dulwich.errors import NotGitRepository, ObjectMissing
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from xskill import __version__ as XSKILL_VERSION
+from xskill.canary import main_sha, staging_sha
 from xskill.config import get_team_server_whl_dir
 from xskill.team.server.client_registry import ClientRegistry
-from xskill.team.shared.git_bundle import fetch_branch_from_bundle, make_repo_bundle
-from xskill.team.server.skill_manifest import build_manifest
+from xskill.team.shared.git_bundle import (
+    fetch_branch_from_bundle, make_repo_archive, make_repo_bundle,
+)
+from xskill.team.server.skill_manifest import (
+    _resolve_slot,
+    build_manifest,
+    get_recommend_engine,
+    manifest_catalog_snapshot,
+    repo_search_id,
+)
 from xskill.team.shared.protocol import (
     PushEditResponse, RegisterRequest, RegisterResponse,
     UploadRejection, UploadRequest, UploadResponse,
@@ -50,6 +60,10 @@ router = APIRouter(prefix="/api/v1/team")
 _SKILL_ARCHIVE_MAX_FILES = 2048
 _SKILL_ARCHIVE_MAX_FILE_BYTES = 50 * 1024 * 1024
 _SKILL_ARCHIVE_MAX_TOTAL_BYTES = 100 * 1024 * 1024
+_REPO_SEARCH_GRANT_TTL_SECONDS = 300.0
+_REPO_SEARCH_GRANT_CAPACITY = 4096
+_REPO_SEARCH_GRANTS: dict[tuple[str, str], tuple[float, str, str, str]] = {}
+_REPO_SEARCH_GRANTS_LOCK = threading.Lock()
 
 
 class _Ctx:
@@ -253,6 +267,8 @@ def init_team_context(
     _ctx.configure_watch_dir = configure_watch_dir
     _ctx.skillhub = skillhub
     _ctx.profile_refresh_service = profile_refresh_service
+    with _REPO_SEARCH_GRANTS_LOCK:
+        _REPO_SEARCH_GRANTS.clear()
 
 
 def clear_team_context(*, profile_refresh_shutdown_timeout: float = 5.0) -> bool:
@@ -284,6 +300,8 @@ def clear_team_context(*, profile_refresh_shutdown_timeout: float = 5.0) -> bool
     _ctx.configure_watch_dir = None
     _ctx.skillhub = None
     _ctx.profile_refresh_service = None
+    with _REPO_SEARCH_GRANTS_LOCK:
+        _REPO_SEARCH_GRANTS.clear()
     return stopped
 
 
@@ -844,19 +862,83 @@ async def team_skill_bundle(
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
 ) -> Response:
-    _auth(x_xskill_token, x_xskill_client)
+    client_id = _auth(x_xskill_token, x_xskill_client)
     repo_dir = _ctx.skill_dir / name
-    if not (repo_dir / ".git").is_dir():
-        hub = _ctx.skillhub
-        if hub is None:
-            raise HTTPException(status_code=404, detail=f"skill not found: {name}")
-        hub_dir = hub.skill_path(name)
-        if hub_dir is None:
-            raise HTTPException(status_code=404, detail=f"skill not found: {name}")
-        archive = _make_skillhub_archive(hub_dir)
-        return Response(content=archive, media_type="application/zip")
-    bundle = make_repo_bundle(repo_dir)
-    return Response(content=bundle, media_type="application/octet-stream")
+    exact_repo = (repo_dir / ".git").is_dir()
+    if _is_repo_search_id(name):
+        download = await run_in_threadpool(
+            _repo_search_archive, name, client_id, exact_repo,
+        )
+        if download is not None:
+            archive, content_sha, side = download
+            return Response(
+                content=archive,
+                media_type="application/zip",
+                headers={
+                    "X-XSkill-Content-Sha": content_sha,
+                    "X-XSkill-Side": side,
+                },
+            )
+
+    if exact_repo:
+        bundle = make_repo_bundle(repo_dir)
+        return Response(content=bundle, media_type="application/octet-stream")
+
+    hub = _ctx.skillhub
+    hub_dir = hub.skill_path(name) if hub is not None else None
+    if hub_dir is None:
+        raise HTTPException(status_code=404, detail=f"skill not found: {name}")
+    archive = _make_skillhub_archive(hub_dir)
+    return Response(content=archive, media_type="application/zip")
+
+
+def _repo_search_archive(
+    search_id: str, client_id: str, exact_repo: bool,
+) -> tuple[bytes, str, str] | None:
+    """在线程内强制刷新 refs、校验 search grant，并导出固定 commit。"""
+    grant = _repo_search_grant(client_id, search_id)
+    if grant is None:
+        catalog = manifest_catalog_snapshot(_ctx.skill_dir, max_age_seconds=0)
+        skill = catalog.search_by_id.get(search_id)
+        if skill is None:
+            if exact_repo:
+                return None
+            raise HTTPException(status_code=404, detail=f"skill not found: {search_id}")
+        if exact_repo:
+            raise HTTPException(status_code=409, detail="ambiguous repo search id")
+        _total_slots, _ranked_slots, probability = live_manifest_tuning()
+        slot = _resolve_slot(
+            skill, client_id, probability, "ranked", refs=catalog.refs,
+        )
+        if slot is None:
+            raise HTTPException(status_code=404, detail=f"skill not found: {search_id}")
+        repo_name = skill.name
+        content_sha, side = _pin_repo_search_grant(
+            client_id, search_id, repo_name, slot.sha, slot.side,
+            catalog.refs[repo_name],
+        )
+    else:
+        repo_name, content_sha, side = grant
+    if exact_repo:
+        raise HTTPException(status_code=409, detail="ambiguous repo search id")
+    if repo_search_id(repo_name) != search_id:
+        raise HTTPException(status_code=409, detail="invalid search grant")
+    repo_dir = _ctx.skill_dir / repo_name
+    if content_sha not in (main_sha(repo_dir), staging_sha(repo_dir)):
+        raise HTTPException(
+            status_code=409, detail="skill version changed; search again",
+        )
+    try:
+        archive = make_repo_archive(repo_dir, content_sha)
+    except (KeyError, NotGitRepository, ObjectMissing, OSError, ValueError) as error:
+        logger.warning(
+            "repo search archive changed during download: %s (%s)",
+            repo_name, type(error).__name__,
+        )
+        raise HTTPException(
+            status_code=409, detail="skill version changed; search again",
+        ) from error
+    return archive, content_sha, side
 
 
 @router.get("/skill_hub/search")
@@ -866,43 +948,34 @@ async def team_skill_hub_search(
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
 ) -> dict:
-    """BM25 + 语义向量混合检索 skillhub；与推荐画像完全无关。"""
+    """BM25 + 语义 RRF 统一检索自产 main skill + SkillHub（无画像）。"""
     client_id = _auth(x_xskill_token, x_xskill_client)
     hub = _ctx.skillhub
-    if hub is None or not getattr(hub, "enabled", False):
-        raise HTTPException(status_code=503, detail="skillhub not enabled on server")
     if not query.strip():
         raise HTTPException(status_code=400, detail="empty query")
     bounded_limit = max(1, min(int(limit), 10))
     try:
-        # A hot result is a bounded in-memory lookup.  Keep that path on the event
-        # loop instead of creating 50 short-lived AnyIO worker jobs beside CPU-heavy
-        # /sync work; misses and expired snapshots still run entirely off-loop.
+        _total_slots, _ranked_slots, probability = live_manifest_tuning()
+        engine = get_recommend_engine()
+        if engine is None and (hub is None or not getattr(hub, "enabled", False)):
+            raise HTTPException(
+                status_code=503, detail="skillhub not enabled on server",
+            )
+        if engine is not None:
+            return await run_in_threadpool(
+                _search_and_format_team_skills,
+                engine, query, bounded_limit, client_id, probability,
+            )
+
         matches = hub.cached_search(query, bounded_limit)
         hot_cache_hit = matches is not None
         if hot_cache_hit:
-            # Fifty cache-hit handlers otherwise contain no suspension point and can
-            # monopolize one event-loop turn.  Yield around result assembly so health
-            # and dashboard requests keep their latency budget during a search burst.
             await asyncio.sleep(0)
         else:
             matches = await run_in_threadpool(hub.search, query, bounded_limit)
-        payload = {"results": [
-            {
-                "skill_id": match["skill_id"],
-                "display_name": match["display_name"],
-                "description": match["description"],
-                "content_sha": match["content_sha"],
-                "source_path": match["source_path"],
-                "source": _skillhub_result_source(match["source_path"]),
-                "ux_avg": match.get("ux_avg"),
-                "match": {
-                    "bm25_rank": match.get("bm25_rank"),
-                    "semantic_rank": match.get("semantic_rank"),
-                },
-            }
-            for match in matches
-        ]}
+        payload = _format_team_search_results(
+            matches, None, client_id, probability,
+        )
         if hot_cache_hit:
             await asyncio.sleep(0)
         return payload
@@ -942,6 +1015,126 @@ async def team_skill_hub_search(
             },
             headers={"X-Request-ID": request_id},
         )
+
+
+def _search_and_format_team_skills(
+    engine,
+    query: str,
+    limit: int,
+    client_id: str,
+    probability: float,
+) -> dict:
+    """冷路径：刷新 catalog、统一 hybrid search，并在线程内补齐灰度元数据。"""
+    catalog = manifest_catalog_snapshot(_ctx.skill_dir)
+    if (
+        not catalog.search_by_id
+        and not getattr(engine.skillhub, "enabled", False)
+    ):
+        raise HTTPException(status_code=503, detail="no searchable skill source")
+    matches = engine.search_team_skills(query, limit, catalog)
+    return _format_team_search_results(
+        matches, catalog, client_id, probability,
+    )
+
+
+def _format_team_search_results(
+    matches: list[dict], catalog, client_id: str, probability: float,
+) -> dict:
+    """把统一排名命中投影为既有 search/install 响应契约。"""
+    results: list[dict] = []
+    for hit in matches:
+        source = hit.get("source")
+        result = {
+            "skill_id": hit["skill_id"],
+            "display_name": hit["display_name"],
+            "description": hit["description"],
+            "content_sha": hit["content_sha"],
+            "source_path": hit["source_path"],
+            "source": (
+                "repo" if source == "repo"
+                else _skillhub_result_source(hit["source_path"])
+            ),
+            "ux_avg": hit.get("ux_avg"),
+            "match": {
+                "bm25_rank": hit.get("bm25_rank"),
+                "semantic_rank": hit.get("semantic_rank"),
+            },
+        }
+        if source == "repo":
+            search_id = repo_search_id(hit["repo_name"])
+            skill = catalog.search_by_id.get(search_id)
+            if skill is None:
+                continue
+            slot = _resolve_slot(
+                skill, client_id, probability, "ranked", refs=catalog.refs,
+            )
+            if slot is None:
+                continue
+            grant = _pin_repo_search_grant(
+                client_id, search_id, skill.name, slot.sha, slot.side,
+                catalog.refs[skill.name],
+            )
+            content_sha, side = grant
+            result.update({
+                "skill_id": search_id,
+                "content_sha": content_sha,
+                "side": side,
+                "staging_available": catalog.refs[skill.name][1] is not None,
+                "staging_assigned": side == "staging",
+            })
+        results.append(result)
+    return {"results": results}
+
+
+def _pin_repo_search_grant(
+    client_id: str,
+    search_id: str,
+    repo_name: str,
+    content_sha: str,
+    side: str,
+    current_refs: tuple[str, str | None],
+) -> tuple[str, str]:
+    """同一 client/skill 的有效租约不被并发搜索覆盖。"""
+    key = (client_id, search_id)
+    now = time.monotonic()
+    with _REPO_SEARCH_GRANTS_LOCK:
+        existing = _REPO_SEARCH_GRANTS.get(key)
+        if existing is not None and now < existing[0]:
+            if existing[2] in current_refs:
+                return existing[2], existing[3]
+        _REPO_SEARCH_GRANTS.pop(key, None)
+        _REPO_SEARCH_GRANTS[key] = (
+            now + _REPO_SEARCH_GRANT_TTL_SECONDS,
+            repo_name,
+            content_sha,
+            side,
+        )
+        while len(_REPO_SEARCH_GRANTS) > _REPO_SEARCH_GRANT_CAPACITY:
+            _REPO_SEARCH_GRANTS.pop(next(iter(_REPO_SEARCH_GRANTS)))
+        return content_sha, side
+
+
+def _repo_search_grant(
+    client_id: str, search_id: str,
+) -> tuple[str, str, str] | None:
+    key = (client_id, search_id)
+    with _REPO_SEARCH_GRANTS_LOCK:
+        grant = _REPO_SEARCH_GRANTS.get(key)
+        if grant is None:
+            return None
+        expires_at, repo_name, content_sha, side = grant
+        if time.monotonic() >= expires_at:
+            del _REPO_SEARCH_GRANTS[key]
+            return None
+        return repo_name, content_sha, side
+
+
+def _is_repo_search_id(name: str) -> bool:
+    return (
+        name.startswith("repo@")
+        and len(name) == 69
+        and all(char in "0123456789abcdef" for char in name[5:])
+    )
 
 
 def _skillhub_result_source(source_path: str) -> str:

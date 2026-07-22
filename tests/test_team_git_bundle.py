@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import subprocess
+import io
 from pathlib import Path
+import subprocess
+import zipfile
 
 import pytest
 
 from xskill.team.shared.git_bundle import (
-    make_repo_bundle, apply_repo_bundle, make_branch_bundle, fetch_branch_from_bundle,
+    make_repo_archive, make_repo_bundle, apply_repo_bundle,
+    make_branch_bundle, fetch_branch_from_bundle,
 )
 
 
@@ -55,6 +58,14 @@ def test_apply_bundle_updates_existing_repo(tmp_path):
     new_main = _git(["rev-parse", "main"], src)
     apply_repo_bundle(make_repo_bundle(src), dest)
     assert _git(["rev-parse", "main"], dest) == new_main
+
+
+def test_repo_archive_exports_selected_commit_as_zip(tmp_path):
+    repo = _seed_repo(tmp_path / "central" / "fix-foo")
+    staging_sha = _git(["rev-parse", "staging"], repo)
+    payload = make_repo_archive(repo, staging_sha)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        assert archive.read("SKILL.md") == b"v2"
 
 
 def test_push_branch_roundtrip(tmp_path):
