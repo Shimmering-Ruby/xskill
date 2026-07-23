@@ -233,7 +233,7 @@ skillhub:
 
 | 术语 | 含义 |
 | ---- | ---- |
-| **Trajectory(轨迹)** | 一次 agent 运行——一段会话的完整记录(`traj_*.md`)。 |
+| **Trajectory(轨迹)** | 一次 agent 运行会话的完整记录，Xskill维护了一套庞大的解析生态层。 |
 | **TrajectoryAtom(轨迹原子)** | 轨迹里最小的、单一意图的切片，是生成skill的原料。 |
 | **Skill(技能)** | 一个 `SKILL.md` 加可选脚本,各自在独立的 git 目录里带版本。 |
 | **Canary(灰度)** | 当前技能与新候选版本在真实流量上的 A/B 对比测试。 |
