@@ -243,11 +243,12 @@ skillhub:
 
 ## 🗺 路线图
 
-- 更多 agent 适配——Goose、OpenHands、Aider
-- 原生 MCP server 接口(把技能作为工具暴露)
-- 浏览技能库、查看 canary 数据的 Web UI
-- 技能市场——导入/导出可移植的技能包
-- 多租户技能库(按团队的 `skill_dir`)
+- 动态并发：根据内网vllm负载动态调整并发以获取更高吞吐
+- 多租户：支持一台实例，外放给多个组/部门用
+- 工业级推荐引擎：更精细的画像和推荐算法
+- 更多 agent 适配：Goose、OpenHands、Aider
+- 轨迹湖：支持管理海量轨迹，服务器端安全预警，Time-Travel功能
+
 
 ## 📰 动态
 
