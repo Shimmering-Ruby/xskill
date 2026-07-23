@@ -1,4 +1,4 @@
-"""`xskill search` 客户端安装结果与人读输出测试。"""
+"""`xskill search` 元信息与 `xskill download` 安装输出测试。"""
 from __future__ import annotations
 
 import io
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from xskill import cli
-from xskill.team.client.search_slots import SearchSlots
+from xskill.team.client.search_slots import DownloadedSkills, SearchSlots
 
 
 class _Response:
@@ -36,6 +36,13 @@ class _SearchHttp:
     def get(self, path: str, **_kwargs) -> _Response:
         if "search" in path:
             return _Response(200, json_data={"results": self.results})
+        if "/entry/" in path:
+            skill_id = path.rsplit("/", 1)[-1]
+            result = next(
+                result for result in self.results
+                if result["skill_id"] == skill_id
+            )
+            return _Response(200, json_data={"result": result})
         skill_id = path.split("/")[-2]
         name = next(
             result["display_name"]
@@ -67,8 +74,8 @@ def _result(name: str, *, source: str = "skillhub",
 
 def _install_home(monkeypatch, tmp_path: Path, home: Path) -> None:
     monkeypatch.setattr(
-        "xskill.team.client.search_slots.SearchSlots",
-        lambda **_kwargs: SearchSlots(
+        "xskill.team.client.search_slots.DownloadedSkills",
+        lambda **_kwargs: DownloadedSkills(
             xskill_home=tmp_path / "xskill-home", home_root=home,
         ),
     )
@@ -91,13 +98,17 @@ def test_only_detected_ngagent_and_nga3_are_printed(
         ),
     ]
 
-    return_code = cli.cmd_search_hub(
-        SimpleNamespace(terms=["openqa"], top_k=5, json=False),
-        http=_SearchHttp(results), headers={},
-    )
+    search_http = _SearchHttp(results)
+    return_codes = [
+        cli.cmd_download(
+            SimpleNamespace(skill_id=result["skill_id"], json=False),
+            http=search_http, headers={},
+        )
+        for result in results
+    ]
 
     output = capsys.readouterr().out
-    assert return_code == 0
+    assert return_codes == [0, 0]
     assert "CodeAgent3 / NGA3" in output
     assert "NGAgent" in output
     assert str(home / ".cac" / "skills" / "repo-skill@abcdef") in output
@@ -113,7 +124,7 @@ def test_only_detected_ngagent_and_nga3_are_printed(
     assert "XSkill 自蒸馏生成" in output
     assert "上传者:alice（用户上传）" in output
     assert "描述中有 连续的 空白" in output
-    assert "\n" + "-" * 64 + "\n" in output
+    assert output.count("完成：1 个 skill") == 2
 
 
 def test_shared_target_keeps_each_harness_record(tmp_path):
@@ -165,8 +176,8 @@ def test_detected_install_failure_is_visible(
     )
     result = _result("partial")
 
-    return_code = cli.cmd_search_hub(
-        SimpleNamespace(terms=["partial"], top_k=5, json=False),
+    return_code = cli.cmd_download(
+        SimpleNamespace(skill_id=result["skill_id"], json=False),
         http=_SearchHttp([result]), headers={},
     )
 
@@ -178,7 +189,7 @@ def test_detected_install_failure_is_visible(
     assert "[成功] CodeAgent3 / NGA3" in output
 
 
-def test_json_keeps_path_and_adds_cache_path_and_installations(
+def test_search_json_is_metadata_only(
     tmp_path, monkeypatch, capsys,
 ):
     home = tmp_path / "home"
@@ -192,8 +203,9 @@ def test_json_keeps_path_and_adds_cache_path_and_installations(
 
     rows = json.loads(capsys.readouterr().out)
     assert return_code == 0
-    assert rows[0]["path"] == rows[0]["cache_path"]
-    assert rows[0]["installations"] == []
+    assert "path" not in rows[0]
+    assert "cache_path" not in rows[0]
+    assert "installations" not in rows[0]
     assert rows[0]["match"] == result["match"]
     assert rows[0]["source"] == result["source"]
 
@@ -256,14 +268,14 @@ def test_install_exception_secret_never_enters_output_or_ledger(
     caplog.set_level("WARNING", logger="xskill.team.client")
     result = _result("safe-error")
 
-    return_code = cli.cmd_search_hub(
-        SimpleNamespace(terms=["safe"], top_k=5, json=False),
+    return_code = cli.cmd_download(
+        SimpleNamespace(skill_id=result["skill_id"], json=False),
         http=_SearchHttp([result]), headers={},
     )
 
     output = capsys.readouterr().out
     ledger_text = (
-        tmp_path / "xskill-home" / "search_slots.json"
+        tmp_path / "xskill-home" / "downloads.json"
     ).read_text(encoding="utf-8")
     assert return_code == 0
     assert "Authorization" not in output
@@ -1885,7 +1897,7 @@ def test_cp936_json_output_with_emoji_is_valid(
 
     payload = json.loads(output_bytes.getvalue().decode("cp936"))
     assert return_code == 0
-    assert payload[0]["name"] == "json-\N{GRINNING FACE}"
+    assert payload[0]["display_name"] == "json-\N{GRINNING FACE}"
     assert payload[0]["description"] == "emoji \N{ROCKET}"
     assert payload[0]["source_path"] == (
         "user_skill_hub/\N{CAT FACE}/json-skill"

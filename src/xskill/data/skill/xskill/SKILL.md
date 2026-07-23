@@ -86,7 +86,8 @@ black-window, copy-mode, and can't-connect issues in detail.
 ## Searching & sharing team skills
 
 ```bash
-xskill search <query...>       # search the team skillhub, pull hits into local slots
+xskill search <query...>       # search team skills; returns metadata only
+xskill download <skill-id>     # explicitly download and persist one search result
 xskill search auth retry -k 3  # top-3 results (max 10)
 xskill upload ./my-skill       # package a SKILL.md folder and share to the team
 xskill dashboard               # print a passwordless link into the server dashboard

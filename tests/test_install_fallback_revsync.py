@@ -410,6 +410,58 @@ def test_reverse_sync_rejects_symlink_without_touching_source(tmp_path):
 
 
 @pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows CI 不保证普通用户可创建 symlink",
+)
+def test_reverse_sync_root_symlink_is_no_edit(tmp_path):
+    """link 安装与 source 同体，不应进入 copy reverse-sync 或报 FAILED。"""
+    from xskill.agents.user_edit_absorb_agent import (
+        ReverseSyncStatus,
+        reverse_sync_copy_dest,
+    )
+
+    src = _build_real_skill_repo(tmp_path)
+    dest = tmp_path / "out" / "demo-skill"
+    dest.parent.mkdir(parents=True)
+    dest.symlink_to(src, target_is_directory=True)
+    (dest / "SKILL.md").write_text("USER EDIT\n", encoding="utf-8")
+
+    status = reverse_sync_copy_dest(dest, src, quiet_seconds=0)
+
+    assert status == ReverseSyncStatus.NO_EDIT
+    assert (src / "SKILL.md").read_text(encoding="utf-8") == "USER EDIT\n"
+
+
+def test_reverse_sync_root_windows_junction_is_no_edit(
+    tmp_path, monkeypatch,
+):
+    """Windows junction/reparse root 与 symlink 一样不属于 copy 反向同步。"""
+    from xskill.agents import user_edit_absorb_agent as user_absorb
+
+    src = _build_real_skill_repo(tmp_path)
+    dest = tmp_path / "out" / "demo-skill"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text("SHARED EDIT\n", encoding="utf-8")
+    dest_stat = dest.lstat()
+    original_is_reparse = user_absorb._is_reparse_point
+
+    def mark_dest_as_reparse(file_stat):
+        return (
+            file_stat.st_dev == dest_stat.st_dev
+            and file_stat.st_ino == dest_stat.st_ino
+        ) or original_is_reparse(file_stat)
+
+    monkeypatch.setattr(
+        user_absorb, "_is_reparse_point", mark_dest_as_reparse,
+    )
+
+    assert user_absorb.reverse_sync_copy_dest(
+        dest, src, quiet_seconds=0,
+    ) == user_absorb.ReverseSyncStatus.NO_EDIT
+    assert (src / "SKILL.md").read_text(encoding="utf-8") != "SHARED EDIT\n"
+
+
+@pytest.mark.skipif(
     os.open not in os.supports_dir_fd,
     reason="openat/dir_fd unavailable",
 )

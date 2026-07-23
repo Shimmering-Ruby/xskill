@@ -5,7 +5,8 @@ working copy 并对齐 side、把本地手改推成 user-staging/<client_id> 分
 零 LLM、零 git 写 main、零灰度判定。
 
 _tick 一轮：
-  collect_and_upload → sync → reconcile_skill_sides → push_user_edits → cleanup
+  collect_and_upload → sync → reconcile_skill_sides →
+  reconcile_downloaded_skills → push_user_edits → cleanup
 """
 from __future__ import annotations
 
@@ -227,6 +228,105 @@ class TeamClient:
     def _install_to_ecosystems(self, repo_dir: Path) -> None:
         install_skill_to_ecosystems(repo_dir, home_root=self.home_root)
 
+    def reconcile_downloaded_skills(self) -> int:
+        """刷新显式下载项；持久下载不占 search LRU，随服务端版本继续更新。"""
+        from xskill.team.client.search_slots import (
+            DownloadedSkills,
+            _valid_slot_id,
+        )
+
+        manager = DownloadedSkills(
+            xskill_home=self.skill_dir.parent,
+            home_root=self.home_root,
+        )
+        updated = 0
+        for entry in manager.entries():
+            skill_id = entry.get("skill_id")
+            if not isinstance(skill_id, str) or not _valid_slot_id(skill_id):
+                logger.warning(
+                    "ignored invalid downloaded skill id error_type="
+                    "DOWNLOAD_LEDGER_ID_INVALID",
+                )
+                continue
+            skill_hash = hashlib.sha256(
+                skill_id.encode("utf-8"),
+            ).hexdigest()[:12]
+            try:
+                metadata_response = self.http.get(
+                    f"/api/v1/team/skill_hub/entry/{skill_id}",
+                    headers=self._hdr(),
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "download refresh metadata failed skill_id_hash=%s "
+                    "error_type=DOWNLOAD_REFRESH_REQUEST_FAILED",
+                    skill_hash,
+                )
+                continue
+            if metadata_response.status_code != 200:
+                logger.warning(
+                    "download refresh metadata failed skill_id_hash=%s "
+                    "http_status=%s",
+                    skill_hash, metadata_response.status_code,
+                )
+                continue
+            try:
+                metadata_payload = metadata_response.json()
+            except (TypeError, ValueError):
+                metadata_payload = {}
+            result = (
+                metadata_payload.get("result")
+                if isinstance(metadata_payload, dict) else None
+            )
+            if not isinstance(result, dict):
+                logger.warning(
+                    "download refresh metadata invalid skill_id_hash=%s",
+                    skill_hash,
+                )
+                continue
+            local_skill = manager.skills_dir / skill_id / "SKILL.md"
+            if (
+                entry.get("sha") == result.get("content_sha")
+                and local_skill.is_file()
+            ):
+                continue
+            try:
+                bundle = self.http.get(
+                    f"/api/v1/team/skill/{skill_id}/bundle",
+                    headers=self._hdr(),
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "download refresh bundle failed skill_id_hash=%s "
+                    "error_type=DOWNLOAD_REFRESH_REQUEST_FAILED",
+                    skill_hash,
+                )
+                continue
+            if bundle.status_code != 200:
+                logger.warning(
+                    "download refresh bundle failed skill_id_hash=%s "
+                    "http_status=%s",
+                    skill_hash, bundle.status_code,
+                )
+                continue
+            try:
+                manager.install(result, bundle.content)
+            except (
+                OSError, RuntimeError, ValueError, zipfile.BadZipFile,
+            ):
+                logger.warning(
+                    "download refresh install failed skill_id_hash=%s "
+                    "error_type=DOWNLOAD_REFRESH_INSTALL_FAILED",
+                    skill_hash,
+                )
+                continue
+            updated += 1
+            logger.info(
+                "refreshed downloaded skill skill_id_hash=%s",
+                skill_hash,
+            )
+        return updated
+
     # ── ④ push 用户手改 ──────────────────────────────────────────
     def push_user_edits(self) -> int:
         """检测本地 working copy 的未吸收手改，推成 user-staging/<client_id>。
@@ -420,6 +520,7 @@ class TeamClient:
             self.collect_and_upload()
             manifest = self.sync()
             self.reconcile_skill_sides(manifest)
+            self.reconcile_downloaded_skills()
             self.push_user_edits()
             self.cleanup(manifest)
         except Exception as tick_error:
@@ -866,7 +967,11 @@ def _matching_source_version_marker(
     dest: Path, source_dir: Path,
 ) -> bool:
     """只用于新鲜度验证，不参与 copy 删除所有权判定。"""
-    for marker_name in (".xskill_search.json", ".xskill_skillhub.json"):
+    for marker_name in (
+        ".xskill_download.json",
+        ".xskill_search.json",
+        ".xskill_skillhub.json",
+    ):
         source_marker = source_dir / marker_name
         dest_marker = dest / marker_name
         if not source_marker.is_file() or not dest_marker.is_file():

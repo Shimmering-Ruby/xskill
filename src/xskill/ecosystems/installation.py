@@ -968,7 +968,11 @@ def copy_install_is_current(src_dir: Path, dest: Path) -> bool:
         dest, src_dir, metadata=metadata,
     ):
         return False
-    for marker_name in (".xskill_search.json", ".xskill_skillhub.json"):
+    for marker_name in (
+        ".xskill_download.json",
+        ".xskill_search.json",
+        ".xskill_skillhub.json",
+    ):
         source_marker = src_dir / marker_name
         dest_marker = dest / marker_name
         if not (source_marker.is_file() and dest_marker.is_file()):

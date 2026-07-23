@@ -885,11 +885,18 @@ async def team_skill_bundle(
         return Response(content=bundle, media_type="application/octet-stream")
 
     hub = _ctx.skillhub
-    hub_dir = hub.skill_path(name) if hub is not None else None
-    if hub_dir is None:
+    hub_entry = hub.entry(name) if hub is not None else None
+    if hub_entry is None:
+        raise HTTPException(status_code=404, detail=f"skill not found: {name}")
+    hub_dir = Path(hub_entry["path"])
+    if not hub_dir.is_dir() or not (hub_dir / "SKILL.md").is_file():
         raise HTTPException(status_code=404, detail=f"skill not found: {name}")
     archive = _make_skillhub_archive(hub_dir)
-    return Response(content=archive, media_type="application/zip")
+    return Response(
+        content=archive,
+        media_type="application/zip",
+        headers={"X-XSkill-Content-Sha": hub_entry["content_sha"]},
+    )
 
 
 def _repo_search_archive(
@@ -939,6 +946,68 @@ def _repo_search_archive(
             status_code=409, detail="skill version changed; search again",
         ) from error
     return archive, content_sha, side
+
+
+@router.get("/skill_hub/entry/{skill_id}")
+async def team_skill_hub_entry(
+    skill_id: str,
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+) -> dict:
+    """按 search 返回的稳定 ID 读取当前下载元信息，不传输 skill 内容。"""
+    client_id = _auth(x_xskill_token, x_xskill_client)
+    return await run_in_threadpool(
+        _team_skill_entry, skill_id, client_id,
+    )
+
+
+def _team_skill_entry(skill_id: str, client_id: str) -> dict:
+    _total_slots, _ranked_slots, probability = live_manifest_tuning()
+    if _is_repo_search_id(skill_id):
+        catalog = manifest_catalog_snapshot(
+            _ctx.skill_dir, max_age_seconds=0,
+        )
+        skill = catalog.search_by_id.get(skill_id)
+        if skill is None:
+            raise HTTPException(
+                status_code=404, detail=f"skill not found: {skill_id}",
+            )
+        hit = {
+            "source": "repo",
+            "skill_id": skill_id,
+            "repo_name": skill.name,
+            "display_name": str(
+                skill.frontmatter.get("name") or skill.name
+            ),
+            "description": skill.description,
+            "source_path": skill.name,
+            "content_sha": catalog.refs[skill.name][0],
+            "ux_avg": None,
+            "bm25_rank": None,
+            "semantic_rank": None,
+        }
+        results = _format_team_search_results(
+            [hit], catalog, client_id, probability,
+        )["results"]
+    else:
+        hub = _ctx.skillhub
+        entry = hub.entry(skill_id) if hub is not None else None
+        if entry is None:
+            raise HTTPException(
+                status_code=404, detail=f"skill not found: {skill_id}",
+            )
+        hit = dict(entry)
+        hit["bm25_rank"] = None
+        hit["semantic_rank"] = None
+        hit["ux_avg"] = hub.ux_avg(skill_id)
+        results = _format_team_search_results(
+            [hit], None, client_id, probability,
+        )["results"]
+    if not results:
+        raise HTTPException(
+            status_code=404, detail=f"skill not found: {skill_id}",
+        )
+    return {"result": results[0]}
 
 
 @router.get("/skill_hub/search")

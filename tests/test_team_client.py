@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -138,6 +140,80 @@ def test_push_user_edits_stops_after_reverse_sync_failure(
     monkeypatch.setattr(daemon, "run_git", fail_if_git_status_runs)
 
     assert tc.push_user_edits() == 0
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows CI 不保证普通用户可创建 symlink",
+)
+def test_push_user_edits_continues_for_shared_symlink(
+    server_app, tmp_path,
+):
+    """Codex/OpenCode shared link 无需反向 copy，仍须继续 Git 回传。"""
+    tc = _client(server_app, tmp_path)
+    manifest = tc.sync()
+    tc.reconcile_skill_sides(manifest)
+    repo = (
+        tmp_path / "client_home" / ".xskill" / "skill" / "fix-foo"
+    )
+    shared = (
+        tmp_path / "client_home" / ".agents" / "skills" / "fix-foo"
+    )
+    shared.parent.mkdir(parents=True)
+    shared.symlink_to(repo, target_is_directory=True)
+    (shared / "SKILL.md").write_text(
+        "---\nname: fix-foo\ndescription: changed\n---\n# fix\n",
+        encoding="utf-8",
+    )
+
+    assert tc.push_user_edits() == 1
+
+
+def test_reconcile_downloaded_skills_refreshes_changed_version(
+    server_app, tmp_path, monkeypatch,
+):
+    tc = _client(server_app, tmp_path)
+    skills_dir = tmp_path / "downloads"
+    local = skills_dir / "download@abcdef"
+    local.mkdir(parents=True)
+    (local / "SKILL.md").write_text("old\n", encoding="utf-8")
+    installed: list[tuple[dict, bytes]] = []
+
+    class _Manager:
+        def __init__(self, **_kwargs):
+            self.skills_dir = skills_dir
+
+        @staticmethod
+        def entries():
+            return [{"skill_id": "download@abcdef", "sha": "old-sha"}]
+
+        @staticmethod
+        def install(result, content):
+            installed.append((result, content))
+
+    class _Http:
+        @staticmethod
+        def get(path, **_kwargs):
+            if "/entry/" in path:
+                return SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {"result": {
+                        "skill_id": "download@abcdef",
+                        "content_sha": "new-sha",
+                    }},
+                )
+            return SimpleNamespace(status_code=200, content=b"archive")
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.DownloadedSkills", _Manager,
+    )
+    tc.http = _Http()
+
+    assert tc.reconcile_downloaded_skills() == 1
+    assert installed == [({
+        "skill_id": "download@abcdef",
+        "content_sha": "new-sha",
+    }, b"archive")]
 
 
 def test_cleanup_removes_skill_not_in_manifest(server_app, tmp_path):

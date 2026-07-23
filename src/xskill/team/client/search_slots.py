@@ -1,10 +1,14 @@
-"""search_slots.py — `xskill search` 拉取的 skillhub skill 的本地滚动槽位。
+"""search_slots.py — 搜索下载 skill 的本地安装与持久化管理。
 
 search 命中的 skill 落 ``~/.xskill/search_skills/<skill_id>/``，与 sync 管理的
 ``~/.xskill/skill/`` 分开——daemon 的 cleanup 按 manifest 清理那边，不碰这里。
 台账 ``~/.xskill/search_slots.json`` 按最近命中排序，超过容量淘汰最旧的
 （同时摘掉仍由该槽位拥有的生态安装）。每个槽位目录里有 ``.xskill_search.json``
 标记（sha / 查询词 / 时间），与 sync 的 ``.xskill_skillhub.json`` 区分来源。
+
+``DownloadedSkills`` 是 ``xskill download`` 的显式、持久化安装区：
+``~/.xskill/downloaded_skills/<skill_id>/``。它不参与 search slot 的 LRU，
+重复下载只更新同一条台账和安装内容。
 """
 from __future__ import annotations
 
@@ -19,11 +23,13 @@ from xskill.team.client.daemon import (
     install_skill_to_ecosystems,
     uninstall_skill_from_ecosystems,
 )
+from xskill.skill.git import skill_repo_lock
 
 logger = logging.getLogger("xskill.team.client")
 
 SEARCH_SLOT_CAPACITY = 10
 SEARCH_MARKER_NAME = ".xskill_search.json"
+DOWNLOAD_MARKER_NAME = ".xskill_download.json"
 
 
 def _valid_slot_id(skill_id: str) -> bool:
@@ -111,6 +117,99 @@ class SearchSlots:
         if return_details:
             return {
                 "cache_path": resolved_path,
+                "installations": tuple(
+                    dict(record) for record in installations
+                ),
+            }
+        return resolved_path
+
+
+class DownloadedSkills:
+    """显式下载的持久 skill：独立台账管理，不因后续搜索而淘汰。"""
+
+    def __init__(
+        self, *, xskill_home: Path, home_root: Path | None = None,
+    ) -> None:
+        self.skills_dir = Path(xskill_home) / "downloaded_skills"
+        self.ledger_path = Path(xskill_home) / "downloads.json"
+        self.home_root = Path(home_root) if home_root else Path.home()
+
+    def _entries_unlocked(self) -> list[dict]:
+        try:
+            loaded = json.loads(self.ledger_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return (
+            [entry for entry in loaded if isinstance(entry, dict)]
+            if isinstance(loaded, list) else []
+        )
+
+    def entries(self) -> list[dict]:
+        with skill_repo_lock(
+            self.skills_dir, use_git_write_limit=False,
+        ):
+            return self._entries_unlocked()
+
+    def install(
+        self, result: dict, archive_bytes: bytes,
+        *, return_details: bool = False,
+    ) -> Path | dict:
+        """落盘并安装一个显式下载项；同 ID 原地更新，其余下载项全部保留。"""
+        skill_id = result.get("skill_id")
+        if not isinstance(skill_id, str) or not _valid_slot_id(skill_id):
+            raise ValueError(f"invalid download skill_id: {skill_id!r}")
+        content_sha = result.get("content_sha")
+        if not isinstance(content_sha, str) or not content_sha:
+            raise ValueError("download metadata missing content_sha")
+
+        with skill_repo_lock(
+            self.skills_dir, use_git_write_limit=False,
+        ):
+            dest_dir = self.skills_dir / skill_id
+            downloaded_at = datetime.now(timezone.utc).isoformat(
+                timespec="seconds",
+            )
+            apply_skillhub_archive(
+                archive_bytes,
+                dest_dir,
+                expected_sha=content_sha,
+                display_name=result.get("display_name"),
+                source_path=result.get("source_path"),
+                marker_name=DOWNLOAD_MARKER_NAME,
+                extra_meta={"downloaded_at": downloaded_at},
+            )
+            installations = install_skill_to_ecosystems(
+                dest_dir, home_root=self.home_root,
+            )
+            entries = [
+                entry for entry in self._entries_unlocked()
+                if entry.get("skill_id") != skill_id
+            ]
+            entries.append({
+                "skill_id": skill_id,
+                "display_name": result.get("display_name"),
+                "description": result.get("description"),
+                "source": result.get("source"),
+                "source_path": result.get("source_path"),
+                "sha": content_sha,
+                "downloaded_at": downloaded_at,
+                "installations": [
+                    dict(record) for record in installations
+                ],
+            })
+            self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_ledger = self.ledger_path.with_name(
+                f".{self.ledger_path.name}.tmp",
+            )
+            temporary_ledger.write_text(
+                json.dumps(entries, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temporary_ledger.replace(self.ledger_path)
+        resolved_path = dest_dir.resolve()
+        if return_details:
+            return {
+                "path": resolved_path,
                 "installations": tuple(
                     dict(record) for record in installations
                 ),
