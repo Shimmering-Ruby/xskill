@@ -84,45 +84,43 @@ xskill是一套无监督的skill蒸馏方案，其不需要构建数据集就可
 
 目前版本的算法管线精度表现如下：
 
+<p align="center">
+  <sub><strong>Setup:</strong> <code>DeepSeek-V4-Flash</code> · <code>Claude Code</code> · <code>single</code> mode<br>
+  <strong>Pipeline:</strong> SkillOpt built-in evaluation pipeline · Official data split</sub>
+</p>
+
 <table align="center">
   <thead>
     <tr>
-      <th colspan="4" align="center">
-        <strong>Setup:</strong> <code>DeepSeek-V4-Flash</code> · <code>Claude Code</code> · <code>single</code> mode<br>
-        <strong>Pipeline:</strong> SkillOpt built-in evaluation pipeline · Official data split
-      </th>
-    </tr>
-    <tr>
-      <th align="left">Benchmark</th>
-      <th align="right">XSkill</th>
-      <th align="right">SkillOpt</th>
-      <th align="right">XSkill Δ</th>
+      <th></th>
+      <th align="right">Spreadsheet</th>
+      <th align="right">ALFWorld</th>
+      <th align="right">Mean¹</th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td align="left">Spreadsheet</td>
+      <th align="left">XSkill</th>
       <td align="right">81.40</td>
-      <td align="right"><strong>82.80</strong></td>
-      <td align="right">−1.40</td>
-    </tr>
-    <tr>
-      <td align="left">ALFWorld</td>
       <td align="right"><strong>84.32</strong></td>
-      <td align="right">77.60</td>
-      <td align="right"><strong>+6.72</strong></td>
-    </tr>
-    <tr>
-      <td align="left"><strong>Mean¹</strong></td>
       <td align="right"><strong>82.86</strong></td>
-      <td align="right">80.20</td>
-      <td align="right"><strong>+2.66</strong></td>
     </tr>
     <tr>
-      <td colspan="4" align="center"><sub>¹ 当前平均分仅包含 Spreadsheet 和 ALFWorld，OfficeQA 仍在评测中。</sub></td>
+      <th align="left">SkillOpt</th>
+      <td align="right"><strong>82.80</strong></td>
+      <td align="right">77.60</td>
+      <td align="right">80.20</td>
+    </tr>
+    <tr>
+      <th align="left">Delta</th>
+      <td align="right">−1.40</td>
+      <td align="right"><strong>+6.72</strong></td>
+      <td align="right"><strong>+2.66</strong></td>
     </tr>
   </tbody>
 </table>
+
+<p align="center"><sub>¹ 当前平均分仅包含 Spreadsheet 和 ALFWorld，OfficeQA 仍在评测中。</sub></p>
 
 
 在目前已完成的评测中，其整体精度与 SkillOpt 相当，并取得了更高的平均分。
