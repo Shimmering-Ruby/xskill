@@ -27,7 +27,7 @@
 
 * * *
 
-## ✨ 为什么需要 xskill
+## 为什么需要 xskill
 
 ```
 “同事的coding agent已经做过的事情，你为什么不能直接拿来用？”
@@ -43,7 +43,7 @@ xskill是企业级的团队skill演进方案，支持轨迹自动蒸馏Skill，�
 
 * * *
 
-## 🔁 一人解决,全队复用
+## 一人解决,全队复用
 
 只要团队里有一个人在自己的会话里搞定了某个问题,这个解法就会变成一条技能——其他人的 agent 自动拿到。没人需要专门写文档。
 
@@ -51,7 +51,7 @@ xskill是企业级的团队skill演进方案，支持轨迹自动蒸馏Skill，�
 <img src="docs/assets/xs_multiplier.zh.svg" width="820" alt="一个人解决一次问题,xskill 把它蒸馏成一条技能,瞬间扩散到全队">
 </div>
 
-## 🧩 跨越每一个 agent 与设备——同一个技能库
+## 跨越每一个 agent 与设备——同一个技能库
 
 笔记本上用 Claude Code、服务器上用 Codex、IDE 里用 Cursor。xskill 从它们全部收集脱敏后的轨迹,进化出**同一个共享技能库**,再把结果同步回你用的每一个 agent。
 
@@ -59,7 +59,7 @@ xskill是企业级的团队skill演进方案，支持轨迹自动蒸馏Skill，�
 <img src="docs/assets/xs_crosscontext.zh.svg" width="860" alt="多个 agent 和设备汇入同一个轨迹 watcher 和同一个进化技能库,再同步回所有 agent">
 </div>
 
-## 🌱 孤岛 → 集体进化
+## 孤岛 → 集体进化
 
 没有一个共享、自我改进的技能库,每个开发者都在孤岛里重复解决同样的问题。xskill 把这些被浪费的、隔离的努力,变成可以复利累积的共享经验。
 
@@ -69,7 +69,7 @@ xskill是企业级的团队skill演进方案，支持轨迹自动蒸馏Skill，�
 
 * * *
 
-## 🏗 架构
+## 架构
 
 <div align="center">
 <img src="docs/assets/xs_architecture.zh.svg" width="900" alt="xskill 架构:agent 生态 → 轨迹 watcher → 原子拆分 → 技能路由 → 技能编辑 agent → canary 灰度 A/B → 技能仓库,并支持团队模式">
