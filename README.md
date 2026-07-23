@@ -75,7 +75,8 @@ xskill是企业级的团队skill演进方案，支持轨迹自动蒸馏Skill，�
 <img src="docs/assets/xs_architecture.zh.svg" width="900" alt="xskill 架构:agent 生态 → 轨迹 watcher → 原子拆分 → 技能路由 → 技能编辑 agent → canary 灰度 A/B → 技能仓库,并支持团队模式">
 </div>
 
-xskill全流程都是Agentic处理的，首先将轨迹按照内部意图拆分为子轨迹（轨迹原子），然后对轨迹原子进行聚类并分配到对应的skill，原子积攒足够后就会触发skill编辑产出新的skill版本。
+> [!NOTE]
+> xskill全流程都是Agentic-Centric的管线。首先将轨迹按照内部意图拆分为子轨迹（轨迹原子），然后对轨迹原子进行聚类并分配到对应的skill，原子积攒足够后就会触发skill编辑产出新的skill版本。
 不同的skill版本会在真实的用户流量上进行测试，用户体验分高的胜出作为主版本继续迭代，每一次改动都有版本、可回滚。细节见 [`docs/agent.md`](https://github.com/SkillNerds/xskill/blob/main/docs/agent.md)。
 
 ## 精度表现
@@ -143,10 +144,10 @@ embedding:
 
 再跑一次 `xskill serve`, 它会自动识别你机器上每一个受支持的 agent 并开始运行，收集agent的轨迹并将skill推送到对应的harness下。
 
-注意：
-单人模式下，你将会丢失很多精心设计的特性，因此只建议在以下情况进行使用。
-1.希望能够自动将之前高频工作流串联成skill
-2.每天有高强度的Agent运行需求
+> [!NOTE]
+>单人模式下，你将会丢失很多精心设计的特性，因此只建议在以下情况进行使用。
+> 1.希望能够自动将之前高频工作流串联成skill
+> 2.每天有高强度的Agent运行需求
 
 ### 团队模式(推荐)
 
@@ -214,8 +215,6 @@ skillhub:
 然后将公司内网skillhub随意放置到该目录下（支持多个skillhub），xskill就会自动探测skill并纳入推荐，将相关skill自动推送给指定的用户.
 
 
-
-
 * * *
 
 ## 🔌 与你的 agent 协同
@@ -264,11 +263,11 @@ skillhub:
 
 ## 🙏 致谢
 
-xskill 站在更广泛的 trajectory-to-skill 研究方向之上(港大 OpenSpace、阿里 Trace2Skill、华东师范 AutoSkill 等),也建立在它所接入的 agent 生态之上——Claude Code、Codex、OpenCode、Cursor、OpenClaw、Trae。
+港大 OpenSpace、阿里 Trace2Skill、华东师范 AutoSkill、微软SkillOpt
 
 ## 🤝 贡献
 
-欢迎提 Issue 和 PR——尤其是新的 agent 适配。具体见仓库说明。
+欢迎提 Issue 和 PR
 
 ## 📝 引用
 
