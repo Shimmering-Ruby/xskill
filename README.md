@@ -22,7 +22,6 @@
 
 <br>
 
-<img src="docs/assets/demo-v5.gif" width="720" alt="一个 coding agent 列出 xskill 从它过往会话中蒸馏出的技能">
 
 </div>
 
@@ -30,12 +29,17 @@
 
 ## ✨ 为什么需要 xskill
 
-你的 coding agent 每次碰到熟悉的问题,都从头再推一遍。你要么重新讲一遍,要么手动维护一个提示词库——而这个库没人盯着就会慢慢烂掉。xskill 让这些活儿消失:
+```
+“同事的coding agent已经做过的事情，你为什么不能直接拿来用？”
+```
 
-- 🚀 **装起来快**——`pip install xskill`,一个配置文件,搞定。
-- 💬 **你只管写代码**——它在后台观察你的真实会话,把"管用的做法"自动蒸馏成 `SKILL.md`,你的 agent 自动加载。零额外操作。
-- 🧬 **自我进化,不是自卖自夸**——新版技能只有在真实流量上**确实让用户体验更好**,才会取代旧版。由用户体验驱动,而不是让大模型给自己打分。
-- 👥 **团队放大器**——一个人解决,全队复用。团队越大,进化越快、越准。
+xskill是企业级的团队skill演进方案，支持轨迹自动蒸馏Skill，基于轨迹画像推送Skill，支持导入团队skillhub进行推荐，支持skill评价。
+
+- **高手经验自动传递**——一个人的解法自动到达全组，让最短路径不再壮志难酬。
+- **跨Harness和设备共享进化**——Codex、Claude Code、Cursor IDE都会加入光荣的进化,齐心,协力。
+- **支持专家修改Skill**——觉得skill不完美？直接修改本地的skill，改动会被云端自动学习。
+- **轨迹保持私有**——会话在上传前已脱敏，秘钥密码和相关隐私不会被别人看到。
+- **不让skill烂掉**——自动评价skill，支持分析用户实际使用轨迹给出评价分并绘制不同**skill版本的得分趋势折线图**，大数据显微镜。
 
 * * *
 
@@ -71,17 +75,53 @@
 <img src="docs/assets/xs_architecture.zh.svg" width="900" alt="xskill 架构:agent 生态 → 轨迹 watcher → 原子拆分 → 技能路由 → 技能编辑 agent → canary 灰度 A/B → 技能仓库,并支持团队模式">
 </div>
 
-几个职责很窄的 LLM agent 在干活:一个把轨迹拆成单一意图的**原子(Atom)**;一个把每个原子**路由**到某条技能;一个在技能攒够素材后**重写** `SKILL.md`;还有一个在真实流量上对新版本做 **A/B 测试**、留下胜出者。每条技能都是它自己的 git 仓库,所以每一次改动都有版本、可回滚。细节见 [`docs/agent.md`](https://github.com/SkillNerds/xskill/blob/main/docs/agent.md)。
+xskill全流程都是Agentic处理的，首先将轨迹按照内部意图拆分为子轨迹（轨迹原子），然后对轨迹原子进行聚类并分配到对应的skill，原子积攒足够后就会触发skill编辑产出新的skill版本。
+不同的skill版本会在真实的用户流量上进行测试，用户体验分高的胜出作为主版本继续迭代，每一次改动都有版本、可回滚。细节见 [`docs/agent.md`](https://github.com/SkillNerds/xskill/blob/main/docs/agent.md)。
+
+## 精度表现
+xskill是一套无监督的skill蒸馏方案，其不需要构建数据集就可以完成进化。
+
+目前版本的算法管线精度表现如下：
+
+**Setup:** `DeepSeek-V4-Flash` · `Claude Code` · `single` mode
+
+**Pipeline:** SkillOpt built-in evaluation pipeline · Official data split
+
+| Benchmark   |    XSkill |  SkillOpt |  XSkill Δ |
+| :---------- | --------: | --------: | --------: |
+| Spreadsheet |     81.40 | **82.80** |     −1.40 |
+| ALFWorld    | **84.32** |     77.60 | **+6.72** |
+| **Mean¹**   | **82.86** |     80.20 | **+2.66** |
+
+> ¹ 当前平均分仅包含 Spreadsheet 和 ALFWorld，OfficeQA 仍在评测中。
+
+
+在目前已完成的评测中，其整体精度与 SkillOpt 相当，并取得了更高的平均分。
+
+### Evaluation Setup
+
+为了尽量还原真实的团队使用场景，评测环境通过 namespace 隔离部署了：
+
+* 3 个独立的 `xskill-client`
+* 1 个共享的 `xskill-server`
+* 多个由 LLM 模拟的用户，负责与 Agent 进行 QA 交互
+
+> [!IMPORTANT]
+> XSkill 无需显式监督信号即可持续进化。
+> SkillOpt 强依赖 ValSet 提供进化所需的监督信号。
+> 在 ALFWorld 的 Epoch 2、3、4 中，ValSet 均出现精度溢出，导致进化失败，是其算法缺陷。
+
+未来会支持嵌入不同的算法内核，敬请期待。
 
 * * *
 
 ## 🚀 快速开始
 
-### 路径 A —— 单人、本地
+### 单人模式（尝鲜体验）
 
 ```bash
 pip install xskill          # Python 3.9+
-xskill serve                # 写出 ~/.xskill/config.yaml,然后退出
+xskill serve                # 第一次启动只初始化配置文件 ~/.xskill/config.yaml
 ```
 
 打开 `~/.xskill/config.yaml`,填两个模型端点(一个 LLM,一个 embedding 向量模型):
@@ -95,76 +135,86 @@ llm:
   api_key:  YOUR_KEY
 
 embedding:
-  # DeepSeek 没有 embedding,用 DashScope / OpenAI / Ollama,例如:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   model:    text-embedding-v4
   api_key:  YOUR_KEY
   dim:      0
 ```
 
-再跑一次 `xskill serve`——它会自动识别你机器上每一个受支持的 agent 并开始监听。要把旧轨迹归档回填进来:
+再跑一次 `xskill serve`, 它会自动识别你机器上每一个受支持的 agent 并开始运行，收集agent的轨迹并将skill推送到对应的harness下。
 
+注意：
+单人模式下，你将会丢失很多精心设计的特性，因此只建议在以下情况进行使用。
+1.希望能够自动将之前高频工作流串联成skill
+2.每天有高强度的Agent运行需求
+
+### 团队模式(推荐)
+
+
+服务器管理员在服务器配置config.yaml后运行中心化进程：
 ```bash
-xskill registry add /path/to/trajectories
+xskill serve --server  # 会打印connect join命令，复制给组内同事便可。
 ```
 
-### 路径 B —— 团队模式(最有杀伤力的用法)
-
-一台机器当 server,其他人作为轻量 client 加入,大家对着同一个进化中的技能库工作。
-
+普通用户执行：
 ```bash
-xskill serve --server                          # 打印一个加入 token
-xskill connect <host:port> --token <token>     # 在每个同事的机器上运行
+xskill connect <host:port> --token <token>  --name <工号/姓名>   # 在每个同事的机器上运行
 ```
 
-- **悄悄蒸馏你的高手**——一个人的解法自动到达全队。
-- **任何工作流都能接**——Codex、Claude Code、Cursor IDE 随便选,大家加入同一个库,跨工具同步。
-- **轨迹保持私有**——会话在上传前已脱敏。
-- **A/B 驱动的进化**——一处改动先在每个人身上度量,再决定要不要扩散。人越多,进化越快越准。
-- **专家可以手动教**——本地改一条技能,会作为 `user-staging/<client_id>` 拉进 server,喂给下一轮进化。
 
-#### 常驻运行(推荐)
+#### 额外功能：管控面板
 
-`xskill connect` 默认**直连** server、绕开公司代理(华为 SWG 之类)——内网同事无需再手动设 `NO_PROXY`。只有当本机唯一出网路径就是代理、且代理能到达 server 时,才加 `--use-proxy` 显式走代理。
-
-**Windows**:`connect` 会自动把自己装成「计划任务」在后台常驻(登录自启、崩溃自愈、不限运行时长),命令随即返回,不用一直开着终端:
-
+在config.yaml中可以填写管理员身份:
+```yaml
+dashboard:
+  enabled: true
+  public: true
+  password: ""
+  admins:
+    - admin_name_1  # 管理员<工号/姓名>
+    - admin_name_2
+  admin_password: admin_passwd_123
+```
+然后再在任意一台pc上输入：
 ```bash
-xskill connect <服务器地址:端口> --token <TOKEN>   # 首次:握手 + 自动拉起后台常驻
-xskill status                                       # 看常驻状态(pid / server / client_id)
-xskill stop                                          # 停止并撤销常驻任务
-xskill start                                          # 重新拉起(需先 connect 过一次)
+xskill dashboard
 ```
 
-> `xskill start` 前必须至少 `connect` 过一次(带 token 完成握手),否则会提示你先 connect。换服务器或换 token 时,重跑一次带 token 的 `connect` 即可。
+就可以打开并登录管控面面板(身份自动识别），管理员可以进行如下操作：
+- 全局pin某个skill
+- 暂停某个用户的轨迹上传（异常行为用户）
+- 全局下线停推某个skill
+- 查看skill的版本血缘，得分趋势
+  
+普通用户可以：
+- 为自己pin某个喜欢的skill，防止推荐流变化
+- 下线某个自己不喜欢的skill
+- 查看自己的轨迹贡献给了哪些用户，谁用了自己的skill
+- 查看skill的版本血缘，得分趋势
 
-**macOS / Linux**:原生常驻(launchd / systemd --user)仍在路上;当前用你自己的 init 系统托管前台形态 `xskill connect --foreground` 即可:
+#### 额外功能：按需搜索
 
+除了 server 按画像推送的Skill,client 还可以主动搜索或下载 server 中的技能:
 ```bash
-xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/Linux 下会前台阻塞)
-# 之后用 launchd(KeepAlive=true)/ systemd --user(Restart=always)托管:
-#   xskill connect --foreground
-```
-
-> 把 `<服务器地址:端口>` 和 `<TOKEN>` 换成团队管理员给你的值(server 端 `xskill serve --server` 启动时会打印 token)。**切勿把真实 token 写进任何公开仓库或聊天记录。**
-
-#### 按需搜索 / 分享技能(skillhub)
-
-除了 server 按画像推送的技能,client 还可以主动搜索或下载 server skillhub 中的技能:
-
-```bash
-xskill search docker compose        # 只返回精简元信息和 skill ID
-xskill search docker --download     # 兼容旧行为:命中写入 10 槽 LRU 并自动安装
-xskill download <skill-id>          # 交互多选安装 harness
-xskill download <skill-id> --agent claude-code --agent codex -y
+xskill search <KEYWORDS>       
+xskill search <KEYWORDS> --download     # 检索的同时下载到本地(老的搜索结果会被刷新掉，建议在临时使用场景触发）
+xskill download <skill-id>          # 交互多选安装 harness, 会持久化到本地, 会随云端更新
+xskill download <skill-id> --agent claude-code --agent codex -y   # 非交互式安装到指定harness
 xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
 ```
 
-- `search` 使用 BM25 关键词+语义向量混合检索 skillhub 目录(含团队成员上传的技能),与推荐画像无关;语义服务不可用时自动退化为 BM25。默认只输出精简元信息、排名和 ID,不修改本机。
-- `search --download` 保留原有逻辑:技能落在 `~/.xskill/search_skills/`,本地最多保留 **10 个槽位**,按最近命中滚动淘汰,不受 sync 清理影响。
-- `download` 按 ID 持久下载;人类可交互多选 harness,agent/脚本应重复传 `--agent` 并加 `-y`。仅加 `-y` 时自动选择已检测到的 harness。
-- `upload` 会先校验 `SKILL.md` frontmatter,server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。
-- 本机语义搜索已从 CLI 移除(不再有 `xskill search traj|skill <query>`);如需按语义检索本机轨迹/技能,请用 dashboard 或 API(`POST /api/v1/skills/search`)。
+#### 额外功能：SkillHub支持
+ Xskill支持导入skillhub并将海量skill纳入**推荐**和**评价**，
+ 服务器管理员只需要配置~/.xskill/config.yaml:
+ ```yaml
+skillhub:
+  enabled: true
+  dir: /root/.xskill/skillhub_skills
+ ```
+然后将公司内网skillhub随意放置到该目录下（支持多个skillhub），xskill就会自动探测skill并纳入推荐，将相关skill自动推送给指定的用户.
+
+
+
 
 * * *
 
@@ -185,7 +235,7 @@ xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.
 | 术语 | 含义 |
 | ---- | ---- |
 | **Trajectory(轨迹)** | 一次 agent 运行——一段会话的完整记录(`traj_*.md`)。 |
-| **Atom(原子)** | 轨迹里最小的、单一意图的切片。路由在这一层发生。 |
+| **TrajectoryAtom(轨迹原子)** | 轨迹里最小的、单一意图的切片，是生成skill的原料。 |
 | **Skill(技能)** | 一个 `SKILL.md` 加可选脚本,各自在独立的 git 目录里带版本。 |
 | **Canary(灰度)** | 当前技能与新候选版本在真实流量上的 A/B 对比测试。 |
 | **UX score(体验分)** | 某条技能在某个原子上服务用户的好坏,由交互本身打 1–10 分。灰度保留分更高的那个版本。 |
@@ -202,11 +252,11 @@ xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.
 
 ## 📰 动态
 
-- **2026-07-20** —— `v0.6.25`：SkillHub 对非 UTF-8 `SKILL.md` 按文件隔离并在修复后重新入索引，搜索接口增加结构化错误与 `request_id`，CLI 改善来源、描述、安装位置和 Windows CP936 输出；Claude Code 已完成会话改由常驻轻量任务采集；Dashboard 支持暂停/恢复指定用户的轨迹入库并自动兼容 `0.6.24` 数据库；同时加固并发候选写入、安装身份校验、用户编辑回写及 Canary 异常恢复。
-- **2026-07-07** —— `v0.6.2a2`：修复 Windows Group Policy 环境下 `schtasks` 拒绝访问的问题，自动降级到开机启动文件夹方案，`connect` 无需管理员权限即可后台常驻。
-- **2026-07-07** —— `v0.6.2`:用户画像 + skill 推荐引擎(`--name` 稳定身份、多兴趣聚类、80/20 质量+相关性混合推荐、staging 优先达量灰度);三方 skillhub 纳入检索池;ux 得分 RESTful 查询(按版本聚合 + atom 关联);Windows 计划任务后台常驻(`xskill start/stop/status`)。
+- **2026-07-20** —— `v0.6.25`：SkillHub 支持非 UTF-8 `SKILL.md`；Dashboard 支持暂停/恢复指定用户的轨迹入库；
+- **2026-07-07** —— `v0.6.2a2`：修复 Windows `connect` 无需管理员权限即可后台常驻，windows下常驻进程迭代至可用；
+- **2026-07-07** —— `v0.6.2`: 引入用户画像和skill 推荐引擎;支持使用实名制工号连接服务；支持导入第三方 skillhub 纳入检索池;为Windows平台添加后台常驻(`xskill start/stop/status`), 支持CLI管理进程；
 - **2026-05-29** —— 新增 Trae IDE / Trae Agent 适配。
-- **2026-05-23** —— `v0.5.0`:团队模式(client-server)、轨迹脱敏、Python 3.9、运行时不再需要 `git` 二进制。
+- **2026-05-23** —— `v0.5.0`:引入团队模式(client-server)、引入轨迹脱敏功能守护隐私、支持Python 3.9、移除`git` 依赖。
 - **2026-05-20** —— MIT 开源;上线 PyPI:`pip install xskill`。
 - **2026-05-12** —— 支持 Claude Code、Codex、OpenCode;接通 OpenClaw 与 Cursor。
 
