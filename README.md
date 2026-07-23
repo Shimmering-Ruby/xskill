@@ -150,15 +150,19 @@ xskill connect <服务器地址:端口> --token <TOKEN>   # 首次握手(macOS/L
 
 #### 按需搜索 / 分享技能(skillhub)
 
-除了 server 按画像推送的技能,client 还可以主动搜 server 的 skillhub 并把命中的技能拉到本地:
+除了 server 按画像推送的技能,client 还可以主动搜索或下载 server skillhub 中的技能:
 
 ```bash
-xskill search docker compose        # BM25+语义混合检索 skillhub,命中的直接拉到本地并安装
+xskill search docker compose        # 只返回精简元信息和 skill ID
+xskill search docker --download     # 兼容旧行为:命中写入 10 槽 LRU 并自动安装
+xskill download <skill-id>          # 交互多选安装 harness
+xskill download <skill-id> --agent claude-code --agent codex -y
 xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
 ```
 
-- `search` 使用 BM25 关键词+语义向量混合检索 skillhub 目录(含团队成员上传的技能),与推荐画像无关;语义服务不可用时自动退化为 BM25，并输出名字、描述、来源、评分和本机绝对路径。
-- 搜下来的技能落在 `~/.xskill/search_skills/`,本地最多保留 **10 个槽位**,按最近命中滚动淘汰,不受 sync 清理影响。
+- `search` 使用 BM25 关键词+语义向量混合检索 skillhub 目录(含团队成员上传的技能),与推荐画像无关;语义服务不可用时自动退化为 BM25。默认只输出精简元信息、排名和 ID,不修改本机。
+- `search --download` 保留原有逻辑:技能落在 `~/.xskill/search_skills/`,本地最多保留 **10 个槽位**,按最近命中滚动淘汰,不受 sync 清理影响。
+- `download` 按 ID 持久下载;人类可交互多选 harness,agent/脚本应重复传 `--agent` 并加 `-y`。仅加 `-y` 时自动选择已检测到的 harness。
 - `upload` 会先校验 `SKILL.md` frontmatter,server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。
 - 本机语义搜索已从 CLI 移除(不再有 `xskill search traj|skill <query>`);如需按语义检索本机轨迹/技能,请用 dashboard 或 API(`POST /api/v1/skills/search`)。
 

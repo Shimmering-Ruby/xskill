@@ -309,8 +309,17 @@ class TeamClient:
                     skill_hash, bundle.status_code,
                 )
                 continue
+            stored_agents = entry.get("agents")
+            refresh_agents = (
+                [str(agent) for agent in stored_agents]
+                if isinstance(stored_agents, list)
+                and all(isinstance(agent, str) for agent in stored_agents)
+                else None
+            )
             try:
-                manager.install(result, bundle.content)
+                manager.install(
+                    result, bundle.content, ecosystems=refresh_agents,
+                )
             except (
                 OSError, RuntimeError, ValueError, zipfile.BadZipFile,
             ):
@@ -751,14 +760,19 @@ def _copy_target_matches_source(dest: Path, source_dir: Path) -> bool:
     )
 
 
-def install_skill_to_ecosystems(repo_dir: Path, *, home_root: Path) -> list[dict]:
-    """把一个已就位的 skill 目录装到本机所有检测到的生态。
+def install_skill_to_ecosystems(
+    repo_dir: Path, *, home_root: Path,
+    ecosystems: list[str] | tuple[str, ...] | None = None,
+) -> list[dict]:
+    """把一个已就位的 skill 目录装到指定或本机已检测到的生态。
 
     working tree 已是最终内容，一律用 side='main' 语义（= 链接 / 拷贝整个
     目录）。openclaw 走 copy 不是 symlink（openclaw 拒收 escape-root 的
     symlink，详见 docs/ecosystem/openclaw-install-fix.md）；其他生态保持
-    symlink-first 三阶 fallback。返回每个已检测生态的本次安装结果；共享目标
-    的生态各保留一条记录，不能按 target 覆盖 harness 归属。
+    symlink-first 三阶 fallback。``ecosystems=None`` 保持旧行为，安装到所有
+    已检测生态；显式列表则不依赖探测，按安装器固定顺序精确安装。返回每个生态
+    的本次安装结果；共享目标的生态各保留一条记录，不能按 target 覆盖 harness
+    归属。
     """
     from xskill.ecosystems import (
         detect_known_ecosystems, install_to_claude_code,
@@ -783,9 +797,25 @@ def install_skill_to_ecosystems(repo_dir: Path, *, home_root: Path) -> list[dict
         "cursor": install_to_cursor,
         "trae": install_to_trae,
     }
+    if ecosystems is None:
+        ecosystem_names = [
+            str(det.get("ecosystem") or "")
+            for det in detect_known_ecosystems(home_root=home_root)
+        ]
+    else:
+        requested = set(ecosystems)
+        unknown = sorted(requested.difference(installer))
+        if unknown:
+            raise ValueError(
+                f"unsupported ecosystem(s): {', '.join(unknown)}"
+            )
+        # 固定顺序很重要：OpenClaw 必须在 Codex/OpenCode 之后，把共享目标
+        # 收敛为 copy，不能让 --agent 参数顺序改变最终安装形态。
+        ecosystem_names = [
+            ecosystem for ecosystem in installer if ecosystem in requested
+        ]
     installation_records: list[dict] = []
-    for det in detect_known_ecosystems(home_root=home_root):
-        ecosystem = det["ecosystem"]
+    for ecosystem in ecosystem_names:
         install_function = installer.get(ecosystem)
         if install_function is None:
             continue

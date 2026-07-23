@@ -152,9 +152,15 @@ class DownloadedSkills:
 
     def install(
         self, result: dict, archive_bytes: bytes,
-        *, return_details: bool = False,
+        *, ecosystems: list[str] | tuple[str, ...] | None = None,
+        return_details: bool = False,
     ) -> Path | dict:
-        """落盘并安装一个显式下载项；同 ID 原地更新，其余下载项全部保留。"""
+        """落盘并安装一个显式下载项；同 ID 原地更新，其余下载项全部保留。
+
+        显式 ``ecosystems`` 会写入台账，供 daemon 后续内容刷新继续复用。重复
+        下载同一 ID 时取新旧选择的并集，避免把仍在使用的旧 harness 变成不再
+        更新的孤儿安装；不传则兼容旧调用，继续安装到所有已检测生态。
+        """
         skill_id = result.get("skill_id")
         if not isinstance(skill_id, str) or not _valid_slot_id(skill_id):
             raise ValueError(f"invalid download skill_id: {skill_id!r}")
@@ -165,6 +171,30 @@ class DownloadedSkills:
         with skill_repo_lock(
             self.skills_dir, use_git_write_limit=False,
         ):
+            existing_entries = self._entries_unlocked()
+            existing_entry = next(
+                (
+                    entry for entry in existing_entries
+                    if entry.get("skill_id") == skill_id
+                ),
+                None,
+            )
+            selected_ecosystems = ecosystems
+            if ecosystems is not None:
+                stored_agents = (
+                    existing_entry.get("agents")
+                    if isinstance(existing_entry, dict) else None
+                )
+                previous_agents = (
+                    [
+                        agent for agent in stored_agents
+                        if isinstance(agent, str)
+                    ]
+                    if isinstance(stored_agents, list) else []
+                )
+                selected_ecosystems = list(dict.fromkeys(
+                    [*previous_agents, *ecosystems]
+                ))
             dest_dir = self.skills_dir / skill_id
             downloaded_at = datetime.now(timezone.utc).isoformat(
                 timespec="seconds",
@@ -180,11 +210,17 @@ class DownloadedSkills:
             )
             installations = install_skill_to_ecosystems(
                 dest_dir, home_root=self.home_root,
+                ecosystems=selected_ecosystems,
             )
             entries = [
-                entry for entry in self._entries_unlocked()
+                entry for entry in existing_entries
                 if entry.get("skill_id") != skill_id
             ]
+            installed_agents = list(dict.fromkeys(
+                str(record.get("ecosystem"))
+                for record in installations
+                if isinstance(record, dict) and record.get("ecosystem")
+            ))
             entries.append({
                 "skill_id": skill_id,
                 "display_name": result.get("display_name"),
@@ -193,6 +229,11 @@ class DownloadedSkills:
                 "source_path": result.get("source_path"),
                 "sha": content_sha,
                 "downloaded_at": downloaded_at,
+                "agents": (
+                    list(selected_ecosystems)
+                    if selected_ecosystems is not None
+                    else installed_agents
+                ),
                 "installations": [
                     dict(record) for record in installations
                 ],

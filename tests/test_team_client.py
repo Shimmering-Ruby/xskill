@@ -177,7 +177,7 @@ def test_reconcile_downloaded_skills_refreshes_changed_version(
     local = skills_dir / "download@abcdef"
     local.mkdir(parents=True)
     (local / "SKILL.md").write_text("old\n", encoding="utf-8")
-    installed: list[tuple[dict, bytes]] = []
+    installed: list[tuple[dict, bytes, list[str] | None]] = []
 
     class _Manager:
         def __init__(self, **_kwargs):
@@ -185,11 +185,15 @@ def test_reconcile_downloaded_skills_refreshes_changed_version(
 
         @staticmethod
         def entries():
-            return [{"skill_id": "download@abcdef", "sha": "old-sha"}]
+            return [{
+                "skill_id": "download@abcdef",
+                "sha": "old-sha",
+                "agents": ["codex", "cursor"],
+            }]
 
         @staticmethod
-        def install(result, content):
-            installed.append((result, content))
+        def install(result, content, *, ecosystems=None):
+            installed.append((result, content, ecosystems))
 
     class _Http:
         @staticmethod
@@ -213,7 +217,7 @@ def test_reconcile_downloaded_skills_refreshes_changed_version(
     assert installed == [({
         "skill_id": "download@abcdef",
         "content_sha": "new-sha",
-    }, b"archive")]
+    }, b"archive", ["codex", "cursor"])]
 
 
 def test_cleanup_removes_skill_not_in_manifest(server_app, tmp_path):

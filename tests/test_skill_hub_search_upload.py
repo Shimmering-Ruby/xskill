@@ -750,6 +750,39 @@ def test_downloaded_skills_are_persistent_without_lru(tmp_path, monkeypatch):
     )
 
 
+def test_downloaded_skills_persist_and_merge_selected_agents(
+    tmp_path, monkeypatch,
+):
+    selected: list[list[str] | None] = []
+
+    def record_install(*_args, **kwargs):
+        ecosystems = kwargs.get("ecosystems")
+        selected.append(
+            list(ecosystems) if ecosystems is not None else None
+        )
+        return []
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.install_skill_to_ecosystems",
+        record_install,
+    )
+    downloads = DownloadedSkills(
+        xskill_home=tmp_path / "xhome",
+        home_root=tmp_path / "home",
+    )
+    result = _fake_result("selected")
+
+    downloads.install(
+        result, _fake_archive("selected"), ecosystems=["codex"],
+    )
+    downloads.install(
+        result, _fake_archive("selected"), ecosystems=["cursor", "codex"],
+    )
+
+    assert selected == [["codex"], ["codex", "cursor"]]
+    assert downloads.entries()[0]["agents"] == ["codex", "cursor"]
+
+
 # ── client: CLI 端到端（TestClient 注入） ───────────────────────
 
 def test_cmd_search_hub_returns_metadata_without_download(
@@ -782,7 +815,10 @@ def test_cmd_download_persists_and_installs(hub_env, tmp_path,
         lambda *_args, **_kwargs: [],
     )
 
-    args = SimpleNamespace(skill_id=searched["skill_id"], json=True)
+    args = SimpleNamespace(
+        skill_id=searched["skill_id"], json=True,
+        agent=["codex"], yes=True,
+    )
     assert cli.cmd_download(args, http=hub_env.client, headers=hdr) == 0
 
     row = json.loads(capsys.readouterr().out)
@@ -895,7 +931,7 @@ def test_cmd_search_hub_renders_source_and_ux_defensively(tmp_path, monkeypatch,
     assert cli.cmd_search_hub(args, http=_FakeHttp(), headers={}) == 0
     out = capsys.readouterr().out
     assert "ux 4.2" in out
-    assert "来源: 上传者:alice" in out
+    assert "来源：上传者:alice" in out
     # 缺 source/ux_avg 的命中正常渲染，其名字行不带 ux/来源 后缀，不报错
     bare_line = next(line for line in out.splitlines() if "bare-meta" in line)
     assert "ux" not in bare_line and "来源" not in bare_line
