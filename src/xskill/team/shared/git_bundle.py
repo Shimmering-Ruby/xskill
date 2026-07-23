@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+import tarfile
+import zipfile
 
 from dulwich import porcelain
 from dulwich.bundle import create_bundle_from_repo, read_bundle, write_bundle
@@ -36,6 +38,29 @@ def make_repo_bundle(repo_dir: Path | str) -> bytes:
         buf = io.BytesIO()
         write_bundle(buf, bundle)
         return buf.getvalue()
+
+
+def make_repo_archive(repo_dir: Path | str, commit_sha: str) -> bytes:
+    """把指定 commit 打成与 SkillHub 分发契约一致的确定性 ZIP。"""
+    tar_buffer = io.BytesIO()
+    porcelain.archive(str(repo_dir), commit_sha, outstream=tar_buffer)
+    tar_buffer.seek(0)
+    zip_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="r:") as archive, zipfile.ZipFile(
+        zip_buffer, "w", compression=zipfile.ZIP_DEFLATED,
+    ) as output:
+        for member in sorted(archive.getmembers(), key=lambda item: item.name):
+            if not member.isfile():
+                continue
+            source = archive.extractfile(member)
+            if source is None:
+                continue
+            info = zipfile.ZipInfo(member.name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = (member.mode & 0o777) << 16
+            output.writestr(info, source.read())
+    return zip_buffer.getvalue()
 
 
 def apply_repo_bundle(bundle_bytes: bytes, dest_dir: Path | str) -> None:

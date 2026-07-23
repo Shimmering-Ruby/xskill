@@ -36,6 +36,15 @@ class _FailingSearchHub:
         raise self.error
 
 
+class _CombinedSearchEngine:
+    def __init__(self, hub, ranked: list[dict]) -> None:
+        self.skillhub = hub
+        self.ranked = ranked
+
+    def search_team_skills(self, _query: str, limit: int, _catalog):
+        return self.ranked[:limit]
+
+
 def _write_hub_skill(hub_dir: Path, folder: str, name: str, description: str) -> Path:
     d = hub_dir / folder
     d.mkdir(parents=True)
@@ -140,6 +149,117 @@ def test_search_and_upload_503_when_skillhub_disabled(tmp_path):
                     files={"file": ("x.zip", b"zz", "application/zip")},
                     headers=hdr)
     assert r.status_code == 503
+
+
+def test_repo_search_works_when_skillhub_disabled(tmp_path, monkeypatch):
+    client = _make_team_client(tmp_path, skillhub=None)
+    repo_dir = tmp_path / "skill" / "repo-only"
+    (repo_dir / ".git").mkdir(parents=True)
+    skill = SimpleNamespace(
+        name="repo-only",
+        path=repo_dir,
+        frontmatter={"name": "repo-only"},
+        description="docker repo helper",
+        ux_avg=lambda **_kwargs: None,
+    )
+    search_id = server_api.repo_search_id(skill.name)
+    main_sha, staging_sha = "a" * 40, "b" * 40
+    catalog = SimpleNamespace(
+        skills=(skill,),
+        refs={skill.name: (main_sha, staging_sha)},
+        search_by_id={search_id: skill},
+    )
+    engine = _CombinedSearchEngine(
+        SimpleNamespace(enabled=False),
+        [{
+            "source": "repo",
+            "skill_id": "repo:repo-only",
+            "repo_name": skill.name,
+            "display_name": skill.name,
+            "description": skill.description,
+            "source_path": skill.name,
+            "content_sha": main_sha,
+            "ux_avg": None,
+            "bm25_rank": 1,
+            "semantic_rank": None,
+        }],
+    )
+    monkeypatch.setattr(server_api, "get_recommend_engine", lambda: engine)
+    monkeypatch.setattr(
+        server_api, "manifest_catalog_snapshot", lambda _path, **_kwargs: catalog,
+    )
+    monkeypatch.setattr(
+        server_api, "live_manifest_tuning", lambda: (100, 80, 1.0),
+    )
+    monkeypatch.setattr(
+        server_api, "main_sha", lambda path: catalog.refs[path.name][0],
+    )
+    monkeypatch.setattr(
+        server_api, "staging_sha", lambda path: catalog.refs[path.name][1],
+    )
+    monkeypatch.setattr("xskill.team.server.skill_manifest._engine", None)
+    _cid, headers = _register(client)
+
+    response = client.get(
+        "/api/v1/team/skill_hub/search",
+        params={"query": "docker"}, headers=headers,
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["skill_id"] == search_id
+    assert result["content_sha"] == staging_sha
+    assert result["match"] == {
+        "bm25_rank": 1, "semantic_rank": None,
+    }
+    monkeypatch.setattr(
+        server_api, "live_manifest_tuning", lambda: (100, 80, 0.0),
+    )
+    repeated = client.get(
+        "/api/v1/team/skill_hub/search",
+        params={"query": "docker"}, headers=headers,
+    )
+    assert repeated.json()["results"][0]["content_sha"] == staging_sha
+
+    archived = []
+    monkeypatch.setattr(
+        server_api, "make_repo_archive",
+        lambda path, sha: archived.append((path, sha)) or _fake_archive("repo"),
+    )
+    original_resolve_slot = server_api._resolve_slot
+    monkeypatch.setattr(
+        server_api, "_resolve_slot",
+        lambda *_args, **_kwargs: pytest.fail("bundle recomputed search side"),
+    )
+    bundle = client.get(
+        f"/api/v1/team/skill/{search_id}/bundle", headers=headers,
+    )
+    assert bundle.status_code == 200
+    assert archived == [(repo_dir, staging_sha)]
+    assert bundle.headers["X-XSkill-Content-Sha"] == staging_sha
+
+    monkeypatch.setattr(
+        server_api, "live_manifest_tuning", lambda: (100, 80, 1.0),
+    )
+    monkeypatch.setattr(server_api, "_resolve_slot", original_resolve_slot)
+    with server_api._REPO_SEARCH_GRANTS_LOCK:
+        server_api._REPO_SEARCH_GRANTS.clear()
+    recovered = client.get(
+        f"/api/v1/team/skill/{search_id}/bundle", headers=headers,
+    )
+    assert recovered.status_code == 200
+    assert archived == [(repo_dir, staging_sha), (repo_dir, staging_sha)]
+
+    catalog.refs[skill.name] = ("c" * 40, None)
+    changed = client.get(
+        f"/api/v1/team/skill/{search_id}/bundle", headers=headers,
+    )
+    assert changed.status_code == 409
+    refreshed = client.get(
+        "/api/v1/team/skill_hub/search",
+        params={"query": "docker"}, headers=headers,
+    )
+    assert refreshed.json()["results"][0]["content_sha"] == "c" * 40
 
 
 def test_search_unknown_error_returns_safe_correlated_response(tmp_path, caplog):

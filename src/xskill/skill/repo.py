@@ -229,6 +229,7 @@ def rebuild_skill_index(
         "embeddings": embeddings,
         "atom_feats": atom_feats,
         "atom_feat_present": atom_present,
+        "model": str(getattr(embed_client, "model", "") or ""),
         "schema_version": 2,
         "method": "api",
     }

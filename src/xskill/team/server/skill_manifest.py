@@ -14,6 +14,7 @@ slot 结构 = 80 ranked + 20 recommended：
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -34,12 +35,19 @@ _logger = logging.getLogger("xskill.team.manifest")
 _engine = None
 
 
+def repo_search_id(skill_name: str) -> str:
+    """自产 skill 在 search/install 协议中的稳定虚拟 ID。"""
+    digest = hashlib.sha256(skill_name.encode("utf-8")).hexdigest()
+    return f"repo@{digest}"
+
+
 @dataclass(frozen=True)
 class _CatalogSnapshot:
     """一次 skill 仓扫描的不可变结果。"""
 
     skills: tuple[Skill, ...]
     refs: dict[str, tuple[str, str | None]]
+    search_by_id: dict[str, Skill]
     built_at: float
 
 
@@ -144,8 +152,20 @@ class _ManifestCatalogCache:
             key=lambda skill: _rank_key(skill, main_ref=refs[skill.name][0]),
             reverse=True,
         )
+        repo_names = {skill.name for skill in skills}
+        search_by_id: dict[str, Skill] = {}
+        for skill in skills:
+            search_id = repo_search_id(skill.name)
+            if search_id in repo_names or search_id in search_by_id:
+                _logger.error(
+                    "repo search id collision; skill omitted from search: %s",
+                    skill.name,
+                )
+                continue
+            search_by_id[search_id] = skill
         return _CatalogSnapshot(
-            skills=tuple(skills), refs=refs, built_at=self.clock(),
+            skills=tuple(skills), refs=refs,
+            search_by_id=search_by_id, built_at=self.clock(),
         )
 
     def clear(self, skill_dir: Path | None = None) -> None:

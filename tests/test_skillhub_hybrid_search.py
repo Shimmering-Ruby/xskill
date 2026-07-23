@@ -20,7 +20,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from xskill.recommend import skillhub as skillhub_module
-from xskill.recommend.skillhub import EMBED_CACHE_NAME, SkillHub, _tokenize
+from xskill.recommend.skillhub import (
+    EMBED_CACHE_NAME, SearchCorpus, SkillHub, _tokenize,
+)
 from xskill.team.server import api as server_api
 from xskill.team.server.client_registry import ClientRegistry, safe_dir_name
 from xskill.utils.embed_store import EmbedStore
@@ -69,6 +71,27 @@ def _prime_corpus_cache(hub: SkillHub) -> None:
     hub.embed_client.encode_calls.clear()
 
 
+def _repo_corpus(
+    tmp_path: Path, *, description: str, vec: list[float] | None = None,
+) -> SearchCorpus:
+    repo_dir = tmp_path / "repo-skill"
+    repo_dir.mkdir(exist_ok=True)
+    entry = {
+        "source": "repo",
+        "name": "repo:repo-skill",
+        "skill_id": "repo:repo-skill",
+        "repo_name": "repo-skill",
+        "display_name": "repo-skill",
+        "description": description,
+        "source_path": "repo-skill",
+        "content_sha": "a" * 40,
+        "path": repo_dir,
+    }
+    if vec is not None:
+        entry["vec"] = np.asarray(vec, dtype=float)
+    return (entry,)
+
+
 # ── 分词 ─────────────────────────────────────────────────────────
 
 def test_tokenize_mixed_chinese_english():
@@ -91,6 +114,98 @@ def test_bm25_orders_matches_and_name_outranks_description(tmp_path):
     assert names == ["alpha", "beta"]
     assert results[0]["bm25_rank"] == 1 and results[1]["bm25_rank"] == 2
     assert all(result["semantic_rank"] is None for result in results)
+
+
+def test_supplemental_repo_and_skillhub_share_global_bm25_rank(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "hub-alpha", "alpha", "shared")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    corpus = _repo_corpus(tmp_path, description="alpha shared")
+
+    results = hub.search("alpha", limit=5, supplemental=corpus)
+
+    assert [result["source"] for result in results] == ["skillhub", "repo"]
+    assert [result["bm25_rank"] for result in results] == [1, 2]
+    assert all(result["semantic_rank"] is None for result in results)
+
+
+def test_supplemental_repo_and_skillhub_share_semantic_and_rrf(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "hub-alpha", "alpha", "gamma one")
+    embed = ControlledEmbed({
+        "gamma one": [0.8, 0.6],
+        "alpha": [1.0, 0.0],
+    })
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=embed)
+    _prime_corpus_cache(hub)
+    corpus = _repo_corpus(
+        tmp_path, description="alpha two", vec=[0.0, 1.0],
+    )
+
+    results = hub.search("alpha", limit=5, supplemental=corpus)
+
+    by_source = {result["source"]: result for result in results}
+    assert by_source["skillhub"]["bm25_rank"] == 1
+    assert by_source["repo"]["bm25_rank"] == 2
+    assert by_source["skillhub"]["semantic_rank"] == 1
+    assert by_source["repo"]["semantic_rank"] == 2
+
+
+def test_disabled_skillhub_searches_repo_only_with_bm25(tmp_path):
+    hub = SkillHub(
+        enabled=False, hub_dir=tmp_path / "missing-hub", embed_client=None,
+    )
+    corpus = _repo_corpus(tmp_path, description="docker compose helper")
+
+    results = hub.search("docker", limit=5, supplemental=corpus)
+
+    assert len(results) == 1
+    assert results[0]["source"] == "repo"
+    assert results[0]["bm25_rank"] == 1
+    assert results[0]["semantic_rank"] is None
+
+
+def test_mismatched_repo_vector_keeps_bm25_and_skips_semantic(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "hub-alpha", "alpha", "alpha helper")
+    embed = ControlledEmbed({
+        "alpha helper": [1.0, 0.0],
+        "alpha": [1.0, 0.0],
+    })
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=embed)
+    _prime_corpus_cache(hub)
+    corpus = _repo_corpus(
+        tmp_path, description="alpha repo helper", vec=[1.0, 0.0, 0.0],
+    )
+
+    results = hub.search("alpha", limit=5, supplemental=corpus)
+
+    by_source = {result["source"]: result for result in results}
+    assert by_source["repo"]["bm25_rank"] is not None
+    assert by_source["repo"]["semantic_rank"] is None
+    assert by_source["skillhub"]["semantic_rank"] == 1
+    assert all("vec" not in result for result in results)
+
+
+def test_supplemental_cached_search_uses_corpus_identity(tmp_path, monkeypatch):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "hub-alpha", "alpha", "alpha helper")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    corpus = _repo_corpus(tmp_path, description="alpha repo helper")
+    expected = hub.search("alpha", limit=5, supplemental=corpus)
+
+    original_build = hub._build_search_index
+    monkeypatch.setattr(
+        hub, "_build_search_index",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("same supplemental corpus rebuilt index")
+        ),
+    )
+    assert hub.search("alpha", limit=5, supplemental=corpus) == expected
+
+    monkeypatch.setattr(hub, "_build_search_index", original_build)
+    equal_but_new = tuple(dict(entry) for entry in corpus)
+    assert hub.search("alpha", limit=5, supplemental=equal_but_new) == expected
 
 
 # ── RRF 融合（构造双通道 rank） ─────────────────────────────────

@@ -57,6 +57,9 @@ class SkillFileSchemaError(TypeError):
     """A SKILL.md frontmatter field has a known-invalid type."""
 
 
+SearchCorpus = tuple[dict, ...]
+
+
 def _normalize(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 0 else v
@@ -140,7 +143,7 @@ class SkillHub:
         self._corpus_embed_inflight: set[str] = set()
         self._query_embed_retry_after = 0.0
         self._ux_avg_cache: dict[
-            tuple[str, int], tuple[float, str, float | None]
+            tuple[str, int, str | None], tuple[float, str, float | None]
         ] = {}
         self._ux_avg_cache_lock = threading.Lock()
 
@@ -510,7 +513,13 @@ class SkillHub:
         with open(self.index_cache_path, "wb") as index_file:
             pickle.dump(data, index_file)
 
-    def search(self, query: str, limit: int = 5) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        *,
+        supplemental: SearchCorpus | None = None,
+    ) -> list[dict]:
         """BM25 关键词 + 语义向量 RRF 融合检索（无画像，query↔description）。
 
         与 ``SkillRecommendEngine`` 完全无关——不读画像。语义通道只读 ``EmbedStore``
@@ -520,7 +529,13 @@ class SkillHub:
         normalized_query = query.strip().lower()
         if not normalized_query:
             return []
-        index_bundle = self._search_index_bundle()
+        index_bundle = self._search_index_bundle(supplemental=supplemental)
+        return self._search_bundle(normalized_query, int(limit), index_bundle)
+
+    def _search_bundle(
+        self, normalized_query: str, limit: int, index_bundle: dict,
+    ) -> list[dict]:
+        """在已构建的统一索引上复用 BM25、semantic、RRF 与结果缓存。"""
         entries = index_bundle["entries"]
         if not entries:
             return []
@@ -571,6 +586,7 @@ class SkillHub:
             index_bundle is None
             or index_bundle["snapshot_entries"] is not self._scan_snapshot_entries
             or now >= self._scan_snapshot_expires_at
+            or index_bundle.get("supplemental") is not None
         ):
             return None
         # Prefer the cached hybrid result when both a prior degraded result
@@ -942,27 +958,48 @@ class SkillHub:
                 self._corpus_embed_inflight.discard(description_key)
             self._query_embed_semaphore.release()
 
-    def _search_index_bundle(self) -> dict:
+    def _search_index_bundle(
+        self, *, supplemental: SearchCorpus | None = None,
+    ) -> dict:
         """随内容 fingerprint 变化整体重建 BM25 倒排 + 只读 corpus 向量，几百 skill <10ms。"""
-        if not self.dir.is_dir():
+        if self.enabled and not self.dir.is_dir():
             raise FileNotFoundError(
                 f"skillhub.dir 不存在: {self.dir}（启用 skillhub 前请放置三方 skill）"
             )
-        snapshot_entries = self._snapshot()
+        snapshot_entries = self._snapshot() if self.enabled else None
         bundle = self._search_index
-        if bundle is not None and bundle["snapshot_entries"] is snapshot_entries:
+        if (
+            bundle is not None
+            and bundle["snapshot_entries"] is snapshot_entries
+            and bundle.get("supplemental") is supplemental
+        ):
             return bundle
         with self._search_index_lock:
             bundle = self._search_index
-            if bundle is not None and bundle["snapshot_entries"] is snapshot_entries:
+            if (
+                bundle is not None
+                and bundle["snapshot_entries"] is snapshot_entries
+                and bundle.get("supplemental") is supplemental
+            ):
                 return bundle
-            entries = [dict(entry) for entry in snapshot_entries]
-            current_fingerprint = tuple(
+            native_entries = snapshot_entries or ()
+            supplemental_entries = supplemental or ()
+            supplemental_ids = {
+                entry["skill_id"] for entry in supplemental_entries
+            }
+            entries = [
+                dict(entry) for entry in native_entries
+                if entry["skill_id"] not in supplemental_ids
+            ]
+            entries.extend(dict(entry) for entry in supplemental_entries)
+            native_fingerprint = tuple(
                 (entry["skill_id"], entry["source_path"], entry["content_sha"])
-                for entry in entries
+                for entry in native_entries
+                if entry["skill_id"] not in supplemental_ids
             )
-            rebuilt_bundle = self._build_search_index(entries, current_fingerprint)
+            rebuilt_bundle = self._build_search_index(entries, native_fingerprint)
             rebuilt_bundle["snapshot_entries"] = snapshot_entries
+            rebuilt_bundle["supplemental"] = supplemental
             self._search_index = rebuilt_bundle
             return rebuilt_bundle
 
@@ -987,6 +1024,8 @@ class SkillHub:
             sum(document_lengths) / len(document_lengths) if document_lengths else 0.0
         )
         vector_present_indices, corpus_matrix = self._read_cached_corpus_vectors(entries)
+        for entry in entries:
+            entry.pop("vec", None)
         return {
             "fingerprint": fingerprint,
             "entries": entries,
@@ -1011,16 +1050,75 @@ class SkillHub:
         if self.embed_client is None or self.search_max_embed <= 0 or not entries:
             return [], np.empty((0, 0), dtype=float)
         embed_store = EmbedStore(self.dir / EMBED_CACHE_NAME, self.embed_client)
-        cached = embed_store.cached_vectors([entry["description"] for entry in entries])
-        present_indices = [
-            entry_index for entry_index, vector in enumerate(cached) if vector is not None
+        vectors: list[np.ndarray | None] = [None] * len(entries)
+        cache_lookup_indices = [
+            entry_index for entry_index, entry in enumerate(entries)
+            if entry.get("vec") is None and entry.get("source") != "repo"
         ]
-        if not present_indices:
-            return [], np.empty((0, 0), dtype=float)
-        corpus_matrix = np.vstack([
-            _normalize(np.asarray(cached[entry_index], dtype=float))
-            for entry_index in present_indices
+        cached = embed_store.cached_vectors([
+            entries[entry_index]["description"]
+            for entry_index in cache_lookup_indices
         ])
+        for entry_index, vector in zip(cache_lookup_indices, cached):
+            if vector is not None:
+                try:
+                    vectors[entry_index] = np.asarray(vector, dtype=float)
+                except (TypeError, ValueError):
+                    pass
+        inline_indices: list[int] = []
+        for entry_index, entry in enumerate(entries):
+            if entry.get("vec") is not None:
+                inline_indices.append(entry_index)
+                try:
+                    vectors[entry_index] = np.asarray(entry["vec"], dtype=float)
+                except (TypeError, ValueError):
+                    vectors[entry_index] = None
+
+        # SkillHub EmbedStore 的当前模型向量优先决定维度；没有时才采用 repo 索引。
+        expected_dim = next((
+            int(vectors[index].shape[0])
+            for index in cache_lookup_indices
+            if (
+                vectors[index] is not None
+                and vectors[index].ndim == 1
+                and vectors[index].shape[0] > 0
+                and np.all(np.isfinite(vectors[index]))
+            )
+        ), None)
+        if expected_dim is None:
+            dimension_counts: dict[int, int] = {}
+            dimension_order: list[int] = []
+            for index in inline_indices:
+                vector = vectors[index]
+                if (
+                    vector is None or vector.ndim != 1 or vector.shape[0] <= 0
+                    or not np.all(np.isfinite(vector))
+                ):
+                    continue
+                dimension = int(vector.shape[0])
+                if dimension not in dimension_counts:
+                    dimension_order.append(dimension)
+                    dimension_counts[dimension] = 0
+                dimension_counts[dimension] += 1
+            if dimension_counts:
+                expected_dim = max(
+                    dimension_order, key=lambda dim: dimension_counts[dim],
+                )
+        if expected_dim is None:
+            return [], np.empty((0, 0), dtype=float)
+        present_indices: list[int] = []
+        normalized_vectors: list[np.ndarray] = []
+        for entry_index, vector in enumerate(vectors):
+            if (
+                vector is None
+                or vector.ndim != 1
+                or vector.shape[0] != expected_dim
+                or not np.all(np.isfinite(vector))
+            ):
+                continue
+            present_indices.append(entry_index)
+            normalized_vectors.append(_normalize(vector))
+        corpus_matrix = np.vstack(normalized_vectors)
         return present_indices, corpus_matrix
 
     def entry(self, name: str, *, force_refresh: bool = False) -> dict | None:
@@ -1106,7 +1204,8 @@ class SkillHub:
     def _ux_avg_for_entry(self, entry: dict, days: int = 30) -> float | None:
         """按已解析 entry 读取近期均分，并用短 TTL 避免搜索热路径重复扫文件。"""
         sha = str(entry["content_sha"])
-        cache_key = (str(entry["skill_id"]), int(days))
+        ux_side = entry.get("ux_side")
+        cache_key = (str(entry["skill_id"]), int(days), ux_side)
         now = time.monotonic()
         with self._ux_avg_cache_lock:
             cached = self._ux_avg_cache.get(cache_key)
@@ -1127,6 +1226,7 @@ class SkillHub:
                 rows = recent_rows
             scores = [r.get("score") for r in rows
                       if r.get("commit_sha") == sha
+                      and (ux_side is None or r.get("side") == ux_side)
                       and isinstance(r.get("score"), (int, float))]
             value = sum(scores) / len(scores) if scores else None
             self._ux_avg_cache[cache_key] = (

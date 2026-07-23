@@ -28,7 +28,7 @@ from xskill.config import recommend_config
 from xskill.pipeline.atom import AtomTaskStore
 from xskill.recommend.profile_store import ProfileStore
 from xskill.recommend.reco_store import RecoStore
-from xskill.recommend.skillhub import SkillHub
+from xskill.recommend.skillhub import SearchCorpus, SkillHub
 from xskill.skill.repo import SkillRepo
 from xskill.utils.embed_store import EmbedStore
 
@@ -92,6 +92,8 @@ class SkillRecommendEngine:
         # 一次万行矩阵,不再每请求每 worker 各拼一遍。invalidate_cache 清空。
         self._combined_pool_cache: Optional[tuple] = None
         self._combined_pool_lock = threading.Lock()
+        self._repo_search_corpus_cache: Optional[tuple] = None
+        self._repo_search_corpus_lock = threading.Lock()
         self._profile_row_cache: dict[str, dict | None] = {}
         self._profile_cache_generation: dict[str, int] = {}
         self._profile_cache_lock = threading.Lock()
@@ -210,6 +212,99 @@ class SkillRecommendEngine:
         self._skill_index_cache = None
         self._skillhub_cache = None
         self._combined_pool_cache = None
+        with self._repo_search_corpus_lock:
+            self._repo_search_corpus_cache = None
+
+    def repo_search_corpus(self, catalog) -> SearchCorpus:
+        """把可分发 repo skill 投影为 hybrid search 补充语料。
+
+        文档始终进入 BM25；只有 ``.skill_index.pkl`` 中 name/text/vec 同代且
+        结构有效时才附加语义向量。
+        """
+        with self._repo_search_corpus_lock:
+            index_path = self.skill_dir / ".skill_index.pkl"
+            index = self._skill_index() if index_path.is_file() else None
+            cache = self._repo_search_corpus_cache
+            if cache is not None and cache[0] is catalog and cache[1] is index:
+                return cache[3]
+
+            skills = tuple(catalog.search_by_id.values())
+            documents = tuple((
+                skill,
+                catalog.refs[skill.name][0],
+                (skill.description or "").strip(),
+            ) for skill in skills)
+            fingerprint = tuple(
+                (skill.name, main_ref, description)
+                for skill, main_ref, description in documents
+            )
+            if (
+                cache is not None and cache[1] is index
+                and cache[2] == fingerprint
+            ):
+                self._repo_search_corpus_cache = (
+                    catalog, index, fingerprint, cache[3],
+                )
+                return cache[3]
+
+            vectors_by_name: dict[str, tuple[str, np.ndarray]] = {}
+            current_model = str(getattr(self.embed_client, "model", "") or "")
+            if index is not None and index.get("model") == current_model:
+                names = list(index.get("skill_names") or [])
+                texts = list(index.get("texts") or [])
+                raw_vectors = index.get("embeddings")
+                try:
+                    vectors = (
+                        np.asarray(raw_vectors, dtype=float)
+                        if raw_vectors is not None else np.empty((0, 0))
+                    )
+                except (TypeError, ValueError):
+                    vectors = np.empty((0, 0))
+                if (
+                    vectors.ndim == 2
+                    and len(names) == len(texts) == vectors.shape[0]
+                ):
+                    vectors_by_name = {
+                        name: (str(text), vectors[row])
+                        for row, (name, text) in enumerate(zip(names, texts))
+                        if isinstance(name, str)
+                    }
+                elif names or texts or raw_vectors is not None:
+                    logger.warning(
+                        "repo skill index shape mismatch; hybrid search uses BM25 only"
+                    )
+
+            entries: list[dict] = []
+            for skill, main_ref, description in documents:
+                entry = {
+                    "source": "repo",
+                    "name": f"repo:{skill.name}",
+                    "skill_id": f"repo:{skill.name}",
+                    "repo_name": skill.name,
+                    "display_name": str(
+                        skill.frontmatter.get("name") or skill.name
+                    ),
+                    "description": description,
+                    "source_path": skill.name,
+                    "content_sha": main_ref,
+                    "path": skill.path,
+                    "ux_side": "main",
+                }
+                indexed = vectors_by_name.get(skill.name)
+                if indexed is not None and indexed[0].strip() == description:
+                    entry["vec"] = indexed[1]
+                entries.append(entry)
+
+            corpus = tuple(entries)
+            self._repo_search_corpus_cache = (
+                catalog, index, fingerprint, corpus,
+            )
+            return corpus
+
+    def search_team_skills(self, query: str, limit: int, catalog) -> list[dict]:
+        """在自产 + SkillHub 的统一 BM25/semantic/RRF corpus 中搜索。"""
+        corpus = self.repo_search_corpus(catalog)
+        return self.skillhub.search(query, limit, supplemental=corpus)
 
     def _skill_index(self) -> dict:
         if self._skill_index_cache is None:
