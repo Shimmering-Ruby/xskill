@@ -432,8 +432,16 @@ def _dest_edit_status(
     exclude: frozenset[str],
 ) -> _DestEditAssessment:
     try:
-        if not dest_dir.is_dir():
+        root_stat = dest_dir.lstat()
+        # Link/junction 安装与 source 共享同一份文件，不需要 copy
+        # reverse-sync。返回 NO_EDIT 让调用方继续走 git status；仍不跟随
+        # 链接扫描，真实 copy 内部出现链接时继续 fail-closed。
+        if stat.S_ISLNK(root_stat.st_mode) or _is_reparse_point(root_stat):
             return _DestEditAssessment(_DestEditStatus.NO_EDIT)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            return _DestEditAssessment(_DestEditStatus.FAILED)
+    except FileNotFoundError:
+        return _DestEditAssessment(_DestEditStatus.NO_EDIT)
     except OSError:
         return _DestEditAssessment(_DestEditStatus.FAILED)
     metadata_ok, installed_at = _read_install_meta_ts(dest_dir)

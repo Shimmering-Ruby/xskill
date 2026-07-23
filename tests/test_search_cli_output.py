@@ -1,4 +1,4 @@
-"""`xskill search` 客户端安装结果与人读输出测试。"""
+"""`xskill search` 元信息与 `xskill download` 安装输出测试。"""
 from __future__ import annotations
 
 import io
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from xskill import cli
-from xskill.team.client.search_slots import SearchSlots
+from xskill.team.client.search_slots import DownloadedSkills, SearchSlots
 
 
 class _Response:
@@ -32,10 +32,19 @@ class _Response:
 class _SearchHttp:
     def __init__(self, results: list[dict]):
         self.results = results
+        self.calls: list[str] = []
 
     def get(self, path: str, **_kwargs) -> _Response:
+        self.calls.append(path)
         if "search" in path:
             return _Response(200, json_data={"results": self.results})
+        if "/entry/" in path:
+            skill_id = path.rsplit("/", 1)[-1]
+            result = next(
+                result for result in self.results
+                if result["skill_id"] == skill_id
+            )
+            return _Response(200, json_data={"result": result})
         skill_id = path.split("/")[-2]
         name = next(
             result["display_name"]
@@ -67,11 +76,310 @@ def _result(name: str, *, source: str = "skillhub",
 
 def _install_home(monkeypatch, tmp_path: Path, home: Path) -> None:
     monkeypatch.setattr(
-        "xskill.team.client.search_slots.SearchSlots",
-        lambda **_kwargs: SearchSlots(
+        "xskill.team.client.search_slots.DownloadedSkills",
+        lambda **_kwargs: DownloadedSkills(
             xskill_home=tmp_path / "xskill-home", home_root=home,
         ),
     )
+
+
+def test_search_download_and_download_agent_flags_parse():
+    parser = cli.build_parser()
+
+    plain = parser.parse_args(["search", "docker"])
+    legacy = parser.parse_args(["search", "docker", "--download"])
+    download = parser.parse_args([
+        "download", "skill@sha",
+        "--agent", "claude-code", "--agent", "codex", "-y",
+    ])
+
+    assert plain.download is False
+    assert legacy.download is True
+    assert download.agent == ["claude-code", "codex"]
+    assert download.yes is True
+    with pytest.raises(SystemExit) as invalid_agent:
+        parser.parse_args([
+            "download", "skill@sha", "--agent", "mystery", "-y",
+        ])
+    assert invalid_agent.value.code == 2
+
+
+def test_search_plain_output_is_compact_and_read_only(capsys):
+    result = _result("compact")
+    result["path"] = "/private/cache/compact"
+    result["installations"] = [{
+        "ecosystem": "codex",
+        "target": "/private/harness/compact",
+        "status": "installed",
+    }]
+    search_http = _SearchHttp([result])
+
+    return_code = cli.cmd_search_hub(
+        SimpleNamespace(
+            terms=["compact"], top_k=5, json=False, download=False,
+        ),
+        http=search_http, headers={},
+    )
+
+    output = capsys.readouterr().out
+    assert return_code == 0
+    assert search_http.calls == ["/api/v1/team/skill_hub/search"]
+    assert "[1/1] compact" in output
+    assert "ID：compact@abcdef" in output
+    assert "关键词排名 #1" in output
+    assert "语义排名 #2" in output
+    assert "xskill download compact@abcdef" in output
+    assert "/private/cache" not in output
+    assert "/private/harness" not in output
+    assert "Codex" not in output
+    assert "已安装到" not in output
+
+
+def test_search_download_uses_legacy_search_slots(
+    tmp_path, monkeypatch, capsys,
+):
+    result = _result("legacy")
+    search_http = _SearchHttp([result])
+    captured: dict = {}
+
+    class _Slots:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+
+        def install(self, metadata, archive, **kwargs):
+            captured["metadata"] = metadata
+            captured["archive"] = archive
+            captured["install"] = kwargs
+            return {
+                "cache_path": tmp_path / "search_skills" / metadata["skill_id"],
+                "installations": (),
+            }
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.SearchSlots", _Slots,
+    )
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path / "xhome")
+
+    return_code = cli.cmd_search_hub(
+        SimpleNamespace(
+            terms=["legacy"], top_k=5, json=True, download=True,
+        ),
+        http=search_http, headers={},
+    )
+
+    row = json.loads(capsys.readouterr().out)[0]
+    assert return_code == 0
+    assert search_http.calls == [
+        "/api/v1/team/skill_hub/search",
+        f"/api/v1/team/skill/{result['skill_id']}/bundle",
+    ]
+    assert captured["install"] == {
+        "query": "legacy", "return_details": True,
+    }
+    assert row["cache_path"].endswith(result["skill_id"])
+    assert "path" in row and row["installations"] == []
+
+
+def test_download_repeated_agents_with_yes_is_noninteractive(
+    tmp_path, monkeypatch, capsys,
+):
+    result = _result("selected")
+    search_http = _SearchHttp([result])
+    captured: dict = {}
+
+    class _Downloads:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+
+        def install(self, metadata, archive, **kwargs):
+            captured["metadata"] = metadata
+            captured["archive"] = archive
+            captured["install"] = kwargs
+            return {
+                "path": tmp_path / metadata["skill_id"],
+                "installations": (),
+            }
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.DownloadedSkills", _Downloads,
+    )
+    monkeypatch.setattr(
+        cli, "_detected_download_agents",
+        lambda: pytest.fail("explicit --agent must not run detection"),
+    )
+    monkeypatch.setattr(
+        cli, "_prompt_download_agents",
+        lambda *_args: pytest.fail("-y must not prompt"),
+    )
+
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=True,
+            agent=["claude-code", "codex", "claude_code"], yes=True,
+        ),
+        http=search_http, headers={},
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert return_code == 0
+    assert captured["install"]["ecosystems"] == ["claude_code", "codex"]
+    assert captured["install"]["return_details"] is True
+    assert output["path"].endswith(result["skill_id"])
+
+
+def test_download_yes_without_agents_selects_detected(
+    tmp_path, monkeypatch, capsys,
+):
+    result = _result("auto-selected")
+    captured: dict = {}
+
+    class _Downloads:
+        def __init__(self, **_kwargs):
+            pass
+
+        def install(self, metadata, _archive, **kwargs):
+            captured.update(kwargs)
+            return {
+                "path": tmp_path / metadata["skill_id"],
+                "installations": (),
+            }
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.DownloadedSkills", _Downloads,
+    )
+    monkeypatch.setattr(
+        cli, "_detected_download_agents", lambda: ["nga3", "cursor"],
+    )
+
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=True, agent=[], yes=True,
+        ),
+        http=_SearchHttp([result]), headers={},
+    )
+
+    assert return_code == 0
+    assert captured["ecosystems"] == ["nga3", "cursor"]
+    json.loads(capsys.readouterr().out)
+
+
+def test_download_yes_without_detected_agents_still_persists(
+    tmp_path, monkeypatch, capsys,
+):
+    result = _result("download-only")
+    captured: dict = {}
+
+    class _Downloads:
+        def __init__(self, **_kwargs):
+            pass
+
+        def install(self, metadata, _archive, **kwargs):
+            captured.update(kwargs)
+            return {
+                "path": tmp_path / metadata["skill_id"],
+                "installations": (),
+            }
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.DownloadedSkills", _Downloads,
+    )
+    monkeypatch.setattr(cli, "_detected_download_agents", lambda: [])
+
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=True, agent=[], yes=True,
+        ),
+        http=_SearchHttp([result]), headers={},
+    )
+
+    captured_output = capsys.readouterr()
+    assert return_code == 0
+    assert captured["ecosystems"] == []
+    assert "仅持久下载" in captured_output.err
+    json.loads(captured_output.out)
+
+
+def test_download_interactive_multiselects_detected_agents(
+    tmp_path, monkeypatch, capsys,
+):
+    result = _result("interactive")
+    captured: dict = {}
+
+    class _Downloads:
+        def __init__(self, **_kwargs):
+            pass
+
+        def install(self, metadata, _archive, **kwargs):
+            captured.update(kwargs)
+            return {
+                "path": tmp_path / metadata["skill_id"],
+                "installations": (),
+            }
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.DownloadedSkills", _Downloads,
+    )
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cli, "_detected_download_agents",
+        lambda: ["claude_code", "codex", "cursor"],
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("1,3\n"))
+
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=True, agent=[], yes=False,
+        ),
+        http=_SearchHttp([result]), headers={},
+    )
+
+    captured_output = capsys.readouterr()
+    assert return_code == 0
+    assert captured["ecosystems"] == ["claude_code", "cursor"]
+    assert "Claude Code" in captured_output.err
+    assert "Cursor" in captured_output.err
+    json.loads(captured_output.out)
+
+
+def test_download_without_yes_rejects_non_tty_before_network(
+    monkeypatch, capsys,
+):
+    result = _result("non-tty")
+    search_http = _SearchHttp([result])
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: False)
+
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=False,
+            agent=["codex"], yes=False,
+        ),
+        http=search_http, headers={},
+    )
+
+    assert return_code == 2
+    assert search_http.calls == []
+    assert "--agent" in capsys.readouterr().err
+
+
+def test_download_cancel_stops_before_network(monkeypatch, capsys):
+    result = _result("cancel")
+    search_http = _SearchHttp([result])
+    monkeypatch.setattr(cli, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cli, "_detected_download_agents", lambda: ["codex", "cursor"],
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("q\n"))
+
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=False, agent=[], yes=False,
+        ),
+        http=search_http, headers={},
+    )
+
+    assert return_code == 0
+    assert search_http.calls == []
+    assert "已取消" in capsys.readouterr().err
 
 
 def test_only_detected_ngagent_and_nga3_are_printed(
@@ -91,13 +399,20 @@ def test_only_detected_ngagent_and_nga3_are_printed(
         ),
     ]
 
-    return_code = cli.cmd_search_hub(
-        SimpleNamespace(terms=["openqa"], top_k=5, json=False),
-        http=_SearchHttp(results), headers={},
-    )
+    search_http = _SearchHttp(results)
+    return_codes = [
+        cli.cmd_download(
+            SimpleNamespace(
+                skill_id=result["skill_id"], json=False,
+                agent=["nga3", "ngagent"], yes=True,
+            ),
+            http=search_http, headers={},
+        )
+        for result in results
+    ]
 
     output = capsys.readouterr().out
-    assert return_code == 0
+    assert return_codes == [0, 0]
     assert "CodeAgent3 / NGA3" in output
     assert "NGAgent" in output
     assert str(home / ".cac" / "skills" / "repo-skill@abcdef") in output
@@ -113,7 +428,7 @@ def test_only_detected_ngagent_and_nga3_are_printed(
     assert "XSkill 自蒸馏生成" in output
     assert "上传者:alice（用户上传）" in output
     assert "描述中有 连续的 空白" in output
-    assert "\n" + "-" * 64 + "\n" in output
+    assert output.count("完成：1 个 skill") == 2
 
 
 def test_shared_target_keeps_each_harness_record(tmp_path):
@@ -147,6 +462,44 @@ def test_shared_target_keeps_each_harness_record(tmp_path):
     assert all(record["mode"] == "copy" for record in shared_records)
 
 
+def test_explicit_ecosystems_bypass_detection_and_use_fixed_order(
+    tmp_path, monkeypatch,
+):
+    from xskill.team.client.daemon import install_skill_to_ecosystems
+
+    repo_dir = tmp_path / "explicit"
+    repo_dir.mkdir()
+    (repo_dir / "SKILL.md").write_text(
+        "---\nname: explicit\ndescription: test\n---\nbody\n",
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda **_kwargs: pytest.fail(
+            "explicit ecosystems must bypass detection"
+        ),
+    )
+    monkeypatch.setattr(
+        "xskill.ecosystems.install_to_codex",
+        lambda *_args, **_kwargs: calls.append("codex"),
+    )
+    monkeypatch.setattr(
+        "xskill.ecosystems.install_to_openclaw",
+        lambda *_args, **_kwargs: calls.append("openclaw"),
+    )
+
+    records = install_skill_to_ecosystems(
+        repo_dir, home_root=tmp_path / "home",
+        ecosystems=["openclaw", "codex"],
+    )
+
+    assert calls == ["codex", "openclaw"]
+    assert [record["ecosystem"] for record in records] == [
+        "codex", "openclaw",
+    ]
+
+
 def test_detected_install_failure_is_visible(
     tmp_path, monkeypatch, capsys,
 ):
@@ -165,8 +518,11 @@ def test_detected_install_failure_is_visible(
     )
     result = _result("partial")
 
-    return_code = cli.cmd_search_hub(
-        SimpleNamespace(terms=["partial"], top_k=5, json=False),
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=False,
+            agent=["nga3", "ngagent"], yes=True,
+        ),
         http=_SearchHttp([result]), headers={},
     )
 
@@ -178,7 +534,7 @@ def test_detected_install_failure_is_visible(
     assert "[成功] CodeAgent3 / NGA3" in output
 
 
-def test_json_keeps_path_and_adds_cache_path_and_installations(
+def test_search_json_is_metadata_only(
     tmp_path, monkeypatch, capsys,
 ):
     home = tmp_path / "home"
@@ -192,8 +548,9 @@ def test_json_keeps_path_and_adds_cache_path_and_installations(
 
     rows = json.loads(capsys.readouterr().out)
     assert return_code == 0
-    assert rows[0]["path"] == rows[0]["cache_path"]
-    assert rows[0]["installations"] == []
+    assert "path" not in rows[0]
+    assert "cache_path" not in rows[0]
+    assert "installations" not in rows[0]
     assert rows[0]["match"] == result["match"]
     assert rows[0]["source"] == result["source"]
 
@@ -256,14 +613,17 @@ def test_install_exception_secret_never_enters_output_or_ledger(
     caplog.set_level("WARNING", logger="xskill.team.client")
     result = _result("safe-error")
 
-    return_code = cli.cmd_search_hub(
-        SimpleNamespace(terms=["safe"], top_k=5, json=False),
+    return_code = cli.cmd_download(
+        SimpleNamespace(
+            skill_id=result["skill_id"], json=False,
+            agent=["ngagent"], yes=True,
+        ),
         http=_SearchHttp([result]), headers={},
     )
 
     output = capsys.readouterr().out
     ledger_text = (
-        tmp_path / "xskill-home" / "search_slots.json"
+        tmp_path / "xskill-home" / "downloads.json"
     ).read_text(encoding="utf-8")
     assert return_code == 0
     assert "Authorization" not in output
@@ -1885,7 +2245,7 @@ def test_cp936_json_output_with_emoji_is_valid(
 
     payload = json.loads(output_bytes.getvalue().decode("cp936"))
     assert return_code == 0
-    assert payload[0]["name"] == "json-\N{GRINNING FACE}"
+    assert payload[0]["display_name"] == "json-\N{GRINNING FACE}"
     assert payload[0]["description"] == "emoji \N{ROCKET}"
     assert payload[0]["source_path"] == (
         "user_skill_hub/\N{CAT FACE}/json-skill"

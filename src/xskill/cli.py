@@ -6,6 +6,7 @@ cli.py — xskill 紧凑 CLI
     xskill serve [--host] [--port]
     xskill registry add|remove|list <path>
     xskill search <关键词...> [--top-k]
+    xskill download <skill-id>
 
 所有筛选/格式化交给 shell（grep/awk）。状态/配置全在 ~/.xskill/。
 """
@@ -705,8 +706,97 @@ def _write_search_output(text: str, *, to_stderr: bool = False) -> None:
         stream.write("\n")
 
 
-def _render_search_results(installed: list[dict], query: str) -> None:
-    """以实际安装结果渲染人读搜索输出，不重新探测本机生态。"""
+_DOWNLOAD_AGENT_OPTIONS = (
+    ("claude_code", "claude-code", "Claude Code"),
+    ("codex", "codex", "Codex"),
+    ("nga3", "nga3", "CodeAgent3 / NGA3"),
+    ("opencode", "opencode", "OpenCode"),
+    ("ngagent", "ngagent", "NGAgent"),
+    ("openclaw", "openclaw", "OpenClaw"),
+    ("cursor", "cursor", "Cursor"),
+    ("trae", "trae", "Trae"),
+)
+_DOWNLOAD_AGENT_ALIASES = {
+    "claude-code": "claude_code",
+    "claude_code": "claude_code",
+    "cc": "claude_code",
+    "codex": "codex",
+    "nga3": "nga3",
+    "codeagent3": "nga3",
+    "code-agent3": "nga3",
+    "opencode": "opencode",
+    "open-code": "opencode",
+    "ngagent": "ngagent",
+    "ng-agent": "ngagent",
+    "openclaw": "openclaw",
+    "open-claw": "openclaw",
+    "cursor": "cursor",
+    "trae": "trae",
+}
+_DOWNLOAD_AGENT_CHOICES = tuple(_DOWNLOAD_AGENT_ALIASES)
+_DOWNLOAD_AGENT_LABELS = {
+    ecosystem: label
+    for ecosystem, _cli_name, label in _DOWNLOAD_AGENT_OPTIONS
+}
+
+
+def _source_label(row: dict) -> str:
+    source = str(row.get("source") or "")
+    source_path = str(row.get("source_path") or "")
+    path_parts = source_path.replace("\\", "/").split("/")
+    if source == "repo":
+        return "XSkill 自蒸馏生成"
+    if source.startswith("上传者:"):
+        return f"{source}（用户上传）"
+    if len(path_parts) >= 2 and path_parts[0] == "user_skill_hub":
+        return f"用户上传（{path_parts[1]}）"
+    return "SkillHub"
+
+
+def _match_summary(row: dict) -> str:
+    match = row.get("match")
+    match_parts: list[str] = []
+    if isinstance(match, dict) and match.get("bm25_rank") is not None:
+        match_parts.append(f"关键词排名 #{match['bm25_rank']}")
+    if isinstance(match, dict) and match.get("semantic_rank") is not None:
+        match_parts.append(f"语义排名 #{match['semantic_rank']}")
+    if row.get("ux_avg") is not None:
+        match_parts.append(f"ux {row['ux_avg']}")
+    return "    ".join(match_parts)
+
+
+def _render_search_metadata_results(results: list[dict], query: str) -> None:
+    """精简渲染只读搜索结果，绝不展示本机路径或 harness 安装信息。"""
+    output_lines = [
+        f"搜索：{query}",
+        f"找到 {len(results)} 个 skill",
+        "=" * 64,
+    ]
+    for index, row in enumerate(results, start=1):
+        if index > 1:
+            output_lines.append("-" * 64)
+        display_name = row.get("display_name") or row.get("name")
+        output_lines.append(
+            f"[{index}/{len(results)}] {display_name or row['skill_id']}"
+        )
+        output_lines.append(f"ID：{row['skill_id']}")
+        description = " ".join(str(row.get("description") or "").split())
+        if len(description) > 180:
+            description = f"{description[:177].rstrip()}..."
+        output_lines.append(f"描述：{description or '（无描述）'}")
+        output_lines.append(f"来源：{_source_label(row)}")
+        match_summary = _match_summary(row)
+        if match_summary:
+            output_lines.append(f"匹配：{match_summary}")
+        output_lines.append(f"下载：xskill download {row['skill_id']}")
+    output_lines.append("=" * 64)
+    _write_search_output("\n".join(output_lines))
+
+
+def _render_search_results(
+    results: list[dict], query: str, *, heading: str = "搜索",
+) -> None:
+    """渲染已经下载/安装的结果，不重新探测本机生态。"""
     harness_names = {
         "claude_code": "Claude Code",
         "codex": "Codex",
@@ -718,15 +808,18 @@ def _render_search_results(installed: list[dict], query: str) -> None:
         "trae": "Trae",
     }
     output_lines = [
-        f"搜索：{query}",
-        f"找到 {len(installed)} 个 skill",
+        f"{heading}：{query}",
+        f"找到 {len(results)} 个 skill",
         "=" * 64,
     ]
     successful_installations = 0
-    for index, row in enumerate(installed, start=1):
+    for index, row in enumerate(results, start=1):
         if index > 1:
             output_lines.append("-" * 64)
-        output_lines.append(f"[{index}/{len(installed)}] {row['name']}")
+        display_name = row.get("display_name") or row.get("name")
+        output_lines.append(
+            f"[{index}/{len(results)}] {display_name or row['skill_id']}"
+        )
         output_lines.append(f"ID：{row['skill_id']}")
 
         description = " ".join(str(row.get("description") or "").split())
@@ -734,35 +827,21 @@ def _render_search_results(installed: list[dict], query: str) -> None:
             description = f"{description[:177].rstrip()}..."
         output_lines.append(f"描述：{description or '（无描述）'}")
 
-        source = str(row.get("source") or "")
         source_path = str(row.get("source_path") or "")
-        path_parts = source_path.replace("\\", "/").split("/")
-        if source == "repo":
-            source_label = "XSkill 自蒸馏生成"
-        elif source.startswith("上传者:"):
-            source_label = f"{source}（用户上传）"
-        elif len(path_parts) >= 2 and path_parts[0] == "user_skill_hub":
-            source_label = f"用户上传（{path_parts[1]}）"
-        else:
-            source_label = "SkillHub"
-        output_lines.append(f"来源: {source_label}")
+        output_lines.append(f"来源: {_source_label(row)}")
         if source_path:
             output_lines.append(f"  {source_path}")
 
-        match = row.get("match")
-        match_parts: list[str] = []
-        if isinstance(match, dict) and match.get("bm25_rank") is not None:
-            match_parts.append(f"关键词排名 #{match['bm25_rank']}")
-        if isinstance(match, dict) and match.get("semantic_rank") is not None:
-            match_parts.append(f"语义排名 #{match['semantic_rank']}")
-        if row.get("ux_avg") is not None:
-            match_parts.append(f"ux {row['ux_avg']}")
-        if match_parts:
-            output_lines.append(f"匹配：{'    '.join(match_parts)}")
+        match_summary = _match_summary(row)
+        if match_summary:
+            output_lines.append(f"匹配：{match_summary}")
 
         installation_records = row.get("installations")
         if not isinstance(installation_records, list):
             installation_records = []
+        local_path = row.get("path")
+        if local_path:
+            output_lines.append(f"本地：{local_path}")
         successful_groups: dict[tuple[str, str], list[str]] = {}
         failed_records: list[dict] = []
         for record in installation_records:
@@ -801,7 +880,7 @@ def _render_search_results(installed: list[dict], query: str) -> None:
             )
     output_lines.append("=" * 64)
     output_lines.append(
-        f"完成：{len(installed)} 个 skill，"
+        f"完成：{len(results)} 个 skill，"
         f"{successful_installations} 条 harness 安装记录"
     )
     _write_search_output("\n".join(output_lines))
@@ -855,19 +934,133 @@ def _safe_search_http_error(response) -> dict:
     return safe_error
 
 
-def cmd_search_hub(args, http=None, headers=None) -> int:
-    """`xskill search <query>` —— 搜 server skillhub，命中的拉到本地滚动槽位。
+def _normalize_download_agents(raw_agents: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for raw_agent in raw_agents:
+        canonical = _DOWNLOAD_AGENT_ALIASES.get(
+            str(raw_agent).strip().lower(),
+        )
+        if canonical is None:
+            raise ValueError(f"unsupported agent: {raw_agent}")
+        if canonical not in normalized:
+            normalized.append(canonical)
+    return normalized
 
-    结果由 BM25 关键词与语义向量混合检索 skillhub 目录（含 user_skill_hub 上传件），
-    与推荐画像无关；语义服务不可用时自动退化为 BM25。每个命中 skill 下载解包到
-    ``~/.xskill/search_skills/<skill_id>/``、
-    打 ``.xskill_search.json`` 标记、装进本机生态；本地最多保留 10 个槽位，
-    按最近命中滚动淘汰。``http``/``headers`` 参数仅测试注入用。
+
+def _detected_download_agents() -> list[str]:
+    from pathlib import Path
+    from xskill.ecosystems import detect_known_ecosystems
+
+    detected = {
+        str(record.get("ecosystem") or "")
+        for record in detect_known_ecosystems(home_root=Path.home())
+        if isinstance(record, dict)
+    }
+    return [
+        ecosystem for ecosystem, _cli_name, _label
+        in _DOWNLOAD_AGENT_OPTIONS
+        if ecosystem in detected
+    ]
+
+
+def _stdin_is_interactive() -> bool:
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
+def _prompt_download_agents(candidates: list[str]) -> list[str] | None:
+    """用无依赖的编号多选询问 harness；None 表示用户取消。"""
+    lines = ["选择要安装到的 harness（可多选）："]
+    for index, ecosystem in enumerate(candidates, start=1):
+        lines.append(
+            f"  {index}. {_DOWNLOAD_AGENT_LABELS[ecosystem]}"
+        )
+    lines.append("输入编号（逗号/空格分隔）；直接回车全选；q 取消。")
+    _write_search_output("\n".join(lines), to_stderr=True)
+    while True:
+        sys.stderr.write("> ")
+        sys.stderr.flush()
+        raw_selection = sys.stdin.readline()
+        if raw_selection == "":
+            return None
+        selection = raw_selection.strip().lower()
+        if selection in {"q", "quit", "cancel"}:
+            return None
+        if not selection:
+            return list(candidates)
+        tokens = [
+            token for token in re.split(r"[\s,]+", selection) if token
+        ]
+        try:
+            indexes = [int(token) for token in tokens]
+        except ValueError:
+            indexes = []
+        if (
+            indexes and all(1 <= index <= len(candidates) for index in indexes)
+        ):
+            return list(dict.fromkeys(
+                candidates[index - 1] for index in indexes
+            ))
+        _write_search_output(
+            f"请输入 1-{len(candidates)} 的编号，或 q 取消。",
+            to_stderr=True,
+        )
+
+
+def _select_download_agents(args) -> tuple[list[str] | None, int]:
+    """解析 download 的自动/交互选择；返回 (agents, rc)。"""
+    try:
+        explicit_agents = _normalize_download_agents(
+            list(getattr(args, "agent", None) or [])
+        )
+    except ValueError as agent_error:
+        _write_search_output(
+            f"error: {agent_error}", to_stderr=True,
+        )
+        return None, 2
+
+    if bool(getattr(args, "yes", False)):
+        selected = explicit_agents or _detected_download_agents()
+        if not selected:
+            _write_search_output(
+                "warning: 未检测到可安装的 harness；skill 将仅持久下载，"
+                "也可用 --agent <name> -y 显式安装。",
+                to_stderr=True,
+            )
+        return selected, 0
+
+    if not _stdin_is_interactive():
+        _write_search_output(
+            "error: 当前不是交互终端；请使用可重复的 "
+            "--agent <name> 并加 -y，或仅加 -y 自动选择已检测 harness。",
+            to_stderr=True,
+        )
+        return None, 2
+    candidates = explicit_agents or _detected_download_agents()
+    if not candidates:
+        _write_search_output(
+            "warning: 未检测到可安装的 harness；skill 将仅持久下载，"
+            "也可用 --agent <name> -y 显式安装。",
+            to_stderr=True,
+        )
+        return [], 0
+    selected = _prompt_download_agents(candidates)
+    if selected is None:
+        _write_search_output("已取消下载。", to_stderr=True)
+        return None, 0
+    return selected, 0
+
+
+def cmd_search_hub(args, http=None, headers=None) -> int:
+    """`xskill search <query>` —— 默认只搜元信息。
+
+    结果由 BM25 关键词与语义向量混合检索自产 skill 与 SkillHub；语义服务
+    不可用时退化为 BM25。下载由 ``xskill download <skill-id>`` 显式执行。
+    ``--download`` 兼容旧 search：把全部命中放进 10 槽 LRU 并自动安装到
+    已检测 harness。
+    ``http``/``headers`` 参数仅测试注入用。
     """
     import json as _json
     import httpx
-    from xskill.config import XSKILL_HOME
-    from xskill.team.client.search_slots import SearchSlots
 
     if http is None:
         http, headers = _team_client_http_and_headers()
@@ -906,33 +1099,45 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
             return 1
         results = resp.json().get("results", [])
         if not results:
-            _write_search_output("skillhub 无匹配 skill")
+            if args.json:
+                _write_search_output("[]")
+            else:
+                _write_search_output("skillhub 无匹配 skill")
             return 0
-        slots = SearchSlots(xskill_home=XSKILL_HOME)
-        installed = []
-        for result in results:
-            bundle = http.get(f"/api/v1/team/skill/{result['skill_id']}/bundle",
-                              headers=headers)
-            if bundle.status_code != 200:
-                _write_search_output(
-                    f"warning: 拉取 {result['skill_id']} 失败 "
-                    f"HTTP {bundle.status_code}",
-                    to_stderr=True,
+        if getattr(args, "download", False):
+            from xskill.config import XSKILL_HOME
+            from xskill.team.client.search_slots import SearchSlots
+
+            slots = SearchSlots(xskill_home=XSKILL_HOME)
+            installed = []
+            for result in results:
+                bundle = http.get(
+                    f"/api/v1/team/skill/{result['skill_id']}/bundle",
+                    headers=headers,
                 )
-                continue
-            slot_result = slots.install(
-                result, bundle.content, query=query, return_details=True,
-            )
-            local_path = slot_result["cache_path"]
-            # 原样透传 server 返回的所有字段，再补本机安装信息
-            installed_entry = dict(result)
-            installed_entry["name"] = result["display_name"]
-            installed_entry["path"] = str(local_path)
-            installed_entry["cache_path"] = str(local_path)
-            installed_entry["installations"] = [
-                dict(record) for record in slot_result["installations"]
-            ]
-            installed.append(installed_entry)
+                if bundle.status_code != 200:
+                    _write_search_output(
+                        f"warning: 拉取 {result['skill_id']} 失败 "
+                        f"HTTP {bundle.status_code}",
+                        to_stderr=True,
+                    )
+                    continue
+                slot_result = slots.install(
+                    result, bundle.content, query=query,
+                    return_details=True,
+                )
+                local_path = slot_result["cache_path"]
+                installed_entry = dict(result)
+                installed_entry["name"] = (
+                    result.get("display_name") or result["skill_id"]
+                )
+                installed_entry["path"] = str(local_path)
+                installed_entry["cache_path"] = str(local_path)
+                installed_entry["installations"] = [
+                    dict(record)
+                    for record in slot_result["installations"]
+                ]
+                installed.append(installed_entry)
     except (httpx.HTTPError, OSError) as network_error:
         _write_search_output(
             f"error: 无法连接 team server（{type(network_error).__name__}），"
@@ -940,12 +1145,97 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
             to_stderr=True,
         )
         return 1
+    output_results = (
+        installed if getattr(args, "download", False) else results
+    )
     if args.json:
         _write_search_output(_json.dumps(
-            installed, ensure_ascii=True, indent=2,
+            output_results, ensure_ascii=True, indent=2,
         ))
         return 0
-    _render_search_results(installed, query)
+    if getattr(args, "download", False):
+        _render_search_results(output_results, query)
+    else:
+        _render_search_metadata_results(output_results, query)
+    return 0
+
+
+def cmd_download(args, http=None, headers=None) -> int:
+    """`xskill download <skill-id>` —— 显式下载并持久安装一个搜索结果。"""
+    import json as _json
+    import zipfile
+    import httpx
+    from xskill.config import XSKILL_HOME
+    from xskill.team.client.search_slots import DownloadedSkills
+
+    skill_id = str(args.skill_id).strip()
+    if (
+        not skill_id or skill_id in {".", ".."}
+        or "/" in skill_id or "\\" in skill_id or "\x00" in skill_id
+    ):
+        _write_search_output("error: 非法 skill ID", to_stderr=True)
+        return 2
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+    selected_agents, selection_rc = _select_download_agents(args)
+    if selected_agents is None:
+        return selection_rc
+    try:
+        metadata_response = http.get(
+            f"/api/v1/team/skill_hub/entry/{skill_id}",
+            headers=headers,
+        )
+        if metadata_response.status_code != 200:
+            _write_search_output(
+                f"error: 找不到可下载的 skill（HTTP "
+                f"{metadata_response.status_code}）",
+                to_stderr=True,
+            )
+            return 1
+        result = metadata_response.json().get("result")
+        if not isinstance(result, dict):
+            _write_search_output(
+                "error: server 返回了无效的 skill 元信息",
+                to_stderr=True,
+            )
+            return 1
+        bundle = http.get(
+            f"/api/v1/team/skill/{skill_id}/bundle",
+            headers=headers,
+        )
+        if bundle.status_code != 200:
+            _write_search_output(
+                f"error: 下载 skill 失败（HTTP {bundle.status_code}）",
+                to_stderr=True,
+            )
+            return 1
+        manager = DownloadedSkills(xskill_home=XSKILL_HOME)
+        installed = manager.install(
+            result, bundle.content, ecosystems=selected_agents,
+            return_details=True,
+        )
+        output = dict(result)
+        output["name"] = result.get("display_name") or skill_id
+        output["path"] = str(installed["path"])
+        output["installations"] = [
+            dict(record) for record in installed["installations"]
+        ]
+    except (
+        httpx.HTTPError, OSError, RuntimeError, ValueError, zipfile.BadZipFile,
+    ) as download_error:
+        _write_search_output(
+            f"error: 下载失败（{type(download_error).__name__}）",
+            to_stderr=True,
+        )
+        return 1
+    if args.json:
+        _write_search_output(_json.dumps(
+            output, ensure_ascii=True, indent=2,
+        ))
+    else:
+        _render_search_results([output], skill_id, heading="下载")
     return 0
 
 
@@ -1172,7 +1462,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_search = sub.add_parser(
         "search",
-        help="搜 team server 的 skillhub 并把命中 skill 拉到本地槽位",
+        help="搜索 team server 的 skill 元信息（不下载）",
     )
     p_search.add_argument(
         "terms", nargs="+", metavar="QUERY",
@@ -1180,7 +1470,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument("--top-k", "-k", type=int, default=5,
                           help="返回条数（skillhub 搜索最多 10）")
+    p_search.add_argument(
+        "--download", action="store_true",
+        help="兼容旧 search：下载命中到 10 槽 LRU 并安装到已检测 harness",
+    )
     p_search.add_argument("--json", action="store_true", help="机读 JSON 输出")
+
+    p_download = sub.add_parser(
+        "download", help="按 search 返回的 skill ID 显式下载并持久安装",
+    )
+    p_download.add_argument("skill_id", help="xskill search 返回的 skill ID")
+    p_download.add_argument(
+        "--agent", action="append", choices=_DOWNLOAD_AGENT_CHOICES,
+        default=[], metavar="AGENT",
+        help="安装目标，可重复（如 claude-code、codex、cursor）",
+    )
+    p_download.add_argument(
+        "-y", "--yes", action="store_true",
+        help="不询问；未指定 --agent 时自动选择已检测 harness",
+    )
+    p_download.add_argument(
+        "--json", action="store_true", help="机读 JSON 输出",
+    )
 
     p_upload = sub.add_parser(
         "upload", help="打包一个 skill 文件夹上传到 team server 的 user skillhub",
@@ -1376,9 +1687,11 @@ def main() -> int:
     if args.command == "dashboard":
         return cmd_dashboard(args)
 
-    # skillhub 搜索/上传是瘦客户端侧（走 team server），不碰 config.yaml。
+    # skillhub 搜索/下载/上传是瘦客户端侧（走 team server），不碰 config.yaml。
     if args.command == "search":
         return cmd_search_hub(args)
+    if args.command == "download":
+        return cmd_download(args)
     if args.command == "upload":
         return cmd_upload(args)
 

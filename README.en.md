@@ -140,11 +140,14 @@ On **macOS / Linux**, native persistence (launchd / systemd --user) is still on 
 #### Search / share skills on demand (skillhub)
 
 ```bash
-xskill search docker compose   # BM25 + semantic search of the server skillhub; hits are installed locally
+xskill search docker compose   # return compact metadata and skill IDs only
+xskill search docker --download  # legacy 10-slot LRU download and auto-install
+xskill download <skill-id>     # interactively select target harnesses
+xskill download <skill-id> --agent claude-code --agent codex -y
 xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
 ```
 
-`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If the embedding service is unavailable it automatically falls back to BM25, and it prints each hit's name, description, source, score, and absolute local path. Pulled skills live in `~/.xskill/search_skills/` with a rolling cap of **10 slots** (least-recently-hit evicted). `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. Semantic search for local trajectories/skills has been removed from the CLI (no more `xskill search traj|skill <query>`); use the dashboard or the API (`POST /api/v1/skills/search`) instead.
+`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. Semantic search for local trajectories/skills has been removed from the CLI (no more `xskill search traj|skill <query>`); use the dashboard or the API (`POST /api/v1/skills/search`) instead.
 
 * * *
 

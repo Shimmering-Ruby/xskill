@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from xskill import cli
 from xskill.ecosystems._fallback import _install_meta_path, install_dir
 from xskill.recommend.skillhub import SkillHub
-from xskill.team.client.search_slots import SearchSlots
+from xskill.team.client.search_slots import DownloadedSkills, SearchSlots
 from xskill.team.server import api as server_api
 from xskill.team.server.client_registry import ClientRegistry, safe_dir_name
 
@@ -117,6 +117,26 @@ def test_search_matches_by_keyword_without_profile(hub_env):
     top = results[0]
     assert top["description"].startswith("Manage docker")
     assert top["skill_id"] and top["content_sha"] and top["source_path"]
+
+
+def test_entry_returns_download_metadata_without_bundle(hub_env):
+    _cid, hdr = _register(hub_env.client)
+    searched = hub_env.client.get(
+        "/api/v1/team/skill_hub/search",
+        params={"query": "docker"}, headers=hdr,
+    ).json()["results"][0]
+
+    response = hub_env.client.get(
+        f"/api/v1/team/skill_hub/entry/{searched['skill_id']}",
+        headers=hdr,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["skill_id"] == searched["skill_id"]
+    assert (
+        response.json()["result"]["content_sha"]
+        == searched["content_sha"]
+    )
 
 
 def test_search_name_hit_outranks_description_hit(hub_env):
@@ -703,25 +723,110 @@ def test_search_slots_default_capacity_is_ten(tmp_path):
     assert slots.capacity == 10
 
 
+def test_downloaded_skills_are_persistent_without_lru(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.install_skill_to_ecosystems",
+        lambda *_args, **_kwargs: [],
+    )
+    downloads = DownloadedSkills(
+        xskill_home=tmp_path / "xhome",
+        home_root=tmp_path / "home",
+    )
+    for index in range(12):
+        result = {
+            "skill_id": f"skill-{index}",
+            "display_name": f"skill-{index}",
+            "description": "d",
+            "content_sha": f"sha-{index}",
+            "source": "skillhub",
+            "source_path": f"skills/skill-{index}",
+        }
+        downloads.install(result, _fake_archive(f"skill-{index}"))
+
+    assert len(downloads.entries()) == 12
+    assert all(
+        (downloads.skills_dir / f"skill-{index}" / "SKILL.md").is_file()
+        for index in range(12)
+    )
+
+
+def test_downloaded_skills_persist_and_merge_selected_agents(
+    tmp_path, monkeypatch,
+):
+    selected: list[list[str] | None] = []
+
+    def record_install(*_args, **kwargs):
+        ecosystems = kwargs.get("ecosystems")
+        selected.append(
+            list(ecosystems) if ecosystems is not None else None
+        )
+        return []
+
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.install_skill_to_ecosystems",
+        record_install,
+    )
+    downloads = DownloadedSkills(
+        xskill_home=tmp_path / "xhome",
+        home_root=tmp_path / "home",
+    )
+    result = _fake_result("selected")
+
+    downloads.install(
+        result, _fake_archive("selected"), ecosystems=["codex"],
+    )
+    downloads.install(
+        result, _fake_archive("selected"), ecosystems=["cursor", "codex"],
+    )
+
+    assert selected == [["codex"], ["codex", "cursor"]]
+    assert downloads.entries()[0]["agents"] == ["codex", "cursor"]
+
+
 # ── client: CLI 端到端（TestClient 注入） ───────────────────────
 
-def test_cmd_search_hub_installs_and_prints_paths(hub_env, tmp_path,
-                                                  monkeypatch, capsys):
+def test_cmd_search_hub_returns_metadata_without_download(
+    hub_env, tmp_path, monkeypatch, capsys,
+):
     _cid, hdr = _register(hub_env.client)
     xhome = tmp_path / "cli-xhome"
-    monkeypatch.setattr(
-        "xskill.team.client.search_slots.SearchSlots",
-        lambda **kw: SearchSlots(xskill_home=xhome,
-                                 home_root=tmp_path / "cli-home"))
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
     args = SimpleNamespace(terms=["docker"], top_k=5, json=True)
     assert cli.cmd_search_hub(args, http=hub_env.client, headers=hdr) == 0
     rows = json.loads(capsys.readouterr().out)
     assert len(rows) == 1
-    assert rows[0]["name"] == "docker-helper"
-    installed = Path(rows[0]["path"])
+    assert rows[0]["display_name"] == "docker-helper"
+    assert "path" not in rows[0]
+    assert not (xhome / "search_skills").exists()
+    assert not (xhome / "downloaded_skills").exists()
+
+
+def test_cmd_download_persists_and_installs(hub_env, tmp_path,
+                                            monkeypatch, capsys):
+    _cid, hdr = _register(hub_env.client)
+    searched = hub_env.client.get(
+        "/api/v1/team/skill_hub/search",
+        params={"query": "docker"}, headers=hdr,
+    ).json()["results"][0]
+    xhome = tmp_path / "cli-xhome"
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
+    monkeypatch.setattr(
+        "xskill.team.client.search_slots.install_skill_to_ecosystems",
+        lambda *_args, **_kwargs: [],
+    )
+
+    args = SimpleNamespace(
+        skill_id=searched["skill_id"], json=True,
+        agent=["codex"], yes=True,
+    )
+    assert cli.cmd_download(args, http=hub_env.client, headers=hdr) == 0
+
+    row = json.loads(capsys.readouterr().out)
+    installed = Path(row["path"])
     assert (installed / "SKILL.md").is_file()
-    assert installed.is_absolute()
-    assert (installed / ".xskill_search.json").is_file()
+    assert (installed / ".xskill_download.json").is_file()
+    assert installed.parent == (xhome / "downloaded_skills").resolve()
+    assert len(json.loads((xhome / "downloads.json").read_text())) == 1
 
 
 def test_cmd_search_hub_no_match_returns_zero(hub_env, capsys):
@@ -826,7 +931,7 @@ def test_cmd_search_hub_renders_source_and_ux_defensively(tmp_path, monkeypatch,
     assert cli.cmd_search_hub(args, http=_FakeHttp(), headers={}) == 0
     out = capsys.readouterr().out
     assert "ux 4.2" in out
-    assert "来源: 上传者:alice" in out
+    assert "来源：上传者:alice" in out
     # 缺 source/ux_avg 的命中正常渲染，其名字行不带 ux/来源 后缀，不报错
     bare_line = next(line for line in out.splitlines() if "bare-meta" in line)
     assert "ux" not in bare_line and "来源" not in bare_line
@@ -854,4 +959,5 @@ def test_cmd_search_hub_json_passes_through_all_fields(tmp_path, monkeypatch,
     row = json.loads(capsys.readouterr().out)[0]
     assert row["source"] == "skillhub"
     assert row["match"] == {"field": "description"}
-    assert row["name"] == "json-skill" and row["path"]
+    assert row["display_name"] == "json-skill"
+    assert "name" not in row and "path" not in row
