@@ -193,7 +193,7 @@ def test_v0627_config_gets_runtime_defaults_without_mutating_user_input():
     assert effective["agent_worker"]["pools"] == {
         "split": {"workers": 24, "llm_weight": 6},
         "cluster": {"workers": 8, "batch_size": 5, "llm_weight": 3},
-        "edit": {"workers": 4, "llm_weight": 1},
+        "edit": {"workers": 4, "batch_size": 5, "llm_weight": 1},
         "embed": {"workers": 4},
     }
     assert effective["llm"]["rate_limit"] == {
@@ -229,7 +229,7 @@ def test_explicit_new_values_win_and_missing_pool_fields_get_defaults():
     assert pools["cluster"] == {
         "workers": 3, "batch_size": 2, "llm_weight": 3,
     }
-    assert pools["edit"] == {"workers": 4, "llm_weight": 1}
+    assert pools["edit"] == {"workers": 4, "batch_size": 5, "llm_weight": 1}
     assert pools["embed"] == {"workers": 4}
     assert effective["llm"]["rate_limit"]["request_burst"] == 3
     assert effective["llm"]["rate_limit"]["max_inflight"] == 11
@@ -246,6 +246,19 @@ def test_missing_new_sections_use_release_defaults():
     }
     assert effective["embedding"]["rate_limit"] == {"max_inflight": 4}
     assert effective["agent_worker"]["pools"]["cluster"]["batch_size"] == 8
+    assert effective["agent_worker"]["pools"]["edit"]["batch_size"] == 5
+
+
+def test_edit_batch_size_must_be_a_positive_integer():
+    config = _legacy_config()
+    config["agent_worker"] = {
+        "pools": {"edit": {"batch_size": 0}},
+    }
+    with pytest.raises(
+        ValueError,
+        match=r"agent_worker\.pools\.edit\.batch_size",
+    ):
+        normalize_runtime_config(config)
 
 
 def test_load_config_accepts_old_yaml_without_rewriting_it(tmp_path):

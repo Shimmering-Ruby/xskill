@@ -80,8 +80,8 @@ class _StubAgno:
                 )
             # 根据当前分支决定调哪个 commit
             if "baby" in user_msg:
-                if "commit_baby_to_main" in self.tools:
-                    _call_tool(self.tools["commit_baby_to_main"], "auto-skill", "stub baby")
+                if "commit_baby" in self.tools:
+                    _call_tool(self.tools["commit_baby"], "auto-skill", "stub baby")
             elif "main" in user_msg:
                 if "commit_to_staging" in self.tools:
                     _call_tool(self.tools["commit_to_staging"], "auto-skill", "stub staging")
@@ -412,8 +412,8 @@ class TestIndependentSkillEditScan:
                         m.group(1),
                         "---\nname: my-skill\ndescription: stub\nmetadata:\n  version: 1\n---\n# body\n",
                     )
-                if "commit_baby_to_main" in self.tools:
-                    _call_tool(self.tools["commit_baby_to_main"], "my-skill", "stub commit")
+                if "commit_baby" in self.tools:
+                    _call_tool(self.tools["commit_baby"], "my-skill", "stub commit")
                 class _R: pass
                 r = _R(); r.content = ""; return r
 

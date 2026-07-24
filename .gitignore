@@ -35,6 +35,7 @@ build/
 .eggs/
 *.so
 .pytest_cache/
+mutants/
 
 # setuptools-scm generated version file
 src/xskill/_version.py

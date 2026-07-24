@@ -268,15 +268,34 @@ def _wrap_with_retry(model, llm_cfg: dict):
     base_url = llm_cfg.get("base_url", "")
 
     def retrying_invoke(messages, **kwargs):
+        from xskill.agents import agent_trace
+
         attempt = 0
         while True:
             try:
                 return original_invoke(messages, **kwargs)
             except Exception as exc:  # noqa: BLE001
                 attempt += 1
+                error_text = str(exc).lower()
+                if "429" in error_text or "rate limit" in error_text:
+                    error_label = "429"
+                elif any(h in error_text for h in _NON_RETRYABLE_HINTS):
+                    error_label = "context-too-long"
+                else:
+                    error_label = type(exc).__name__
                 if attempt >= max_retries or not _is_transient_error(exc):
+                    agent_trace.event(
+                        "ERROR",
+                        f"LLM returned {error_label}; retries exhausted "
+                        f"({attempt}/{max_retries})",
+                    )
                     raise
                 delay = min(cap, base * (2 ** (attempt - 1)))
+                agent_trace.event(
+                    "WARN",
+                    f"LLM returned {error_label}; retrying "
+                    f"({attempt}/{max_retries})",
+                )
                 import logging
                 logging.getLogger("xskill.agno_factory").warning(
                     "LLM 瞬时错误,第 %d/%d 次重试(%.0fs 后): %s",
@@ -304,8 +323,9 @@ def _wrap_with_trace(model):
     original_invoke = model.invoke
 
     def traced_invoke(messages, **kwargs):
+        agent_trace.begin_round(messages)
         resp = original_invoke(messages, **kwargs)
-        agent_trace.record(messages, resp)
+        agent_trace.record_response(resp)
         return resp
 
     model.invoke = traced_invoke

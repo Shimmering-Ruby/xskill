@@ -1845,6 +1845,37 @@ def commit_baby_to_main_branch(skill_dir: str, message: str) -> bool:
     return True
 
 
+def commit_baby_checkpoint(skill_dir: str, message: str) -> str | None:
+    """Commit one non-empty SkillEdit batch on ``baby`` without renaming it.
+
+    Returns the full commit SHA on success.  ``None`` means the branch was not
+    baby, the worktree had no real change, or the commit failed.  Candidate
+    removal intentionally lives in the caller so it can share one outer
+    ``skill_repo_lock`` transaction with this Git mutation.
+    """
+    with skill_repo_lock(skill_dir):
+        with _open_repo(skill_dir) as repo:
+            cur = _current_branch_name(repo)
+            if cur != "baby":
+                logger.warning(
+                    "commit_baby_checkpoint 拒绝：当前不在 baby (在 %s)", cur,
+                )
+                return None
+            _stage_all(repo, Path(skill_dir))
+            sha, err = _do_commit(repo, message)
+            if sha is None:
+                logger.warning("baby checkpoint commit 失败: %s", err)
+                return None
+    full_sha = sha.decode("ascii", errors="strict")
+    logger.info(
+        "🌱 baby checkpoint: %s %s: %s",
+        Path(skill_dir).name,
+        full_sha[:7],
+        message,
+    )
+    return full_sha
+
+
 def commit_to_staging_branch(skill_dir: str, message: str) -> bool:
     """SkillEditAgent 调用：从 main 切 staging 分支并提交灰度候选。
 

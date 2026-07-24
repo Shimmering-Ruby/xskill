@@ -139,7 +139,10 @@ def test_context_management_reads_compact_config_and_calls_compactor(tmp_path):
     )
     assistant_message = Message(role="assistant", content=None)
     messages = [
-        Message(role="system", content="SkillEditAgent system prompt"),
+        Message(
+            role="system",
+            content="SkillEditAgent system prompt\n" + ("S" * 4000),
+        ),
         Message(role="user", content="turn0 scenario"),
         Message(role="assistant", content="old reasoning"),
         Message(role="tool", content="OLD_ATOM_RESULT\n" + ("x" * 8000),

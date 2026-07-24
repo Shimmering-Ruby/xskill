@@ -11,8 +11,9 @@
    ``look`` 工具结果替换成短标记；把 SkillEdit 的读文件类工具结果 spill 到
    当前 XSkill 实例的隔离目录，message 里只保留摘要 + ``spill_path``。
    从最旧的开始剪,剪到回落 85% 以下为止。
-3. **可选 compact**：如果本轮剪裁后仍超过 ``compact_token_limit``，调用同一个
-   model 做一次工作记忆摘要，然后保留 system、首轮 user、摘要和最近完整消息块。
+3. **可选 compact**：先把可 spill 的结果尽量降到 85% 边界；仍超出
+   ``max(compact_token_limit, spill 边界)`` 才调用同一个 model 做一次工作
+   记忆摘要，然后保留 system、首轮 user、摘要和最近完整消息块。
 4. **最底层兜底（唯一）**：抓住后端抛的"上下文超长"报错 → 再剪一轮历史 →
    **重发一次**。就这一条,不做解析上限学分母、不做多触发统一。
 5. **真实已用 token**：每次请求拿到 ``usage.prompt_tokens`` 写进 thread-local,
@@ -473,8 +474,13 @@ class ContextManager:
             if spill_root is not None
             else None
         )
+        # Compact is always a fallback after the proactive spill boundary.
+        # A legacy config below spill@ can no longer make summarization fire
+        # first or on every moderately large round.
         self.compact_token_limit = (
-            int(compact_token_limit) if compact_token_limit is not None else None
+            max(int(compact_token_limit), self.trigger)
+            if compact_token_limit is not None
+            else None
         )
         self.compact_keep_recent_messages = int(compact_keep_recent_messages)
         self.compact_fn = compact_fn
@@ -487,6 +493,8 @@ class ContextManager:
     def wrap(self, original_invoke):
         """返回包好上下文自管理的 invoke。"""
         def managed_invoke(messages, **kwargs):
+            from xskill.agents import agent_trace
+
             set_max_context(self.max_context)
             # 1) 主动剪裁：到 85% 就剪旧工具结果（纯截断/spill,不调模型）。
             est = _estimate_history_tokens(messages)
@@ -496,11 +504,25 @@ class ContextManager:
                     messages, self.trigger, spill_root=self.spill_root,
                 )
                 if trimmed:
+                    after_spill = _estimate_history_tokens(messages)
                     logger.info("上下文到 %d/%d token,主动剪裁 %d 条旧工具结果",
                                 est, self.max_context, trimmed)
+                    agent_trace.event(
+                        "CONTEXT",
+                        f"Spilled {trimmed} old tool result(s): "
+                        f"{est:,} -> {after_spill:,} tokens.",
+                        include_timestamp=False,
+                    )
+                else:
+                    agent_trace.event(
+                        "CONTEXT",
+                        "No more eligible tool results could be spilled.",
+                        include_timestamp=False,
+                    )
+            after_spill = _estimate_history_tokens(messages)
             if (
                 self.compact_token_limit is not None
-                and _estimate_history_tokens(messages) > self.compact_token_limit
+                and after_spill > self.compact_token_limit
             ):
                 compact_fn = self.compact_fn or _model_compact_fn(original_invoke)
                 try:
@@ -512,11 +534,32 @@ class ContextManager:
                 except Exception as exc:  # noqa: BLE001
                     compacted = False
                     logger.warning("上下文 compact 失败,继续使用剪裁后的历史：%s", exc)
+                    agent_trace.event(
+                        "CONTEXT",
+                        "Compact failed; continuing with spilled history.",
+                        include_timestamp=False,
+                    )
                 if compacted:
+                    after_compact = _estimate_history_tokens(messages)
                     logger.info(
                         "上下文仍超过 compact_token_limit=%d,已压缩历史到 %d 条消息",
                         self.compact_token_limit, len(messages or []),
                     )
+                    agent_trace.event(
+                        "CONTEXT",
+                        f"Compacted context: {after_spill:,} -> "
+                        f"{after_compact:,} tokens.",
+                        include_timestamp=False,
+                    )
+            elif (
+                self.compact_token_limit is not None
+                and est >= self.trigger
+            ):
+                agent_trace.event(
+                    "CONTEXT",
+                    "Compact was not needed.",
+                    include_timestamp=False,
+                )
             try:
                 resp = original_invoke(messages, **kwargs)
             except Exception as exc:  # noqa: BLE001 — 唯一底层兜底
@@ -524,9 +567,18 @@ class ContextManager:
                     raise
                 # 2) 超长兜底（唯一）：再狠剪一轮 → 重发一次。
                 logger.warning("后端报上下文超长,剪裁历史后重发一次：%s", exc)
+                before_retry_spill = _estimate_history_tokens(messages)
                 _trim_old_look_results(messages, self.max_context // 2,
                                        force_all=True,
                                        spill_root=self.spill_root)
+                after_retry_spill = _estimate_history_tokens(messages)
+                agent_trace.event(
+                    "CONTEXT",
+                    "Backend reported context too long; forced spill before "
+                    f"one retry: {before_retry_spill:,} -> "
+                    f"{after_retry_spill:,} tokens.",
+                    include_timestamp=False,
+                )
                 resp = original_invoke(messages, **kwargs)
             # 3) 记后端真实 prompt_tokens（context_budget 工具读这个）。
             self._record_prompt_tokens(resp)

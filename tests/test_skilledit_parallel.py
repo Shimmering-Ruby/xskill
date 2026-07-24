@@ -89,11 +89,11 @@ def _make_barrier_agno(expected_workers, barrier):
                     f"---\nname: {skill_slug}\ndescription: real body for {skill_slug}\n"
                     f"metadata:\n  version: 1\n---\n# {skill_slug}\nbody-of-{skill_slug}\n",
                 )
-            if "baby" in user_message and "commit_baby_to_main" in self.tools:
+            if "baby" in user_message and "commit_baby" in self.tools:
                 _call_tool(
-                    self.tools["commit_baby_to_main"],
+                    self.tools["commit_baby"],
                     skill_slug,
-                    f"graduate {skill_slug}",
+                    f"checkpoint {skill_slug}",
                 )
             class _Response:
                 pass
@@ -176,6 +176,26 @@ def test_runner_passes_jam_threshold(monkeypatch, tmp_path):
     assert captured.get("jam_threshold") == 33, (
         f"jam_threshold was not wired from config; captured={captured!r}"
     )
+
+
+def test_runner_remembers_n1_retry_until_a_checkpoint_succeeds(tmp_path):
+    skill_root = tmp_path / "skill"
+    skill_root.mkdir()
+    watcher = _make_watcher(
+        tmp_path,
+        skill_root,
+        _make_barrier_agno(1, threading.Barrier(1)),
+        edit_workers=1,
+    )
+    skill_dir = skill_root / "retry-target"
+
+    watcher._on_skill_edit_done((skill_dir, False, 1))
+    assert watcher._skill_edit_retry_batch_sizes[skill_dir] == 1
+
+    watcher._on_skill_edit_done(
+        (skill_dir, False, watcher.skill_edit_batch_size)
+    )
+    assert skill_dir not in watcher._skill_edit_retry_batch_sizes
 
 
 class TestSkillEditParallel:

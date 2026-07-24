@@ -1,35 +1,9 @@
-"""SkillEditAgent 多轮渐进式消化（batch + turn 分支）验收单测
-================================================================
+"""Issue #146：baby checkpoint + legacy main/jam turn-chain 回归。
 
-背景：``.candidates.yml`` buffer 攒满阈值时曾经把全部候选一次性塞进单个
-``agent.run()``——``xskill rebuild --force`` 重放历史 / 团队突然活跃时 buffer
-可能攒到几十上百条，单次会话被拖到小时级,且落盘判定弱（agent 半途收笔也会
-被当成"成功"整批清空 buffer,未消化的候选静默丢失）。
-
-止血设计（用户拍板，见 PR 描述）：
-  1. ``maybe_run`` 对 buffer 做一次快照,按 ``(weightscore 降序, atom_id 升序)``
-     切成 ``SKILL_EDIT_BATCH_SIZE`` 条一批,每批一轮全新上下文的 agent.run()。
-  2. 除最后一轮外,每轮结束由宿主 Python 代码（不是 agent）commit 到
-     ``<branch>_turn<N>`` 分支承接进度；中间轮的 agent 完全拿不到任何终态
-     commit 工具——分支推进对它不可见也不可调用（结构性保证）。
-  3. 最后一轮开跑前宿主代码把 HEAD 切回原分支（工作区不动），agent 此时才
-     拿到终态 commit 工具，一次 commit 落地全部批次的累计改动。
-  4. 成功后清理所有 turn 分支；用快照的 atom_id 集合从 buffer 摘除（而非
-     清空整个文件）——消化期间新增的候选留给下一次 maybe_run。
-  5. 崩溃恢复：发现残留 ``*_turn*`` 分支就重置（不续传），buffer 未清过，
-     重新完整跑一遍不丢候选。
-
-本文件验收：
-  - 100+ 候选、真实 batch=20：多轮链条产出的 SKILL.md 融合全部批次内容，
-    turn 分支跑完后清理干净。
-  - 核心安全性质：中间轮不会推进 main / 不会创建 staging，只有最后一轮才推进。
-  - 四个终态落地场景（baby 毕业 / main 开 staging / jam 强砍合并——jam 内部
-    调用的 ``commit_update_main_branch`` 就是"main 直接更新"这第四种落地
-    方式，本仓库现状里它只在 jam 路径可达，因此用同一个 jam 多轮用例覆盖）
-    都各有一个多轮用例，共享同一套渐进式循环骨架。
-  - 崩溃恢复：残留 turn 分支被重置，重新完整跑一遍，候选不丢不重复消化。
-  - 快照语义：消化期间新增的候选本次不处理，运行结束后仍在 buffer 里。
-  - ``remove_candidates`` 只摘除快照里的 atom_id，其余原样保留。
+baby 每 N 个 FIFO candidates 形成一个真实 commit 并立即消费，失败按 N/2
+降压，成功恢复默认 N，buffer 空后框架晋升 main。main→staging 与 jam 则保留
+旧 ``*_turnN`` 链。本文件同时覆盖大 buffer、崩溃恢复、并发新增、精确消费、
+post-commit 异常不重放，以及旧 main/jam 语义不回归。
 """
 from __future__ import annotations
 
@@ -145,7 +119,7 @@ class _ProgressiveStub:
             "baby_sha": _rev("baby"),
             "main_sha": _rev("main"),
             "staging_exists": staging_ok,
-            "has_commit_baby": "commit_baby_to_main" in self.tools,
+            "has_commit_baby": "commit_baby" in self.tools,
             "has_commit_staging": "commit_to_staging" in self.tools,
             "has_commit_update_main": "commit_update_main" in self.tools,
         })
@@ -162,8 +136,8 @@ class _ProgressiveStub:
         )
         _call_tool(self.tools["write_file"], target, content)
 
-        if "commit_baby_to_main" in self.tools:
-            _call_tool(self.tools["commit_baby_to_main"], skill, "progressive graduate")
+        if "commit_baby" in self.tools:
+            _call_tool(self.tools["commit_baby"], skill, "baby batch checkpoint")
         elif "commit_to_staging" in self.tools:
             _call_tool(self.tools["commit_to_staging"], skill, "progressive staging")
         elif "commit_update_main" in self.tools:
@@ -187,10 +161,9 @@ def _make_progressive_factory(observed: list):
 # ═══════════════════════════════════════════════════════════════════
 
 class TestLargeBufferRealBatchSize:
-    def test_100_plus_candidates_batch_20_merges_all_and_cleans_turn_branches(
+    def test_100_candidates_default_batch_5_creates_20_checkpoints(
         self, tmp_path,
     ):
-        assert C.SKILL_EDIT_BATCH_SIZE == 20, "本用例故意验证真实默认 batch size"
         skill_dir = _make_baby_skill(tmp_path / "skill", "huge-skill")
         atom_ids = _seed_candidates(skill_dir, 100)
 
@@ -202,20 +175,21 @@ class TestLargeBufferRealBatchSize:
         )
         assert agent.maybe_run() is True
 
-        # 5 轮（100/20）
-        assert len(observed) == 5, f"expected 5 turns, got {len(observed)}"
+        # 20 轮（100/5），每轮都是真实 baby checkpoint。
+        assert len(observed) == 20, f"expected 20 turns, got {len(observed)}"
+        assert all(item["has_commit_baby"] for item in observed)
 
         # 毕业到 main
         assert current_branch(str(skill_dir)) == "main"
 
-        # 正文融合了全部 5 批的标记行，且每批 20 个 atom_id，并集 = 全部 100 个
+        # 正文融合全部 20 批，每批 5 个 atom_id。
         body = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
         marker_lines = [ln for ln in body.splitlines() if ln.startswith("- round atoms:")]
-        assert len(marker_lines) == 5
+        assert len(marker_lines) == 20
         seen_atoms: set[str] = set()
         for ln in marker_lines:
             ids = ln.split(":", 1)[1].strip().split(",")
-            assert len(ids) == 20
+            assert len(ids) == 5
             seen_atoms.update(ids)
         assert seen_atoms == set(atom_ids)
 
@@ -242,7 +216,7 @@ def small_batch(monkeypatch):
 
 
 class TestFourTerminalScenariosMultiTurn:
-    def test_baby_graduate_multi_turn_only_final_round_advances(
+    def test_baby_checkpoints_every_turn_then_framework_graduates(
         self, tmp_path, small_batch,
     ):
         skill_dir = _make_baby_skill(tmp_path / "skill", "baby-multi")
@@ -253,17 +227,15 @@ class TestFourTerminalScenariosMultiTurn:
         agent = SkillEditAgent(
             skill_dir=skill_dir, store=None,
             agno_agent_factory=_make_progressive_factory(observed),
-            llm_cfg={}, traj_root=tmp_path,
+            llm_cfg={}, traj_root=tmp_path, batch_size=small_batch,
         )
         assert agent.maybe_run() is True
         assert len(observed) == 3
 
-        # 安全性质：只有最后一轮拿到 commit_baby_to_main；baby ref 在此之前
-        # 全程原地不动（turn 分支不影响 baby 自己的 tip）。
-        for round_info in observed[:-1]:
-            assert round_info["has_commit_baby"] is False
-            assert round_info["baby_sha"] == baby_sha_before
-        assert observed[-1]["has_commit_baby"] is True
+        # 每一轮都拿到 commit_baby；下一轮启动时 baby tip 已经前进。
+        assert all(round_info["has_commit_baby"] for round_info in observed)
+        assert observed[0]["baby_sha"] == baby_sha_before
+        assert len({round_info["baby_sha"] for round_info in observed}) == 3
 
         assert current_branch(str(skill_dir)) == "main"
         assert list_turn_branches(str(skill_dir)) == []
@@ -280,7 +252,7 @@ class TestFourTerminalScenariosMultiTurn:
         agent = SkillEditAgent(
             skill_dir=skill_dir, store=None,
             agno_agent_factory=_make_progressive_factory(observed),
-            llm_cfg={}, traj_root=tmp_path,
+            llm_cfg={}, traj_root=tmp_path, batch_size=small_batch,
         )
         assert agent.maybe_run() is True
         assert len(observed) == 3
@@ -363,7 +335,7 @@ class TestCrashRecovery:
         agent = SkillEditAgent(
             skill_dir=skill_dir, store=None,
             agno_agent_factory=_make_progressive_factory(observed),
-            llm_cfg={}, traj_root=tmp_path,
+            llm_cfg={}, traj_root=tmp_path, batch_size=small_batch,
         )
         assert agent.maybe_run() is True
 
@@ -423,20 +395,28 @@ class TestSnapshotSemantics:
             """写正文 + commit 之前,模拟 cluster 并发往 buffer 里加了条新候选。"""
             def __init__(self, *, instructions, tools):
                 self.tools = {_tool_name(t): t for t in tools}
+                self.injected = False
 
             def run(self, user_msg, **_kw):
                 target = re.search(r"目标 SKILL\.md 路径:\s*(\S+)", user_msg).group(1)
                 skill = re.search(r"skill_name:\s*([\w-]+)", user_msg).group(1)
+                atom_ids = re.findall(r"atom_id=(\S+)\s+weightscore=", user_msg)
 
-                data = C.load_candidates(skill_dir)
-                data, _ = C.add_atom_contribution(data, "atom_injected_concurrently", 5)
-                C.save_candidates(skill_dir, data)
+                if not getattr(_InjectingStub, "injected_once", False):
+                    data = C.load_candidates(skill_dir)
+                    data, _ = C.add_atom_contribution(
+                        data, "atom_injected_concurrently", 5,
+                    )
+                    C.save_candidates(skill_dir, data)
+                    _InjectingStub.injected_once = True
 
                 _call_tool(
                     self.tools["write_file"], target,
-                    f"---\nname: {skill}\ndescription: v1\nmetadata:\n  version: 1\n---\n# body\n",
+                    f"---\nname: {skill}\ndescription: checkpoint\n"
+                    "metadata:\n  version: 1\n---\n# body\n"
+                    f"processed: {','.join(atom_ids)}\n",
                 )
-                _call_tool(self.tools["commit_baby_to_main"], skill, "v1")
+                _call_tool(self.tools["commit_baby"], skill, "v1 checkpoint")
                 class _R:
                     pass
                 r = _R(); r.content = "done"
@@ -450,10 +430,9 @@ class TestSnapshotSemantics:
         assert agent.maybe_run() is True
 
         remaining = C.load_candidates(skill_dir)["candidates"]
-        remaining_ids = {c["atom_id"] for c in remaining}
-        # 快照里的 3 个已消化摘除；并发期间加进来的第 4 个还在,留给下次 maybe_run
-        assert remaining_ids == {"atom_injected_concurrently"}
-        assert not (remaining_ids & set(snapshot_ids))
+        # baby 会持续 drain 到当前 buffer 为空，并发新增 atom 在下一批被消费。
+        assert remaining == []
+        assert set(snapshot_ids)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -486,3 +465,201 @@ class TestRemoveCandidates:
 
         remaining = C.load_candidates(skill_dir)["candidates"]
         assert [c["atom_id"] for c in remaining] == ["only-one"]
+
+
+class TestBabyCheckpointRecovery:
+    def test_1000_fifo_candidates_form_200_default_batches(self, tmp_path):
+        agent = SkillEditAgent(
+            skill_dir=tmp_path,
+            store=None,
+            agno_agent_factory=lambda **_kwargs: None,
+            llm_cfg={},
+            traj_root=tmp_path,
+        )
+        pending = [
+            {"atom_id": f"atom_{index:04d}", "weightscore": 1}
+            for index in range(1000)
+        ]
+        batches: list[list[str]] = []
+        while pending:
+            batch = agent._take_baby_batch(pending, agent.batch_size)
+            batches.append([candidate["atom_id"] for candidate in batch])
+            pending = pending[len(batch):]
+
+        assert agent.batch_size == 5
+        assert len(batches) == 200
+        assert batches[0] == [f"atom_{index:04d}" for index in range(5)]
+        assert batches[-1] == [f"atom_{index:04d}" for index in range(995, 1000)]
+
+    def test_failures_reduce_5_to_2_to_1_then_success_resets_to_5(
+        self, tmp_path,
+    ):
+        skill_dir = _make_baby_skill(tmp_path / "skill", "adaptive-baby")
+        _seed_candidates(skill_dir, 5, ws=2)
+        batch_sizes: list[int] = []
+
+        class _AdaptiveStub:
+            def __init__(self, *, instructions, tools):
+                del instructions
+                self.tools = {_tool_name(tool): tool for tool in tools}
+
+            def run(self, user_msg, **_kwargs):
+                atom_ids = re.findall(
+                    r"atom_id=(\S+)\s+weightscore=", user_msg,
+                )
+                batch_sizes.append(len(atom_ids))
+                if len(batch_sizes) <= 2:
+                    raise RuntimeError("429 rate limit")
+                target = re.search(
+                    r"目标 SKILL\.md 路径:\s*(\S+)", user_msg,
+                ).group(1)
+                skill = re.search(
+                    r"skill_name:\s*([\w-]+)", user_msg,
+                ).group(1)
+                existing = Path(target).read_text(encoding="utf-8")
+                marker = f"\nprocessed-{len(batch_sizes)}: {','.join(atom_ids)}\n"
+                _call_tool(
+                    self.tools["write_file"],
+                    target,
+                    existing + marker,
+                )
+                _call_tool(
+                    self.tools["commit_baby"],
+                    skill,
+                    f"checkpoint {len(batch_sizes)}",
+                )
+                return type("_R", (), {"content": "done"})()
+
+        logs_dir = tmp_path / "logs"
+        agent = SkillEditAgent(
+            skill_dir=skill_dir,
+            store=None,
+            agno_agent_factory=lambda **kwargs: _AdaptiveStub(**kwargs),
+            llm_cfg={"max_context": 128000, "compact_token_limit": 112000},
+            traj_root=tmp_path,
+            logs_dir=logs_dir,
+        )
+
+        assert agent.maybe_run() is True
+        assert batch_sizes == [5, 2, 1, 4]
+        assert agent.next_batch_size == 5
+        assert current_branch(str(skill_dir)) == "main"
+        trace = (
+            logs_dir / "agents" / "skill_edit_agents"
+            / "skills" / "adaptive-baby.log"
+        ).read_text(encoding="utf-8")
+        assert "Retry batch reduced: 5 -> 2" in trace
+        assert "Retry batch reduced: 2 -> 1" in trace
+        assert "TURN START | N=1 | processing 1 of 5" in trace
+        assert "TURN START | N=5 | processing 4 of 4" in trace
+        assert "TURN END | COMMITTED | consumed=4 | 0 remaining | next N=5" in trace
+        assert "{" not in trace
+
+    def test_exception_after_commit_is_not_replayed(self, tmp_path):
+        skill_dir = _make_baby_skill(tmp_path / "skill", "post-commit-error")
+        atom_ids = _seed_candidates(skill_dir, 3, ws=4)
+        calls = 0
+
+        class _CommitThenThrow:
+            def __init__(self, *, instructions, tools):
+                del instructions
+                self.tools = {_tool_name(tool): tool for tool in tools}
+
+            def run(self, user_msg, **_kwargs):
+                nonlocal calls
+                calls += 1
+                target = re.search(
+                    r"目标 SKILL\.md 路径:\s*(\S+)", user_msg,
+                ).group(1)
+                skill = re.search(
+                    r"skill_name:\s*([\w-]+)", user_msg,
+                ).group(1)
+                _call_tool(
+                    self.tools["write_file"],
+                    target,
+                    f"---\nname: {skill}\ndescription: durable checkpoint\n"
+                    "metadata:\n  version: 1\n---\n# body\n",
+                )
+                _call_tool(
+                    self.tools["commit_baby"],
+                    skill,
+                    "durable before final response",
+                )
+                raise RuntimeError("429 on post-tool model response")
+
+        agent = SkillEditAgent(
+            skill_dir=skill_dir,
+            store=None,
+            agno_agent_factory=lambda **kwargs: _CommitThenThrow(**kwargs),
+            llm_cfg={},
+            traj_root=tmp_path,
+        )
+
+        assert agent.maybe_run() is True
+        assert calls == 1
+        assert current_branch(str(skill_dir)) == "main"
+        assert C.load_candidates(skill_dir)["candidates"] == []
+        body = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        assert "durable checkpoint" in body
+        assert atom_ids
+
+    def test_partial_baby_bypasses_threshold_after_restart(self, tmp_path):
+        from xskill.skill.git import commit_baby_checkpoint
+
+        skill_dir = _make_baby_skill(tmp_path / "skill", "partial-baby")
+        atom_ids = _seed_candidates(skill_dir, 6, ws=2)
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text(
+            "---\nname: partial-baby\ndescription: first checkpoint\n"
+            "metadata:\n  version: 1\n---\n# body\nfirst five\n",
+            encoding="utf-8",
+        )
+        assert commit_baby_checkpoint(
+            str(skill_dir), "simulate checkpoint before restart",
+        )
+        consumed, remaining = C.remove_candidates(
+            skill_dir, set(atom_ids[:5]),
+        )
+        assert consumed == atom_ids[:5]
+        assert remaining == 1
+
+        observed: list = []
+        agent = SkillEditAgent(
+            skill_dir=skill_dir,
+            store=None,
+            agno_agent_factory=_make_progressive_factory(observed),
+            llm_cfg={},
+            traj_root=tmp_path,
+        )
+        assert agent.maybe_run() is True
+        assert [item["atom_ids"] for item in observed] == [[atom_ids[-1]]]
+        assert current_branch(str(skill_dir)) == "main"
+
+    def test_n1_failure_releases_turn_and_preserves_retry_size(self, tmp_path):
+        skill_dir = _make_baby_skill(tmp_path / "skill", "n1-failure")
+        _seed_candidates(skill_dir, 1, ws=10)
+        calls = 0
+
+        class _AlwaysFails:
+            def __init__(self, **_kwargs):
+                pass
+
+            def run(self, _user_msg, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("maximum context length exceeded")
+
+        agent = SkillEditAgent(
+            skill_dir=skill_dir,
+            store=None,
+            agno_agent_factory=lambda **kwargs: _AlwaysFails(**kwargs),
+            llm_cfg={},
+            traj_root=tmp_path,
+            retry_batch_size=1,
+        )
+
+        assert agent.maybe_run() is False
+        assert calls == 1
+        assert agent.next_batch_size == 1
+        assert current_branch(str(skill_dir)) == "baby"
+        assert len(C.load_candidates(skill_dir)["candidates"]) == 1

@@ -25,6 +25,8 @@ class _FlakyModel:
 def _no_sleep(monkeypatch):
     # 别真睡——把退避 sleep 打掉,测试秒过
     monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+    from xskill.utils.shutdown import SHUTTING_DOWN
+    monkeypatch.setattr(SHUTTING_DOWN, "wait", lambda *_args: False)
 
 
 def test_transient_classification():
@@ -59,3 +61,19 @@ def test_non_transient_raises_immediately_no_retry():
     with pytest.raises(Exception):
         m.invoke([])
     assert m.calls == 1  # 只试一次
+
+
+def test_retry_and_exhaustion_are_written_to_active_trace(tmp_path):
+    from xskill.agents.agent_trace import trace_to
+
+    model = _FlakyModel(fail_n=999, exc=Exception("429 rate limit"))
+    _wrap_with_retry(model, {"max_retries": 3})
+    sink = tmp_path / "skill.log"
+    with trace_to(sink):
+        with pytest.raises(Exception):
+            model.invoke([])
+
+    trace = sink.read_text(encoding="utf-8")
+    assert "LLM returned 429; retrying (1/3)" in trace
+    assert "LLM returned 429; retrying (2/3)" in trace
+    assert "LLM returned 429; retries exhausted (3/3)" in trace
