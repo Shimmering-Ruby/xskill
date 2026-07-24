@@ -7,6 +7,7 @@ def pool_config(
     workers: int = 2,
     *,
     batch_size: int = 8,
+    edit_batch_size: int = 5,
     split_workers: int | None = None,
     cluster_workers: int | None = None,
     edit_workers: int | None = None,
@@ -19,6 +20,10 @@ def pool_config(
             "batch_size": batch_size,
             "llm_weight": 3,
         },
-        "edit": {"workers": edit_workers or workers, "llm_weight": 1},
+        "edit": {
+            "workers": edit_workers or workers,
+            "batch_size": edit_batch_size,
+            "llm_weight": 1,
+        },
         "embed": {"workers": embed_workers or workers},
     }

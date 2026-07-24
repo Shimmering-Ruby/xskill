@@ -51,7 +51,7 @@ def _add_ux_score(skill_dir: Path, side: str = "main"):
 
 
 class _BabyStubAgno:
-    """模拟 SkillEditAgent 在 baby 分支：写 SKILL.md + 调 commit_baby_to_main。"""
+    """模拟 baby turn：写 SKILL.md + 调 commit_baby checkpoint。"""
     invoked: bool = False
     user_msg: str = ""
     writes_skill_md_with: str | None = None
@@ -75,9 +75,9 @@ class _BabyStubAgno:
         # 写 SKILL.md
         if type(self).writes_skill_md_with is not None and target_path:
             _call_tool(self.tools["write_file"], target_path, type(self).writes_skill_md_with)
-        # 调 commit_baby_to_main
+        # 调 commit_baby；buffer 清空后由框架 graduate。
         if type(self).calls_commit and skill:
-            _call_tool(self.tools["commit_baby_to_main"], skill, "stub baby commit")
+            _call_tool(self.tools["commit_baby"], skill, "stub baby checkpoint")
         class _R: pass
         r = _R(); r.content = "done"
         return r
@@ -189,12 +189,10 @@ class TestThresholdGate:
             logs_dir=tmp_path / "instance-logs",
         )
         assert agent.maybe_run() is True
-        assert list(
-            (
-                tmp_path / "instance-logs" / "agents"
-                / "skill_edit_agents" / "skills"
-            ).glob("my-skill_*.log")
-        )
+        assert (
+            tmp_path / "instance-logs" / "agents"
+            / "skill_edit_agents" / "skills" / "my-skill.log"
+        ).is_file()
         # baby → main graduate 完成
         from xskill.skill.git import current_branch
         assert current_branch(str(skill_dir)) == "main"
@@ -478,7 +476,7 @@ class TestWritingDisciplineInPrompt:
         """管线契约部分（场景块占位/commit 工具/隐私守护/frontmatter/工具清单）保留不动。"""
         assert "{scenario_block}" in SYSTEM_PROMPT_TEMPLATE
         assert "{branch_now}" in SYSTEM_PROMPT_TEMPLATE
-        assert "commit_baby_to_main" in SYSTEM_PROMPT_TEMPLATE
+        assert "commit_baby" in SYSTEM_PROMPT_TEMPLATE
         assert "commit_to_staging" in SYSTEM_PROMPT_TEMPLATE
         assert "隐私守护" in SYSTEM_PROMPT_TEMPLATE
         assert "AtomTaskRead" in SYSTEM_PROMPT_TEMPLATE

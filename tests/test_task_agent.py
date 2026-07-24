@@ -936,7 +936,7 @@ class TestContextManager:
             return "COMPACTED: keep atom evidence and pending edits"
 
         messages = [
-            _Msg("system", "SkillEditAgent system prompt"),
+            _Msg("system", "SkillEditAgent system prompt\n" + ("S" * 4000)),
             _Msg("user", "turn0 scenario with target skill"),
             _Msg("assistant", "I will inspect atoms"),
             _Msg("tool", "OLD_ATOM_RESULT\n" + ("x" * 8000), "atom_task_read"),
@@ -965,7 +965,7 @@ class TestContextManager:
         assert [m.role for m in compacted] == [
             "system", "user", "assistant", "assistant", "user",
         ]
-        assert compacted[0].content == "SkillEditAgent system prompt"
+        assert compacted[0].content.startswith("SkillEditAgent system prompt")
         assert compacted[1].content == "turn0 scenario with target skill"
         assert "COMPACTED" in compacted[2].content
         assert compacted[-2].content == "recent reasoning"
@@ -983,7 +983,7 @@ class TestContextManager:
                 self.tool_call_id = tool_call_id
 
         messages = [
-            _Msg("system", "SkillEditAgent system prompt"),
+            _Msg("system", "SkillEditAgent system prompt\n" + ("S" * 4000)),
             _Msg("user", "turn0 scenario"),
             _Msg("assistant", "old reasoning"),
             _Msg("tool", "OLD_ATOM_RESULT\n" + ("x" * 8000), "atom_task_read"),
@@ -1011,6 +1011,33 @@ class TestContextManager:
         ]
         assert all(m.content != "RECENT_TOOL_WITHOUT_ASSISTANT" for m in compacted)
         assert compacted[-1].content == "continue after tool"
+
+    def test_configured_compact_below_spill_does_not_compact_eagerly(self, tmp_path):
+        """低于 spill@ 的旧配置不能让 compact 抢在可回收 tool result 前触发。"""
+        from xskill.agents.context_budget import ContextManager
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        messages = [
+            _Msg("system", "short system"),
+            _Msg("user", "scenario"),
+            _Msg("tool", "x" * 8000, "atom_task_read"),
+        ]
+        compact_calls: list[str] = []
+        ContextManager(
+            max_context=1000,
+            spill_root=tmp_path / "spill",
+            compact_token_limit=20,
+            compact_fn=lambda prompt: compact_calls.append(prompt) or "summary",
+        ).wrap(lambda _messages, **_kwargs: {"usage": {"prompt_tokens": 100}})(
+            messages
+        )
+
+        assert compact_calls == []
 
     def test_overlong_error_triggers_retrim_and_resend(self):
         from xskill.agents.context_budget import ContextManager, _TRIM_MARK

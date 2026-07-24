@@ -1,5 +1,5 @@
-"""SkillEditAgent —— SKILL.md 自主整理 + git commit（baby→main 或 staging）
-========================================================================
+"""SkillEditAgent —— SKILL.md 自主整理 + 可恢复 checkpoint
+===========================================================
 
 何时触发（``maybe_run`` 守门）：
   1. 该 skill 没有 staging 分支（灰度中不再触发新 SkillEdit）
@@ -9,30 +9,20 @@
      避免冷启动后 main 无人用就连开 staging 卡死灰度链路
   4. 调用方（watcher._check_pending_skill_edits）保证不在冷启动期触发
 
-agent 写完 SKILL.md / scripts / references 后**必须**调以下两个 commit
-工具之一（依当前分支状态）：
-  - baby 分支：调 ``commit_baby_to_main(skill_name, message)`` 完成首版
-  - main 分支：调 ``commit_to_staging(skill_name, message)`` 产出灰度候选
+baby 冷启动按配置 N（默认 5）以 candidates YAML 插入顺序逐批处理。每批使用
+全新 agent 上下文，写完后必须调用 ``commit_baby``：在 baby 上创建真实非空
+commit，并在同一仓锁内消费框架绑定的 atom_id。失败按 N/2（最小 1）重试；
+任一批成功后下一批恢复配置 N。buffer 清空后框架统一跑一次 description
+optimization，并把 baby 晋升 main。这样第 199/200 批崩溃也只重试未提交批次。
 
-落盘成功（SKILL.md mtime 推进 + 非空 + 分支真推进）→ 从 buffer 摘除本次
-快照到的 atom_id + 立即 install_to_claude_code 让 CC 立刻看到新版本。
-
-多轮渐进式消化（buffer 超过 ``SKILL_EDIT_BATCH_SIZE`` 条候选时）：
-一次 ``maybe_run`` 对 buffer 做一次快照,按 ``(weightscore 降序, atom_id 升序)``
-切成多批,每批一轮**全新上下文**的 ``agent.run()``（不带前一轮的对话历史，
-与 TaskAgent 弃窗单趟同一设计哲学，见 ``context_budget.py``）。除最后一轮外
-每轮结束后由**宿主 Python 代码**（不是 agent）把改动 commit 到一个新建的
-``<branch>_turn<N>`` 分支承接进度；中间轮的 agent 完全不会拿到任何终态
-commit 工具——分支推进对它不可见也不可调用，是结构性保证而非约定。最后一轮
-开跑前宿主代码把 HEAD 切回原分支（工作区不动），agent 此时才拿到终态 commit
-工具，一次 commit 落地全部批次的累计改动。成功后清理所有遗留 turn 分支；
-若发现残留 turn 分支（上次崩溃/失败），不续传，直接重置重来（详见
-``SkillEditAgent._recover_crashed_turns``）。
+main→staging 与 jam 路径保留旧 ``*_turnN`` 渐进分支语义，避免扩大 Issue #146
+的行为面。
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -214,8 +204,9 @@ metadata:
 
 ## 当前在 {branch_now} 分支，按场景调对应工具：
 
-- **如果在 baby 分支**：调 ``commit_baby_to_main(skill_name, message)``
-  这是该 skill 第一次出版本，graduate 到 main 分支。
+- **如果在 baby 分支**：调 ``commit_baby(skill_name, message)``
+  checkpoint 当前批次。它保持 baby 分支并消费系统绑定的 atom_id；当
+  candidates 全部清空后，框架会自动 graduate 到 main。
 - **如果在 main 分支**（已有 main，本次是更新）：调
   ``commit_to_staging(skill_name, message)`` 把更新作为灰度候选放进 staging。
   staging 会被灰度系统 vs main 对比，胜出才升级。
@@ -233,7 +224,7 @@ commit message 写明本次基于哪些 atom_id 整理，例如：
 - grep_files(pattern, path="", glob="", max_results=100) — 全文检索（ripgrep），
   返回「文件:行号:内容」；先检索定位、再 read_file 精读，别逐个翻文件
 - write_file(path, content) — 写任意文件到 skill_dir 下
-- commit_baby_to_main(skill_name, message) — 仅 baby 分支可用
+- commit_baby(skill_name, message) — 仅 baby 分支可用；checkpoint 当前批次
 - commit_to_staging(skill_name, message) — 仅 main 分支可用
 
 # 隐私守护
@@ -340,11 +331,27 @@ class SkillEditAgent:
     traj_root: Path
     threshold: int = C.ATOM_PROMOTION_THRESHOLD
     jam_threshold: int = 50
+    batch_size: int = 5
+    retry_batch_size: int | None = None
     logs_dir: Path | None = None
+    next_batch_size: int = field(init=False)
 
     def __post_init__(self) -> None:
         self.skill_dir = Path(self.skill_dir)
         self.traj_root = Path(self.traj_root)
+        if isinstance(self.batch_size, bool) or int(self.batch_size) <= 0:
+            raise ValueError("SkillEditAgent batch_size must be a positive integer")
+        self.batch_size = int(self.batch_size)
+        if self.retry_batch_size is not None:
+            if (
+                isinstance(self.retry_batch_size, bool)
+                or int(self.retry_batch_size) <= 0
+            ):
+                raise ValueError(
+                    "SkillEditAgent retry_batch_size must be a positive integer"
+                )
+            self.retry_batch_size = int(self.retry_batch_size)
+        self.next_batch_size = self.retry_batch_size or self.batch_size
         if self.logs_dir is not None:
             self.logs_dir = Path(self.logs_dir)
 
@@ -382,9 +389,8 @@ class SkillEditAgent:
              - .ux_scores.jsonl 必须至少有 1 条 side=main → 证明 main 真有人用
              - 否则保留 candidates 等用户用过 main 再触发
 
-        全过 → 跑 agent（可能多轮渐进式） → 验证 SKILL.md mtime 推进 + 非空 +
-        分支真推进 → 从 buffer 摘除本次快照的 atom_id。
-        agent 没落盘 SKILL.md，或分支没真推进 → 保留 candidates 等下轮重试。
+        baby 全过 → 按 N 逐批 checkpoint + 消费，清空后框架晋升 main。
+        main/jam 全过 → 保留旧渐进分支链，终态成功后摘除入口快照 atom_id。
         """
         from xskill.skill.git import current_branch, run_git
 
@@ -405,13 +411,25 @@ class SkillEditAgent:
             return False
 
         if not staging_exists:
-            # 守门 2: 阈值
-            ready = C.ready_for_promotion_v2(data, threshold=self.threshold)
-            if not ready:
-                return False
-            # 守门 3: 若场景是 "create staging"（即在 main 上）→ 额外要求 main 真有人用过
             cur = current_branch(str(self.skill_dir))
+            if cur == "baby":
+                partial_baby = self._baby_has_checkpoint()
+                # 首次启动仍要求累计达到 promotion threshold；一旦已有 baby
+                # checkpoint，就必须无视剩余权重继续 drain，避免最后几个低分
+                # atom 永远无法完成毕业。candidate 已空则补完 crash window 中
+                # “remove 成功、rename 前进程退出”的最终晋升。
+                if not partial_baby:
+                    if not C.ready_for_promotion_v2(
+                        data, threshold=self.threshold,
+                    ):
+                        return False
+                return self._run_baby_until_empty()
             if cur == "main":
+                # 守门 2: main 的新一轮更新仍要求累计达到阈值。
+                ready = C.ready_for_promotion_v2(data, threshold=self.threshold)
+                if not ready:
+                    return False
+                # 守门 3: create staging 前要求 main 真有人用过。
                 if not self._main_has_ux_score():
                     logger.info(
                         "skip SkillEdit: %s main 还没真实 ux_score，"
@@ -419,7 +437,7 @@ class SkillEditAgent:
                         self.skill_dir.name,
                     )
                     return False
-            elif cur != "baby":
+            else:
                 logger.warning(
                     "skip SkillEdit: %s 在异常分支 %r (期望 baby 或 main)",
                     self.skill_dir.name, cur,
@@ -522,6 +540,264 @@ class SkillEditAgent:
                     len(snapshot_atom_ids), self.skill_dir.name)
         return True
 
+    def _baby_has_checkpoint(self) -> bool:
+        """Return whether baby has at least one commit after its init commit."""
+        from xskill.skill.git import run_git
+
+        return run_git(
+            ["rev-parse", "baby~1"],
+            cwd=str(self.skill_dir),
+        )[0] == 0
+
+    def _trace_path(self) -> Path | None:
+        if self.logs_dir is None:
+            return None
+        return (
+            self.logs_dir
+            / "agents"
+            / "skill_edit_agents"
+            / "skills"
+            / f"{self.skill_dir.name}.log"
+        )
+
+    def _trace_limits(self) -> tuple[int, int | None]:
+        from xskill.agents.context_budget import (
+            DEFAULT_MAX_CONTEXT,
+            TRIM_TRIGGER_RATIO,
+        )
+
+        max_context = int(
+            (self.llm_cfg or {}).get("max_context") or DEFAULT_MAX_CONTEXT
+        )
+        spill_limit = int(max_context * TRIM_TRIGGER_RATIO)
+        compact_raw = (self.llm_cfg or {}).get("compact_token_limit")
+        compact_limit = (
+            max(int(compact_raw), spill_limit)
+            if compact_raw not in (None, "")
+            else None
+        )
+        return spill_limit, compact_limit
+
+    def _append_turn_start(self, n: int, processing: int, pending: int) -> None:
+        from xskill.agents import agent_trace
+
+        agent_trace.append_to(
+            self._trace_path(),
+            (
+                "\n================ TURN START "
+                f"| N={n} | processing {processing} of {pending} "
+                "pending atoms ================\n\n"
+            ),
+        )
+
+    def _append_turn_end(
+        self,
+        status: str,
+        *,
+        consumed: int,
+        remaining: int,
+        next_n: int,
+    ) -> None:
+        from xskill.agents import agent_trace
+
+        agent_trace.append_to(
+            self._trace_path(),
+            (
+                f"\nTURN END | {status} | consumed={consumed} "
+                f"| {remaining} remaining | next N={next_n}\n\n"
+            ),
+        )
+
+    def _reset_baby_worktree(self) -> None:
+        """Discard uncheckpointed tracked/untracked edits, preserving ignored buffers."""
+        from xskill.skill.git import run_git
+
+        reset_code, _, reset_error = run_git(
+            ["reset", "--hard", "HEAD"],
+            cwd=str(self.skill_dir),
+        )
+        clean_code, _, clean_error = run_git(
+            ["clean", "-fd"],
+            cwd=str(self.skill_dir),
+        )
+        if reset_code != 0 or clean_code != 0:
+            logger.warning(
+                "SkillEdit baby worktree cleanup incomplete for %s: reset=%s clean=%s",
+                self.skill_dir.name,
+                reset_error,
+                clean_error,
+            )
+
+    def _graduate_completed_baby(self) -> bool:
+        """Promote an empty, checkpointed baby to main under framework control."""
+        from xskill.agents import agent_tools, agent_trace
+
+        ok = agent_tools.graduate_baby_to_main(
+            self.skill_dir,
+            self.skill_dir.name,
+            "graduate baby after all candidate checkpoints",
+        )
+        if ok:
+            self.next_batch_size = self.batch_size
+            agent_trace.append_to(
+                self._trace_path(),
+                (
+                    f"{time.strftime('%H:%M:%S')} INFO  "
+                    "Candidate buffer empty; promoted baby -> main.\n"
+                ),
+            )
+        else:
+            logger.warning(
+                "SkillEdit baby checkpoints complete but graduation failed: %s",
+                self.skill_dir.name,
+            )
+        return ok
+
+    def _run_baby_until_empty(self) -> bool:
+        """Drain baby candidates via durable per-batch commits, then graduate."""
+        current_n = self.retry_batch_size or self.batch_size
+        current_n = max(1, min(int(current_n), self.batch_size))
+        self.next_batch_size = current_n
+
+        while True:
+            data = C.load_candidates(self.skill_dir)
+            candidates = list(data.get("candidates", []) or [])
+            if not candidates:
+                return self._graduate_completed_baby()
+
+            pending = len(candidates)
+            batch = self._take_baby_batch(candidates, current_n)
+            batch_ids = [
+                str(candidate["atom_id"])
+                for candidate in batch
+                if candidate.get("atom_id")
+            ]
+            if not batch_ids:
+                logger.warning(
+                    "SkillEdit baby candidate batch has no atom_id: %s",
+                    self.skill_dir.name,
+                )
+                return False
+
+            self._append_turn_start(current_n, len(batch_ids), pending)
+            committed, remaining = self._run_baby_batch(
+                batch,
+                batch_ids=batch_ids,
+                n=current_n,
+            )
+            if committed:
+                self.next_batch_size = self.batch_size
+                self._append_turn_end(
+                    "COMMITTED",
+                    consumed=len(batch_ids),
+                    remaining=remaining,
+                    next_n=self.batch_size,
+                )
+                current_n = self.batch_size
+                continue
+
+            next_n = max(1, current_n // 2)
+            self.next_batch_size = next_n
+            from xskill.agents import agent_trace
+            agent_trace.append_to(
+                self._trace_path(),
+                (
+                    f"{time.strftime('%H:%M:%S')} INFO  "
+                    f"Retry batch reduced: {current_n} -> {next_n}\n"
+                ),
+            )
+            self._append_turn_end(
+                "FAILED",
+                consumed=0,
+                remaining=remaining,
+                next_n=next_n,
+            )
+            if current_n == 1:
+                return False
+            current_n = next_n
+
+    @staticmethod
+    def _take_baby_batch(candidates: list[dict], n: int) -> list[dict]:
+        """Take at most N candidates in stable YAML insertion (FIFO) order."""
+        return candidates[:min(max(1, int(n)), len(candidates))]
+
+    def _run_baby_batch(
+        self,
+        batch: list[dict],
+        *,
+        batch_ids: list[str],
+        n: int,
+    ) -> tuple[bool, int]:
+        """Run one baby turn and verify the durable checkpoint, not run() return."""
+        from xskill.agents import agent_tools
+        from xskill.skill.git import run_git
+
+        before_code, before_out, _ = run_git(
+            ["rev-parse", "HEAD"],
+            cwd=str(self.skill_dir),
+        )
+        before_sha = before_out.strip() if before_code == 0 else ""
+        run_error: Exception | None = None
+        try:
+            with agent_tools.use_skill_edit_batch(
+                self.skill_dir.name,
+                batch_ids,
+            ):
+                self._run_normal_round(
+                    batch,
+                    current_branch_name="baby",
+                    turn_idx=1,
+                    num_batches=1,
+                    is_last=True,
+                )
+        except Exception as error:  # noqa: BLE001
+            run_error = error
+            logger.warning(
+                "SkillEdit baby turn failed for %s (N=%d): %s",
+                self.skill_dir.name,
+                n,
+                error,
+            )
+
+        after_code, after_out, _ = run_git(
+            ["rev-parse", "HEAD"],
+            cwd=str(self.skill_dir),
+        )
+        after_sha = after_out.strip() if after_code == 0 else ""
+        try:
+            remaining_candidates = list(
+                C.load_candidates(self.skill_dir).get("candidates", []) or []
+            )
+        except Exception:
+            logger.exception(
+                "failed to reload candidates after baby turn: %s",
+                self.skill_dir.name,
+            )
+            remaining_candidates = []
+            remaining_ids = set(batch_ids)
+        else:
+            remaining_ids = {
+                str(candidate.get("atom_id"))
+                for candidate in remaining_candidates
+                if candidate.get("atom_id")
+            }
+        checkpointed = bool(
+            before_sha
+            and after_sha
+            and before_sha != after_sha
+            and not (set(batch_ids) & remaining_ids)
+        )
+        self._reset_baby_worktree()
+        if checkpointed:
+            if run_error is not None:
+                logger.info(
+                    "SkillEdit baby turn raised after durable checkpoint; "
+                    "treating as success: %s",
+                    self.skill_dir.name,
+                )
+            return True, len(remaining_candidates)
+        return False, len(remaining_candidates)
+
     def _main_has_ux_score(self) -> bool:
         """检查该 skill 的 .ux_scores.jsonl 是否有至少 1 条 side=main 记录。
 
@@ -607,20 +883,17 @@ class SkillEditAgent:
             )
         return ["", note]
 
-    def _trace_run(self, agent: Any, user_msg: str, *, log_suffix: str) -> None:
-        """跑一轮 agent.run() 并把逐轮 CoT/工具调用记到
-        logs/agents/skill_edit_agents/skills/<skill><suffix>_<ts>.log。"""
-        import time as _time
+    def _trace_run(self, agent: Any, user_msg: str) -> None:
+        """Append one agent.run() to the skill's single human-readable trace."""
         from xskill.agents.agent_trace import trace_to
 
-        _ts = _time.strftime("%Y%m%d-%H%M%S")
-        sink = (
-            self.logs_dir / "agents" / "skill_edit_agents" / "skills"
-            / f"{self.skill_dir.name}{log_suffix}_{_ts}.log"
-            if self.logs_dir is not None
-            else None
-        )
-        with trace_to(sink):
+        spill_limit, compact_limit = self._trace_limits()
+        with trace_to(
+            self._trace_path(),
+            append=True,
+            spill_token_limit=spill_limit,
+            compact_token_limit=compact_limit,
+        ):
             agent.run(user_msg)
 
     # ───────────────────────────────────────────────────────────────
@@ -741,8 +1014,7 @@ class SkillEditAgent:
             tools.append(agent_tools.commit_update_main)
 
         agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
-        suffix = "_jam" if num_batches <= 1 else f"_jam_turn{turn_idx}"
-        self._trace_run(agent, scenario_block, log_suffix=suffix)
+        self._trace_run(agent, scenario_block)
 
     def _run_normal_round(
         self, batch: list[dict], *, current_branch_name: str,
@@ -758,16 +1030,12 @@ class SkillEditAgent:
                 "skill_name: " + self.skill_dir.name + "（**baby 分支**——首次出版本）"
             )
             scenario_lines.extend(self._round_info_lines(turn_idx, num_batches))
-            if is_last:
-                scenario_lines.append(
-                    "写完 SKILL.md 后调 ``commit_baby_to_main(skill_name, message)`` "
-                    "graduate 到 main 分支。"
-                )
-            else:
-                scenario_lines.append(
-                    "本轮没有提供任何 commit 工具——分支推进由系统在全部批次渐进式"
-                    "消化完成后自动处理，你只需要把本轮候选编辑进 SKILL.md。"
-                )
+            scenario_lines.append(
+                "本轮只处理下面这批候选。写完后必须调 "
+                "``commit_baby(skill_name, message)``：它会 checkpoint 当前改动"
+                "并消费系统绑定的 atom_id，但保持在 baby；buffer 清空后由框架"
+                "自动 graduate 到 main。"
+            )
         else:
             scenario_lines.append(
                 "skill_name: " + self.skill_dir.name + "（**main 分支** —— 更新现有 skill）"
@@ -828,10 +1096,9 @@ class SkillEditAgent:
         ]
         if is_last:
             if current_branch_name == "baby":
-                tools.append(agent_tools.commit_baby_to_main)
+                tools.append(agent_tools.commit_baby)
             else:
                 tools.append(agent_tools.commit_to_staging)
 
         agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
-        suffix = "" if num_batches <= 1 else f"_turn{turn_idx}"
-        self._trace_run(agent, user_msg, log_suffix=suffix)
+        self._trace_run(agent, user_msg)

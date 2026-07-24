@@ -31,7 +31,7 @@ _overrides: dict = {}
 DEFAULT_AGENT_WORKER_POOLS = {
     "split": {"workers": 24, "llm_weight": 6},
     "cluster": {"workers": 8, "batch_size": 8, "llm_weight": 3},
-    "edit": {"workers": 4, "llm_weight": 1},
+    "edit": {"workers": 4, "batch_size": 5, "llm_weight": 1},
     "embed": {"workers": 4},
 }
 DEFAULT_LLM_RATE_LIMIT = {
@@ -83,7 +83,9 @@ llm:
   # compact_token_limit: 120000  # optional; after trimming/spilling old tool
                          # results, if the estimated history is still above this
                          # limit, ask the same chat model to summarize old
-                         # SkillEditAgent memory. Leave commented to disable.
+                         # SkillEditAgent memory. The effective limit is never
+                         # below spill@ (85% of max_context), so spill always
+                         # runs first. Leave commented to disable.
   # compact_keep_recent_messages: 6 # optional; recent complete message blocks
                          # kept verbatim after compact. Default 6.
   # temperature: 0.0     # optional; default 0 (deterministic)
@@ -208,6 +210,7 @@ agent_worker:
       llm_weight: 3
     edit:
       workers: 4
+      batch_size: 5
       llm_weight: 1
     embed:
       workers: 4
@@ -367,6 +370,10 @@ def normalize_runtime_config(config_data: dict) -> dict:
     normalized_pools["cluster"]["batch_size"] = _positive_int(
         cluster_batch_size,
         "agent_worker.pools.cluster.batch_size",
+    )
+    normalized_pools["edit"]["batch_size"] = _positive_int(
+        normalized_pools["edit"].get("batch_size"),
+        "agent_worker.pools.edit.batch_size",
     )
     worker = dict(worker)
     worker["pools"] = normalized_pools

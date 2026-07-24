@@ -35,7 +35,7 @@ def test_record_writes_round_with_cot_and_tools(tmp_path):
                                     tools=(("submit_atom", '{"start_line":1}'),)))
     assert sink.is_file()
     txt = sink.read_text(encoding="utf-8")
-    assert "round 1" in txt and "round 2" in txt
+    assert "ROUND 1" in txt and "ROUND 2" in txt
     assert "第一步看上下文" in txt and "提交原子" in txt
     assert "look(" in txt and "submit_atom(" in txt
     assert "tokens" in txt  # 每轮带 token 估算
@@ -83,11 +83,11 @@ def test_nested_trace_restores_outer_sink_and_round(tmp_path):
     assert "outer-before" in outer_text
     assert "outer-after" in outer_text
     assert "inner" not in outer_text
-    assert "round 1" in outer_text
-    assert "round 2" in outer_text
+    assert "ROUND 1" in outer_text
+    assert "ROUND 2" in outer_text
     assert "inner" in inner_text
-    assert "round 1" in inner_text
-    assert "round 2" not in inner_text
+    assert "ROUND 1" in inner_text
+    assert "ROUND 2" not in inner_text
 
 
 def test_nested_none_temporarily_disables_outer_trace(tmp_path):
@@ -103,7 +103,7 @@ def test_nested_none_temporarily_disables_outer_trace(tmp_path):
     assert "outer-before" in text
     assert "suppressed" not in text
     assert "outer-after" in text
-    assert "round 2" in text
+    assert "ROUND 2" in text
 
 
 def test_trace_disk_errors_warn_once_without_path_or_error_text(
@@ -149,7 +149,7 @@ def test_wrap_with_trace_records_each_invoke(tmp_path):
         m.invoke(_msgs())
         m.invoke(_msgs())
     txt = sink.read_text(encoding="utf-8")
-    assert txt.count("wrapped-round") == 2 and "round 2" in txt
+    assert txt.count("wrapped-round") == 2 and "ROUND 2" in txt
 
 
 def test_wrap_with_trace_does_not_swallow_unexpected_trace_bug(tmp_path):
@@ -183,3 +183,33 @@ def test_dict_tool_call_shape(tmp_path):
     with trace_to(sink):
         record(_msgs(), resp)
     assert "grep(" in sink.read_text(encoding="utf-8")
+
+
+def test_tool_arguments_are_human_readable_without_raw_json(tmp_path):
+    sink = tmp_path / "readable.log"
+    with trace_to(
+        sink,
+        spill_token_limit=96000,
+        compact_token_limit=112000,
+    ):
+        record(
+            _msgs(),
+            _fake_resp(
+                reasoning="inspect and commit",
+                tools=(
+                    ("skill_read", '{"skill_name":"context-management"}'),
+                    (
+                        "write_file",
+                        '{"path":"SKILL.md","content":"'
+                        + ("x" * 300)
+                        + '"}',
+                    ),
+                ),
+            ),
+        )
+
+    trace = sink.read_text(encoding="utf-8")
+    assert "spill@96k | compact@112k" in trace
+    assert "TOOL  skill_read(context-management)" in trace
+    assert "TOOL  write_file(path=SKILL.md, content=<300 chars>)" in trace
+    assert '{"skill_name"' not in trace

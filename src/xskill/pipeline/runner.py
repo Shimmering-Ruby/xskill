@@ -158,11 +158,14 @@ class DirectoryWatcher:
         default_pools = {
             "split": {"workers": 24, "llm_weight": 6},
             "cluster": {"workers": 8, "batch_size": 8, "llm_weight": 3},
-            "edit": {"workers": 4, "llm_weight": 1},
+            "edit": {"workers": 4, "batch_size": 5, "llm_weight": 1},
             "embed": {"workers": 4},
         }
         self.pool_config = pool_config or default_pools
         self.cluster_batch_size = int(self.pool_config["cluster"]["batch_size"])
+        self.skill_edit_batch_size = int(
+            self.pool_config["edit"].get("batch_size", 5)
+        )
         self.interests = interests_config(self.config)
         self.interest_fingerprint = interests_fingerprint(self.interests)
 
@@ -185,6 +188,10 @@ class DirectoryWatcher:
         self.pending_atoms: deque[str] = deque()
         self.claimed_atoms: set[str] = set()
         self.cluster_futures: set[Future] = set()
+        # SkillEdit baby 消化失败到 N=1 时释放 worker；下一轮 watcher 从 1
+        # 继续，成功 checkpoint 后由 agent 自动恢复配置默认值。仅驻留内存，
+        # 进程重启后自然回到配置值。
+        self._skill_edit_retry_batch_sizes: dict[Path, int] = {}
         self._last_poll: float | None = None
         self._started_at = time.time()
         # 单机 canary 轮转节流：上次真跑 _reconcile_skill_sides 的时间戳。
@@ -505,6 +512,16 @@ class DirectoryWatcher:
 
         jam_threshold = CanaryConfig.from_dict(
             self.config.get("canary", {})).jam_threshold
+        base_llm_cfg = self.config.get("llm", {}) or {}
+        skill_llm_override = self.config.get("llm_skill", {}) or {}
+        skill_llm_cfg = {
+            **base_llm_cfg,
+            **{
+                key: value
+                for key, value in skill_llm_override.items()
+                if value not in (None, "")
+            },
+        }
 
         def _run_one(d):
             """在 pool 工作线程里跑单个 skill 的 maybe_run；返回 (d, promoted)。
@@ -513,17 +530,28 @@ class DirectoryWatcher:
                 editor = SkillEditAgent(
                     skill_dir=d, store=store,
                     agno_agent_factory=factory,
-                    llm_cfg=self.config.get("llm", {}),
+                    llm_cfg=skill_llm_cfg,
                     traj_root=traj_root,
                     logs_dir=self.logs_dir,
                     jam_threshold=jam_threshold,
+                    batch_size=self.skill_edit_batch_size,
+                    retry_batch_size=self._skill_edit_retry_batch_sizes.get(d),
                     **({} if threshold is None else {"threshold": threshold}),
                 )
                 try:
-                    return d, bool(editor.maybe_run())
+                    promoted = bool(editor.maybe_run())
+                    return d, promoted, getattr(
+                        editor,
+                        "next_batch_size",
+                        self.skill_edit_batch_size,
+                    )
                 except Exception:
                     logger.exception("SkillEditAgent failed: %s", d.name)
-                    return d, False
+                    return d, False, getattr(
+                        editor,
+                        "next_batch_size",
+                        self.skill_edit_batch_size,
+                    )
 
         skill_edit_in_flight = {
             info.get("skill_dir") for info in self._futures.values()
@@ -540,7 +568,11 @@ class DirectoryWatcher:
     def _on_skill_edit_done(self, result) -> None:
         """``_harvest`` 收割 stage="skill_edit" future 用：_stats 自增 + 即时
         install。回主线程串行做（避免对无锁的 self._stats 并发自增）。"""
-        d, ok = result
+        d, ok, next_batch_size = result
+        if ok or next_batch_size == self.skill_edit_batch_size:
+            self._skill_edit_retry_batch_sizes.pop(d, None)
+        else:
+            self._skill_edit_retry_batch_sizes[d] = next_batch_size
         if not ok:
             return
         self._stats["skills_edited"] += 1

@@ -79,6 +79,8 @@ class AgentToolContext:
     usage_ledger: Any = None
     cluster_write_queue: Any = None
     cluster_result_recorder: Any = None
+    skill_edit_skill_name: str | None = None
+    skill_edit_batch_ids: tuple[str, ...] = ()
     grep_fallback_warned: bool = False
 
     def __post_init__(self) -> None:
@@ -110,6 +112,8 @@ def create_agent_tool_context(
     usage_ledger=None,
     cluster_write_queue=None,
     cluster_result_recorder=None,
+    skill_edit_skill_name=None,
+    skill_edit_batch_ids=(),
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -130,6 +134,14 @@ def create_agent_tool_context(
         usage_ledger=usage_ledger,
         cluster_write_queue=cluster_write_queue,
         cluster_result_recorder=cluster_result_recorder,
+        skill_edit_skill_name=(
+            str(skill_edit_skill_name)
+            if skill_edit_skill_name is not None
+            else None
+        ),
+        skill_edit_batch_ids=tuple(
+            str(atom_id) for atom_id in (skill_edit_batch_ids or ())
+        ),
     )
 
 
@@ -162,6 +174,26 @@ def use_agent_tool_context(
         yield context
     finally:
         reset_agent_tool_context(token)
+
+
+@contextlib.contextmanager
+def use_skill_edit_batch(
+    skill_name: str,
+    batch_ids,
+) -> Iterator[AgentToolContext]:
+    """Bind immutable checkpoint authority for one baby SkillEdit turn.
+
+    The model never supplies candidate IDs to ``commit_baby``.  It can only
+    consume the exact ordered IDs that the framework put into this context.
+    """
+    current = current_agent_tool_context()
+    bound = replace(
+        current,
+        skill_edit_skill_name=_slugify(skill_name),
+        skill_edit_batch_ids=tuple(str(atom_id) for atom_id in batch_ids),
+    )
+    with use_agent_tool_context(bound):
+        yield bound
 
 
 class AgentToolConfig:
@@ -215,6 +247,8 @@ class AgentToolConfig:
             "usage_ledger": current.usage_ledger,
             "cluster_write_queue": current.cluster_write_queue,
             "cluster_result_recorder": current.cluster_result_recorder,
+            "skill_edit_skill_name": current.skill_edit_skill_name,
+            "skill_edit_batch_ids": current.skill_edit_batch_ids,
             "grep_fallback_warned": current.grep_fallback_warned,
         }
 
@@ -230,6 +264,8 @@ class AgentToolConfig:
             usage_ledger=snapshot.get("usage_ledger"),
             cluster_write_queue=snapshot.get("cluster_write_queue"),
             cluster_result_recorder=snapshot.get("cluster_result_recorder"),
+            skill_edit_skill_name=snapshot.get("skill_edit_skill_name"),
+            skill_edit_batch_ids=snapshot.get("skill_edit_batch_ids") or (),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()
@@ -1521,6 +1557,93 @@ def _run_description_optimization(target: Path, slug: str) -> None:
         )
 
 
+def graduate_baby_to_main(target: Path, slug: str, message: str) -> bool:
+    """Framework-controlled final baby graduation.
+
+    Description optimization runs once here, after every candidate checkpoint
+    has been consumed.  The legacy ``commit_baby_to_main`` tool delegates to
+    this function and remains available for compatibility, but checkpointed
+    baby turns only expose ``commit_baby`` to the model.
+    """
+    from xskill.skill.frontmatter import FrontmatterError
+    from xskill.skill.git import commit_baby_to_main_branch
+
+    skill_md = target / "SKILL.md"
+    try:
+        fm_parse_strict(skill_md.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, FrontmatterError) as error:
+        logger.warning("baby graduation frontmatter invalid for %s: %s", slug, error)
+        return False
+    _run_description_optimization(target, slug)
+    return commit_baby_to_main_branch(str(target), message)
+
+
+@tool(name="commit_baby")
+def commit_baby(skill_name: str, message: str) -> str:
+    """Commit the current framework-bound atom batch on ``baby``.
+
+    Candidate IDs are deliberately not arguments: the framework binds the
+    exact ordered batch in ``AgentToolContext`` before this turn.  A successful
+    call creates one non-empty commit, then removes only those bound IDs while
+    holding the same repository lock.  It never renames the branch and never
+    runs description optimization.
+    """
+    from xskill.agents import agent_trace
+    from xskill.skill import candidates as candidate_buffer
+    from xskill.skill.frontmatter import FrontmatterError
+    from xskill.skill.git import (
+        commit_baby_checkpoint,
+        current_branch,
+        skill_repo_lock,
+    )
+
+    context = current_agent_tool_context()
+    skill_root = context.atom_skill_dir
+    if skill_root is None:
+        return "error: atom task tool context not initialized"
+    slug = _slugify(skill_name)
+    if not context.skill_edit_skill_name or not context.skill_edit_batch_ids:
+        return "error: no framework-bound SkillEdit batch"
+    if slug != context.skill_edit_skill_name:
+        return (
+            "error: commit_baby can only commit the framework-bound skill "
+            f"{context.skill_edit_skill_name}"
+        )
+    target = skill_root / slug
+    if not target.is_dir() or not (target / ".git").is_dir():
+        return f"error: skill {slug} not found or has no git repository"
+    msg = (message or "").strip()
+    if not msg:
+        return "error: commit message 必填"
+
+    skill_md = target / "SKILL.md"
+    try:
+        fm_parse_strict(skill_md.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, FrontmatterError) as error:
+        return f"error: invalid SKILL.md frontmatter: {error}"
+
+    batch_ids = tuple(context.skill_edit_batch_ids)
+    with skill_repo_lock(target):
+        if current_branch(str(target)) != "baby":
+            return "error: commit_baby only works on the baby branch"
+        commit_sha = commit_baby_checkpoint(str(target), msg)
+        if commit_sha is None:
+            return "error: commit_baby requires a real non-empty change"
+        consumed, remaining = candidate_buffer.remove_candidates(
+            target,
+            set(batch_ids),
+        )
+
+    lines = [
+        f"Created baby checkpoint {commit_sha[:7]}.",
+        "Consumed atoms:",
+        *[f"  {atom_id}" for atom_id in consumed],
+        f"{remaining} atoms remain.",
+    ]
+    agent_trace.event("INFO", "\n".join(lines), include_timestamp=False)
+    return "\n".join(lines)
+
+
 @tool(name="commit_baby_to_main")
 def commit_baby_to_main(skill_name: str, message: str) -> str:
     """SkillEditAgent 首次为某 skill 出版本时调用。
@@ -1537,7 +1660,6 @@ def commit_baby_to_main(skill_name: str, message: str) -> str:
         成功："graduated baby → main: <skill_name>"
         失败："error: ..."
     """
-    from xskill.skill.git import commit_baby_to_main_branch
     skill_dir = agent_tool_config.atom_skill_dir
     if skill_dir is None:
         return "error: atom task tool context not initialized"
@@ -1550,10 +1672,7 @@ def commit_baby_to_main(skill_name: str, message: str) -> str:
     msg = (message or "").strip()
     if not msg:
         return "error: commit message 必填"
-    # commit 前先跑 description 触发优化（best desc 写回 frontmatter），优化产物
-    # 随 add . 一起进 commit。失败只 log，不阻断 commit。
-    _run_description_optimization(target, slug)
-    ok = commit_baby_to_main_branch(str(target), msg)
+    ok = graduate_baby_to_main(target, slug, msg)
     if not ok:
         return "error: commit_baby_to_main 失败（不在 baby 分支？看 daemon 日志）"
     return f"graduated baby → main: {slug}"
