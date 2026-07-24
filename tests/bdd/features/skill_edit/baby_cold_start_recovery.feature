@@ -21,7 +21,7 @@ Feature: baby 冷启动可以从模型失败和进程中断中恢复
   Scenario: commit 完成后的模型 429 不会导致原子被再次处理
     Given 模型已经调用 commit_baby 并成功提交当前批次
     And commit_baby 已经从 candidates 删除当前批次 atom_id
-    And ai-mocks 在模型的结束响应阶段返回 HTTP 429
+    And aimock 在模型的结束响应阶段返回 HTTP 429
     When SkillEditAgent 检查 baby HEAD 和剩余 candidates
     Then 当前 turn 应当被判定为成功
     And 当前批次不应当再次发送给模型

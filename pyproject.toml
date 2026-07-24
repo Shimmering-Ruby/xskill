@@ -52,7 +52,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-timeout>=2", "pytest-asyncio>=0.21", "requests>=2"]
+dev = [
+    "pytest>=7",
+    "pytest-timeout>=2",
+    "pytest-asyncio>=0.21",
+    "pytest-bdd>=8,<9",
+    "requests>=2",
+    # HTTP LLM contract tests only.  The Python fixture downloads the pinned
+    # @copilotkit/aimock npm artifact and manages its local Node.js process.
+    "aimock-pytest==0.5.0; python_version >= '3.10'",
+    # Mutation testing is a developer/CI concern and never enters the wheel's
+    # runtime dependency set.
+    "mutmut>=3.6,<4; python_version >= '3.10'",
+]
 
 [project.urls]
 Homepage = "https://github.com/SkillNerds/xskill"
@@ -89,6 +101,39 @@ markers = [
     # ``pytest -m live_agent`` 触发。
     "live_agent: real codex/opencode process + mock LLM end-to-end (slow, optional)",
     "stress: slow real-process load and smoke tests (excluded by default)",
+    "bdd: executable product behavior specifications",
+    "http_llm: real OpenAI-compatible HTTP boundary backed by local aimock",
+    "state_machine: deterministic SkillEdit state-machine coverage for mutation testing",
+    "primary: primary user success journey",
+    "golden_path: end-to-end happy-path behavior",
+    "recovery: retry and restart recovery behavior",
+    "contract: external protocol contract behavior",
+    "observability: operator-facing trace behavior",
 ]
 addopts = "--ignore=tests/live --ignore=tests/stress"
 asyncio_mode = "strict"
+
+[tool.mutmut]
+# Keep mutation testing focused on the Issue #146 durable boundaries:
+# framework-owned candidate consumption and baby graduation.  The local HTTP
+# contract is intentionally excluded: mutation workers should not start a
+# Node process or depend on fixture timing.
+source_paths = ["src/xskill"]
+only_mutate = [
+    "src/xskill/skill/candidates.py",
+    "src/xskill/agents/agent_tools.py",
+]
+# Logging prose and spelling-equivalent encoding names are not observable
+# product behavior; mutating them creates equivalent mutants.
+do_not_mutate_patterns = [
+    "logger\\.",
+    "encoding=\"utf-8\"",
+]
+pytest_add_cli_args = ["-q", "--override-ini=addopts="]
+pytest_add_cli_args_test_selection = [
+    "tests/bdd/test_skill_edit_state_machine.py",
+    "tests/test_skill_edit_batch_turns.py::TestRemoveCandidates",
+    "tests/test_skill_edit_mutation_contracts.py",
+]
+timeout_multiplier = 5.0
+timeout_constant = 1.0
