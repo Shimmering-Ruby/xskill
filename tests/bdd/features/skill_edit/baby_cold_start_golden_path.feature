@@ -6,10 +6,10 @@ Feature: 用户在冷启动后获得完整可用的 main skill
   Background:
     Given xskill 使用隔离的测试目录
     And SkillEdit 每批最多处理 5 个原子
-    And SkillEdit 模型指向本地 OpenAI-compatible 测试后端
 
   @primary @golden_path @http_llm
   Scenario: 用户等待系统把新知识整理成可用的 main skill
+    Given SkillEdit 模型指向本地 OpenAI-compatible 测试后端
     Given cluster 已经创建名为 "incident-recovery" 的 baby skill
     And baby 的 candidates 按以下顺序保存
       | atom_id | knowledge                                      |

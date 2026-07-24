@@ -361,7 +361,7 @@ def remove_candidates(
     """
     with skill_repo_lock(skill_dir, use_git_write_limit=False):
         data = _load_candidates_unlocked(skill_dir)
-        candidates = data.get("candidates", []) or []
+        candidates = data.get("candidates") or []
         consumed = [
             str(candidate.get("atom_id"))
             for candidate in candidates
