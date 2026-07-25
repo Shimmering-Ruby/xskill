@@ -1,0 +1,86 @@
+{
+  "description": "Reference token counts from real tokenizers (offline generated, issue #149). Texts are representative agent-context payloads.",
+  "texts": {
+    "zh_reasoning": "让我分析一下这个问题。首先，用户希望估算误差小于百分之三，这意味着简单的字符除以四的粗估方法在中文场景下会严重失真。其次，跨模型一致性要求我们不能只针对某一个分词器做校准。权衡之后，按模型路由的方案精度更高，但维护成本也更高。",
+    "zh_agent": "请阅读 src/xskill/agents/context_budget.py 这个文件，总结其中的主动剪裁逻辑。上下文管理器在每次请求前估算历史 token，超过最大上下文的 85% 时，会把旧的工具返回结果替换成短标记，避免后端报上下文超长错误。",
+    "en_reasoning": "Let me think through this step by step. The user wants estimation error bounded, which rules out naive character heuristics. First I should check whether the reasoning content field is included in the estimate, then verify that tool call arguments are counted as well.",
+    "code": "def _estimate_history_tokens(messages):\n    chars = 0\n    for m in messages or []:\n        chars += len(_msg_content_str(m))\n    return chars // CHARS_PER_TOKEN\n",
+    "json_args": "{\"path\": \"src/xskill/agents/context_budget.py\", \"offset\": 1, \"limit\": 200, \"reason\": \"需要确认统计口径\"}",
+    "mixed": "问题定位：`_estimate_history_tokens` 只统计了 content 字段,遗漏了 reasoning_content。Fix: accumulate all three fields, then compare against trigger = int(max_context * 0.85). 这样 spill 和 compact 才能在后端报错之前触发。",
+    "tool_output": "DEBUG:xskill.collector:scan /home/admin/.claude/projects: found 147 sessions, 12 new\nINFO:xskill.upload:POST https://api.example.com/v1/trajectories -> 200 OK (1.2s, 34.5KB)\n  File \"<stdin>\", line 1, in <module>\nValueError: invalid literal for int() with base 10: 'abc'"
+  },
+  "reference": {
+    "zh_reasoning": {
+      "cl100k": 129,
+      "o200k": 82,
+      "llama3": 91,
+      "deepseek": 63,
+      "qwen": 71,
+      "glm": 68,
+      "minimax": 63
+    },
+    "zh_agent": {
+      "cl100k": 97,
+      "o200k": 70,
+      "llama3": 80,
+      "deepseek": 61,
+      "qwen": 69,
+      "glm": 61,
+      "minimax": 56
+    },
+    "en_reasoning": {
+      "cl100k": 51,
+      "o200k": 50,
+      "llama3": 52,
+      "deepseek": 50,
+      "qwen": 51,
+      "glm": 51,
+      "minimax": 49
+    },
+    "code": {
+      "cl100k": 39,
+      "o200k": 40,
+      "llama3": 40,
+      "deepseek": 42,
+      "qwen": 39,
+      "glm": 39,
+      "minimax": 41
+    },
+    "json_args": {
+      "cl100k": 36,
+      "o200k": 35,
+      "llama3": 36,
+      "deepseek": 36,
+      "qwen": 36,
+      "glm": 34,
+      "minimax": 35
+    },
+    "mixed": {
+      "cl100k": 68,
+      "o200k": 60,
+      "llama3": 62,
+      "deepseek": 59,
+      "qwen": 60,
+      "glm": 56,
+      "minimax": 52
+    },
+    "tool_output": {
+      "cl100k": 85,
+      "o200k": 86,
+      "llama3": 86,
+      "deepseek": 91,
+      "qwen": 92,
+      "glm": 85,
+      "minimax": 87
+    }
+  },
+  "family_models": {
+    "cl100k": "gpt-4",
+    "o200k": "gpt-4o",
+    "llama3": "meta-llama-3-70b",
+    "deepseek": "deepseek-chat",
+    "qwen": "qwen-max",
+    "glm": "glm-4.5",
+    "minimax": "minimax-m1"
+  }
+}
