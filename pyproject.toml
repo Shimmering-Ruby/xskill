@@ -109,6 +109,15 @@ markers = [
     "recovery: retry and restart recovery behavior",
     "contract: external protocol contract behavior",
     "observability: operator-facing trace behavior",
+    "estimate: token estimation accuracy behavior",
+    "coverage: message field coverage in token estimation",
+    "overhead: token estimation overhead bounds",
+    "family-band: model family error band behavior",
+    "trigger: spill/compact trigger behavior",
+    "spill: spill trigger behavior",
+    "compact: compact trigger behavior",
+    "calibration: EMA calibration behavior",
+    "unknown-family: unknown model family fallback behavior",
 ]
 addopts = "--ignore=tests/live --ignore=tests/stress"
 asyncio_mode = "strict"
