@@ -72,7 +72,14 @@ class ModelPrice:
 
 
 def extract_usage(resp: Any) -> Usage:
-    """从 OpenAI 兼容 response 提取 token(dict 或 SDK 对象,缺失补 0)。
+    """从 LLM/embedding 响应提取 token,缺失补 0。
+
+    支持的响应形态:
+    - 原始 dict(embedding HTTP JSON): ``resp["usage"]``
+    - OpenAI SDK 对象(ChatCompletion): ``resp.usage``
+    - agno ``ModelResponse``: ``resp.response_usage``(``MessageMetrics``,
+      字段名为 ``input_tokens``/``output_tokens``/``total_tokens`` —— 与
+      OpenAI 原始格式不同,不单独适配会整段记 0)
 
     覆盖 prompt/completion/total + DeepSeek 的 prompt_cache_hit/miss_tokens。
     """
@@ -81,6 +88,18 @@ def extract_usage(resp: Any) -> Usage:
             return None
         v = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
         return int(v) if isinstance(v, (int, float)) else None
+
+    agno_metrics = getattr(resp, "response_usage", None)
+    if agno_metrics is not None:
+        prompt = g(agno_metrics, "input_tokens") or 0
+        completion = g(agno_metrics, "output_tokens") or 0
+        total = g(agno_metrics, "total_tokens") or (prompt + completion)
+        # cost_usd 按 hit+miss=prompt 分档计费,miss 须补未命中余量,
+        # 否则配了 cache 价时 prompt 非命中段会漏计。
+        hit = g(agno_metrics, "cache_read_tokens") or 0
+        miss = max(0, prompt - hit)
+        return Usage(prompt=prompt, completion=completion, total=total,
+                     cache_hit=hit, cache_miss=miss)
 
     usage = resp.get("usage") if isinstance(resp, dict) else getattr(resp, "usage", None)
     if usage is None:
