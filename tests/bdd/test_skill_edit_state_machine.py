@@ -10,25 +10,32 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pytest_bdd import given, scenario, then, when
+from agno.exceptions import ModelProviderError
+from pytest_bdd import given, parsers, scenario, then, when
 
 from xskill.agents import agent_tools, agent_trace
 from xskill.agents.agno_factory import _wrap_with_retry, _wrap_with_trace
 from xskill.agents.context_budget import ContextManager
 from xskill.agents.skill_edit_agent import SkillEditAgent
 from xskill.pipeline.atom import AtomTaskStore
+from xskill.pipeline.registry import register_dir
+from xskill.pipeline.runner import DirectoryWatcher, SKILL_EDIT_N1_FAIL_DEPRIORITIZE
 from xskill.skill import candidates as candidate_buffer
 from xskill.skill.git import (
     commit_baby_checkpoint,
     current_branch,
     init_skill_repo_on_baby,
 )
+from tests.pool_helpers import pool_config
+from tests.test_atom_task_store import _FakeEmbed
+from tests.test_task_agent import _AutoSplitLLM
 
 
 pytestmark = [
@@ -85,6 +92,38 @@ def test_trace_shows_spill_before_compact_and_retry_reduction() -> None:
     """Production context events preserve their causal order in the trace."""
 
 
+@scenario(
+    "features/skill_edit/skill_edit_trace.feature",
+    "无关键词的 5xx ModelProviderError 仍按 status_code 重试",
+)
+def test_status_code_500_retries_without_message_keywords() -> None:
+    """ModelProviderError status_code drives retry, not str(exc) keywords."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_trace.feature",
+    "中文 429 ModelProviderError 仍按 status_code 重试",
+)
+def test_chinese_429_retries_via_status_code() -> None:
+    """Chinese rate-limit copy without '429' still retries via status_code."""
+
+
+@scenario(
+    "features/skill_edit/baby_cold_start_recovery.feature",
+    "错误分相同时原子更少的 skill 优先调度",
+)
+def test_fewer_atoms_are_scheduled_first() -> None:
+    """Watcher submit order prefers fewer pending atoms when errors tie."""
+
+
+@scenario(
+    "features/skill_edit/baby_cold_start_recovery.feature",
+    "N=1 连败 3 次后降优先级并换下一个 skill",
+)
+def test_n1_failures_deprioritize_and_switch_skill() -> None:
+    """After three N=1 failures the hard skill yields the edit slot."""
+
+
 def _tool_name(tool: Any) -> str:
     return getattr(tool, "__name__", None) or getattr(tool, "name", "")
 
@@ -116,6 +155,13 @@ class StateWorld:
     result: bool | None = None
     next_batch_size: int | None = None
     first_five: list[str] = field(default_factory=list)
+    skill_dirs: dict[str, Path] = field(default_factory=dict)
+    watcher: DirectoryWatcher | None = None
+    submitted_skill_names: list[str] = field(default_factory=list)
+    retry_exc: Exception | None = None
+    retry_max_retries: int = 3
+    retry_calls: int = 0
+    retry_trace: str = ""
 
     @property
     def trace_path(self) -> Path:
@@ -236,7 +282,9 @@ def _exercise_context_pressure(world: StateWorld) -> None:
     class _RateLimitedModel:
         @staticmethod
         def invoke(_messages: list[Any], **_kwargs: Any) -> Any:
-            raise RuntimeError("429 rate limit from deterministic backend")
+            raise RuntimeError(
+                "429 rate limit from deterministic backend"
+            )
 
     model = _RateLimitedModel()
     manager = ContextManager(
@@ -714,6 +762,13 @@ def trace_shows_readable_model_error(state_world: StateWorld) -> None:
     assert "LLM returned 429; retries exhausted (1/1)" in state_world.trace
 
 
+@then("exhausted 日志行应当包含原始错误文本")
+def exhausted_line_includes_raw_error(state_world: StateWorld) -> None:
+    assert "retries exhausted (1/1): 429 rate limit from deterministic backend" in (
+        state_world.trace
+    )
+
+
 @then('日志应当显示 "Retry batch reduced: 5 -> 2"')
 def trace_shows_batch_reduction(state_world: StateWorld) -> None:
     assert "Retry batch reduced: 5 -> 2" in state_world.trace
@@ -722,3 +777,223 @@ def trace_shows_batch_reduction(state_world: StateWorld) -> None:
 @then("下一次 TURN START 应当显示 N=2")
 def next_turn_marker_uses_two(state_world: StateWorld) -> None:
     assert "TURN START | N=2 | processing 2 of 5 pending atoms" in state_world.trace
+
+
+@given(
+    parsers.parse(
+        '模型抛出 status_code={status_code:d} 且 message 为 "{message}" '
+        "的 ModelProviderError"
+    )
+)
+def model_provider_error_pending(
+    state_world: StateWorld,
+    status_code: int,
+    message: str,
+) -> None:
+    state_world.retry_exc = ModelProviderError(message, status_code=status_code)
+
+
+@given(parsers.parse("客户端 max_retries 为 {max_retries:d}"))
+def client_max_retries(state_world: StateWorld, max_retries: int) -> None:
+    state_world.retry_max_retries = max_retries
+
+
+@when("调用生产 retry wrapper")
+def invoke_production_retry_wrapper(
+    state_world: StateWorld,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert state_world.retry_exc is not None
+    monkeypatch.setattr(
+        "xskill.utils.shutdown.SHUTTING_DOWN.wait",
+        lambda *_args, **_kwargs: False,
+    )
+
+    class _AlwaysFails:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, _messages: list[Any], **_kwargs: Any) -> Any:
+            self.calls += 1
+            raise state_world.retry_exc
+
+    model = _AlwaysFails()
+    _wrap_with_retry(
+        model,
+        {
+            "base_url": "http://127.0.0.1:1/v1",
+            "max_retries": state_world.retry_max_retries,
+            "retry_base_delay": 0.001,
+            "retry_max_delay": 0.001,
+        },
+    )
+    sink = state_world.root / "retry-trace.log"
+    with agent_trace.trace_to(sink):
+        with pytest.raises(Exception):
+            model.invoke([])
+    state_world.retry_calls = model.calls
+    state_world.retry_trace = sink.read_text(encoding="utf-8")
+
+
+@then(parsers.parse("invoke 应被尝试 {calls:d} 次"))
+def invoke_attempt_count(state_world: StateWorld, calls: int) -> None:
+    assert state_world.retry_calls == calls
+
+
+@then(parsers.parse('exhausted 日志行应当包含 "{fragment}"'))
+def exhausted_contains_fragment(state_world: StateWorld, fragment: str) -> None:
+    assert "retries exhausted" in state_world.retry_trace
+    assert fragment in state_world.retry_trace
+
+
+def _seed_named_baby(
+    world: StateWorld,
+    *,
+    name: str,
+    count: int,
+    weight: int = 10,
+) -> Path:
+    skill_dir = world.skill_root / name
+    init_skill_repo_on_baby(
+        str(skill_dir),
+        name=name,
+        description="BDD scheduler draft",
+    )
+    data: dict[str, Any] = {"candidates": []}
+    for index in range(1, count + 1):
+        data, _ = candidate_buffer.add_atom_contribution(
+            data,
+            f"{name}-atom-{index:02d}",
+            weight,
+            note=f"knowledge for {name} {index}",
+        )
+    candidate_buffer.save_candidates(skill_dir, data)
+    world.skill_dirs[name] = skill_dir
+    return skill_dir
+
+
+def _blocking_edit_factory(started: threading.Event, release: threading.Event):
+    class _BlockingAgent:
+        def __init__(self, *, instructions: list[str], tools: list[Any]):
+            del instructions, tools
+
+        def run(self, _user_msg: str, **_kwargs: Any) -> Any:
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("scheduler BDD release timed out")
+            raise RuntimeError("scheduler BDD holds the edit worker")
+
+    def factory(*, instructions: list[str], tools: list[Any]) -> Any:
+        return _BlockingAgent(instructions=instructions, tools=tools)
+
+    return factory
+
+
+def _ensure_scheduler_watcher(state_world: StateWorld) -> DirectoryWatcher:
+    if state_world.watcher is not None:
+        return state_world.watcher
+    db_path = state_world.root / "scheduler.db"
+    watch_root = state_world.root / "watch"
+    watch_root.mkdir(exist_ok=True)
+    register_dir(watch_root, db_path=db_path)
+    started = threading.Event()
+    release = threading.Event()
+    watcher = DirectoryWatcher(
+        llm=_AutoSplitLLM(),
+        embed_client=_FakeEmbed(),
+        config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
+        skill_dir=state_world.skill_root,
+        poll_interval=0.0,
+        pool_config=pool_config(workers=1, edit_workers=1),
+        db_path=db_path,
+        store=AtomTaskStore(root=watch_root),
+        agno_agent_factory=_blocking_edit_factory(started, release),
+        home_root=state_world.root,
+        logs_dir=state_world.logs_root,
+    )
+    watcher._bdd_started = started  # type: ignore[attr-defined]
+    watcher._bdd_release = release  # type: ignore[attr-defined]
+    state_world.watcher = watcher
+    return watcher
+
+
+@given(
+    parsers.parse(
+        '两个 baby skill "{left}" 有 {left_count:d} 个原子且 '
+        '"{right}" 有 {right_count:d} 个原子'
+    )
+)
+def two_baby_skills(
+    state_world: StateWorld,
+    left: str,
+    left_count: int,
+    right: str,
+    right_count: int,
+) -> None:
+    _seed_named_baby(state_world, name=left, count=left_count)
+    _seed_named_baby(state_world, name=right, count=right_count)
+
+
+@given("两者错误分均为 0")
+def both_error_counts_zero(state_world: StateWorld) -> None:
+    assert state_world.skill_dirs
+    return None
+
+
+@given(parsers.parse('"{name}" 已在 N=1 上连续失败 {fails:d} 次'))
+def skill_has_n1_failures(
+    state_world: StateWorld,
+    name: str,
+    fails: int,
+) -> None:
+    assert fails == SKILL_EDIT_N1_FAIL_DEPRIORITIZE
+    watcher = _ensure_scheduler_watcher(state_world)
+    skill_dir = state_world.skill_dirs[name]
+    for _ in range(fails):
+        watcher._on_skill_edit_done((skill_dir, False, 1))
+    assert watcher._skill_edit_error_counts.get(skill_dir, 0) == 1
+    assert watcher._skill_edit_retry_batch_sizes.get(skill_dir) == 1
+
+
+@given("edit pool 一次只能跑 1 个 skill")
+def edit_pool_is_single_worker(state_world: StateWorld) -> None:
+    _ensure_scheduler_watcher(state_world)
+
+
+@when("watcher 调度 SkillEdit")
+def watcher_schedules_skill_edit(state_world: StateWorld) -> None:
+    watcher = _ensure_scheduler_watcher(state_world)
+    started = watcher._bdd_started  # type: ignore[attr-defined]
+    release = watcher._bdd_release  # type: ignore[attr-defined]
+    started.clear()
+    release.clear()
+    watcher._check_pending_skill_edits()
+    assert started.wait(timeout=5), "edit worker did not start"
+    state_world.submitted_skill_names = [
+        info["skill_dir"].name
+        for info in watcher._futures.values()
+        if info.get("stage") == "skill_edit"
+    ]
+    release.set()
+    watcher._drain_futures(stage="skill_edit", timeout=10)
+
+
+@then(parsers.parse('本轮应先提交 "{name}"'))
+def first_submitted_skill(state_world: StateWorld, name: str) -> None:
+    assert state_world.submitted_skill_names, "no skill_edit futures submitted"
+    assert state_world.submitted_skill_names[0] == name
+
+
+@then(parsers.parse('"{name}" 的 candidates 原子应当全部保留'))
+def skill_candidates_preserved(state_world: StateWorld, name: str) -> None:
+    skill_dir = state_world.skill_dirs[name]
+    remaining = candidate_buffer.load_candidates(skill_dir)["candidates"]
+    assert remaining, f"{name} candidates were cleared"
+
+
+@then(parsers.parse('"{name}" 的重试批次仍为 N=1'))
+def skill_retry_batch_still_one(state_world: StateWorld, name: str) -> None:
+    watcher = state_world.watcher
+    assert watcher is not None
+    skill_dir = state_world.skill_dirs[name]
+    assert watcher._skill_edit_retry_batch_sizes.get(skill_dir) == 1

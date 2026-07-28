@@ -57,6 +57,9 @@ from xskill.pipeline.trajectory import validate_trajectory_source
 
 logger = logging.getLogger("xskill.watcher")
 
+# SkillEdit N=1 连续失败达到该次数后抬高调度错误分，优先跑其他 skill。
+SKILL_EDIT_N1_FAIL_DEPRIORITIZE = 3
+
 # v2 (AtomTask 流水线) 的 action → status 映射
 # splitting → split_done → indexed → clustering → done
 _ACTION_STATUS = {
@@ -192,6 +195,10 @@ class DirectoryWatcher:
         # 继续，成功 checkpoint 后由 agent 自动恢复配置默认值。仅驻留内存，
         # 进程重启后自然回到配置值。
         self._skill_edit_retry_batch_sizes: dict[Path, int] = {}
+        # N=1 连续失败计数；达 SKILL_EDIT_N1_FAIL_DEPRIORITIZE 次后抬高
+        # error_count，调度时排到后面（不永久 error，不指数退避）。
+        self._skill_edit_n1_fail_counts: dict[Path, int] = {}
+        self._skill_edit_error_counts: dict[Path, int] = {}
         self._last_poll: float | None = None
         self._started_at = time.time()
         # 单机 canary 轮转节流：上次真跑 _reconcile_skill_sides 的时间戳。
@@ -503,12 +510,36 @@ class DirectoryWatcher:
         # ``_harvest``（每轮 scan 开头）收割 + 做 _stats 自增/即时 install。
         # 同一个 skill 同时只允许一个 skill_edit future 在飞，避免同一 skill
         # 被并发跑两个 maybe_run（第二个进来时前一个多半仍在改 candidates/git）。
+        from xskill.skill import candidates as candidate_buffer
+
         skill_dirs = [
-            d for d in sorted(self.skill_dir.iterdir())
+            d for d in self.skill_dir.iterdir()
             if d.is_dir() and not d.name.startswith(".")
         ]
         if not skill_dirs:
             return
+
+        def _pending_atom_count(skill_path: Path) -> int:
+            try:
+                data = candidate_buffer.load_candidates(skill_path)
+            except Exception:
+                logger.exception(
+                    "failed to load candidates for skill_edit sort: %s",
+                    skill_path.name,
+                )
+                raise
+            return len(data.get("candidates") or [])
+
+        # 错误少优先，其次原子少，再按名字稳定排序。N=1 连败抬高 error 后
+        # 自然排到后面，换下一个 skill；不永久 error、无指数退避。
+        def _skill_edit_sort_key(path: Path):
+            return (
+                self._skill_edit_error_counts.get(path, 0),
+                _pending_atom_count(path),
+                path.name,
+            )
+
+        skill_dirs.sort(key=_skill_edit_sort_key)
 
         jam_threshold = CanaryConfig.from_dict(
             self.config.get("canary", {})).jam_threshold
@@ -569,10 +600,30 @@ class DirectoryWatcher:
         """``_harvest`` 收割 stage="skill_edit" future 用：_stats 自增 + 即时
         install。回主线程串行做（避免对无锁的 self._stats 并发自增）。"""
         d, ok, next_batch_size = result
-        if ok or next_batch_size == self.skill_edit_batch_size:
+        if ok:
+            self._skill_edit_retry_batch_sizes.pop(d, None)
+            self._skill_edit_n1_fail_counts.pop(d, None)
+            self._skill_edit_error_counts.pop(d, None)
+        elif next_batch_size == self.skill_edit_batch_size:
             self._skill_edit_retry_batch_sizes.pop(d, None)
         else:
             self._skill_edit_retry_batch_sizes[d] = next_batch_size
+            if next_batch_size == 1:
+                fails = self._skill_edit_n1_fail_counts.get(d, 0) + 1
+                if fails >= SKILL_EDIT_N1_FAIL_DEPRIORITIZE:
+                    self._skill_edit_error_counts[d] = (
+                        self._skill_edit_error_counts.get(d, 0) + 1
+                    )
+                    self._skill_edit_n1_fail_counts[d] = 0
+                    logger.warning(
+                        "SkillEdit N=1 failed %d times; deprioritize %s "
+                        "(error_count=%d, atoms kept)",
+                        SKILL_EDIT_N1_FAIL_DEPRIORITIZE,
+                        d.name,
+                        self._skill_edit_error_counts[d],
+                    )
+                else:
+                    self._skill_edit_n1_fail_counts[d] = fails
         if not ok:
             return
         self._stats["skills_edited"] += 1

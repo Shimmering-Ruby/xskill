@@ -46,3 +46,21 @@ Feature: baby 冷启动可以从模型失败和进程中断中恢复
     And baby 应当继续停留在 baby 分支
     And 最后 1 个原子应当保留在 candidates
     And watcher 下次调度时仍应当从 N=1 开始
+
+  @recovery @state_machine
+  Scenario: 错误分相同时原子更少的 skill 优先调度
+    Given 两个 baby skill "few-atoms" 有 1 个原子且 "many-atoms" 有 3 个原子
+    And 两者错误分均为 0
+    And edit pool 一次只能跑 1 个 skill
+    When watcher 调度 SkillEdit
+    Then 本轮应先提交 "few-atoms"
+
+  @recovery @state_machine
+  Scenario: N=1 连败 3 次后降优先级并换下一个 skill
+    Given 两个 baby skill "hard" 有 1 个原子且 "easy" 有 2 个原子
+    And "hard" 已在 N=1 上连续失败 3 次
+    And edit pool 一次只能跑 1 个 skill
+    When watcher 调度 SkillEdit
+    Then 本轮应先提交 "easy"
+    And "hard" 的 candidates 原子应当全部保留
+    And "hard" 的重试批次仍为 N=1
