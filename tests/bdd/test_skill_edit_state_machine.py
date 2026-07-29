@@ -160,10 +160,10 @@ def test_thin_baby_without_checkpoint_is_not_submitted() -> None:
 
 @scenario(
     "features/skill_edit/skill_edit_schedule_actionable.feature",
-    "无 git 目录只跳过该 skill 不中断整轮",
+    "无 git 目录不中断整轮且不饿死 READY baby",
 )
 def test_nongit_directory_does_not_abort_schedule_round() -> None:
-    """Missing .git skips that skill; other actionable skills still submit."""
+    """Missing .git must not crash the scan or starve READY babies."""
 
 
 @scenario(

@@ -23,13 +23,13 @@ Feature: SkillEdit 只把 actionable skill 提交进 edit 池
     And 提交列表不应包含 "thin-baby"
 
   @recovery @state_machine
-  Scenario: 无 git 目录只跳过该 skill 不中断整轮
+  Scenario: 无 git 目录不中断整轮且不饿死 READY baby
     Given skill 目录 "broken-nongit" 存在但没有 .git
     And baby skill "ready-baby" 已达冷启动阈值且可编辑
     When watcher 调度 SkillEdit
     Then 整轮调度不应因 NotGitRepository 失败
     And 提交列表应包含 "ready-baby"
-    And 提交列表不应包含 "broken-nongit"
+    And 本轮应先提交 "ready-baby"
 
   @recovery @state_machine
   Scenario: actionable 检查抛错只排除该 skill

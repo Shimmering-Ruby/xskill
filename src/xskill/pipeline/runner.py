@@ -544,13 +544,18 @@ class DirectoryWatcher:
             """与 maybe_run 守门对齐：不会开 LLM 的 skill 不进 edit 池。
 
             单目录异常只排除该 skill，禁止拖垮整轮 edit submit。
+            无 ``.git`` 的目录仍返回 True：交由 worker 侧 ``_run_one`` /
+            ``maybe_run`` 吞错（与过滤前提交语义一致），避免 listcomp 里
+            ``current_branch`` 抛穿扫描；也不把「脏目录」误当成可过滤的
+            伪 skill 状态机。
             """
             if not (skill_path / ".git").exists():
                 logger.warning(
-                    "skip SkillEdit schedule: %s has no .git",
+                    "SkillEdit schedule: %s has no .git; submit and let "
+                    "worker isolate failures",
                     skill_path.name,
                 )
-                return False
+                return True
             try:
                 data = candidate_buffer.load_candidates(skill_path)
                 candidates = list(data.get("candidates") or [])
@@ -612,11 +617,14 @@ class DirectoryWatcher:
         if not skill_dirs:
             return
 
-        # 错误少优先，其次 lean-first。列表已是 actionable，无需再排空 buffer。
+        # 错误少优先；有候选优先于空 buffer；再 lean-first。
+        # 无 .git 等「仍提交」的空目录靠 empty-last 避免抢窗。
         def _skill_edit_sort_key(path: Path):
+            pending = _pending_atom_count(path)
             return (
                 self._skill_edit_error_counts.get(path, 0),
-                _pending_atom_count(path),
+                0 if pending > 0 else 1,
+                pending,
                 path.name,
             )
 

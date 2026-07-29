@@ -1751,13 +1751,36 @@ BABY_STUB_BODY_MARKER = (
 
 
 def skill_md_still_baby_stub(skill_dir: str | Path) -> bool:
-    """SKILL.md 是否仍含 init 时的 placeholder 正文。"""
+    """SKILL.md 是否仍是 init 时的空 stub（#154 empty-graduate）。
+
+    仅当正文在去掉 frontmatter 后本质上仍是 init 形态（可选 ``# name`` +
+    placeholder 行）时返回 True。正文已追加真实内容时即使残留 marker 子串
+    也不再判为 empty stub——避免把「已 write 过」的 checkpoint 误拦成空毕业。
+    """
     skill_md = Path(skill_dir) / "SKILL.md"
     try:
         text = skill_md.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    return BABY_STUB_BODY_MARKER in text
+    if BABY_STUB_BODY_MARKER not in text:
+        return False
+    body = text
+    if body.startswith("---"):
+        fence = body.find("\n---", 3)
+        if fence >= 0:
+            body = body[fence + len("\n---"):]
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return True
+    if lines == [BABY_STUB_BODY_MARKER]:
+        return True
+    if (
+        len(lines) == 2
+        and lines[0].startswith("#")
+        and lines[1] == BABY_STUB_BODY_MARKER
+    ):
+        return True
+    return False
 
 
 def init_skill_repo_on_baby(skill_dir: str, name: str, description: str) -> None:

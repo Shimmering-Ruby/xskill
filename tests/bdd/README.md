@@ -86,6 +86,6 @@ mutmut run --max-children 8 \
 
 `skill_edit_schedule_actionable.feature` 守护 Issue #156 / #157 / #158：
 
-- 不会开 LLM 的 skill（main 无 ux、瘦 baby、非 git）不得 `submit` 进 edit 池；
+- 不会开 LLM 的 git skill（main 无 ux、瘦 baby）不得 `submit` 进 edit 池；
 - 单 skill 的 actionable 检查失败只 skip，不得中断整轮扫描；
-- #156 的「空 buffer 置后」由 actionable 过滤取代，不再单独排序键。
+- 无 `.git` 目录不崩扫描；排序 empty-last，避免空目录饿死 READY baby。
