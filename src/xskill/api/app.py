@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from dulwich.errors import NotGitRepository
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -814,17 +814,27 @@ async def api_init(req: InitRequest):
 
 
 @router.post("/reindex", response_model=MessageResponse)
-def api_reindex():
+def api_reindex(
+    scope: str = Query(
+        default="search",
+        description=(
+            "search=仅 description→embeddings（默认，检索止血，不扫 atom）；"
+            "full=description+atom_feats（扫全部 client atom，代价高）"
+        ),
+    ),
+):
     """Rebuild the skill vector index.
 
-    同步 def：全量重建 = 大量同步 embed 调用，可能持续分钟级；放事件循环上
-    会让服务整段假死，见 api_search_trajectories 的说明。
+    同步 def：embed 调用可能持续较久；放事件循环上会让服务假死，见
+    api_search_trajectories 的说明。默认 ``scope=search`` 只重建检索用
+    description 向量；``scope=full`` 才扫 atom 算 atom_feats。
     """
     try:
         embedding_client = create_embed_client(_config)
+        atom_roots = _team_atom_roots() if scope == "full" else None
         rebuild_skill_index(
             skill_dir=_skill_dir, embed_client=embedding_client,
-            atom_store_roots=_team_atom_roots(),
+            atom_store_roots=atom_roots, scope=scope,
         )
         # 失效推荐引擎的 skill 索引 / skillhub 缓存，否则引擎仍服务旧 embedding
         try:
@@ -834,7 +844,11 @@ def api_reindex():
                 eng.invalidate_cache()
         except Exception:  # pylint: disable=broad-exception-caught
             logger.debug("engine cache invalidation skipped", exc_info=True)
-        return MessageResponse(message="Skill index rebuilt", ok=True)
+        return MessageResponse(
+            message=f"Skill index rebuilt (scope={scope})", ok=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
         logger.exception("reindex failed")
         raise HTTPException(status_code=500, detail=str(e)) from e

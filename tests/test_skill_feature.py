@@ -206,7 +206,8 @@ class TestRebuildIndex:
 
         fake = FakeEmbed()
         rebuild_skill_index(skill_dir=skill_dir, embed_client=fake,
-                            atom_store_roots=[atom_root], last_n_atoms=5)
+                            atom_store_roots=[atom_root], last_n_atoms=5,
+                            scope="full")
 
         with open(skill_dir / ".skill_index.pkl", "rb") as f:
             idx = pickle.load(f)
@@ -230,7 +231,32 @@ class TestRebuildIndex:
         d = skill_dir / "foo"; d.mkdir(parents=True)
         (d / "SKILL.md").write_text(_make_skill_md("foo", "desc"), encoding="utf-8")
         rebuild_skill_index(skill_dir=skill_dir, embed_client=FakeEmbed(),
-                            atom_store_roots=None)
+                            atom_store_roots=None, scope="full")
         with open(skill_dir / ".skill_index.pkl", "rb") as f:
             idx = pickle.load(f)
         assert idx["atom_feat_present"] == [False]
+
+
+    def test_default_scope_is_search_skips_atom_feats(self, tmp_path):
+        """默认 scope=search：即便给了 atom_store_roots 也不算 atom_feats。"""
+        skill_dir = tmp_path / "skills"
+        d = skill_dir / "foo"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(_make_skill_md("foo", "desc"), encoding="utf-8")
+        atom_root = tmp_path / "atoms"
+        tasks = atom_root / "traj_001" / "tasks"
+        tasks.mkdir(parents=True)
+        import json
+        (tasks / "atom_traj_001_0001.json").write_text(json.dumps({
+            "atom_id": "atom_traj_001_0001", "traj_id": "traj_001",
+            "offset_start": 1, "offset_end": 2, "intent": "i",
+            "summary": "foo summary", "used_skills": ["foo"],
+        }), encoding="utf-8")
+        rebuild_skill_index(
+            skill_dir=skill_dir, embed_client=FakeEmbed(),
+            atom_store_roots=[atom_root],
+        )
+        with open(skill_dir / ".skill_index.pkl", "rb") as f:
+            idx = pickle.load(f)
+        assert idx["atom_feat_present"] == [False]
+        assert np.allclose(idx["atom_feats"][0], 0.0)
