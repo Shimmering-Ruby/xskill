@@ -516,12 +516,17 @@ class TestBabyCheckpointRecovery:
                 skill = re.search(
                     r"skill_name:\s*([\w-]+)", user_msg,
                 ).group(1)
-                existing = Path(target).read_text(encoding="utf-8")
-                marker = f"\nprocessed-{len(batch_sizes)}: {','.join(atom_ids)}\n"
+                # Checkpoint 正文不得残留 init placeholder（#154）。
+                content = (
+                    f"---\nname: {skill}\ndescription: adaptive recovery\n"
+                    f"metadata:\n  version: {len(batch_sizes)}\n---\n\n"
+                    f"# Adaptive\n\n"
+                    f"processed-{len(batch_sizes)}: {','.join(atom_ids)}\n"
+                )
                 _call_tool(
                     self.tools["write_file"],
                     target,
-                    existing + marker,
+                    content,
                 )
                 _call_tool(
                     self.tools["commit_baby"],
