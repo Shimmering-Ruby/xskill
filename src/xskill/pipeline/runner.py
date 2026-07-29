@@ -511,6 +511,8 @@ class DirectoryWatcher:
         # 同一个 skill 同时只允许一个 skill_edit future 在飞，避免同一 skill
         # 被并发跑两个 maybe_run（第二个进来时前一个多半仍在改 candidates/git）。
         from xskill.skill import candidates as candidate_buffer
+        from xskill.skill.git import current_branch, run_git
+        from xskill.canary import load_ux_scores
 
         skill_dirs = [
             d for d in self.skill_dir.iterdir()
@@ -518,6 +520,14 @@ class DirectoryWatcher:
         ]
         if not skill_dirs:
             return
+
+        jam_threshold = CanaryConfig.from_dict(
+            self.config.get("canary", {})).jam_threshold
+        edit_threshold = (
+            int(threshold)
+            if threshold is not None
+            else candidate_buffer.ATOM_PROMOTION_THRESHOLD
+        )
 
         def _pending_atom_count(skill_path: Path) -> int:
             try:
@@ -530,8 +540,79 @@ class DirectoryWatcher:
                 raise
             return len(data.get("candidates") or [])
 
-        # 错误少优先，其次原子少，再按名字稳定排序。N=1 连败抬高 error 后
-        # 自然排到后面，换下一个 skill；不永久 error、无指数退避。
+        def _skill_edit_actionable(skill_path: Path) -> bool:
+            """与 maybe_run 守门对齐：不会开 LLM 的 skill 不进 edit 池。
+
+            单目录异常只排除该 skill，禁止拖垮整轮 edit submit。
+            """
+            if not (skill_path / ".git").exists():
+                logger.warning(
+                    "skip SkillEdit schedule: %s has no .git",
+                    skill_path.name,
+                )
+                return False
+            try:
+                data = candidate_buffer.load_candidates(skill_path)
+                candidates = list(data.get("candidates") or [])
+                total_ws = 0
+                for item in candidates:
+                    try:
+                        total_ws += int(item.get("weightscore") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                staging_exists = run_git(
+                    ["rev-parse", "--verify", "staging"],
+                    cwd=str(skill_path),
+                )[0] == 0
+                jam = staging_exists and total_ws >= jam_threshold
+                if staging_exists and not jam:
+                    return False
+                if jam:
+                    return True
+                ready = bool(
+                    candidate_buffer.ready_for_promotion_v2(
+                        data, threshold=edit_threshold,
+                    )
+                )
+                baby_checkpoint = run_git(
+                    ["rev-parse", "baby~1"],
+                    cwd=str(skill_path),
+                )[0] == 0
+                branch = current_branch(str(skill_path)) or ""
+                if branch == "baby":
+                    return baby_checkpoint or ready
+                if branch == "main":
+                    if not ready:
+                        return False
+                    try:
+                        scores = load_ux_scores(skill_path)
+                    except Exception:
+                        logger.exception(
+                            "load_ux_scores failed during skill_edit "
+                            "filter: %s",
+                            skill_path.name,
+                        )
+                        return False
+                    return any(
+                        score.get("side") == "main" for score in scores
+                    )
+                if "_turn" in branch:
+                    return baby_checkpoint or ready
+                return False
+            except Exception:
+                logger.exception(
+                    "skill_edit actionable check failed: %s",
+                    skill_path.name,
+                )
+                return False
+
+        skill_dirs = [
+            path for path in skill_dirs if _skill_edit_actionable(path)
+        ]
+        if not skill_dirs:
+            return
+
+        # 错误少优先，其次 lean-first。列表已是 actionable，无需再排空 buffer。
         def _skill_edit_sort_key(path: Path):
             return (
                 self._skill_edit_error_counts.get(path, 0),
@@ -541,8 +622,6 @@ class DirectoryWatcher:
 
         skill_dirs.sort(key=_skill_edit_sort_key)
 
-        jam_threshold = CanaryConfig.from_dict(
-            self.config.get("canary", {})).jam_threshold
         base_llm_cfg = self.config.get("llm", {}) or {}
         skill_llm_override = self.config.get("llm_skill", {}) or {}
         skill_llm_cfg = {

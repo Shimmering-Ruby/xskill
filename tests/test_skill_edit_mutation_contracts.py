@@ -85,6 +85,37 @@ def test_graduate_baby_rejects_invalid_frontmatter_before_side_effects(
     ) is False
 
 
+def test_graduate_baby_rejects_init_stub_before_side_effects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from xskill.skill.git import BABY_STUB_BODY_MARKER, init_skill_repo_on_baby
+
+    target = tmp_path / "skills" / "stub-graduation"
+    init_skill_repo_on_baby(str(target), name="stub-graduation", description="d")
+    assert BABY_STUB_BODY_MARKER in (target / "SKILL.md").read_text(encoding="utf-8")
+
+    def unexpected(*_args, **_kwargs) -> None:
+        raise AssertionError("stub SKILL.md must not reach a side effect")
+
+    monkeypatch.setattr(
+        agent_tools,
+        "_run_description_optimization",
+        unexpected,
+    )
+    monkeypatch.setattr(
+        skill_git,
+        "commit_baby_to_main_branch",
+        unexpected,
+    )
+
+    assert agent_tools.graduate_baby_to_main(
+        target,
+        "stub-graduation",
+        "must not commit",
+    ) is False
+
+
 def test_remove_candidates_does_not_consume_a_git_write_slot(
     tmp_path: Path,
     monkeypatch,

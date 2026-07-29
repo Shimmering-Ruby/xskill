@@ -29,9 +29,11 @@ from xskill.pipeline.registry import register_dir
 from xskill.pipeline.runner import DirectoryWatcher, SKILL_EDIT_N1_FAIL_DEPRIORITIZE
 from xskill.skill import candidates as candidate_buffer
 from xskill.skill.git import (
+    BABY_STUB_BODY_MARKER,
     commit_baby_checkpoint,
     current_branch,
     init_skill_repo_on_baby,
+    run_git,
 )
 from tests.pool_helpers import pool_config
 from tests.test_atom_task_store import _FakeEmbed
@@ -124,6 +126,54 @@ def test_n1_failures_deprioritize_and_switch_skill() -> None:
     """After three N=1 failures the hard skill yields the edit slot."""
 
 
+@scenario(
+    "features/skill_edit/baby_stub_graduate_guard.feature",
+    "直接调用 commit_baby_to_main 时 stub 未清除则报错",
+)
+def test_commit_baby_to_main_rejects_init_stub() -> None:
+    """Empty-graduate via the legacy tool must fail while SKILL.md is stub."""
+
+
+@scenario(
+    "features/skill_edit/baby_stub_graduate_guard.feature",
+    "candidates 已空但 stub 仍在时框架重写后再晋升",
+)
+def test_empty_buffer_stub_retriggers_rewrite_before_main() -> None:
+    """Framework refuses graduate, forces rewrite, then promotes."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "main 无 ux_score 不进池，READY baby 进池",
+)
+def test_main_without_ux_is_not_submitted() -> None:
+    """Non-actionable main must not occupy the edit submit window."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "未达阈值且无 checkpoint 的 baby 不进池",
+)
+def test_thin_baby_without_checkpoint_is_not_submitted() -> None:
+    """Below-threshold baby without checkpoint is filtered before submit."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "无 git 目录只跳过该 skill 不中断整轮",
+)
+def test_nongit_directory_does_not_abort_schedule_round() -> None:
+    """Missing .git skips that skill; other actionable skills still submit."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "actionable 检查抛错只排除该 skill",
+)
+def test_actionable_check_exception_isolates_one_skill() -> None:
+    """Per-skill filter exceptions must not abort the whole edit scan."""
+
+
 def _tool_name(tool: Any) -> str:
     return getattr(tool, "__name__", None) or getattr(tool, "name", "")
 
@@ -162,6 +212,9 @@ class StateWorld:
     retry_max_retries: int = 3
     retry_calls: int = 0
     retry_trace: str = ""
+    tool_graduate_result: str = ""
+    rewrite_turns: int = 0
+    schedule_error: BaseException | None = None
 
     @property
     def trace_path(self) -> Path:
@@ -356,6 +409,9 @@ class _DeterministicEditAgent:
         rules = "\n".join(
             f"- processed {atom_id}" for atom_id in world.processed_atoms
         )
+        if not atom_ids:
+            rules = "- stub rewrite: formal body without placeholder"
+            world.rewrite_turns += 1
         content = (
             "---\n"
             f"name: {skill.group(1)}\n"
@@ -372,6 +428,8 @@ class _DeterministicEditAgent:
             content,
         )
         assert write_result.startswith("wrote:")
+        if "commit_baby" not in self.tools:
+            return SimpleNamespace(content="done")
         commit_result = _call_tool(
             self.tools["commit_baby"],
             skill.group(1),
@@ -967,7 +1025,14 @@ def watcher_schedules_skill_edit(state_world: StateWorld) -> None:
     release = watcher._bdd_release  # type: ignore[attr-defined]
     started.clear()
     release.clear()
-    watcher._check_pending_skill_edits()
+    state_world.schedule_error = None
+    state_world.submitted_skill_names = []
+    try:
+        watcher._check_pending_skill_edits()
+    except BaseException as exc:
+        state_world.schedule_error = exc
+        release.set()
+        raise
     assert started.wait(timeout=5), "edit worker did not start"
     state_world.submitted_skill_names = [
         info["skill_dir"].name
@@ -984,6 +1049,89 @@ def first_submitted_skill(state_world: StateWorld, name: str) -> None:
     assert state_world.submitted_skill_names[0] == name
 
 
+@then(parsers.parse('提交列表应包含 "{name}"'))
+def submitted_list_contains(state_world: StateWorld, name: str) -> None:
+    assert name in state_world.submitted_skill_names, (
+        f"{name} missing from submitted={state_world.submitted_skill_names}"
+    )
+
+
+@then(parsers.parse('提交列表不应包含 "{name}"'))
+def submitted_list_excludes(state_world: StateWorld, name: str) -> None:
+    assert name not in state_world.submitted_skill_names, (
+        f"{name} unexpectedly in submitted={state_world.submitted_skill_names}"
+    )
+
+
+@then("整轮调度不应因 NotGitRepository 失败")
+def schedule_round_did_not_fail(state_world: StateWorld) -> None:
+    assert state_world.schedule_error is None
+
+
+@given(parsers.parse('baby skill "{name}" 已达冷启动阈值且可编辑'))
+def baby_ready_for_edit(state_world: StateWorld, name: str) -> None:
+    _seed_named_baby(state_world, name=name, count=1, weight=10)
+
+
+@given(
+    parsers.parse(
+        'main skill "{name}" 有候选但还没有 main 侧 ux_score'
+    )
+)
+def main_ready_without_ux(state_world: StateWorld, name: str) -> None:
+    skill_dir = _seed_named_baby(state_world, name=name, count=1, weight=10)
+    assert run_git(
+        ["branch", "-m", "baby", "main"],
+        cwd=str(skill_dir),
+    )[0] == 0
+    assert current_branch(str(skill_dir)) == "main"
+    assert not (skill_dir / ".ux_scores.jsonl").exists()
+
+
+@given(
+    parsers.parse(
+        'baby skill "{name}" 仅有不足阈值的候选且无 checkpoint'
+    )
+)
+def thin_baby_below_threshold(state_world: StateWorld, name: str) -> None:
+    skill_dir = _seed_named_baby(state_world, name=name, count=1, weight=1)
+    assert run_git(
+        ["rev-parse", "baby~1"],
+        cwd=str(skill_dir),
+    )[0] != 0
+
+
+@given(parsers.parse('skill 目录 "{name}" 存在但没有 .git'))
+def nongit_skill_directory(state_world: StateWorld, name: str) -> None:
+    skill_dir = state_world.skill_root / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: broken\ndescription: not a git repo\n---\n\n# broken\n",
+        encoding="utf-8",
+    )
+    assert not (skill_dir / ".git").exists()
+    state_world.skill_dirs[name] = skill_dir
+
+
+@given(
+    parsers.parse('baby skill "{name}" 在 actionable 检查时会抛错'),
+)
+def baby_raises_during_actionable_check(
+    state_world: StateWorld,
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_dir = _seed_named_baby(state_world, name=name, count=1, weight=10)
+    original = candidate_buffer.load_candidates
+
+    def _load_or_boom(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if Path(path).resolve() == skill_dir.resolve():
+            raise RuntimeError("bdd actionable boom")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(candidate_buffer, "load_candidates", _load_or_boom)
+
+
 @then(parsers.parse('"{name}" 的 candidates 原子应当全部保留'))
 def skill_candidates_preserved(state_world: StateWorld, name: str) -> None:
     skill_dir = state_world.skill_dirs[name]
@@ -997,3 +1145,84 @@ def skill_retry_batch_still_one(state_world: StateWorld, name: str) -> None:
     assert watcher is not None
     skill_dir = state_world.skill_dirs[name]
     assert watcher._skill_edit_retry_batch_sizes.get(skill_dir) == 1
+
+
+@given(parsers.parse('baby skill "{name}" 仍是 init stub 正文'))
+def baby_still_has_init_stub(state_world: StateWorld, name: str) -> None:
+    state_world.skill_name = name
+    state_world.skill_dir = state_world.skill_root / name
+    init_skill_repo_on_baby(
+        str(state_world.skill_dir),
+        name=name,
+        description="BDD stub graduate guard",
+    )
+    body = (state_world.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert BABY_STUB_BODY_MARKER in body
+    assert current_branch(str(state_world.skill_dir)) == "baby"
+
+
+@given("candidates 已经为空")
+def candidates_are_empty_buffer(state_world: StateWorld) -> None:
+    assert state_world.skill_dir is not None
+    candidate_buffer.save_candidates(
+        state_world.skill_dir,
+        {"candidates": []},
+    )
+
+
+@given("已有一次未改写 stub 的 baby checkpoint")
+def checkpoint_without_rewriting_stub(state_world: StateWorld) -> None:
+    assert state_world.skill_dir is not None
+    note = state_world.skill_dir / "scripts" / "note.txt"
+    note.write_text("checkpoint without rewriting stub\n", encoding="utf-8")
+    assert run_git(["add", "scripts/note.txt"], cwd=str(state_world.skill_dir))[0] == 0
+    assert run_git(
+        ["commit", "-m", "checkpoint without rewriting stub"],
+        cwd=str(state_world.skill_dir),
+    )[0] == 0
+    body = (state_world.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert BABY_STUB_BODY_MARKER in body
+    assert run_git(["rev-parse", "baby~1"], cwd=str(state_world.skill_dir))[0] == 0
+
+
+@when("模型调用 commit_baby_to_main 尝试毕业")
+def model_calls_commit_baby_to_main(state_world: StateWorld) -> None:
+    assert state_world.skill_name is not None
+    state_world.tool_graduate_result = _call_tool(
+        agent_tools.commit_baby_to_main,
+        state_world.skill_name,
+        "v1: should be rejected while stub remains",
+    )
+
+
+@when("watcher 再次调度这个 baby 的 SkillEdit")
+def watcher_reschedules_stub_baby(state_world: StateWorld) -> None:
+    _run_state_agent(state_world)
+
+
+@then("工具应当返回 stub 拒绝错误")
+def tool_returns_stub_rejection(state_world: StateWorld) -> None:
+    message = state_world.tool_graduate_result.lower()
+    assert state_world.tool_graduate_result.startswith("error:")
+    assert "stub" in message or "placeholder" in message
+
+
+@then("框架应当先触发一轮 stub 重写")
+def framework_triggered_stub_rewrite(state_world: StateWorld) -> None:
+    assert state_world.rewrite_turns >= 1
+    assert state_world.trace_path.is_file()
+    assert "stub" in state_world.trace.lower()
+
+
+@then("SkillEdit 应当成功并把 baby 晋升为 main")
+def skill_edit_promoted_to_main(state_world: StateWorld) -> None:
+    assert state_world.result is True
+    assert state_world.skill_dir is not None
+    assert current_branch(str(state_world.skill_dir)) == "main"
+
+
+@then("最终 SKILL.md 不应当再含 init placeholder")
+def final_skill_md_has_no_placeholder(state_world: StateWorld) -> None:
+    assert state_world.skill_dir is not None
+    body = (state_world.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert BABY_STUB_BODY_MARKER not in body
