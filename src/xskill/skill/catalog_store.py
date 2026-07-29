@@ -1,0 +1,551 @@
+"""skills_catalog 投影表：磁盘为真相源，表供列表/分页查询。
+
+写路径在确认的出口 UPSERT/DELETE；读路径只查表。空表（或该 root 尚未
+backfill）时一次性扫盘灌表——这是初始化，不是每请求静默回退扫盘。
+"""
+from __future__ import annotations
+
+import logging
+import operator
+import threading
+from pathlib import Path
+from typing import Optional
+
+from xskill.pipeline.registry import pooled_connection
+
+logger = logging.getLogger(__name__)
+
+_SOURCE_NATIVE = "native"
+_SOURCE_SKILLHUB = "skillhub"
+
+_STATE_ORDER_SQL = """
+CASE state
+  WHEN 'main' THEN 0
+  WHEN 'staging' THEN 0
+  WHEN 'baby' THEN 1
+  WHEN 'unknown' THEN 2
+  WHEN 'skillhub' THEN 3
+  ELSE 4
+END
+"""
+
+_BACKFILL_LOCKS_GUARD = threading.Lock()
+_BACKFILL_FLIGHTS: dict[tuple[str, str], "_BackfillFlight"] = {}
+
+
+class _BackfillFlight:
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
+def _root_key(skill_dir: Path | str) -> str:
+    path = Path(skill_dir).expanduser()
+    try:
+        return str(path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return str(path.absolute())
+
+
+def catalog_root_key(skill_dir: Path | str) -> str:
+    """自产 skill 根目录的投影表 root_key（绝对路径字符串）。"""
+    return _root_key(skill_dir)
+
+
+def _native_catalog_key(name: str) -> str:
+    return f"native:{name}"
+
+
+def _skillhub_catalog_key(skill_id: str) -> str:
+    return f"skillhub:{skill_id}"
+
+
+def _branch_names(skill_path: Path) -> set[str]:
+    git = skill_path / ".git"
+    names: set[str] = set()
+    heads = git / "refs" / "heads"
+    if heads.is_dir():
+        for path in heads.iterdir():
+            if path.is_file():
+                names.add(path.name)
+    packed = git / "packed-refs"
+    if packed.is_file():
+        try:
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if " refs/heads/" in line:
+                    names.add(line.split("refs/heads/", 1)[1])
+        except OSError:
+            logger.warning("failed to read packed-refs: %s", packed, exc_info=True)
+    return names
+
+
+def _ref_sha(skill_path: Path, branch: str) -> str:
+    loose = skill_path / ".git" / "refs" / "heads" / branch
+    if loose.is_file():
+        try:
+            return loose.read_text(encoding="utf-8").strip()
+        except OSError:
+            logger.warning("failed to read ref %s", loose, exc_info=True)
+            return ""
+    packed = skill_path / ".git" / "packed-refs"
+    if not packed.is_file():
+        return ""
+    needle = f" refs/heads/{branch}"
+    try:
+        for line in packed.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.endswith(needle) and not line.startswith("#"):
+                return line.split(" ", 1)[0]
+    except OSError:
+        logger.warning("failed to read packed-refs for sha: %s", packed, exc_info=True)
+    return ""
+
+
+def _read_native_row(skill_path: Path) -> dict:
+    """从单个 skill 目录读出投影行（API 字段 + 表扩展字段）。"""
+    from xskill.skill.frontmatter import parse as fm_parse
+
+    skill_path = Path(skill_path)
+    branches = _branch_names(skill_path)
+    if "staging" in branches:
+        state = "staging"
+    elif "main" in branches:
+        state = "main"
+    elif "baby" in branches:
+        state = "baby"
+    else:
+        state = "unknown"
+    description, version = "", 0
+    skill_md = skill_path / "SKILL.md"
+    if skill_md.is_file():
+        try:
+            frontmatter, _ = fm_parse(skill_md.read_text(encoding="utf-8"))
+            description = (
+                (frontmatter.get("description") or "").strip().replace("\n", " ")
+            )
+            metadata = frontmatter.get("metadata", {}) or {}
+            version = metadata.get("version", 0)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("failed to read skill metadata: %s", skill_md, exc_info=True)
+    candidates_count = 0
+    candidates_path = skill_path / ".candidates.yml"
+    if candidates_path.is_file():
+        try:
+            import yaml
+            data = yaml.safe_load(candidates_path.read_text(encoding="utf-8")) or {}
+            candidates_count = len(data.get("candidates", []) or [])
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "failed to read candidate buffer: %s", candidates_path, exc_info=True,
+            )
+    main_sha = _ref_sha(skill_path, "main")
+    staging_sha = _ref_sha(skill_path, "staging")
+    distributable = 1 if state in ("main", "staging") and skill_md.is_file() else 0
+    return {
+        "catalog_key": _native_catalog_key(skill_path.name),
+        "name": skill_path.name,
+        "repo_name": skill_path.name,
+        "source": _SOURCE_NATIVE,
+        "state": state,
+        "description": description[:300],
+        "version": version,
+        "candidates": candidates_count,
+        "candidates_count": candidates_count,
+        "main_sha": main_sha,
+        "staging_sha": staging_sha,
+        "distributable": distributable,
+        "search_id": skill_path.name,
+        "hub": "",
+        "skill_id": "",
+        "use_count": 0,
+        "root_key": _root_key(skill_path.parent),
+    }
+
+
+def _skillhub_entries(skillhub) -> list[dict]:
+    """归一 skillhub 入参：None / list / SkillHub 对象 → 条目列表。"""
+    if skillhub is None:
+        return []
+    if isinstance(skillhub, list):
+        return list(skillhub)
+    return list(skillhub._entries(  # pylint: disable=protected-access
+        include_vec=False, require_description=True))
+
+
+def _skillhub_fingerprint(skillhub) -> str:
+    if skillhub is None:
+        return "none"
+    if isinstance(skillhub, list):
+        rows = []
+        for entry in skillhub:
+            rows.append(tuple(
+                repr(entry.get(field)) for field in (
+                    "display_name", "name", "source_path", "skill_id",
+                    "description", "use_count",
+                )
+            ))
+        return "entries:" + repr(tuple(sorted(rows)))
+    hub_dir = getattr(skillhub, "dir", None)
+    if hub_dir is not None:
+        return "skillhub:" + _root_key(hub_dir) + f":{bool(getattr(skillhub, 'enabled', True))}"
+    return f"object:{type(skillhub).__module__}.{type(skillhub).__qualname__}:{id(skillhub)}"
+
+
+def _skillhub_rows(skillhub) -> list[dict]:
+    rows: list[dict] = []
+    for entry in _skillhub_entries(skillhub):
+        description = str(entry.get("description") or "").strip().replace("\n", " ")
+        skill_id = entry.get("skill_id") or entry.get("name") or ""
+        name = entry.get("display_name") or entry.get("name") or ""
+        hub = entry.get("source_path") or ""
+        use_count = entry.get("use_count", 0) or 0
+        rows.append({
+            "catalog_key": _skillhub_catalog_key(str(skill_id)),
+            "name": name,
+            "repo_name": name,
+            "source": _SOURCE_SKILLHUB,
+            "state": "skillhub",
+            "description": description[:300],
+            "version": 0,
+            "candidates": 0,
+            "candidates_count": 0,
+            "main_sha": "",
+            "staging_sha": "",
+            "distributable": 0,
+            "search_id": str(skill_id),
+            "hub": hub,
+            "skill_id": str(skill_id),
+            "use_count": use_count,
+            "root_key": "",
+        })
+    rows.sort(key=operator.itemgetter("hub", "name"))
+    return rows
+
+
+def scan_skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
+    """扫盘得到完整清单行（backfill / 调试用）；排序与旧 dashboard 一致。"""
+    skill_dir = Path(skill_dir)
+    out: list[dict] = []
+    root = _root_key(skill_dir)
+    if skill_dir.is_dir():
+        for path in sorted(skill_dir.iterdir()):
+            if not path.is_dir() or path.name.startswith("."):
+                continue
+            row = _read_native_row(path)
+            row["root_key"] = root
+            out.append(row)
+    order = {"main": 0, "staging": 0, "baby": 1, "unknown": 2}
+    out = [row for _rank, _name, _index, row in sorted(
+        (order.get(row["state"], 3), row["name"], index, row)
+        for index, row in enumerate(out))]
+    hub_rows = _skillhub_rows(skillhub)
+    for row in hub_rows:
+        row["root_key"] = root
+    out.extend(hub_rows)
+    return out
+
+
+def catalog_api_row(stored: dict) -> dict:
+    """表行 / 扫盘行 → dashboard API 行形状。"""
+    row = {
+        "name": stored["name"],
+        "state": stored["state"],
+        "source": stored["source"],
+        "description": stored["description"],
+        "version": stored["version"],
+        "candidates": stored.get("candidates", stored.get("candidates_count", 0)),
+    }
+    if stored["source"] == _SOURCE_SKILLHUB:
+        row["hub"] = stored.get("hub") or ""
+        row["skill_id"] = stored.get("skill_id") or stored.get("search_id") or ""
+        row["use_count"] = stored.get("use_count", 0) or 0
+    return row
+
+
+def _upsert_row(conn, row: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO skills_catalog(
+            catalog_key, root_key, name, repo_name, source, state,
+            description, version, candidates_count, main_sha, staging_sha,
+            distributable, search_id, hub, skill_id, use_count, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+        ON CONFLICT(catalog_key) DO UPDATE SET
+            root_key=excluded.root_key,
+            name=excluded.name,
+            repo_name=excluded.repo_name,
+            source=excluded.source,
+            state=excluded.state,
+            description=excluded.description,
+            version=excluded.version,
+            candidates_count=excluded.candidates_count,
+            main_sha=excluded.main_sha,
+            staging_sha=excluded.staging_sha,
+            distributable=excluded.distributable,
+            search_id=excluded.search_id,
+            hub=excluded.hub,
+            skill_id=excluded.skill_id,
+            use_count=excluded.use_count,
+            updated_at=datetime('now')
+        """,
+        (
+            row["catalog_key"],
+            row["root_key"],
+            row["name"],
+            row["repo_name"],
+            row["source"],
+            row["state"],
+            row["description"],
+            int(row["version"] or 0),
+            int(row["candidates_count"]),
+            row["main_sha"],
+            row["staging_sha"],
+            int(row["distributable"]),
+            row["search_id"],
+            row.get("hub") or "",
+            row.get("skill_id") or "",
+            int(row.get("use_count") or 0),
+        ),
+    )
+
+
+def upsert_native_skill(skill_path: Path | str, *, db_path: Optional[Path] = None) -> None:
+    """写出口：按磁盘现状 UPSERT 一条自产 skill。"""
+    path = Path(skill_path)
+    if not path.is_dir():
+        raise FileNotFoundError(f"skill path not found for catalog upsert: {path}")
+    row = _read_native_row(path)
+    with pooled_connection(db_path) as conn:
+        _upsert_row(conn, row)
+        conn.commit()
+
+
+def delete_native_skill(name: str, *, db_path: Optional[Path] = None) -> None:
+    with pooled_connection(db_path) as conn:
+        conn.execute(
+            "DELETE FROM skills_catalog WHERE catalog_key=?",
+            (_native_catalog_key(name),),
+        )
+        conn.commit()
+
+
+def delete_all_native(*, root_key: str = "", db_path: Optional[Path] = None) -> int:
+    """wipe_all_skills：删该 root 下全部 native 行；root_key 空则删所有 native。"""
+    with pooled_connection(db_path) as conn:
+        if root_key:
+            cursor = conn.execute(
+                "DELETE FROM skills_catalog WHERE source=? AND root_key=?",
+                (_SOURCE_NATIVE, root_key),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM skills_catalog WHERE source=?",
+                (_SOURCE_NATIVE,),
+            )
+        conn.commit()
+        return int(cursor.rowcount or 0)
+
+
+def rename_native_skill(
+    old_name: str,
+    new_skill_path: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> None:
+    delete_native_skill(old_name, db_path=db_path)
+    upsert_native_skill(new_skill_path, db_path=db_path)
+
+
+def _meta_ready(conn, root_key: str, skillhub_key: str) -> bool:
+    row = conn.execute(
+        "SELECT skillhub_key FROM skills_catalog_meta WHERE root_key=?",
+        (root_key,),
+    ).fetchone()
+    if row is None:
+        return False
+    return row["skillhub_key"] == skillhub_key
+
+
+def backfill_skills_catalog(
+    skill_dir: Path | str,
+    skillhub=None,
+    *,
+    db_path: Optional[Path] = None,
+) -> int:
+    """全量用磁盘扫描替换该 root 的投影行，并标记 meta 已就绪。"""
+    skill_dir = Path(skill_dir)
+    root = _root_key(skill_dir)
+    skillhub_key = _skillhub_fingerprint(skillhub)
+    rows = scan_skills_catalog(skill_dir, skillhub=skillhub)
+    with pooled_connection(db_path) as conn:
+        conn.execute(
+            "DELETE FROM skills_catalog WHERE root_key=?",
+            (root,),
+        )
+        for row in rows:
+            row["root_key"] = root
+            _upsert_row(conn, row)
+        conn.execute(
+            """
+            INSERT INTO skills_catalog_meta(root_key, backfilled_at, skillhub_key)
+            VALUES (?, datetime('now'), ?)
+            ON CONFLICT(root_key) DO UPDATE SET
+                backfilled_at=datetime('now'),
+                skillhub_key=excluded.skillhub_key
+            """,
+            (root, skillhub_key),
+        )
+        conn.commit()
+    logger.info(
+        "skills_catalog backfill: root=%s rows=%d", root, len(rows),
+    )
+    return len(rows)
+
+
+def ensure_skills_catalog(
+    skill_dir: Path | str,
+    skillhub=None,
+    *,
+    db_path: Optional[Path] = None,
+) -> None:
+    """该 root 尚未 backfill（或 skillhub 身份变了）时做一次灌表。
+
+    并发请求单飞：一次成功灌表，失败时等待方共享同一异常（不再各自重扫）。
+    """
+    skill_dir = Path(skill_dir)
+    root = _root_key(skill_dir)
+    skillhub_key = _skillhub_fingerprint(skillhub)
+    with pooled_connection(db_path) as conn:
+        if _meta_ready(conn, root, skillhub_key):
+            return
+    flight_key = (root, skillhub_key)
+    owner = False
+    with _BACKFILL_LOCKS_GUARD:
+        with pooled_connection(db_path) as conn:
+            if _meta_ready(conn, root, skillhub_key):
+                return
+        flight = _BACKFILL_FLIGHTS.get(flight_key)
+        if flight is None:
+            flight = _BackfillFlight()
+            _BACKFILL_FLIGHTS[flight_key] = flight
+            owner = True
+    if not owner:
+        flight.done.wait()
+        if flight.error is not None:
+            raise flight.error
+        return
+    try:
+        backfill_skills_catalog(skill_dir, skillhub=skillhub, db_path=db_path)
+    except BaseException as error:
+        flight.error = error
+        raise
+    finally:
+        with _BACKFILL_LOCKS_GUARD:
+            if _BACKFILL_FLIGHTS.get(flight_key) is flight:
+                _BACKFILL_FLIGHTS.pop(flight_key, None)
+        flight.done.set()
+
+
+def list_skills_catalog(
+    skill_dir: Path | str,
+    skillhub=None,
+    *,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """读投影表全量（API 行形状）。"""
+    ensure_skills_catalog(skill_dir, skillhub=skillhub, db_path=db_path)
+    root = _root_key(skill_dir)
+    with pooled_connection(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT name, state, source, description, version, candidates_count,
+                   hub, skill_id, search_id, use_count
+            FROM skills_catalog
+            WHERE root_key=?
+            ORDER BY {_STATE_ORDER_SQL},
+                     CASE WHEN source='skillhub' THEN hub ELSE '' END,
+                     name
+            """,
+            (root,),
+        ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        stored = dict(row)
+        stored["candidates"] = stored.pop("candidates_count")
+        if not stored.get("skill_id"):
+            stored["skill_id"] = stored.get("search_id") or ""
+        out.append(catalog_api_row(stored))
+    return out
+
+
+def page_skills_catalog(
+    skill_dir: Path | str,
+    skillhub=None,
+    *,
+    limit: int = 0,
+    offset: int = 0,
+    name: str = "",
+    db_path: Optional[Path] = None,
+) -> dict:
+    """分页读投影表；形状与旧 skills_catalog_page 一致。"""
+    ensure_skills_catalog(skill_dir, skillhub=skillhub, db_path=db_path)
+    root = _root_key(skill_dir)
+    with pooled_connection(db_path) as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM skills_catalog WHERE root_key=?",
+            (root,),
+        ).fetchone()["n"]
+        by_state_rows = conn.execute(
+            """
+            SELECT state, COUNT(*) AS n FROM skills_catalog
+            WHERE root_key=? GROUP BY state
+            """,
+            (root,),
+        ).fetchall()
+        by_state = {row["state"]: row["n"] for row in by_state_rows}
+        if name:
+            selected = conn.execute(
+                f"""
+                SELECT name, state, source, description, version, candidates_count,
+                       hub, skill_id, search_id, use_count
+                FROM skills_catalog
+                WHERE root_key=? AND name=?
+                ORDER BY {_STATE_ORDER_SQL},
+                         CASE WHEN source='skillhub' THEN hub ELSE '' END,
+                         name
+                """,
+                (root, name),
+            ).fetchall()
+        else:
+            query = f"""
+                SELECT name, state, source, description, version, candidates_count,
+                       hub, skill_id, search_id, use_count
+                FROM skills_catalog
+                WHERE root_key=?
+                ORDER BY {_STATE_ORDER_SQL},
+                         CASE WHEN source='skillhub' THEN hub ELSE '' END,
+                         name
+            """
+            params: list = [root]
+            if limit > 0:
+                query += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            elif offset > 0:
+                query += " LIMIT -1 OFFSET ?"
+                params.append(offset)
+            selected = conn.execute(query, params).fetchall()
+    skills: list[dict] = []
+    for row in selected:
+        stored = dict(row)
+        stored["candidates"] = stored.pop("candidates_count")
+        if not stored.get("skill_id"):
+            stored["skill_id"] = stored.get("search_id") or ""
+        skills.append(catalog_api_row(stored))
+    return {
+        "total": int(total),
+        "by_state": by_state,
+        "offset": offset,
+        "limit": limit,
+        "skills": skills,
+    }

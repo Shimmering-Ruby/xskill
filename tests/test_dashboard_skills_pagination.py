@@ -1,7 +1,6 @@
 """海量 skill 分页:/skills 支持 limit/offset 分页 + name 定向查,total/by_state 按全量。
 
-分页 / 计数 / 深拷贝隔离都走真实的 :func:`skills_catalog_page` + 缓存 bundle
-（审计 L9），测试只在最底层磁盘扫描处注入假清单，让真实读路径全程被覆盖。
+分页走投影表 :func:`skills_catalog_page`；测试在扫盘 backfill 入口注入假清单。
 """
 from __future__ import annotations
 
@@ -10,39 +9,54 @@ from unittest.mock import Mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from xskill.dashboard import metrics as metrics_mod
+import xskill.skill.catalog_store as catalog_store
 from xskill.dashboard import router as router_mod
 from xskill.dashboard.mount import mount_dashboard
 from xskill.dashboard.router import build_dashboard_router
 from xskill.pipeline.registry import get_connection
 
 
-def _fake_catalog(n):
-    return [
-        {
-            "name": f"s{i}",
-            "state": "main" if i % 2 else "staging",
-            "version": "1",
-            "candidates": 0,
+def _fake_catalog_rows(skill_dir, n):
+    root_key = catalog_store.catalog_root_key(skill_dir)
+    rows = []
+    for index in range(n):
+        name = f"s{index:04d}"
+        rows.append({
+            "catalog_key": f"native:{name}",
+            "root_key": root_key,
+            "name": name,
+            "repo_name": name,
             "source": "native",
+            "state": "main" if index % 2 else "staging",
             "description": "",
-        }
-        for i in range(n)
-    ]
+            "version": 1,
+            "candidates": 0,
+            "candidates_count": 0,
+            "main_sha": "",
+            "staging_sha": "",
+            "distributable": 1,
+            "search_id": name,
+            "hub": "",
+            "skill_id": "",
+            "use_count": 0,
+        })
+    return rows
 
 
 def _client(tmp_path, monkeypatch, n):
     db = tmp_path / "r.db"
     get_connection(db).close()
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path",
+        lambda: tmp_path / "_skills_catalog_registry.db",
+    )
     app = FastAPI()
     mount_dashboard(app, {"dashboard": {"enabled": True, "public": True}}, db_path=db)
 
-    # 注入到最底层磁盘扫描：真实的缓存 bundle + 分页 + 计数 + 单页深拷贝全程被覆盖。
-    # 每个用例用独立 tmp_path/skill 作缓存键，天然隔离不串缓存。
-    def fake_build(*_args, **_kwargs):
-        return _fake_catalog(n)
+    def fake_scan(skill_dir, skillhub=None):  # noqa: ARG001
+        return _fake_catalog_rows(skill_dir, n)
 
-    monkeypatch.setattr(metrics_mod, "_build_skills_catalog_uncached", fake_build)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", fake_scan)
     return TestClient(app)
 
 
@@ -57,7 +71,7 @@ def test_limit_offset_returns_one_page(tmp_path, monkeypatch):
         "/api/v1/dashboard/skills?limit=100&offset=100").json()
     assert body["total"] == 250  # total 仍按全量
     assert len(body["skills"]) == 100
-    assert body["skills"][0]["name"] == "s100"
+    assert body["skills"][0]["name"] == "s0100"
     assert body["offset"] == 100 and body["limit"] == 100
 
 
@@ -77,10 +91,15 @@ def test_name_filter_returns_single_skill(tmp_path, monkeypatch):
 
 def test_standalone_projects_10000_skills_for_all_page_and_name(
         tmp_path, monkeypatch):
-    def fake_build(*_args, **_kwargs):
-        return _fake_catalog(10000)
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path",
+        lambda: tmp_path / "_skills_catalog_registry.db",
+    )
 
-    monkeypatch.setattr(metrics_mod, "_build_skills_catalog_uncached", fake_build)
+    def fake_scan(skill_dir, skillhub=None):  # noqa: ARG001
+        return _fake_catalog_rows(skill_dir, 10000)
+
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", fake_scan)
     monkeypatch.setattr(
         router_mod,
         "_build_skillhub",
@@ -117,13 +136,23 @@ def test_standalone_projects_10000_skills_for_all_page_and_name(
         "name": "s4242",
         "state": "staging",
         "source": "native",
-        "version": "1",
+        "version": 1,
         "candidates": 0,
     }]
 
 
 def test_standalone_projection_reuses_catalog_page_list(tmp_path, monkeypatch):
-    source_rows = _fake_catalog(10000)
+    source_rows = [
+        {
+            "name": f"s{i}",
+            "state": "main" if i % 2 else "staging",
+            "version": "1",
+            "candidates": 0,
+            "source": "native",
+            "description": "",
+        }
+        for i in range(10000)
+    ]
     original_list = source_rows
     original_first_row = source_rows[0]
     page = {
@@ -154,10 +183,8 @@ def test_standalone_projection_reuses_catalog_page_list(tmp_path, monkeypatch):
         for route in router.routes
         if route.path == "/api/v1/dashboard/skills"
     )
-
-    projected_page = skills_endpoint()
-
-    assert projected_page is page
-    assert projected_page["skills"] is original_list
-    assert projected_page["skills"][0] is not original_first_row
-    assert len(projected_page["skills"]) == 10000
+    body = skills_endpoint()
+    assert body is page
+    assert body["skills"] is original_list
+    assert body["skills"][0] is not original_first_row
+    assert len(body["skills"]) == 10000

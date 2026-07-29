@@ -381,86 +381,14 @@ def _skills_catalog_cache_key(skill_dir: Path, skillhub) -> tuple:
 def _build_skills_catalog_uncached(skill_dir: Path, skillhub=None) -> list[dict]:
     """列出 skill 库里的所有 skill —— 纯分析式(读目录 + SKILL.md + .candidates.yml)。
 
-    该函数只执行一次磁盘扫描；:func:`skills_catalog` 负责缓存和合并并发调用。
-
-    不依赖任何埋点事件,永远有内容(只要库里有 skill 目录)。每条含:
-    name / state(baby|main|staging) / description / version / use_count / candidates,
-    并统一带 ``source``：自产 git 技能为 ``"native"``。
-
-    ``skillhub``（可选，向后兼容——不传即旧行为）：三方 skill 来源，可传 SkillHub
-    对象或其条目列表。合入的三方条目 ``source="skillhub"`` / ``state="skillhub"``
-    （无 git 分支）,额外带 ``hub``（skillhub 目录下相对路径/子目录名）与 ``skill_id``
-    （``name@path_hash``）,``use_count`` 有则带否则 0。
+    供投影表 backfill / 调试扫盘；dashboard 列表热路径请走投影表
+    (:func:`skills_catalog` / :func:`skills_catalog_page`)。
     """
-    from xskill.skill.frontmatter import parse as fm_parse
-    skill_dir = Path(skill_dir)
-    out: list[dict] = []
-    if skill_dir.is_dir():
-        skill_dirs = [
-            path for path in sorted(skill_dir.iterdir())
-            if path.is_dir() and not path.name.startswith(".")
-        ]
-        snapshot_rows = _rows_from_manifest_snapshot(skill_dir, skill_dirs)
-        if snapshot_rows is not None:
-            out = snapshot_rows
-        else:
-            for d in skill_dirs:
-                branches = _branches(d)
-                if "staging" in branches:
-                    state = "staging"
-                elif "main" in branches:
-                    state = "main"
-                elif "baby" in branches:
-                    state = "baby"
-                else:
-                    state = "unknown"
-                desc, version = "", 0
-                smd = d / "SKILL.md"
-                if smd.is_file():
-                    try:
-                        fm, _ = fm_parse(smd.read_text(encoding="utf-8"))
-                        desc = (fm.get("description") or "").strip().replace("\n", " ")
-                        meta = fm.get("metadata", {}) or {}
-                        version = meta.get("version", 0)
-                    except Exception:  # pylint: disable=broad-exception-caught
-                        logger.warning("failed to read skill metadata: %s",
-                                       smd, exc_info=True)
-                n_cand = 0
-                cand = d / ".candidates.yml"
-                if cand.is_file():
-                    try:
-                        import yaml
-                        data = yaml.safe_load(cand.read_text(encoding="utf-8")) or {}
-                        n_cand = len(data.get("candidates", []) or [])
-                    except Exception:  # pylint: disable=broad-exception-caught
-                        logger.warning("failed to read candidate buffer: %s",
-                                       cand, exc_info=True)
-                out.append({
-                    "name": d.name, "state": state, "source": "native",
-                    "description": desc[:300], "version": version,
-                    "candidates": n_cand,
-                })
-    # main/staging（已正式产出）排前,其次 baby,再按名字
-    # （禁 lambda：装饰-排序-还原；下标项保证元组比较永不落到不可比的 dict 上）
-    order = {"main": 0, "staging": 0, "baby": 1, "unknown": 2}
-    out = [row for _rank, _name, _index, row in sorted(
-        (order.get(row["state"], 3), row["name"], index, row)
-        for index, row in enumerate(out))]
-    # 三方（skillhub）技能追加在自产之后：独立目录、无 git 分支 → state="skillhub"。
-    hub_rows: list[dict] = []
-    for e in _skillhub_entries(skillhub):
-        desc = str(e.get("description") or "").strip().replace("\n", " ")
-        hub_rows.append({
-            "name": e.get("display_name") or e.get("name") or "",
-            "state": "skillhub", "source": "skillhub",
-            "hub": e.get("source_path") or "",
-            "skill_id": e.get("skill_id") or e.get("name") or "",
-            "description": desc[:300], "version": 0,
-            "candidates": 0, "use_count": e.get("use_count", 0) or 0,
-        })
-    hub_rows.sort(key=operator.itemgetter("hub", "name"))
-    out.extend(hub_rows)
-    return out
+    from xskill.skill.catalog_store import catalog_api_row, scan_skills_catalog
+    return [
+        catalog_api_row(row)
+        for row in scan_skills_catalog(skill_dir, skillhub=skillhub)
+    ]
 
 
 def _rows_from_manifest_snapshot(
@@ -526,42 +454,31 @@ def _skills_catalog_bundle(skill_dir: Path, skillhub) -> "_CatalogBundle":
 
 
 def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
-    """返回短时缓存的技能清单全量，每次都给调用方独立的可修改副本。
+    """返回技能清单全量（查 ``skills_catalog`` 投影表）。
 
-    分页读取请走 :func:`skills_catalog_page`——它只深拷贝请求的那一页并 O(1)
-    取聚合计数；本函数保留全量深拷贝语义，服务于需要整份清单的既有调用方。
+    分页请走 :func:`skills_catalog_page`。磁盘仍是真相源；表由写出口 UPSERT，
+    冷启动对该 root 做一次性 backfill。返回独立可修改副本。
     """
-    return copy.deepcopy(_skills_catalog_bundle(skill_dir, skillhub).rows)
+    from xskill.skill.catalog_store import list_skills_catalog
+    return list_skills_catalog(skill_dir, skillhub=skillhub)
 
 
 def skills_catalog_page(skill_dir: Path, skillhub=None, *,
                         limit: int = 0, offset: int = 0,
                         name: str = "") -> dict:
-    """分页读取技能清单：``total`` / ``by_state`` 从缓存 bundle O(1) 取，只深拷贝
-    请求的那一页（审计 L9——避免每请求深拷贝全部 N 条并重算计数）。
+    """分页读取技能清单（查投影表，不扫盘）。
 
-    - ``name`` 非空：定向查该名字的条目（可能多于一条，语义同旧实现的全量筛选），
-      只遍历不深拷贝全部 N。
-    - ``limit`` > 0：返回 ``rows[offset:offset+limit]`` 这一页。
-    - 否则：返回 ``rows[offset:]``（``limit=0`` 向后兼容旧行为）。
+    - ``name`` 非空：精确匹配该名字。
+    - ``limit`` > 0：返回 ``[offset:offset+limit]``。
+    - 否则：返回 ``[offset:]``（``limit=0`` 向后兼容）。
 
-    响应形状与旧 ``/skills`` 端点严格一致：
-    ``{total, by_state, offset, limit, skills}``；``skills`` 为当前页的独立可修改副本。
+    响应形状：``{total, by_state, offset, limit, skills}``。
     """
-    bundle = _skills_catalog_bundle(skill_dir, skillhub)
-    if name:
-        page = [entry for entry in bundle.rows if entry["name"] == name]
-    elif limit > 0:
-        page = bundle.rows[offset:offset + limit]
-    else:
-        page = bundle.rows[offset:]
-    return {
-        "total": bundle.total,
-        "by_state": dict(bundle.by_state),
-        "offset": offset,
-        "limit": limit,
-        "skills": copy.deepcopy(page),
-    }
+    from xskill.skill.catalog_store import page_skills_catalog
+    return page_skills_catalog(
+        skill_dir, skillhub=skillhub,
+        limit=limit, offset=offset, name=name,
+    )
 
 
 class DashboardMetrics:

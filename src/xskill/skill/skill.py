@@ -570,6 +570,8 @@ def delete_skill(skill_dir: Path, name: str) -> bool:
     committed = commit_changes(str(skill_dir), f"delete skill: {name}")
     if committed:
         logger.info(f"deleted: {name}")
+        from xskill.skill.catalog_store import delete_native_skill
+        delete_native_skill(name)
     return committed
 
 

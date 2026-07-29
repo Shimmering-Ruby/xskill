@@ -117,6 +117,9 @@ class SkillRepo:
         if idx.is_file():
             idx.unlink()
         logger.info("wipe_all_skills: removed %d skill(s) under %s", n, self.root)
+        if n:
+            from xskill.skill.catalog_store import catalog_root_key, delete_all_native
+            delete_all_native(root_key=catalog_root_key(self.root))
         return n
 
     def __repr__(self) -> str:

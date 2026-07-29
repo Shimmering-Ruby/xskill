@@ -605,8 +605,8 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
     def admin_skills(_=Depends(require_admin)):
         """技能生命周期表：状态徽章 + 近 30 日使用数。
 
-        状态取 ``skills_catalog`` 的短时缓存清单（其 ``state`` 已由同一次扫描读出
-        staging/main/baby 分支），不再逐个 skill 现读一次 git ref——十万级技能库
+        状态取 ``skills_catalog`` 投影表（其 ``state`` 已由 backfill/写出口写出
+        staging/main/baby），不再逐个 skill 现读一次 git ref——十万级技能库
         下那是每请求十万次文件读。清单口径比 SkillRepo 宽（它列所有非隐藏目录），
         故这里补上 SkillRepo 的两条筛选：``references`` 与无 SKILL.md 的目录不是
         skill，保持响应与旧实现逐条一致。

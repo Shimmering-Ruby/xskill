@@ -129,6 +129,8 @@ def _atomic_save_candidates_unlocked(skill_dir: Path, data: dict) -> None:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+    from xskill.skill.catalog_store import upsert_native_skill
+    upsert_native_skill(skill_dir)
 
 
 def save_candidates(skill_dir: Path, data: dict) -> None:

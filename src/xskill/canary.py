@@ -284,6 +284,8 @@ def merge_staging_to_main(skill_dir: Path) -> bool:
     if canary_copy.is_dir():
         shutil.rmtree(canary_copy)
     logger.info(f"{skill_dir.name}: staging merged to main and deleted")
+    from xskill.skill.catalog_store import upsert_native_skill
+    upsert_native_skill(skill_dir)
     return True
 
 
@@ -331,6 +333,8 @@ def discard_staging(skill_dir: Path) -> bool:
     if canary_copy.is_dir():
         shutil.rmtree(canary_copy)
     logger.info(f"{skill_dir.name}: staging discarded")
+    from xskill.skill.catalog_store import upsert_native_skill
+    upsert_native_skill(skill_dir)
     return True
 
 

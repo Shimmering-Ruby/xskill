@@ -1807,6 +1807,8 @@ def absorb_user_edit_to_main(skill_name: str, message: str) -> str:
             shutil.rmtree(canary_md, ignore_errors=True)
         result += " (deleted in-flight staging)"
 
+    from xskill.skill.catalog_store import upsert_native_skill
+    upsert_native_skill(target)
     return result
 
 
@@ -1860,6 +1862,8 @@ def rename_skill(old_name: str, new_name: str) -> str:
     run_git(["add", "-A"], cwd=str(new_path))
     run_git(["commit", "-m", f"rename: {old_slug} → {new_slug}"], cwd=str(new_path))
     logger.info(f"renamed baby skill: {old_slug} → {new_slug}")
+    from xskill.skill.catalog_store import rename_native_skill
+    rename_native_skill(old_slug, new_path)
     return f"renamed: {old_slug} → {new_slug}"
 
 
