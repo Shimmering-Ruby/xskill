@@ -1566,13 +1566,22 @@ def graduate_baby_to_main(target: Path, slug: str, message: str) -> bool:
     baby turns only expose ``commit_baby`` to the model.
     """
     from xskill.skill.frontmatter import FrontmatterError
-    from xskill.skill.git import commit_baby_to_main_branch
+    from xskill.skill.git import (
+        commit_baby_to_main_branch,
+        skill_md_still_baby_stub,
+    )
 
     skill_md = target / "SKILL.md"
     try:
         fm_parse_strict(skill_md.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, FrontmatterError) as error:
         logger.warning("baby graduation frontmatter invalid for %s: %s", slug, error)
+        return False
+    if skill_md_still_baby_stub(target):
+        logger.warning(
+            "baby graduation refused: %s SKILL.md still has init stub placeholder",
+            slug,
+        )
         return False
     _run_description_optimization(target, slug)
     return commit_baby_to_main_branch(str(target), message)
@@ -1672,6 +1681,13 @@ def commit_baby_to_main(skill_name: str, message: str) -> str:
     msg = (message or "").strip()
     if not msg:
         return "error: commit message 必填"
+    from xskill.skill.git import skill_md_still_baby_stub
+
+    if skill_md_still_baby_stub(target):
+        return (
+            "error: SKILL.md 仍是 baby stub（含 init placeholder），"
+            "禁止 graduate；请先 write_file 写完整正文再调用"
+        )
     ok = graduate_baby_to_main(target, slug, msg)
     if not ok:
         return "error: commit_baby_to_main 失败（不在 baby 分支？看 daemon 日志）"

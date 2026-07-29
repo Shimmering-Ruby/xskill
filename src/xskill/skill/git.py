@@ -1744,6 +1744,26 @@ _DISPATCH: dict[str, Callable[[list[str], str], tuple[int, str, str]]] = {
 # 高层 API：直接用 dulwich（不绕回 run_git）
 # ═══════════════════════════════════════════════════════════════════
 
+# init stub 正文标记：毕业前必须消失，否则拒绝 baby→main。
+BABY_STUB_BODY_MARKER = (
+    "(placeholder — SkillEditAgent 在 candidates 攒满阈值后会用真实 atom 内容填充正文)"
+)
+
+
+def skill_md_still_baby_stub(skill_dir: str | Path) -> bool:
+    """SKILL.md 是否仍含 init placeholder。
+
+    baby 分批 checkpoint 与最终 graduate 都要求正文不再含该标记；
+    残留即视为未完成写作，拒绝升 main（#154）。
+    """
+    skill_md = Path(skill_dir) / "SKILL.md"
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return BABY_STUB_BODY_MARKER in text
+
+
 def init_skill_repo_on_baby(skill_dir: str, name: str, description: str) -> None:
     """v2: 初始化 skill 仓库到 baby 分支，附带 stub SKILL.md + .gitignore。
 
@@ -1782,7 +1802,7 @@ def init_skill_repo_on_baby(skill_dir: str, name: str, description: str) -> None
                 f"\n"
                 f"# {name}\n"
                 f"\n"
-                f"(placeholder — SkillEditAgent 在 candidates 攒满阈值后会用真实 atom 内容填充正文)\n"
+                f"{BABY_STUB_BODY_MARKER}\n"
             )
             (p / "SKILL.md").write_text(stub_md, encoding="utf-8")
 

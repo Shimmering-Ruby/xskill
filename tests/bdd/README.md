@@ -74,3 +74,18 @@ mutmut run --max-children 8 \
 - `@state_machine`：快速、确定性的状态机测试。
 - `@recovery`：429、上下文超长、进程重启等恢复路径。
 - `@observability`：面向操作者的 SkillEdit trace。
+
+## stub 毕业闸门
+
+`baby_stub_graduate_guard.feature` 守护 Issue #154：
+
+- 仍含 init placeholder 时，`commit_baby_to_main` 必须报错且留在 baby；
+- candidates 已空但 stub 仍在时，框架先重写正文再晋升 main。
+
+## actionable 调度闸门
+
+`skill_edit_schedule_actionable.feature` 守护 Issue #156 / #157 / #158：
+
+- 不会开 LLM 的 git skill（main 无 ux、瘦 baby）不得 `submit` 进 edit 池；
+- 单 skill 的 actionable 检查失败只 skip，不得中断整轮扫描；
+- 无 `.git` 目录不崩扫描；排序 empty-last，避免空目录饿死 READY baby。

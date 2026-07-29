@@ -34,6 +34,51 @@ def test_extract_usage_missing_usage():
     assert extract_usage(None) == Usage()
 
 
+def _agno_response(**metrics_kwargs):
+    """构造真实 agno ModelResponse —— agent LLM 记账点的实际传入形态。"""
+    from agno.models.metrics import MessageMetrics
+    from agno.models.response import ModelResponse
+
+    resp = ModelResponse()
+    metrics = MessageMetrics()
+    for key, value in metrics_kwargs.items():
+        setattr(metrics, key, value)
+    resp.response_usage = metrics
+    return resp
+
+
+def test_extract_usage_agno_model_response():
+    # 回归:agno 用 response_usage(MessageMetrics)而非 OpenAI 的 usage,
+    # 字段名 input/output_tokens;不识别的历史 bug 会把 LLM 调用整段记 0。
+    resp = _agno_response(input_tokens=1523, output_tokens=87, total_tokens=1610)
+    usage = extract_usage(resp)
+    assert (usage.prompt, usage.completion, usage.total) == (1523, 87, 1610)
+    # cache_miss 补未命中余量,保证 cost_usd 分档计费 hit+miss=prompt
+    assert (usage.cache_hit, usage.cache_miss) == (0, 1523)
+
+
+def test_extract_usage_agno_total_derived():
+    resp = _agno_response(input_tokens=100, output_tokens=5, total_tokens=0)
+    assert extract_usage(resp).total == 105
+
+
+def test_extract_usage_agno_cache_read_split():
+    resp = _agno_response(input_tokens=1000, output_tokens=10,
+                          total_tokens=1010, cache_read_tokens=800)
+    usage = extract_usage(resp)
+    assert (usage.cache_hit, usage.cache_miss) == (800, 200)
+
+
+def test_record_llm_with_agno_response_counts_tokens():
+    ledger = UsageLedger(_table())
+    ledger.record_llm("skill_edit", "deepseek-v4-flash",
+                      _agno_response(input_tokens=2000, output_tokens=100,
+                                     total_tokens=2100))
+    bucket = ledger.snapshot()["by_step"]["skill_edit"]
+    assert bucket["calls"] == 1 and bucket["tokens"] == 2100
+    assert bucket["cost_usd"] > 0
+
+
 # ── PriceTable 解析优先级 ────────────────────────────────────────
 def _table():
     vendored = {"deepseek-v4-flash": {"input_per_1m": 0.14, "output_per_1m": 0.28,

@@ -76,7 +76,7 @@ class _BabyStubAgno:
         if type(self).writes_skill_md_with is not None and target_path:
             _call_tool(self.tools["write_file"], target_path, type(self).writes_skill_md_with)
         # 调 commit_baby；buffer 清空后由框架 graduate。
-        if type(self).calls_commit and skill:
+        if type(self).calls_commit and skill and "commit_baby" in self.tools:
             _call_tool(self.tools["commit_baby"], skill, "stub baby checkpoint")
         class _R: pass
         r = _R(); r.content = "done"
@@ -95,7 +95,7 @@ class _StagingStubAgno(_BabyStubAgno):
         target_path = m.group(1) if m else None
         if type(self).writes_skill_md_with is not None and target_path:
             _call_tool(self.tools["write_file"], target_path, type(self).writes_skill_md_with)
-        if type(self).calls_commit and skill:
+        if type(self).calls_commit and skill and "commit_to_staging" in self.tools:
             _call_tool(self.tools["commit_to_staging"], skill, "stub staging commit")
         class _R: pass
         r = _R(); r.content = "done"
@@ -199,6 +199,51 @@ class TestThresholdGate:
         # candidates 已清空 (v2.1: clear 取代 promoted 标记)
         data2 = C.load_candidates(skill_dir)
         assert data2["candidates"] == []
+
+    def test_stub_body_blocks_tool_graduate(self, tmp_path):
+        """init stub 未改写时 commit_baby_to_main 必须报错且留在 baby。"""
+        from xskill.agents import agent_tools
+        from xskill.skill.git import current_branch
+
+        skill_dir = _make_baby_skill(tmp_path / "skill", "still-stub")
+        msg = agent_tools.commit_baby_to_main.entrypoint(
+            "still-stub", "v1: should fail",
+        )
+        assert msg.startswith("error:")
+        assert "stub" in msg.lower() or "placeholder" in msg.lower()
+        assert current_branch(str(skill_dir)) == "baby"
+
+    def test_empty_buffer_with_stub_retriggers_rewrite_then_graduates(
+        self, tmp_path,
+    ):
+        """candidates 已空但仍是 stub → 框架重触发写正文后再 graduate。"""
+        from xskill.skill.git import current_branch, run_git
+
+        skill_dir = _make_baby_skill(tmp_path / "skill", "rewrite-me")
+        # 造一次非正文 checkpoint，让 partial_baby=True 且 buffer 可为空仍进 drain
+        (skill_dir / "scripts" / "note.txt").write_text("keep stub", encoding="utf-8")
+        assert run_git(["add", "scripts/note.txt"], cwd=str(skill_dir))[0] == 0
+        assert run_git(
+            ["commit", "-m", "checkpoint without rewriting stub"],
+            cwd=str(skill_dir),
+        )[0] == 0
+        C.save_candidates(skill_dir, {"candidates": []})
+
+        _BabyStubAgno.writes_skill_md_with = (
+            "---\nname: rewrite-me\ndescription: real\nmetadata:\n"
+            "  version: 1\n---\n# real body\n"
+        )
+        agent = SkillEditAgent(
+            skill_dir=skill_dir, store=None,
+            agno_agent_factory=_baby_factory,
+            llm_cfg={}, traj_root=tmp_path,
+            logs_dir=tmp_path / "instance-logs",
+        )
+        assert agent.maybe_run() is True
+        assert current_branch(str(skill_dir)) == "main"
+        body = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        assert "placeholder" not in body
+        assert "# real body" in body
 
 
 # ────────────────────────────────────────────────────────────────────
