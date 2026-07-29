@@ -58,6 +58,9 @@ from xskill.pipeline.trajectory import validate_trajectory_source
 
 logger = logging.getLogger("xskill.watcher")
 
+# SkillEdit N=1 连续失败达到该次数后抬高调度错误分，优先跑其他 skill。
+SKILL_EDIT_N1_FAIL_DEPRIORITIZE = 3
+
 # v2 (AtomTask 流水线) 的 action → status 映射
 # splitting → split_done → indexed → clustering → done
 _ACTION_STATUS = {
@@ -193,6 +196,10 @@ class DirectoryWatcher:
         # 继续，成功 checkpoint 后由 agent 自动恢复配置默认值。仅驻留内存，
         # 进程重启后自然回到配置值。
         self._skill_edit_retry_batch_sizes: dict[Path, int] = {}
+        # N=1 连续失败计数；达 SKILL_EDIT_N1_FAIL_DEPRIORITIZE 次后抬高
+        # error_count，调度时排到后面（不永久 error，不指数退避）。
+        self._skill_edit_n1_fail_counts: dict[Path, int] = {}
+        self._skill_edit_error_counts: dict[Path, int] = {}
         self._last_poll: float | None = None
         self._started_at = time.time()
         # 单机 canary 轮转节流：上次真跑 _reconcile_skill_sides 的时间戳。
@@ -510,8 +517,12 @@ class DirectoryWatcher:
         # ``_harvest``（每轮 scan 开头）收割 + 做 _stats 自增/即时 install。
         # 同一个 skill 同时只允许一个 skill_edit future 在飞，避免同一 skill
         # 被并发跑两个 maybe_run（第二个进来时前一个多半仍在改 candidates/git）。
+        from xskill.skill import candidates as candidate_buffer
+        from xskill.skill.git import current_branch, run_git
+        from xskill.canary import load_ux_scores
+
         skill_dirs = [
-            d for d in sorted(self.skill_dir.iterdir())
+            d for d in self.skill_dir.iterdir()
             if d.is_dir() and not d.name.startswith(".")
         ]
         if not skill_dirs:
@@ -519,6 +530,113 @@ class DirectoryWatcher:
 
         jam_threshold = CanaryConfig.from_dict(
             self.config.get("canary", {})).jam_threshold
+        edit_threshold = (
+            int(threshold)
+            if threshold is not None
+            else candidate_buffer.ATOM_PROMOTION_THRESHOLD
+        )
+
+        def _pending_atom_count(skill_path: Path) -> int:
+            try:
+                data = candidate_buffer.load_candidates(skill_path)
+            except Exception:
+                logger.exception(
+                    "failed to load candidates for skill_edit sort: %s",
+                    skill_path.name,
+                )
+                raise
+            return len(data.get("candidates") or [])
+
+        def _skill_edit_actionable(skill_path: Path) -> bool:
+            """与 maybe_run 守门对齐：不会开 LLM 的 skill 不进 edit 池。
+
+            单目录异常只排除该 skill，禁止拖垮整轮 edit submit。
+            无 ``.git`` 的目录仍返回 True：交由 worker 侧 ``_run_one`` /
+            ``maybe_run`` 吞错（与过滤前提交语义一致），避免 listcomp 里
+            ``current_branch`` 抛穿扫描；也不把「脏目录」误当成可过滤的
+            伪 skill 状态机。
+            """
+            if not (skill_path / ".git").exists():
+                logger.warning(
+                    "SkillEdit schedule: %s has no .git; submit and let "
+                    "worker isolate failures",
+                    skill_path.name,
+                )
+                return True
+            try:
+                data = candidate_buffer.load_candidates(skill_path)
+                candidates = list(data.get("candidates") or [])
+                total_ws = 0
+                for item in candidates:
+                    try:
+                        total_ws += int(item.get("weightscore") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                staging_exists = run_git(
+                    ["rev-parse", "--verify", "staging"],
+                    cwd=str(skill_path),
+                )[0] == 0
+                jam = staging_exists and total_ws >= jam_threshold
+                if staging_exists and not jam:
+                    return False
+                if jam:
+                    return True
+                ready = bool(
+                    candidate_buffer.ready_for_promotion_v2(
+                        data, threshold=edit_threshold,
+                    )
+                )
+                baby_checkpoint = run_git(
+                    ["rev-parse", "baby~1"],
+                    cwd=str(skill_path),
+                )[0] == 0
+                branch = current_branch(str(skill_path)) or ""
+                if branch == "baby":
+                    return baby_checkpoint or ready
+                if branch == "main":
+                    if not ready:
+                        return False
+                    try:
+                        scores = load_ux_scores(skill_path)
+                    except Exception:
+                        logger.exception(
+                            "load_ux_scores failed during skill_edit "
+                            "filter: %s",
+                            skill_path.name,
+                        )
+                        return False
+                    return any(
+                        score.get("side") == "main" for score in scores
+                    )
+                if "_turn" in branch:
+                    return baby_checkpoint or ready
+                return False
+            except Exception:
+                logger.exception(
+                    "skill_edit actionable check failed: %s",
+                    skill_path.name,
+                )
+                return False
+
+        skill_dirs = [
+            path for path in skill_dirs if _skill_edit_actionable(path)
+        ]
+        if not skill_dirs:
+            return
+
+        # 错误少优先；有候选优先于空 buffer；再 lean-first。
+        # 无 .git 等「仍提交」的空目录靠 empty-last 避免抢窗。
+        def _skill_edit_sort_key(path: Path):
+            pending = _pending_atom_count(path)
+            return (
+                self._skill_edit_error_counts.get(path, 0),
+                0 if pending > 0 else 1,
+                pending,
+                path.name,
+            )
+
+        skill_dirs.sort(key=_skill_edit_sort_key)
+
         base_llm_cfg = self.config.get("llm", {}) or {}
         skill_llm_override = self.config.get("llm_skill", {}) or {}
         skill_llm_cfg = {
@@ -621,10 +739,30 @@ class DirectoryWatcher:
         """``_harvest`` 收割 stage="skill_edit" future 用：_stats 自增 + 即时
         install。回主线程串行做（避免对无锁的 self._stats 并发自增）。"""
         d, ok, next_batch_size = result
-        if ok or next_batch_size == self.skill_edit_batch_size:
+        if ok:
+            self._skill_edit_retry_batch_sizes.pop(d, None)
+            self._skill_edit_n1_fail_counts.pop(d, None)
+            self._skill_edit_error_counts.pop(d, None)
+        elif next_batch_size == self.skill_edit_batch_size:
             self._skill_edit_retry_batch_sizes.pop(d, None)
         else:
             self._skill_edit_retry_batch_sizes[d] = next_batch_size
+            if next_batch_size == 1:
+                fails = self._skill_edit_n1_fail_counts.get(d, 0) + 1
+                if fails >= SKILL_EDIT_N1_FAIL_DEPRIORITIZE:
+                    self._skill_edit_error_counts[d] = (
+                        self._skill_edit_error_counts.get(d, 0) + 1
+                    )
+                    self._skill_edit_n1_fail_counts[d] = 0
+                    logger.warning(
+                        "SkillEdit N=1 failed %d times; deprioritize %s "
+                        "(error_count=%d, atoms kept)",
+                        SKILL_EDIT_N1_FAIL_DEPRIORITIZE,
+                        d.name,
+                        self._skill_edit_error_counts[d],
+                    )
+                else:
+                    self._skill_edit_n1_fail_counts[d] = fails
         if not ok:
             return
         self._stats["skills_edited"] += 1

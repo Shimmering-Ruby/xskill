@@ -631,6 +631,33 @@ class SkillEditAgent:
     def _graduate_completed_baby(self) -> bool:
         """Promote an empty, checkpointed baby to main under framework control."""
         from xskill.agents import agent_tools, agent_trace
+        from xskill.skill.git import skill_md_still_baby_stub
+
+        if skill_md_still_baby_stub(self.skill_dir):
+            logger.warning(
+                "SkillEdit refuse graduate (stub still present), re-trigger rewrite: %s",
+                self.skill_dir.name,
+            )
+            agent_trace.append_to(
+                self._trace_path(),
+                (
+                    f"{time.strftime('%H:%M:%S')} INFO  "
+                    "Candidate buffer empty but SKILL.md still stub; "
+                    "re-trigger rewrite before graduate.\n"
+                ),
+            )
+            if not self._run_stub_rewrite_turn():
+                logger.warning(
+                    "SkillEdit stub rewrite failed; stay on baby: %s",
+                    self.skill_dir.name,
+                )
+                return False
+            if skill_md_still_baby_stub(self.skill_dir):
+                logger.warning(
+                    "SkillEdit stub rewrite left placeholder; stay on baby: %s",
+                    self.skill_dir.name,
+                )
+                return False
 
         ok = agent_tools.graduate_baby_to_main(
             self.skill_dir,
@@ -652,6 +679,54 @@ class SkillEditAgent:
                 self.skill_dir.name,
             )
         return ok
+
+    def _run_stub_rewrite_turn(self) -> bool:
+        """Buffer empty but body still stub → one forced write_file turn, no commit tool."""
+        from xskill.agents import agent_tools, agent_trace
+
+        skill_md = self.skill_dir / "SKILL.md"
+        scenario_block = "\n".join(
+            [
+                f"skill_name: {self.skill_dir.name}（**baby 分支 · stub 未清除，强制重写**）",
+                "SKILL.md 仍是 init placeholder，框架拒绝 graduate。",
+                "必须用 write_file 覆盖 SKILL.md 为正式正文（去掉 placeholder 行）。",
+                "本轮没有 commit 工具；写完后由框架校验并 graduate。",
+                *self._skill_tree_context_lines(),
+                f"目标 SKILL.md 路径: {skill_md}",
+            ]
+        )
+        sysprompt = build_system_prompt(
+            scenario_block=scenario_block,
+            branch_now="baby",
+        )
+        tools = [
+            agent_tools.atom_task_read,
+            agent_tools.read_traj,
+            agent_tools.skill_read,
+            agent_tools.read_file,
+            agent_tools.list_files,
+            agent_tools.grep_files,
+            agent_tools.write_file,
+        ]
+        agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
+        agent_trace.append_to(
+            self._trace_path(),
+            (
+                f"{time.strftime('%H:%M:%S')} INFO  "
+                "Stub rewrite turn start (no commit tool).\n"
+            ),
+        )
+        try:
+            self._trace_run(agent, scenario_block)
+        except Exception:
+            logger.exception(
+                "SkillEdit stub rewrite turn raised: %s",
+                self.skill_dir.name,
+            )
+            return False
+        from xskill.skill.git import skill_md_still_baby_stub
+
+        return not skill_md_still_baby_stub(self.skill_dir)
 
     def _run_baby_until_empty(self) -> bool:
         """Drain baby candidates via durable per-batch commits, then graduate."""

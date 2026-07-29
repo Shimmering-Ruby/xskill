@@ -28,5 +28,22 @@ Feature: 操作者可以从一份 SkillEdit trace 解释整个冷启动过程
     Then 日志中 spill 事件应当出现在 compact 事件之前
     And 日志应当显示 compact 前后的 token 数量
     And 日志应当显示模型调用失败的可读原因
+    And exhausted 日志行应当包含原始错误文本
     And 日志应当显示 "Retry batch reduced: 5 -> 2"
     And 下一次 TURN START 应当显示 N=2
+
+  @observability @recovery @state_machine
+  Scenario: 无关键词的 5xx ModelProviderError 仍按 status_code 重试
+    Given 模型抛出 status_code=500 且 message 为 "server error" 的 ModelProviderError
+    And 客户端 max_retries 为 3
+    When 调用生产 retry wrapper
+    Then invoke 应被尝试 3 次
+    And exhausted 日志行应当包含 "server error"
+
+  @observability @recovery @state_machine
+  Scenario: 中文 429 ModelProviderError 仍按 status_code 重试
+    Given 模型抛出 status_code=429 且 message 为 "当前并发请求过多，请稍后重试" 的 ModelProviderError
+    And 客户端 max_retries 为 3
+    When 调用生产 retry wrapper
+    Then invoke 应被尝试 3 次
+    And exhausted 日志行应当包含 "当前并发请求过多"

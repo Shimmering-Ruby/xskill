@@ -254,6 +254,17 @@ def test_commit_baby_to_main_runs_optimization(tmp_path, monkeypatch):
     sd = skill_root / "log-analyzer"
     init_skill_repo_on_baby(str(sd), name="log-analyzer",
                             description="does stuff with files")
+    (sd / "SKILL.md").write_text(
+        "---\n"
+        "name: log-analyzer\n"
+        "description: does stuff with files\n"
+        "metadata:\n"
+        "  version: 1\n"
+        "---\n\n"
+        "# log-analyzer\n\n"
+        "Analyze and parse log files and error traces.\n",
+        encoding="utf-8",
+    )
 
     agent_tools.init_atom_task_tool_context(
         skill_dir=skill_root,
@@ -294,6 +305,17 @@ def test_commit_optimization_failure_does_not_block_commit(tmp_path, monkeypatch
     skill_root.mkdir()
     sd = skill_root / "boom"
     init_skill_repo_on_baby(str(sd), name="boom", description="orig desc")
+    (sd / "SKILL.md").write_text(
+        "---\n"
+        "name: boom\n"
+        "description: orig desc\n"
+        "metadata:\n"
+        "  version: 1\n"
+        "---\n\n"
+        "# boom\n\n"
+        "Real body so graduation is allowed.\n",
+        encoding="utf-8",
+    )
 
     agent_tools.init_atom_task_tool_context(
         skill_dir=skill_root,

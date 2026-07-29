@@ -10,25 +10,34 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pytest_bdd import given, scenario, then, when
+from agno.exceptions import ModelProviderError
+from pytest_bdd import given, parsers, scenario, then, when
 
 from xskill.agents import agent_tools, agent_trace
 from xskill.agents.agno_factory import _wrap_with_retry, _wrap_with_trace
 from xskill.agents.context_budget import ContextManager
 from xskill.agents.skill_edit_agent import SkillEditAgent
 from xskill.pipeline.atom import AtomTaskStore
+from xskill.pipeline.registry import register_dir
+from xskill.pipeline.runner import DirectoryWatcher, SKILL_EDIT_N1_FAIL_DEPRIORITIZE
 from xskill.skill import candidates as candidate_buffer
 from xskill.skill.git import (
+    BABY_STUB_BODY_MARKER,
     commit_baby_checkpoint,
     current_branch,
     init_skill_repo_on_baby,
+    run_git,
 )
+from tests.pool_helpers import pool_config
+from tests.test_atom_task_store import _FakeEmbed
+from tests.test_task_agent import _AutoSplitLLM
 
 
 pytestmark = [
@@ -85,6 +94,86 @@ def test_trace_shows_spill_before_compact_and_retry_reduction() -> None:
     """Production context events preserve their causal order in the trace."""
 
 
+@scenario(
+    "features/skill_edit/skill_edit_trace.feature",
+    "无关键词的 5xx ModelProviderError 仍按 status_code 重试",
+)
+def test_status_code_500_retries_without_message_keywords() -> None:
+    """ModelProviderError status_code drives retry, not str(exc) keywords."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_trace.feature",
+    "中文 429 ModelProviderError 仍按 status_code 重试",
+)
+def test_chinese_429_retries_via_status_code() -> None:
+    """Chinese rate-limit copy without '429' still retries via status_code."""
+
+
+@scenario(
+    "features/skill_edit/baby_cold_start_recovery.feature",
+    "错误分相同时原子更少的 skill 优先调度",
+)
+def test_fewer_atoms_are_scheduled_first() -> None:
+    """Watcher submit order prefers fewer pending atoms when errors tie."""
+
+
+@scenario(
+    "features/skill_edit/baby_cold_start_recovery.feature",
+    "N=1 连败 3 次后降优先级并换下一个 skill",
+)
+def test_n1_failures_deprioritize_and_switch_skill() -> None:
+    """After three N=1 failures the hard skill yields the edit slot."""
+
+
+@scenario(
+    "features/skill_edit/baby_stub_graduate_guard.feature",
+    "直接调用 commit_baby_to_main 时 stub 未清除则报错",
+)
+def test_commit_baby_to_main_rejects_init_stub() -> None:
+    """Empty-graduate via the legacy tool must fail while SKILL.md is stub."""
+
+
+@scenario(
+    "features/skill_edit/baby_stub_graduate_guard.feature",
+    "candidates 已空但 stub 仍在时框架重写后再晋升",
+)
+def test_empty_buffer_stub_retriggers_rewrite_before_main() -> None:
+    """Framework refuses graduate, forces rewrite, then promotes."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "main 无 ux_score 不进池，READY baby 进池",
+)
+def test_main_without_ux_is_not_submitted() -> None:
+    """Non-actionable main must not occupy the edit submit window."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "未达阈值且无 checkpoint 的 baby 不进池",
+)
+def test_thin_baby_without_checkpoint_is_not_submitted() -> None:
+    """Below-threshold baby without checkpoint is filtered before submit."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "无 git 目录不中断整轮且不饿死 READY baby",
+)
+def test_nongit_directory_does_not_abort_schedule_round() -> None:
+    """Missing .git must not crash the scan or starve READY babies."""
+
+
+@scenario(
+    "features/skill_edit/skill_edit_schedule_actionable.feature",
+    "actionable 检查抛错只排除该 skill",
+)
+def test_actionable_check_exception_isolates_one_skill() -> None:
+    """Per-skill filter exceptions must not abort the whole edit scan."""
+
+
 def _tool_name(tool: Any) -> str:
     return getattr(tool, "__name__", None) or getattr(tool, "name", "")
 
@@ -116,6 +205,16 @@ class StateWorld:
     result: bool | None = None
     next_batch_size: int | None = None
     first_five: list[str] = field(default_factory=list)
+    skill_dirs: dict[str, Path] = field(default_factory=dict)
+    watcher: DirectoryWatcher | None = None
+    submitted_skill_names: list[str] = field(default_factory=list)
+    retry_exc: Exception | None = None
+    retry_max_retries: int = 3
+    retry_calls: int = 0
+    retry_trace: str = ""
+    tool_graduate_result: str = ""
+    rewrite_turns: int = 0
+    schedule_error: BaseException | None = None
 
     @property
     def trace_path(self) -> Path:
@@ -236,7 +335,9 @@ def _exercise_context_pressure(world: StateWorld) -> None:
     class _RateLimitedModel:
         @staticmethod
         def invoke(_messages: list[Any], **_kwargs: Any) -> Any:
-            raise RuntimeError("429 rate limit from deterministic backend")
+            raise RuntimeError(
+                "429 rate limit from deterministic backend"
+            )
 
     model = _RateLimitedModel()
     manager = ContextManager(
@@ -308,6 +409,9 @@ class _DeterministicEditAgent:
         rules = "\n".join(
             f"- processed {atom_id}" for atom_id in world.processed_atoms
         )
+        if not atom_ids:
+            rules = "- stub rewrite: formal body without placeholder"
+            world.rewrite_turns += 1
         content = (
             "---\n"
             f"name: {skill.group(1)}\n"
@@ -324,6 +428,8 @@ class _DeterministicEditAgent:
             content,
         )
         assert write_result.startswith("wrote:")
+        if "commit_baby" not in self.tools:
+            return SimpleNamespace(content="done")
         commit_result = _call_tool(
             self.tools["commit_baby"],
             skill.group(1),
@@ -714,6 +820,13 @@ def trace_shows_readable_model_error(state_world: StateWorld) -> None:
     assert "LLM returned 429; retries exhausted (1/1)" in state_world.trace
 
 
+@then("exhausted 日志行应当包含原始错误文本")
+def exhausted_line_includes_raw_error(state_world: StateWorld) -> None:
+    assert "retries exhausted (1/1): 429 rate limit from deterministic backend" in (
+        state_world.trace
+    )
+
+
 @then('日志应当显示 "Retry batch reduced: 5 -> 2"')
 def trace_shows_batch_reduction(state_world: StateWorld) -> None:
     assert "Retry batch reduced: 5 -> 2" in state_world.trace
@@ -722,3 +835,394 @@ def trace_shows_batch_reduction(state_world: StateWorld) -> None:
 @then("下一次 TURN START 应当显示 N=2")
 def next_turn_marker_uses_two(state_world: StateWorld) -> None:
     assert "TURN START | N=2 | processing 2 of 5 pending atoms" in state_world.trace
+
+
+@given(
+    parsers.parse(
+        '模型抛出 status_code={status_code:d} 且 message 为 "{message}" '
+        "的 ModelProviderError"
+    )
+)
+def model_provider_error_pending(
+    state_world: StateWorld,
+    status_code: int,
+    message: str,
+) -> None:
+    state_world.retry_exc = ModelProviderError(message, status_code=status_code)
+
+
+@given(parsers.parse("客户端 max_retries 为 {max_retries:d}"))
+def client_max_retries(state_world: StateWorld, max_retries: int) -> None:
+    state_world.retry_max_retries = max_retries
+
+
+@when("调用生产 retry wrapper")
+def invoke_production_retry_wrapper(
+    state_world: StateWorld,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert state_world.retry_exc is not None
+    monkeypatch.setattr(
+        "xskill.utils.shutdown.SHUTTING_DOWN.wait",
+        lambda *_args, **_kwargs: False,
+    )
+
+    class _AlwaysFails:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def invoke(self, _messages: list[Any], **_kwargs: Any) -> Any:
+            self.calls += 1
+            raise state_world.retry_exc
+
+    model = _AlwaysFails()
+    _wrap_with_retry(
+        model,
+        {
+            "base_url": "http://127.0.0.1:1/v1",
+            "max_retries": state_world.retry_max_retries,
+            "retry_base_delay": 0.001,
+            "retry_max_delay": 0.001,
+        },
+    )
+    sink = state_world.root / "retry-trace.log"
+    with agent_trace.trace_to(sink):
+        with pytest.raises(Exception):
+            model.invoke([])
+    state_world.retry_calls = model.calls
+    state_world.retry_trace = sink.read_text(encoding="utf-8")
+
+
+@then(parsers.parse("invoke 应被尝试 {calls:d} 次"))
+def invoke_attempt_count(state_world: StateWorld, calls: int) -> None:
+    assert state_world.retry_calls == calls
+
+
+@then(parsers.parse('exhausted 日志行应当包含 "{fragment}"'))
+def exhausted_contains_fragment(state_world: StateWorld, fragment: str) -> None:
+    assert "retries exhausted" in state_world.retry_trace
+    assert fragment in state_world.retry_trace
+
+
+def _seed_named_baby(
+    world: StateWorld,
+    *,
+    name: str,
+    count: int,
+    weight: int = 10,
+) -> Path:
+    skill_dir = world.skill_root / name
+    init_skill_repo_on_baby(
+        str(skill_dir),
+        name=name,
+        description="BDD scheduler draft",
+    )
+    data: dict[str, Any] = {"candidates": []}
+    for index in range(1, count + 1):
+        data, _ = candidate_buffer.add_atom_contribution(
+            data,
+            f"{name}-atom-{index:02d}",
+            weight,
+            note=f"knowledge for {name} {index}",
+        )
+    candidate_buffer.save_candidates(skill_dir, data)
+    world.skill_dirs[name] = skill_dir
+    return skill_dir
+
+
+def _blocking_edit_factory(started: threading.Event, release: threading.Event):
+    class _BlockingAgent:
+        def __init__(self, *, instructions: list[str], tools: list[Any]):
+            del instructions, tools
+
+        def run(self, _user_msg: str, **_kwargs: Any) -> Any:
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("scheduler BDD release timed out")
+            raise RuntimeError("scheduler BDD holds the edit worker")
+
+    def factory(*, instructions: list[str], tools: list[Any]) -> Any:
+        return _BlockingAgent(instructions=instructions, tools=tools)
+
+    return factory
+
+
+def _ensure_scheduler_watcher(state_world: StateWorld) -> DirectoryWatcher:
+    if state_world.watcher is not None:
+        return state_world.watcher
+    db_path = state_world.root / "scheduler.db"
+    watch_root = state_world.root / "watch"
+    watch_root.mkdir(exist_ok=True)
+    register_dir(watch_root, db_path=db_path)
+    started = threading.Event()
+    release = threading.Event()
+    watcher = DirectoryWatcher(
+        llm=_AutoSplitLLM(),
+        embed_client=_FakeEmbed(),
+        config={"llm": {"base_url": "x", "model": "y", "api_key": "z"}},
+        skill_dir=state_world.skill_root,
+        poll_interval=0.0,
+        pool_config=pool_config(workers=1, edit_workers=1),
+        db_path=db_path,
+        store=AtomTaskStore(root=watch_root),
+        agno_agent_factory=_blocking_edit_factory(started, release),
+        home_root=state_world.root,
+        logs_dir=state_world.logs_root,
+    )
+    watcher._bdd_started = started  # type: ignore[attr-defined]
+    watcher._bdd_release = release  # type: ignore[attr-defined]
+    state_world.watcher = watcher
+    return watcher
+
+
+@given(
+    parsers.parse(
+        '两个 baby skill "{left}" 有 {left_count:d} 个原子且 '
+        '"{right}" 有 {right_count:d} 个原子'
+    )
+)
+def two_baby_skills(
+    state_world: StateWorld,
+    left: str,
+    left_count: int,
+    right: str,
+    right_count: int,
+) -> None:
+    _seed_named_baby(state_world, name=left, count=left_count)
+    _seed_named_baby(state_world, name=right, count=right_count)
+
+
+@given("两者错误分均为 0")
+def both_error_counts_zero(state_world: StateWorld) -> None:
+    assert state_world.skill_dirs
+    return None
+
+
+@given(parsers.parse('"{name}" 已在 N=1 上连续失败 {fails:d} 次'))
+def skill_has_n1_failures(
+    state_world: StateWorld,
+    name: str,
+    fails: int,
+) -> None:
+    assert fails == SKILL_EDIT_N1_FAIL_DEPRIORITIZE
+    watcher = _ensure_scheduler_watcher(state_world)
+    skill_dir = state_world.skill_dirs[name]
+    for _ in range(fails):
+        watcher._on_skill_edit_done((skill_dir, False, 1))
+    assert watcher._skill_edit_error_counts.get(skill_dir, 0) == 1
+    assert watcher._skill_edit_retry_batch_sizes.get(skill_dir) == 1
+
+
+@given("edit pool 一次只能跑 1 个 skill")
+def edit_pool_is_single_worker(state_world: StateWorld) -> None:
+    _ensure_scheduler_watcher(state_world)
+
+
+@when("watcher 调度 SkillEdit")
+def watcher_schedules_skill_edit(state_world: StateWorld) -> None:
+    watcher = _ensure_scheduler_watcher(state_world)
+    started = watcher._bdd_started  # type: ignore[attr-defined]
+    release = watcher._bdd_release  # type: ignore[attr-defined]
+    started.clear()
+    release.clear()
+    state_world.schedule_error = None
+    state_world.submitted_skill_names = []
+    try:
+        watcher._check_pending_skill_edits()
+    except BaseException as exc:
+        state_world.schedule_error = exc
+        release.set()
+        raise
+    assert started.wait(timeout=5), "edit worker did not start"
+    state_world.submitted_skill_names = [
+        info["skill_dir"].name
+        for info in watcher._futures.values()
+        if info.get("stage") == "skill_edit"
+    ]
+    release.set()
+    watcher._drain_futures(stage="skill_edit", timeout=10)
+
+
+@then(parsers.parse('本轮应先提交 "{name}"'))
+def first_submitted_skill(state_world: StateWorld, name: str) -> None:
+    assert state_world.submitted_skill_names, "no skill_edit futures submitted"
+    assert state_world.submitted_skill_names[0] == name
+
+
+@then(parsers.parse('提交列表应包含 "{name}"'))
+def submitted_list_contains(state_world: StateWorld, name: str) -> None:
+    assert name in state_world.submitted_skill_names, (
+        f"{name} missing from submitted={state_world.submitted_skill_names}"
+    )
+
+
+@then(parsers.parse('提交列表不应包含 "{name}"'))
+def submitted_list_excludes(state_world: StateWorld, name: str) -> None:
+    assert name not in state_world.submitted_skill_names, (
+        f"{name} unexpectedly in submitted={state_world.submitted_skill_names}"
+    )
+
+
+@then("整轮调度不应因 NotGitRepository 失败")
+def schedule_round_did_not_fail(state_world: StateWorld) -> None:
+    assert state_world.schedule_error is None
+
+
+@given(parsers.parse('baby skill "{name}" 已达冷启动阈值且可编辑'))
+def baby_ready_for_edit(state_world: StateWorld, name: str) -> None:
+    _seed_named_baby(state_world, name=name, count=1, weight=10)
+
+
+@given(
+    parsers.parse(
+        'main skill "{name}" 有候选但还没有 main 侧 ux_score'
+    )
+)
+def main_ready_without_ux(state_world: StateWorld, name: str) -> None:
+    skill_dir = _seed_named_baby(state_world, name=name, count=1, weight=10)
+    assert run_git(
+        ["branch", "-m", "baby", "main"],
+        cwd=str(skill_dir),
+    )[0] == 0
+    assert current_branch(str(skill_dir)) == "main"
+    assert not (skill_dir / ".ux_scores.jsonl").exists()
+
+
+@given(
+    parsers.parse(
+        'baby skill "{name}" 仅有不足阈值的候选且无 checkpoint'
+    )
+)
+def thin_baby_below_threshold(state_world: StateWorld, name: str) -> None:
+    skill_dir = _seed_named_baby(state_world, name=name, count=1, weight=1)
+    assert run_git(
+        ["rev-parse", "baby~1"],
+        cwd=str(skill_dir),
+    )[0] != 0
+
+
+@given(parsers.parse('skill 目录 "{name}" 存在但没有 .git'))
+def nongit_skill_directory(state_world: StateWorld, name: str) -> None:
+    skill_dir = state_world.skill_root / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: broken\ndescription: not a git repo\n---\n\n# broken\n",
+        encoding="utf-8",
+    )
+    assert not (skill_dir / ".git").exists()
+    state_world.skill_dirs[name] = skill_dir
+
+
+@given(
+    parsers.parse('baby skill "{name}" 在 actionable 检查时会抛错'),
+)
+def baby_raises_during_actionable_check(
+    state_world: StateWorld,
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_dir = _seed_named_baby(state_world, name=name, count=1, weight=10)
+    original = candidate_buffer.load_candidates
+
+    def _load_or_boom(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if Path(path).resolve() == skill_dir.resolve():
+            raise RuntimeError("bdd actionable boom")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(candidate_buffer, "load_candidates", _load_or_boom)
+
+
+@then(parsers.parse('"{name}" 的 candidates 原子应当全部保留'))
+def skill_candidates_preserved(state_world: StateWorld, name: str) -> None:
+    skill_dir = state_world.skill_dirs[name]
+    remaining = candidate_buffer.load_candidates(skill_dir)["candidates"]
+    assert remaining, f"{name} candidates were cleared"
+
+
+@then(parsers.parse('"{name}" 的重试批次仍为 N=1'))
+def skill_retry_batch_still_one(state_world: StateWorld, name: str) -> None:
+    watcher = state_world.watcher
+    assert watcher is not None
+    skill_dir = state_world.skill_dirs[name]
+    assert watcher._skill_edit_retry_batch_sizes.get(skill_dir) == 1
+
+
+@given(parsers.parse('baby skill "{name}" 仍是 init stub 正文'))
+def baby_still_has_init_stub(state_world: StateWorld, name: str) -> None:
+    state_world.skill_name = name
+    state_world.skill_dir = state_world.skill_root / name
+    init_skill_repo_on_baby(
+        str(state_world.skill_dir),
+        name=name,
+        description="BDD stub graduate guard",
+    )
+    body = (state_world.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert BABY_STUB_BODY_MARKER in body
+    assert current_branch(str(state_world.skill_dir)) == "baby"
+
+
+@given("candidates 已经为空")
+def candidates_are_empty_buffer(state_world: StateWorld) -> None:
+    assert state_world.skill_dir is not None
+    candidate_buffer.save_candidates(
+        state_world.skill_dir,
+        {"candidates": []},
+    )
+
+
+@given("已有一次未改写 stub 的 baby checkpoint")
+def checkpoint_without_rewriting_stub(state_world: StateWorld) -> None:
+    assert state_world.skill_dir is not None
+    note = state_world.skill_dir / "scripts" / "note.txt"
+    note.write_text("checkpoint without rewriting stub\n", encoding="utf-8")
+    assert run_git(["add", "scripts/note.txt"], cwd=str(state_world.skill_dir))[0] == 0
+    assert run_git(
+        ["commit", "-m", "checkpoint without rewriting stub"],
+        cwd=str(state_world.skill_dir),
+    )[0] == 0
+    body = (state_world.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert BABY_STUB_BODY_MARKER in body
+    assert run_git(["rev-parse", "baby~1"], cwd=str(state_world.skill_dir))[0] == 0
+
+
+@when("模型调用 commit_baby_to_main 尝试毕业")
+def model_calls_commit_baby_to_main(state_world: StateWorld) -> None:
+    assert state_world.skill_name is not None
+    state_world.tool_graduate_result = _call_tool(
+        agent_tools.commit_baby_to_main,
+        state_world.skill_name,
+        "v1: should be rejected while stub remains",
+    )
+
+
+@when("watcher 再次调度这个 baby 的 SkillEdit")
+def watcher_reschedules_stub_baby(state_world: StateWorld) -> None:
+    _run_state_agent(state_world)
+
+
+@then("工具应当返回 stub 拒绝错误")
+def tool_returns_stub_rejection(state_world: StateWorld) -> None:
+    message = state_world.tool_graduate_result.lower()
+    assert state_world.tool_graduate_result.startswith("error:")
+    assert "stub" in message or "placeholder" in message
+
+
+@then("框架应当先触发一轮 stub 重写")
+def framework_triggered_stub_rewrite(state_world: StateWorld) -> None:
+    assert state_world.rewrite_turns >= 1
+    assert state_world.trace_path.is_file()
+    assert "stub" in state_world.trace.lower()
+
+
+@then("SkillEdit 应当成功并把 baby 晋升为 main")
+def skill_edit_promoted_to_main(state_world: StateWorld) -> None:
+    assert state_world.result is True
+    assert state_world.skill_dir is not None
+    assert current_branch(str(state_world.skill_dir)) == "main"
+
+
+@then("最终 SKILL.md 不应当再含 init placeholder")
+def final_skill_md_has_no_placeholder(state_world: StateWorld) -> None:
+    assert state_world.skill_dir is not None
+    body = (state_world.skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert BABY_STUB_BODY_MARKER not in body

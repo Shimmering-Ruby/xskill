@@ -241,9 +241,19 @@ _NON_RETRYABLE_HINTS = (
 
 
 def _is_transient_error(exc: Exception) -> bool:
+    # 本地限流桶耗尽只是"等一等就有令牌"，必须按瞬时错误重试——不能靠字符串
+    # 匹配：消息是 "RPM bucket exhausted"，与 hint "rpm exhausted" 子串对不上，
+    # 曾被误判为非瞬时 → 1/8 一击致命，高并发下 cluster 会话成片死亡。
+    from xskill.utils.rate_limit import RateLimitExhausted
+    if isinstance(exc, RateLimitExhausted):
+        return True
     t = f"{exc}".lower()
     if any(h in t for h in _NON_RETRYABLE_HINTS):
         return False
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        if status_code == 429 or 500 <= status_code <= 599:
+            return True
     return any(h in t for h in _TRANSIENT_HINTS)
 
 
@@ -277,17 +287,21 @@ def _wrap_with_retry(model, llm_cfg: dict):
             except Exception as exc:  # noqa: BLE001
                 attempt += 1
                 error_text = str(exc).lower()
-                if "429" in error_text or "rate limit" in error_text:
+                status_code = getattr(exc, "status_code", None)
+                if status_code == 429 or "429" in error_text or "rate limit" in error_text:
                     error_label = "429"
+                elif isinstance(status_code, int) and 500 <= status_code <= 599:
+                    error_label = str(status_code)
                 elif any(h in error_text for h in _NON_RETRYABLE_HINTS):
                     error_label = "context-too-long"
                 else:
                     error_label = type(exc).__name__
+                error_detail = str(exc)[:160]
                 if attempt >= max_retries or not _is_transient_error(exc):
                     agent_trace.event(
                         "ERROR",
                         f"LLM returned {error_label}; retries exhausted "
-                        f"({attempt}/{max_retries})",
+                        f"({attempt}/{max_retries}): {error_detail}",
                     )
                     raise
                 delay = min(cap, base * (2 ** (attempt - 1)))
