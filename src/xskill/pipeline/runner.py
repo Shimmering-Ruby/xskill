@@ -31,6 +31,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future
+from functools import partial
 from pathlib import Path
 
 from xskill.config import (
@@ -264,6 +265,12 @@ class DirectoryWatcher:
             "heartbeat_at": time.time(),
             "watcher": self.stats,
             "pools": {name: pool.status for name, pool in self._pools.items()},
+            # 看板「流水线」页配置 chip 的展示值（席位/配额比/批量）；
+            # 配置键不变，热更在 P1 另行评审。
+            "pool_config": {
+                name: dict(self.pool_config.get(name) or {})
+                for name in ("split", "cluster", "edit")
+            },
             "cluster": {
                 "pending_atoms": len(self.pending_atoms),
                 "claimed_atoms": len(self.claimed_atoms),
@@ -560,10 +567,55 @@ class DirectoryWatcher:
         for d in skill_dirs:
             if d in skill_edit_in_flight:
                 continue
-            fut = self._pools["edit"].submit(_run_one, d)
+            fut = self._pools["edit"].submit(
+                _run_one,
+                d,
+                task={"kind": "skill", "skill_name": d.name},
+                task_factory=partial(self._skill_edit_task_meta, d),
+            )
             if fut is None:
                 break
             self._futures[fut] = {"stage": "skill_edit", "skill_dir": d}
+
+    def _skill_edit_task_meta(self, d: Path) -> dict:
+        """流水线 Monitor 的 edit 席位元数据：A→B 转移 + buffer 事实。
+
+        作为 ``task_factory`` 在 pool 工作线程起跑时求值：git / candidates
+        都是当时的鲜活读数，且不花 watcher 扫描线程的时间。SkillEdit 只占
+        席位时一定在做三种转移之一：``baby_main``（冷启动消化后 graduate）、
+        ``main_staging``（产灰度候选）、``staging_main``（Jam 强砍回 main）。
+        读失败不拖垮真任务——退回 submit 时的静态元数据（仅 skill 名）。
+        """
+        from xskill.canary import CanaryConfig
+        from xskill.skill import candidates as candidate_buffer
+        from xskill.skill.git import current_branch, run_git
+
+        meta = {"kind": "skill", "skill_name": d.name}
+        data = candidate_buffer.load_candidates(d)
+        items = list(data.get("candidates") or [])
+        total_ws = 0
+        for item in items:
+            try:
+                total_ws += int(item.get("weightscore") or 0)
+            except (TypeError, ValueError):
+                pass
+        meta["candidates"] = len(items)
+        meta["weightscore"] = total_ws
+        staging_exists = run_git(
+            ["rev-parse", "--verify", "staging"], cwd=str(d),
+        )[0] == 0
+        jam_threshold = CanaryConfig.from_dict(
+            self.config.get("canary", {}),
+        ).jam_threshold
+        branch = current_branch(str(d)) or ""
+        meta["branch"] = branch
+        if staging_exists and total_ws >= jam_threshold:
+            meta["xfer"] = "staging_main"
+        elif branch == "main":
+            meta["xfer"] = "main_staging"
+        else:
+            meta["xfer"] = "baby_main"
+        return meta
 
     def _on_skill_edit_done(self, result) -> None:
         """``_harvest`` 收割 stage="skill_edit" future 用：_stats 自增 + 即时
@@ -1984,7 +2036,14 @@ class DirectoryWatcher:
                         )
                         continue
                     fut = self._pools["split"].submit(
-                        self._do_split, dir_path, fname,
+                        self._do_split,
+                        dir_path,
+                        fname,
+                        task={
+                            "kind": "traj",
+                            "traj_id": (dir_path / fname).stem,
+                            "watch_dir": dir_path.name,
+                        },
                     )
                     if fut is None:
                         break
@@ -2000,7 +2059,11 @@ class DirectoryWatcher:
                 i["stage"] == "embed" and i["wd_id"] == wd_id for i in self._futures.values()
             ):
                 fut = self._pools["embed"].submit(
-                    self._do_atom_index, dir_path, wd_id, split_done_files,
+                    self._do_atom_index,
+                    dir_path,
+                    wd_id,
+                    split_done_files,
+                    task={"kind": "embed", "count": len(split_done_files)},
                 )
                 if fut is not None:
                     self._futures[fut] = {
@@ -2169,7 +2232,9 @@ class DirectoryWatcher:
             batch_size = min(self.cluster_batch_size, len(self.pending_atoms))
             atom_ids = list(self.pending_atoms)[:batch_size]
             future = self._pools["cluster"].submit(
-                self._do_cluster_batch, atom_ids,
+                self._do_cluster_batch,
+                atom_ids,
+                task={"kind": "atom_batch", "atom_ids": list(atom_ids)},
             )
             if future is None:
                 return

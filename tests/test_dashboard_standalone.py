@@ -26,6 +26,8 @@ _STANDALONE_ALLOWED_OPERATIONS = {
     ("get", "/api/v1/dashboard/skills"),
     ("get", "/api/v1/dashboard/skill/{name}/ux/daily"),
     ("get", "/api/v1/dashboard/pipeline"),
+    # 流水线实时监看：公网实例剥任务身份，只留席位占用/计时与聚合计数。
+    ("get", "/api/v1/dashboard/pipeline/live"),
     ("get", "/api/v1/dashboard/skill/{name}/ux"),
     ("get", "/api/v1/dashboard/skillhub/{name}/ux"),
     ("get", "/api/v1/dashboard/skill/{name}/trigger"),
@@ -34,6 +36,8 @@ _STANDALONE_ALLOWED_OPERATIONS = {
 _BUILTIN_ONLY_OPERATIONS = {
     # 用户、原始轨迹、原子、skill 内容及逐 case 数据。
     ("get", "/api/v1/dashboard/users"),
+    # 单任务 agent trace 日志尾巴（内容级）。
+    ("get", "/api/v1/dashboard/pipeline/log"),
     ("get", "/api/v1/dashboard/skill/{name}/detail"),
     ("get", "/api/v1/dashboard/skill/{name}/graph"),
     ("get", "/api/v1/dashboard/skill/{name}/lineage"),

@@ -214,6 +214,36 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         from xskill.dashboard.explore import pipeline_progress
         return pipeline_progress(db_path, skill_dir)
 
+    @router.get("/api/v1/dashboard/pipeline/live")
+    def pipeline_live_ep() -> dict:
+        """三池实时监看：固定席位 + 排队预览（agent-worker 状态文件只读整形）。
+
+        公网只读实例剥掉任务级身份（skill/traj/atom 名），只留席位占用与
+        计时——与 ``dirs``/``tags`` 的白名单裁剪同一套；日志尾巴属内容级，
+        物理不注册（见下）。
+        """
+        from xskill.dashboard.pipeline_live import pipeline_live
+        live = pipeline_live(db_path)
+        if expose_sensitive or not live.get("running"):
+            return live
+        for pool in (live.get("pools") or {}).values():
+            pool["seats"] = [
+                ({"seat": seat.get("seat"), "started_at": seat.get("started_at")}
+                 if isinstance(seat, dict) else None)
+                for seat in pool.get("seats") or []
+            ]
+            pool["queue"] = []
+        return live
+
+    @sensitive_router.get("/api/v1/dashboard/pipeline/log")
+    def pipeline_log_ep(kind: str, name: str, tail: int = 300) -> dict:
+        """单任务 agent trace 日志尾巴（内容级，只挂内置看板）。"""
+        from xskill.dashboard.pipeline_live import tail_task_log
+        try:
+            return tail_task_log(db_path, kind=kind, name=name, tail=tail)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
     # 文件名、文件正文和 diff 都属于 skill 内容；只挂到内置看板。
     @sensitive_router.get("/api/v1/dashboard/skill/{name}/tree")
     def skill_tree(name: str) -> dict:

@@ -873,8 +873,289 @@ async function loadCanary() {
     '还没有灰度使用记录');
 }
 
+// ═════════════ 流水线 Monitor（三池固定席位实时事实板） ═════════════
+// 数据：pipeline/live（agent-worker 状态文件只读整形，~5s 粒度），3s 轮询；
+// 点选席位/任务后 pipeline/log 轮询日志尾巴。禁止 fallback：状态文件缺失、
+// 日志不存在、席位已腾空一律显式空态，绝不编造。
+const PM_POOLS = [
+  { key: 'split', title: 'Split', subtitle: '轨迹', weight: true, batch: false },
+  { key: 'cluster', title: 'Cluster', subtitle: 'atom 批', weight: true, batch: true },
+  { key: 'edit', title: 'SkillEditAgent', subtitle: 'A→B 转移', weight: true, batch: true },
+];
+const PM_XFER = {
+  baby_main: { from: 'baby', to: 'main', tip: '冷启动消化后 graduate' },
+  main_staging: { from: 'main', to: 'staging', tip: '产灰度候选' },
+  staging_main: { from: 'staging', to: 'main', tip: 'Jam 强砍回 main' },
+};
+const PM_POLL_MS = 3000, PM_LOG_MS = 2500;
+let pmState = null;      // 最近一次 live 响应
+let pmFetchAt = 0;       // 响应到达的本地时刻（席位龄期在两次轮询间本地走秒）
+let pmSelected = null;   // {pool, seat}：席位号才是稳定身份（任务完成只清该坑）
+let pmPollTimer = null, pmLogTimer = null, pmLogKey = null;
+
+function pmAgeText(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return (sec / 60).toFixed(1) + 'm';
+  return (sec / 3600).toFixed(1) + 'h';
+}
+// 席位色：浅=刚起，深=已久（约 0→120s 饱和）：#99f6e4 → #0f766e → #042f2e
+function pmSeatColor(ageSec) {
+  const t = Math.max(0, Math.min(1, ageSec / 120));
+  const stops = [[153, 246, 228], [15, 118, 110], [4, 47, 46]];
+  const [a, b, local] = t < 0.5
+    ? [stops[0], stops[1], t / 0.5]
+    : [stops[1], stops[2], (t - 0.5) / 0.5];
+  const rgb = a.map((v, i) => Math.round(v + (b[i] - v) * local));
+  return 'rgb(' + rgb.join(',') + ')';
+}
+function pmSeatAge(seat) {
+  if (!pmState || !seat || !seat.started_at) return 0;
+  return Math.max(0, (pmState.heartbeat_at || 0) - seat.started_at)
+    + (Date.now() - pmFetchAt) / 1000;
+}
+function pmOccupied(pool) { return (pool.seats || []).filter(Boolean); }
+
+function pmRenderBubbles() {
+  const d = pmState, el = document.getElementById('pm-bubbles');
+  if (!d) { el.innerHTML = ''; return; }
+  if (!d.pools) {  // running:false 的显式空态（无状态文件 / 空上报）
+    el.innerHTML = `<div class="pm-bubble bad ring-1 ring-slate-200"><span class="pm-dot"></span><span class="k">心跳</span><span class="v">已停</span></div>`
+      + `<div class="pm-bubble ring-1 ring-slate-200"><span class="k">${esc(d.message || 'agent-worker 未在运行')}</span></div>`;
+    return;
+  }
+  const llm = d.llm || {};
+  const quotaWait = (llm.rate_limit_waiting || 0) + (llm.retry_waiting || 0);
+  const failed = PM_POOLS.reduce((n, p) => n + ((d.pools[p.key] || {}).failed || 0), 0);
+  const hbAge = Math.max(0, Date.now() / 1000 - (d.heartbeat_at || 0));
+  let html = `<div class="pm-bubble ${d.running && d.ok !== false ? '' : 'bad'} ring-1 ring-slate-200">`
+    + `<span class="pm-dot"></span><span class="k">心跳</span>`
+    + `<span class="v">${d.running ? pmAgeText(hbAge) + '前' : '已停'}</span></div>`;
+  html += `<div class="pm-bubble ring-1 ring-slate-200"><span class="k">模型请求</span><span class="v">${llm.inflight || 0}</span></div>`;
+  if (quotaWait > 0) html += `<div class="pm-bubble warn ring-1 ring-slate-200"><span class="pm-dot"></span><span class="k">配额排队</span><span class="v">${quotaWait}</span></div>`;
+  html += `<div class="pm-bubble ring-1 ring-slate-200"><span class="k">未归类原子</span><span class="v">${d.pending_atoms || 0}</span></div>`;
+  if (failed > 0) html += `<div class="pm-bubble bad ring-1 ring-slate-200"><span class="pm-dot"></span><span class="k">异常</span><span class="v">${failed}</span></div>`;
+  for (const p of PM_POOLS) {
+    const pool = d.pools[p.key] || {};
+    html += `<div class="pm-bubble ring-1 ring-slate-200"><span class="k">${p.title}</span><span class="v">${pmOccupied(pool).length}/${pool.workers || 0}</span></div>`;
+  }
+  el.innerHTML = html;
+}
+
+function pmTaskCard(task, poolKey, selKey) {
+  const sel = selKey ? ' sel' : '';
+  // 排队预览不可点（无席位、无日志）：不发 data-pm-open、用默认光标
+  const queued = String(task._seat).startsWith('q');
+  const open = queued ? '' : ` data-pm-open="${poolKey}:${task._seat}"`;
+  const style = queued ? ' style="cursor:default"' : '';
+  if (task.kind === 'skill') {
+    const x = PM_XFER[task.xfer];
+    return `<div class="pm-card${sel}"${open}${style}>
+      <div class="nm font-mono">${esc(task.skill_name)}</div>
+      ${x ? `<div class="pm-xfer pm-xfer-${task.xfer}">${x.from} <span class="arrow">→</span> ${x.to}</div>` : ''}
+      <div class="inf">${task.candidates != null ? `cand <b>${esc(task.candidates)}</b> · ` : ''}${task.weightscore != null ? `ws <b>${esc(task.weightscore)}</b> · ` : ''}${task._age != null ? pmAgeText(task._age) : '排队中'}</div>
+    </div>`;
+  }
+  if (task.kind === 'atom_batch') {
+    const ids = task.atom_ids || [];
+    const preview = ids.slice(0, 4).map(a => `<code class="font-mono" style="font-size:10px;color:#0f766e">${esc(a)}</code>`).join(' ');
+    return `<div class="pm-card${sel}"${open}${style}>
+      <div class="nm">本批 ${ids.length} 个原子</div>
+      <div class="inf">${task._age != null ? pmAgeText(task._age) : '排队中'}</div>
+      <div class="mt-1 flex flex-wrap gap-1">${preview}${ids.length > 4 ? `<span class="inf">+${ids.length - 4}</span>` : ''}</div>
+    </div>`;
+  }
+  // traj（拆分代理没有任务名，只有轨迹 id）
+  return `<div class="pm-card${sel}"${open}${style}>
+    <div class="nm font-mono">${esc(task.traj_id || '?')}</div>
+    <div class="inf">${esc(task.watch_dir || '')}${task._age != null ? ' · ' + pmAgeText(task._age) : ' · 排队中'}</div>
+  </div>`;
+}
+
+function pmRenderStages() {
+  const wrap = document.getElementById('pm-stages');
+  const d = pmState;
+  if (!d || !d.pools) {
+    wrap.innerHTML = `<div class="pm-stage ring-1 ring-slate-200" style="align-items:center;justify-content:center;min-height:160px">
+      <span class="text-slate-400 text-xs">${esc((d && d.message) || 'agent-worker 未在运行')}</span></div>`;
+    return;
+  }
+  wrap.innerHTML = PM_POOLS.map(def => {
+    const pool = d.pools[def.key] || {};
+    const seats = pool.seats || [];
+    const queue = pool.queue || [];
+    const chips = [
+      `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" title="pools.${def.key}.workers（热更 P1 评审中，暂只读）">席位 ${pool.workers ?? '—'}</span>`,
+    ];
+    if (def.weight && pool.llm_weight != null) chips.push(`<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" title="pools.${def.key}.llm_weight（暂只读）">配额比 ${esc(pool.llm_weight)}</span>`);
+    if (def.batch && pool.batch_size != null) chips.push(`<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" title="pools.${def.key}.batch_size（暂只读）">批量 ${esc(pool.batch_size)}</span>`);
+    const seatHtml = seats.map((seat, i) => {
+      if (!seat) return `<button type="button" class="pm-seat" title="席位 ${i + 1} · 空闲"></button>`;
+      const task = { ...(seat.task || {}), _seat: i, _age: pmSeatAge(seat) };
+      const sel = pmSelected && pmSelected.pool === def.key && pmSelected.seat === i;
+      const color = pmSeatColor(task._age);
+      return `<button type="button" class="pm-seat busy${sel ? ' sel' : ''}" data-pm-open="${def.key}:${i}"
+        title="席位 ${i + 1} · 已跑 ${pmAgeText(task._age)}" style="background:${color};border-color:${color}"></button>`;
+    }).join('');
+    const activeCards = seats.map((seat, i) => seat && { ...(seat.task || {}), _seat: i, _age: pmSeatAge(seat) })
+      .filter(Boolean).map(t => pmTaskCard(t, def.key,
+        pmSelected && pmSelected.pool === def.key && pmSelected.seat === t._seat)).join('');
+    const queueCards = queue.map((t, i) => pmTaskCard({ ...t, _seat: 'q' + i, _age: null }, def.key, false)).join('');
+    const qlabel = def.key === 'cluster'
+      ? `未归类 ${d.pending_atoms || 0} · 排队 ${pool.queued || queue.length}`
+      : `排队 ${pool.queued || queue.length}`;
+    return `<section class="pm-stage ring-1 ring-slate-200">
+      <div class="flex items-baseline justify-between gap-1.5">
+        <div><div class="font-semibold text-[13px]">${def.title}</div>
+        <div class="text-[10.5px] text-slate-400">${def.subtitle}</div></div>
+        <div class="flex flex-wrap gap-1 justify-end">${chips.join('')}</div>
+      </div>
+      <div class="pm-seats">${seatHtml}</div>
+      <div class="text-[10.5px] text-slate-400 font-medium">进行中 ${pmOccupied(pool).length}</div>
+      <div class="pm-lane">${activeCards || '<div class="text-[11px] text-slate-400">—</div>'}</div>
+      <div class="text-[10.5px] text-slate-400 font-medium">${qlabel}</div>
+      <div class="pm-lane">${queueCards || '<div class="text-[11px] text-slate-400">—</div>'}</div>
+      <div class="pm-foot"><span>完成 ${pool.completed || 0}</span><span>失败 ${pool.failed || 0}</span></div>
+    </section>`;
+  }).join('');
+}
+
+function pmSelectedSeat() {
+  if (!pmSelected || !pmState || !pmState.pools) return null;
+  const pool = (pmState.pools[pmSelected.pool] || {});
+  return (pool.seats || [])[pmSelected.seat] || null;
+}
+
+function pmRenderDrawer() {
+  const dr = document.getElementById('pm-drawer');
+  const seat = pmSelectedSeat();
+  if (!pmSelected || !seat) {
+    pmStopLog();
+    dr.className = 'pm-drawer empty ring-1 ring-slate-200';
+    dr.innerHTML = pmSelected
+      ? '该席位任务已结束 <button type="button" class="pm-btn ghost" data-pm-close>关闭</button>'
+      : '点选进行中的任务看实时日志';
+    if (pmSelected) pmSelected = null;
+    return;
+  }
+  const task = seat.task || {};
+  const age = pmAgeText(pmSeatAge(seat));
+  const def = PM_POOLS.find(p => p.key === pmSelected.pool);
+  // 抽屉随 live 轮询重渲染：同一任务的日志内容要保住，否则每 3s 闪回「加载中」
+  const hasStream = task.kind === 'skill' || task.kind === 'traj';
+  const existingLog = (hasStream && pmLogKey && document.getElementById('pm-log'))
+    ? document.getElementById('pm-log').innerHTML : '';
+  const logPane = `<div class="pm-log" id="pm-log">${existingLog || '<div class="dim">日志加载中…</div>'}</div>`;
+  let head = '', logHtml = '';
+  if (task.kind === 'skill') {
+    const x = PM_XFER[task.xfer];
+    head = `<h2 class="font-mono text-sm font-semibold break-all">${esc(task.skill_name)}</h2>
+      <div class="text-[11px] text-slate-400 mt-0.5">${def.title} · 席位 ${pmSelected.seat + 1} · 已跑 ${age}</div>
+      ${x ? `<div class="flex items-center gap-2 flex-wrap mt-1"><span class="pm-xfer pm-xfer-${task.xfer}" style="margin-top:0">${x.from} <span class="arrow">→</span> ${x.to}</span><span class="text-xs text-slate-500">${x.tip}</span>
+      <span class="text-[11px] text-slate-400">${task.candidates != null ? `cand ${esc(task.candidates)} · ` : ''}${task.weightscore != null ? `ws ${esc(task.weightscore)}` : ''}</span></div>` : ''}`;
+    logHtml = logPane;
+  } else if (task.kind === 'traj') {
+    head = `<h2 class="font-mono text-sm font-semibold break-all">${esc(task.traj_id || '?')}</h2>
+      <div class="text-[11px] text-slate-400 mt-0.5">${def.title} · ${esc(task.watch_dir || '')} · 席位 ${pmSelected.seat + 1} · 已跑 ${age}</div>`;
+    logHtml = logPane;
+  } else {  // atom_batch：Cluster 批没有独立日志，展示本批原子名单（概念稿语义）
+    const ids = (task.atom_ids || []).map(a => `<code class="font-mono text-[11px] text-teal-700">${esc(a)}</code>`).join(' · ');
+    head = `<h2 class="text-sm font-semibold">本批 ${(task.atom_ids || []).length} 个原子</h2>
+      <div class="text-[11px] text-slate-400 mt-0.5">${def.title} · 席位 ${pmSelected.seat + 1} · 已跑 ${age}</div>
+      <div class="flex flex-wrap gap-1.5 mt-1">${ids || '<span class="text-[11px] text-slate-400">—</span>'}</div>`;
+    logHtml = '<div class="pm-log" style="min-height:60px"><div class="dim">Cluster 批没有独立日志文件（逐轮 trace 在 split/edit 任务上）</div></div>';
+  }
+  dr.className = 'pm-drawer ring-1 ring-slate-200';
+  dr.innerHTML = `<div class="flex items-start justify-between gap-2"><div class="min-w-0">${head}</div>
+    <button type="button" class="pm-btn ghost shrink-0" data-pm-close>关闭</button></div>${logHtml}`;
+  if (task.kind === 'skill' || task.kind === 'traj') pmStartLog(task.kind, task.kind === 'skill' ? task.skill_name : task.traj_id);
+  else pmStopLog();
+}
+
+function pmLogClassify(line) {
+  if (/ERROR|失败|超时|Traceback|溢出|停滞/.test(line)) return 'err';
+  if (/graduate|commit|split_done|clustered|完成|成功/.test(line)) return 'okl';
+  if (/→|Candidates|staging|Jam|baby|main|TURN|ROUND/.test(line)) return 'hl';
+  return '';
+}
+async function pmPollLog() {
+  if (!pmLogKey) return;
+  const { kind, name } = pmLogKey;
+  try {
+    const r = await j('api/v1/dashboard/pipeline/log?kind=' + encodeURIComponent(kind)
+      + '&name=' + encodeURIComponent(name) + '&tail=300');
+    const log = document.getElementById('pm-log');
+    if (!log) return;
+    if (!r.exists) { log.innerHTML = `<div class="dim">${esc(r.message || '该任务暂无日志文件')}</div>`; return; }
+    log.innerHTML = (r.lines || []).map(l => {
+      const cls = pmLogClassify(l);
+      return cls ? `<div class="${cls}">${esc(l)}</div>` : `<div>${esc(l)}</div>`;
+    }).join('') || '<div class="dim">（日志为空）</div>';
+    if (r.truncated) log.insertAdjacentHTML('afterbegin', '<div class="dim">…（仅显示日志尾部）</div>');
+    log.scrollTop = log.scrollHeight;
+  } catch (e) {
+    const log = document.getElementById('pm-log');
+    if (log) log.innerHTML = `<div class="err">日志读取失败：${esc(e.message)}</div>`;
+  }
+}
+function pmStartLog(kind, name) {
+  const key = kind + ':' + name;
+  if (pmLogKey === key) return;
+  pmStopLog();
+  pmLogKey = { kind, name };
+  pmPollLog();
+  pmLogTimer = setInterval(pmPollLog, PM_LOG_MS);
+}
+function pmStopLog() {
+  pmLogKey = null;
+  if (pmLogTimer) { clearInterval(pmLogTimer); pmLogTimer = null; }
+}
+
+async function pmFetchLive() {
+  try {
+    pmState = await j('api/v1/dashboard/pipeline/live');  // 不走 jc：每轮都要新数据
+    pmFetchAt = Date.now();
+  } catch (e) {
+    pmState = { running: false, message: '流水线状态读取失败：' + e.message };
+  }
+  pmRenderBubbles();
+  pmRenderStages();
+  pmRenderDrawer();
+}
+function pmSetActive(on) {
+  if (on) {
+    if (pmPollTimer) return;
+    pmFetchLive();
+    pmPollTimer = setInterval(pmFetchLive, PM_POLL_MS);
+  } else {
+    if (pmPollTimer) { clearInterval(pmPollTimer); pmPollTimer = null; }
+    pmStopLog();
+  }
+}
+// 席位/任务点选 + 抽屉关闭（事件委托，重渲染不丢）
+document.addEventListener('click', e => {
+  const open = e.target.closest('[data-pm-open]');
+  if (open) {
+    const [pool, seat] = open.dataset.pmOpen.split(':');
+    if (seat.startsWith('q')) return;   // 排队预览不可点（无日志/详情）
+    const key = { pool, seat: Number(seat) };
+    const same = pmSelected && pmSelected.pool === key.pool && pmSelected.seat === key.seat;
+    pmSelected = same ? null : key;
+    pmStopLog();
+    pmRenderStages();
+    pmRenderDrawer();
+    return;
+  }
+  if (e.target.closest('[data-pm-close]')) {
+    pmSelected = null;
+    pmStopLog();
+    pmRenderStages();
+    pmRenderDrawer();
+  }
+});
+
 // ── SPA-lite 路由（hash）─────────────────────────────────────────
-const NAMES = { overview: '总览', skills: '技能库', traj: '轨迹 & 原子', users: '用户 & 画像', canary: '灰度 Canary', my: '我的', admin: '管理', settings: '设置' };
+const NAMES = { overview: '总览', skills: '技能库', pipeline: '流水线', traj: '轨迹 & 原子', users: '用户 & 画像', canary: '灰度 Canary', my: '我的', admin: '管理', settings: '设置' };
 function showPage(pg) {
   if (!document.getElementById('pg-' + pg)) pg = 'overview';
   document.querySelectorAll('.sec-page').forEach(s => s.classList.remove('on'));
@@ -888,6 +1169,7 @@ function showPage(pg) {
   });
   document.getElementById('pgname').textContent = NAMES[pg] || '总览';
   window.scrollTo(0, 0);
+  pmSetActive(pg === 'pipeline');   // 只在流水线页轮询，离开即停
 }
 function route() {
   const h = decodeURIComponent(location.hash.replace(/^#/, ''));
