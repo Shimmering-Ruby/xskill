@@ -199,3 +199,55 @@ def test_crash_fs_deleted_db_active_reconcile_via_removal(tmp_path):
     assert remove_owned_dest(dest, src) is True
     row = get_default_ledger().read_install_row(dest)
     assert row["status"] == "tombstone"
+
+
+def test_remove_owned_dest_refuses_copy_without_ledger_row(tmp_path):
+    """copy 无账本行：拒删，目录留给用户。"""
+    src = _skill_source(tmp_path)
+    dest = tmp_path / "eco" / "orphan"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text("user kept\n", encoding="utf-8")
+
+    assert remove_owned_dest(dest, src) is False
+    assert dest.is_dir()
+    assert (dest / "SKILL.md").read_text(encoding="utf-8") == "user kept\n"
+
+
+def test_remove_owned_dest_refuses_when_source_mismatches(tmp_path):
+    """账本 source 与传入 source 不符（被其他来源接管）：拒删。"""
+    owned = _skill_source(tmp_path, "owned")
+    other = _skill_source(tmp_path, "other")
+    dest = tmp_path / "eco" / "demo"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text(
+        (other / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    write_install_metadata(dest, other, "copy")
+
+    assert remove_owned_dest(dest, owned) is False
+    assert dest.is_dir()
+    assert (dest / "SKILL.md").read_text(encoding="utf-8") == (
+        other / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_remove_owned_dest_refuses_out_of_band_content_replacement(tmp_path):
+    """同路径带外替换后：指纹不符，拒删用户新内容。"""
+    src = _skill_source(tmp_path)
+    dest = tmp_path / "eco" / "demo"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text(
+        (src / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    write_install_metadata(dest, src, "copy")
+
+    old_target = dest.with_name("old-target-kept-for-test")
+    dest.replace(old_target)
+    dest.mkdir()
+    (dest / "SKILL.md").write_text("new user data\n", encoding="utf-8")
+
+    assert remove_owned_dest(dest, src) is False
+    assert (dest / "SKILL.md").read_text(
+        encoding="utf-8",
+    ) == "new user data\n"
+    assert old_target.is_dir()

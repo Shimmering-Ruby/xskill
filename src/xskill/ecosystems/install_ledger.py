@@ -695,7 +695,11 @@ def remove_owned_dest(
     ledger: InstallLedger | None = None,
     is_link_or_junction: Any = None,
 ) -> bool:
-    """基于 ledger 的卸装：世代匹配才删；否则 superseded 且不刷 MISMATCH。"""
+    """基于 ledger 的卸装：世代匹配才删；否则 superseded 且不刷 MISMATCH。
+
+    copy 还会在删除前复核 ``file_fingerprints`` / ``baseline_identity``：
+    同路径被带外替换成别的内容时拒删，避免清掉用户手写目录。
+    """
     if is_link_or_junction is None:
         from xskill.ecosystems.installation import is_link_or_junction as _ilj
         is_link_or_junction = _ilj
@@ -734,6 +738,30 @@ def remove_owned_dest(
             if dest_key(Path(meta["source"])) != dest_key(source_dir):
                 return False
         except (OSError, KeyError, TypeError):
+            return False
+
+    # copy：删除前复核 dest 内容指纹，挡住同路径带外替换后的误删。
+    if meta.get("mode") == "copy" and not is_link_or_junction(dest):
+        expected_fp = meta.get("file_fingerprints")
+        expected_baseline = meta.get("baseline_identity")
+        if (
+            not isinstance(expected_fp, dict)
+            or not isinstance(expected_baseline, str)
+        ):
+            return False
+        try:
+            from xskill.ecosystems.installation import (
+                _copy_baseline_identity,
+                _safe_copy_file_fingerprints,
+            )
+
+            current_fp = _safe_copy_file_fingerprints(dest)
+            if (
+                current_fp != expected_fp
+                or _copy_baseline_identity(current_fp) != expected_baseline
+            ):
+                return False
+        except OSError:
             return False
 
     identity = None
