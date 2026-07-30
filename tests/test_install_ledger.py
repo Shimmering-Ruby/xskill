@@ -251,3 +251,35 @@ def test_remove_owned_dest_refuses_out_of_band_content_replacement(tmp_path):
         encoding="utf-8",
     ) == "new user data\n"
     assert old_target.is_dir()
+
+
+def test_refresh_baseline_after_owned_write_allows_removal(tmp_path):
+    """我们自己在 record 后再写 dest，refresh 后应仍能卸装。"""
+    from xskill.ecosystems.installation import refresh_copy_install_baseline
+
+    src = _skill_source(tmp_path)
+    dest = tmp_path / "eco" / "demo"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text(
+        (src / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    write_install_metadata(dest, src, "copy")
+    before = read_install_metadata(dest)
+    assert before is not None
+    generation = int(before["generation"])
+    installation_id = before["installation_id"]
+
+    (dest / ".xskill-install-meta.json").write_text(
+        '{"ecosystem":"openclaw"}\n', encoding="utf-8",
+    )
+    assert remove_owned_dest(dest, src) is False
+    assert dest.is_dir()
+
+    assert refresh_copy_install_baseline(dest) is True
+    after = read_install_metadata(dest)
+    assert after is not None
+    assert int(after["generation"]) == generation
+    assert after["installation_id"] == installation_id
+    assert ".xskill-install-meta.json" in after["file_fingerprints"]
+    assert remove_owned_dest(dest, src) is True
+    assert not dest.exists()

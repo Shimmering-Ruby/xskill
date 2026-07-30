@@ -907,6 +907,30 @@ def write_install_metadata(
             _raise_metadata_error(dest, "INSTALL_METADATA_VERIFY_FAILED")
 
 
+def refresh_copy_install_baseline(dest: Path) -> bool:
+    """安装器在 record 之后再次写入 dest 时，同步账本指纹（不升 generation）。
+
+    返回是否成功更新了一条 active copy 行。
+    """
+    from xskill.ecosystems.install_ledger import get_default_ledger
+
+    dest = Path(dest)
+    ledger = get_default_ledger()
+    meta = ledger.read_install(dest)
+    if meta is None or meta.get("mode") != "copy":
+        return False
+    try:
+        file_fingerprints = _safe_copy_file_fingerprints(dest)
+        baseline_identity = _copy_baseline_identity(file_fingerprints)
+    except OSError:
+        return False
+    return ledger.update_copy_baseline(
+        dest,
+        file_fingerprints=file_fingerprints,
+        baseline_identity=baseline_identity,
+    )
+
+
 def is_link_or_junction(path: Path) -> bool:
     """判断 path 是否为 symlink 或 Windows directory junction。"""
     try:

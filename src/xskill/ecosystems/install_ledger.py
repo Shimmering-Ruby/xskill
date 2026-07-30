@@ -252,6 +252,40 @@ class InstallLedger(_SqliteStore):
         finally:
             conn.close()
 
+    def update_copy_baseline(
+        self,
+        dest: Path | str,
+        *,
+        file_fingerprints: dict[str, str],
+        baseline_identity: str,
+    ) -> bool:
+        """同步更新 active copy 的内容指纹，不升 generation / 不换 installation_id。
+
+        供安装器在 ``record_install`` 之后再次写入 dest（如 openclaw 老位置
+        meta、auxiliary 刷新）时调用，保证账本等于「我们最后一次写入的内容」。
+        """
+        key = dest_key(dest)
+        fp_json = json.dumps(
+            file_fingerprints, ensure_ascii=False, sort_keys=True,
+        )
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                """
+                UPDATE installations
+                SET file_fingerprints_json=?, baseline_identity=?
+                WHERE dest_key=? AND status='active' AND mode='copy'
+                """,
+                (fp_json, baseline_identity, key),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def supersede_removals(self, dest: Path | str) -> int:
         key = dest_key(dest)
         now = time.time()

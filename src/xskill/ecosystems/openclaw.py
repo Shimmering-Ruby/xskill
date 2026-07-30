@@ -32,6 +32,7 @@ from xskill.ecosystems._fallback import install_dir
 from xskill.ecosystems.installation import (
     InstallSafetyError,
     read_skill_head_sha,
+    refresh_copy_install_baseline,
 )
 from xskill.ecosystems._shared import (
     EcosystemSpec,
@@ -158,6 +159,9 @@ def install_to_openclaw(
     (dest / _OPENCLAW_INSTALL_META).write_text(
         json.dumps(legacy_meta, indent=2), encoding="utf-8",
     )
+    # install_dir 已按当时内容记过指纹；老位置 meta 是我们随后写入的，
+    # 必须同步账本，否则卸装会把这份合法写入误判成带外替换。
+    refresh_copy_install_baseline(dest)
 
     return dest / "SKILL.md"
 
