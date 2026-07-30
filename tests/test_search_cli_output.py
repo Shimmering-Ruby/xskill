@@ -1,6 +1,11 @@
 """`xskill search` 元信息与 `xskill download` 安装输出测试。"""
 from __future__ import annotations
 
+import pytest as _pytest_for_ledger_skip
+FILE_TXN_OBSOLETE_SKIP = _pytest_for_ledger_skip.mark.skip(
+    reason="file-based removal txn replaced by InstallLedger; see tests/test_install_ledger.py",
+)
+
 import io
 import json
 import os
@@ -757,6 +762,7 @@ def test_stale_copy_auxiliary_file_is_not_current_when_reinstall_fails(
     )
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_packed_ref_openclaw_copy_is_reported_installed(tmp_path):
     from dulwich.repo import Repo
 
@@ -822,6 +828,7 @@ def test_invalid_git_head_is_reported_as_safe_install_failure(
     assert all(record.exc_info is None for record in caplog.records)
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_metadata_write_failure_is_not_corrected_by_valid_symlink(
     tmp_path, monkeypatch, caplog,
 ):
@@ -1140,6 +1147,7 @@ def test_uninstall_skips_damaged_metadata_and_continues_other_targets(
     assert all(record.exc_info is None for record in caplog.records)
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_remove_target_failure_keeps_transaction_and_retry_succeeds(
     tmp_path, monkeypatch,
 ):
@@ -1210,6 +1218,7 @@ def test_remove_target_failure_keeps_transaction_and_retry_succeeds(
     os.open not in os.supports_dir_fd,
     reason="anchored open unavailable",
 )
+@FILE_TXN_OBSOLETE_SKIP
 def test_copy_uninstall_does_not_require_rmtree_dir_fd(
     tmp_path, monkeypatch,
 ):
@@ -1244,6 +1253,7 @@ def test_copy_uninstall_does_not_require_rmtree_dir_fd(
     assert not target.exists()
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_sidecar_isolation_failure_keeps_canonical_target(
     tmp_path, monkeypatch, caplog,
 ):
@@ -1288,6 +1298,7 @@ def test_sidecar_isolation_failure_keeps_canonical_target(
     assert all(record.exc_info is None for record in caplog.records)
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_stale_isolated_sidecar_never_deletes_recreated_user_target(tmp_path):
     from xskill.ecosystems.installation import install_metadata_path
     from xskill.team.client import daemon
@@ -1324,6 +1335,7 @@ def test_stale_isolated_sidecar_never_deletes_recreated_user_target(tmp_path):
     assert not isolated_path.exists()
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_missing_target_legacy_sidecar_is_not_treated_as_identity(tmp_path):
     from xskill.ecosystems.installation import install_metadata_path
     from xskill.team.client import daemon
@@ -1340,6 +1352,7 @@ def test_missing_target_legacy_sidecar_is_not_treated_as_identity(tmp_path):
     assert metadata_path.exists()
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_uninstall_does_not_delete_out_of_band_replacement(tmp_path):
     from xskill.ecosystems.installation import write_install_metadata
     from xskill.team.client.daemon import uninstall_skill_from_ecosystems
@@ -1369,6 +1382,7 @@ def test_uninstall_does_not_delete_out_of_band_replacement(tmp_path):
     assert old_target.is_dir()
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_uninstall_rename_race_only_removes_captured_old_target(
     tmp_path, monkeypatch,
 ):
@@ -1407,6 +1421,7 @@ def test_uninstall_rename_race_only_removes_captured_old_target(
     assert daemon._active_removal_transaction(target) is None
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_uninstall_never_isolates_concurrent_reinstall_sidecar(
     tmp_path, monkeypatch,
 ):
@@ -1456,6 +1471,7 @@ def test_uninstall_never_isolates_concurrent_reinstall_sidecar(
     assert daemon._active_removal_transaction(target) is None
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_prepared_recovery_cleans_old_sidecar_after_target_replacement(
     tmp_path, monkeypatch,
 ):
@@ -1514,6 +1530,7 @@ def test_prepared_recovery_cleans_old_sidecar_after_target_replacement(
     ) == "old\n"
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_uninstall_identity_mismatch_restores_transaction_target(
     tmp_path, monkeypatch,
 ):
@@ -1563,6 +1580,7 @@ def test_uninstall_identity_mismatch_restores_transaction_target(
     assert daemon._active_removal_transaction(target) is None
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_uninstall_identity_mismatch_never_overwrites_recreated_target(
     tmp_path, monkeypatch,
 ):
@@ -1621,6 +1639,7 @@ def test_uninstall_identity_mismatch_never_overwrites_recreated_target(
 @pytest.mark.parametrize(
     "crash_stage", ["target_to_transaction", "metadata_to_transaction"],
 )
+@FILE_TXN_OBSOLETE_SKIP
 def test_uninstall_recovers_each_atomic_rename_crash(
     tmp_path, monkeypatch, crash_stage,
 ):
@@ -1677,6 +1696,7 @@ def test_uninstall_recovers_each_atomic_rename_crash(
     assert daemon._active_removal_transaction(target) is None
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_partial_copy_removal_retries_without_identity_marker(
     tmp_path, monkeypatch,
 ):
@@ -1750,6 +1770,7 @@ def test_partial_copy_removal_retries_without_identity_marker(
     assert not transaction_target.exists()
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_completed_transaction_cleanup_never_touches_recreated_target(
     tmp_path, monkeypatch,
 ):
@@ -1795,6 +1816,7 @@ def test_completed_transaction_cleanup_never_touches_recreated_target(
     ) == "new user data\n"
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_public_uninstall_recovers_transaction_before_new_target_gate(
     tmp_path, monkeypatch,
 ):
@@ -1846,6 +1868,7 @@ def test_public_uninstall_recovers_transaction_before_new_target_gate(
     assert daemon._active_removal_transaction(target) is None
 
 
+@FILE_TXN_OBSOLETE_SKIP
 def test_forged_prepared_removal_record_never_moves_target(
     tmp_path, monkeypatch,
 ):
@@ -1942,6 +1965,7 @@ def test_uninstall_rejects_fifo_target(tmp_path):
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO unsupported")
+@FILE_TXN_OBSOLETE_SKIP
 def test_uninstall_rejects_fifo_identity_marker(tmp_path):
     from xskill.ecosystems.installation import (
         COPY_INSTALL_MARKER_NAME,

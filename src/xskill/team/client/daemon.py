@@ -464,6 +464,11 @@ class TeamClient:
         client 的 skill 集合完全由 server 算出的 manifest 决定——server 把
         某 skill 移出 100 → 下次 sync 后本地也删，不自留。
         """
+        from xskill.ecosystems.install_ledger import get_default_ledger
+
+        get_default_ledger().migrate_from_sidecars(
+            _ecosystem_skill_roots(self.home_root),
+        )
         keep = {s.skill_name for s in manifest.slots}
         for repo_dir in sorted(self.skill_dir.iterdir()):
             if (
@@ -1821,11 +1826,23 @@ def _finish_removal_transaction(
 def _remove_owned_install_target(
     dest: Path, source_dir: Path | None = None,
 ) -> bool:
-    """原子改名隔离 target，再按持久安装身份删除隔离项。
+    """通过 InstallLedger 卸装：世代匹配才删；旧事务被重装 supersede。
 
-    copy 必须同时具有 sidecar 与 target 内 marker 的 installation_id/content
-    identity。旧 copy sidecar 没有双重身份时只保留，绝不递归删除。
+    不再在用户生态目录写 removal-transaction / removing 旁路文件。
     """
+    from xskill.ecosystems.install_ledger import remove_owned_dest
+
+    return remove_owned_dest(
+        dest,
+        source_dir,
+        is_link_or_junction=is_link_or_junction,
+    )
+
+
+def _legacy_remove_owned_install_target_file_txn(
+    dest: Path, source_dir: Path | None = None,
+) -> bool:
+    """旧文件事务卸装（保留供对照；生产入口已切 ledger）。"""
     metadata_path = install_metadata_path(dest)
     try:
         active_transaction = _active_removal_transaction(dest)

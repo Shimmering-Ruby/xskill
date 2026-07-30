@@ -44,6 +44,23 @@ def _isolate_registry_db(tmp_path_factory, monkeypatch):
     monkeypatch.setattr("xskill.pipeline.registry.get_registry_db_path", lambda: db)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_install_ledger(tmp_path_factory, monkeypatch):
+    """每个测试使用独立 installations.sqlite，避免污染 ~/.xskill。"""
+    from xskill.ecosystems import install_ledger as ledger_mod
+
+    root = tmp_path_factory.mktemp("xskill_install_ledger")
+    db = root / "installations.sqlite"
+    monkeypatch.setenv("XSKILL_INSTALL_LEDGER", str(db))
+    monkeypatch.setattr(
+        ledger_mod, "default_staging_root",
+        lambda *, xskill_home=None: root / "removal-staging",
+    )
+    ledger_mod.reset_default_ledger()
+    yield
+    ledger_mod.reset_default_ledger()
+
+
 # ─────────────────────────────────────────────────────────────────
 # ingest 配置隔离：测试不读真实 ~/.xskill/config.yaml 的 ingest 段
 # ─────────────────────────────────────────────────────────────────

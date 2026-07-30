@@ -301,13 +301,12 @@ def test_copy_install_writes_matching_target_and_sidecar_identity(tmp_path):
     assert install_dir(src, dest, force_mode="copy") == "copy"
 
     metadata = read_install_metadata(dest)
-    marker = json.loads(
-        (dest / COPY_INSTALL_MARKER_NAME).read_text(encoding="utf-8"),
-    )
     assert metadata is not None
-    assert marker["installation_id"] == metadata["installation_id"]
-    assert marker["content_identity"] == metadata["content_identity"]
-    assert marker["baseline_identity"] == metadata["baseline_identity"]
+    assert not (dest / COPY_INSTALL_MARKER_NAME).exists()
+    assert not install_metadata_path(dest).exists()
+    assert metadata["installation_id"]
+    assert metadata["content_identity"]
+    assert metadata["baseline_identity"]
     baseline = read_copy_install_baseline(dest, src)
     assert set(baseline) == {"SKILL.md", "scripts/run.sh"}
     assert all(len(file_hash) == 64 for file_hash in baseline.values())
@@ -431,22 +430,21 @@ def test_write_install_metadata_failure_is_safe_and_loud(
     tmp_path, monkeypatch, caplog,
 ):
     from xskill.ecosystems import installation
+    from xskill.ecosystems.install_ledger import get_default_ledger
 
     src = _make_src(tmp_path / "srcs")
     dest = tmp_path / "private" / "target"
     dest.mkdir(parents=True)
     (dest / "SKILL.md").write_text("copy", encoding="utf-8")
 
-    def fail_atomic_write(_path, _payload):
+    ledger = get_default_ledger()
+
+    def fail_record(*_a, **_k):
         raise PermissionError(
             "Authorization: Bearer write-secret /root/private/meta"
         )
 
-    monkeypatch.setattr(
-        installation,
-        "_atomic_write_json",
-        fail_atomic_write,
-    )
+    monkeypatch.setattr(ledger, "record_install", fail_record)
     raised_error = None
     with caplog.at_level(logging.ERROR, logger="xskill.installation"):
         try:
@@ -457,7 +455,7 @@ def test_write_install_metadata_failure_is_safe_and_loud(
 
     assert raised_error is not None
     assert raised_error.error_type == "INSTALL_METADATA_WRITE_FAILED"
-    assert "stage=copy_identity_marker" in caplog.text
+    assert "stage=install_ledger" in caplog.text
     assert "exception_type=PermissionError" in caplog.text
     assert "write-secret" not in caplog.text
     assert "/root/private/meta" not in caplog.text
@@ -846,10 +844,8 @@ def test_copy_reinstall_skipped_when_skillhub_sha_unchanged(tmp_path, monkeypatc
 
 def test_copy_reinstall_happens_with_legacy_meta_without_sha(tmp_path, monkeypatch):
     """老版本 meta 没有 source_sha 字段：无法判定 → 保守重装，且不崩。"""
-    import json as json_mod
-
     from xskill import ecosystems
-    from xskill.ecosystems._fallback import _install_meta_path
+    from xskill.ecosystems.install_ledger import get_default_ledger
 
     src = _make_src(tmp_path / "srcs")
     _init_real_git_repo(src)
@@ -858,10 +854,21 @@ def test_copy_reinstall_happens_with_legacy_meta_without_sha(tmp_path, monkeypat
     copy_calls = _count_do_copy(monkeypatch)
 
     dest_md = ecosystems.install_to_claude_code(src, target_root=fake_home)
-    meta_path = _install_meta_path(dest_md.parent)
-    legacy_meta = json_mod.loads(meta_path.read_text(encoding="utf-8"))
-    legacy_meta.pop("source_sha")
-    meta_path.write_text(json_mod.dumps(legacy_meta), encoding="utf-8")
+    dest = dest_md.parent
+    meta = read_install_metadata(dest)
+    assert meta is not None
+    # 模拟缺 source_sha：直接改 ledger 行
+    ledger = get_default_ledger()
+    from xskill.ecosystems.install_ledger import dest_key
+    conn = ledger._conn()
+    try:
+        conn.execute(
+            "UPDATE installations SET source_sha='' WHERE dest_key=?",
+            (dest_key(dest),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     ecosystems.install_to_claude_code(src, target_root=fake_home)
     assert len(copy_calls) == 2  # 老 meta 判不了，重装
