@@ -120,7 +120,11 @@ class CanaryGitOps:
             if db_scores:
                 return db_scores
         except Exception:
-            pass
+            # DB 未就绪 / 查询失败：回退盘文件（镜像未到时也走此路径）
+            import logging
+            logging.getLogger("xskill.skill").debug(
+                "ux_scores db read failed; fallback jsonl", exc_info=True,
+            )
         scores = _canary.load_ux_scores(self.skill_path)
         if side is not None:
             scores = [s for s in scores if s.get("side") == side]

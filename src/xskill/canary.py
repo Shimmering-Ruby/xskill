@@ -515,6 +515,11 @@ def recent_scores(
     commit_sha: str,
     n: int,
 ) -> list[dict]:
+    """取某 side+sha 最近 n 条 UX 分（优先 registry.db，空则回退 jsonl）。
+
+    镜像写入失败且 sync 尚未追上时，DB 可能暂时缺最新分——回退盘文件；
+    若 DB 已有旧行但缺最新，会偏保守（样本偏少），有意为之。
+    """
     skill_name = Path(skill_dir).name
     all_: list[dict] = []
     try:
