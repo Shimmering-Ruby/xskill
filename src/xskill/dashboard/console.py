@@ -113,9 +113,10 @@ def _slot_source_fields(slot) -> dict:
 def _skill_meta_for_names(names: list[str], *, db_path: Optional[Path],
                           skill_dir: Path) -> dict[str, dict]:
     """贡献关系图 skill 芯片用的轻量摘要。"""
-    from xskill.events import skill_main_producer
+    from xskill.events import skill_main_producers
     from xskill.dashboard.explore import skill_lineage
 
+    producers = skill_main_producers(names, db_path=db_path)
     meta: dict[str, dict] = {}
     for name in names:
         if not name:
@@ -135,7 +136,7 @@ def _skill_meta_for_names(names: list[str], *, db_path: Optional[Path],
             if sp:
                 entry["source"] = "skillhub"
                 entry["source_path"] = sp
-        prod = skill_main_producer(name, db_path=db_path)
+        prod = producers.get(name)
         if prod and entry["source"] == "native":
             entry["producer"] = prod["user"]
             entry["producer_trajs"] = prod["traj_count"]
@@ -374,10 +375,17 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                 db_path=db_path, skill_dir=Path(ctx.skill_dir),
                 registry=ctx.client_registry).get(user, [])
         }
-        from xskill.events import skill_main_producer
+        from xskill.events import skill_main_producers
+        native_names = []
+        slot_srcs = []
         for s in resp.slots:
-            meta = prefs["pin_meta"].get(s.skill_name, {})
             src = _slot_source_fields(s)
+            slot_srcs.append(src)
+            if src["source"] == "native":
+                native_names.append(s.skill_name)
+        producers = skill_main_producers(native_names, db_path=db_path)
+        for s, src in zip(resp.slots, slot_srcs):
+            meta = prefs["pin_meta"].get(s.skill_name, {})
             row = {
                 "skill_name": s.skill_name, "side": s.side, "sha": s.sha,
                 "bucket": s.bucket,
@@ -391,7 +399,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                     s.bucket != "pinned" or meta.get("set_by") == user),
             }
             if src["source"] == "native":
-                prod = skill_main_producer(s.skill_name, db_path=db_path)
+                prod = producers.get(s.skill_name)
                 if prod:
                     row["producer"] = prod["user"]
                     row["producer_trajs"] = prod["traj_count"]

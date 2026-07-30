@@ -59,6 +59,17 @@ def _traj_of_atom(atom_id: str) -> str:
     return stem if stem and idx.isdigit() else ""
 
 
+def _traj_user_map(db_path: Optional[Path] = None) -> dict[str, str]:
+    """filename stem → user_key。调用方批量算贡献人时只建一次。"""
+    with pooled_connection(db_path) as conn:
+        return {
+            (r["filename"][:-3] if r["filename"].endswith(".md")
+             else r["filename"]): (r["user_key"] or "")
+            for r in conn.execute(
+                "SELECT filename, user_key FROM trajectories").fetchall()
+        }
+
+
 def skill_contributors(skill: str, *, min_weight: int = CONTRIBUTOR_MIN_WEIGHT,
                        db_path: Optional[Path] = None) -> dict[str, int]:
     """某 skill 的贡献者 → 累计 weightscore(仅 ≥ min_weight 且 user_key 非空)。
@@ -66,13 +77,8 @@ def skill_contributors(skill: str, *, min_weight: int = CONTRIBUTOR_MIN_WEIGHT,
     贡献关系 = ``atom_adoption``(atom 被聚进 skill) 经 atom_id 内嵌的
     traj_id 归到 ``trajectories.user_key``(D5 canonical 身份键)。
     """
+    traj_user = _traj_user_map(db_path)
     with pooled_connection(db_path) as conn:
-        traj_user = {
-            (r["filename"][:-3] if r["filename"].endswith(".md")
-             else r["filename"]): (r["user_key"] or "")
-            for r in conn.execute(
-                "SELECT filename, user_key FROM trajectories").fetchall()
-        }
         rows = conn.execute(
             "SELECT atom_id, weightscore FROM atom_adoption WHERE skill=?",
             (skill,),
@@ -86,34 +92,59 @@ def skill_contributors(skill: str, *, min_weight: int = CONTRIBUTOR_MIN_WEIGHT,
     return {u: w for u, w in weights.items() if w >= min_weight}
 
 
+def _producer_from_by_user(by_user: dict[str, set[str]]) -> Optional[dict]:
+    if not by_user:
+        return None
+    user, trajs = max(by_user.items(), key=lambda kv: (len(kv[1]), kv[0]))
+    return {"user": user, "traj_count": len(trajs)}
+
+
 def skill_main_producer(skill: str, *,
-                        db_path: Optional[Path] = None) -> Optional[dict]:
+                        db_path: Optional[Path] = None,
+                        traj_user: Optional[dict[str, str]] = None,
+                        ) -> Optional[dict]:
     """蒸馏资产主要贡献人：对该 skill 贡献来源轨迹数最多的 user_key。
 
     返回 ``{"user": str, "traj_count": int}``；无人贡献时返回 ``None``。
+    批量场景请用 ``skill_main_producers``，避免反复全表扫 trajectories。
     """
+    return skill_main_producers([skill], db_path=db_path,
+                                traj_user=traj_user).get(skill)
+
+
+def skill_main_producers(skills,
+                         *,
+                         db_path: Optional[Path] = None,
+                         traj_user: Optional[dict[str, str]] = None,
+                         ) -> dict[str, dict]:
+    """批量主要贡献人：整次请求只扫一次 trajectories + 一次 IN 查询 adoption。
+
+    返回 ``{skill: {"user", "traj_count"}}``；无贡献的 skill 不出现在结果里。
+    """
+    names = [s for s in dict.fromkeys(skills or ()) if s]
+    if not names:
+        return {}
+    if traj_user is None:
+        traj_user = _traj_user_map(db_path)
+    placeholders = ",".join("?" * len(names))
     with pooled_connection(db_path) as conn:
-        traj_user = {
-            (r["filename"][:-3] if r["filename"].endswith(".md")
-             else r["filename"]): (r["user_key"] or "")
-            for r in conn.execute(
-                "SELECT filename, user_key FROM trajectories").fetchall()
-        }
         rows = conn.execute(
-            "SELECT atom_id FROM atom_adoption WHERE skill=?",
-            (skill,),
+            f"SELECT skill, atom_id FROM atom_adoption"
+            f" WHERE skill IN ({placeholders})",
+            names,
         ).fetchall()
-    by_user: dict[str, set[str]] = {}
+    by_skill: dict[str, dict[str, set[str]]] = {}
     for r in rows:
         traj = _traj_of_atom(r["atom_id"] or "")
         user = traj_user.get(traj, "") if traj else ""
         if not user or not traj:
             continue
-        by_user.setdefault(user, set()).add(traj)
-    if not by_user:
-        return None
-    user, trajs = max(by_user.items(), key=lambda kv: (len(kv[1]), kv[0]))
-    return {"user": user, "traj_count": len(trajs)}
+        by_skill.setdefault(r["skill"], {}).setdefault(user, set()).add(traj)
+    return {
+        skill: prod
+        for skill, by_user in by_skill.items()
+        if (prod := _producer_from_by_user(by_user)) is not None
+    }
 
 
 class EventStore:
