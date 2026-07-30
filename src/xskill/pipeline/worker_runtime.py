@@ -11,9 +11,14 @@ new skill repositories are changed in a deterministic order.
 from __future__ import annotations
 
 import threading
+import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
+
+# 排队任务预览上限：状态文件每 5s 落盘一次，队列只需够看，不许无限增长。
+_QUEUED_PREVIEW_LIMIT = 50
 
 
 def _install_worker_context() -> None:
@@ -35,6 +40,13 @@ class BoundedExecutor:
     reserves one slot before submission, giving this wrapper a hard total
     capacity of ``workers * 3``.  Rejected work is never submitted and the
     caller can leave its durable DB/file state untouched for the next scan.
+
+    Seat model for the pipeline monitor: running tasks occupy a **fixed**
+    seat (index into a list of length ``workers``).  Completion only clears
+    its own index — neighbours never shift.  New tasks take the lowest free
+    seat.  ``task`` / ``task_factory`` attach monitor metadata (skill name,
+    atom ids, transfer type, …) shown on the dashboard; both are optional
+    and seats track occupancy even without metadata.
     """
 
     def __init__(self, name: str, workers: int):
@@ -50,27 +62,74 @@ class BoundedExecutor:
         self._queued = 0
         self._completed = 0
         self._failed = 0
+        self._seats: list[dict | None] = [None] * workers
+        # (token, task) FIFO 预览；token 用于取消/起跑时精确移除。
+        self._queued_tasks: deque[tuple[int, dict]] = deque()
+        self._task_token = 0
         self._executor = ThreadPoolExecutor(
             max_workers=workers,
             thread_name_prefix=f"xskill-{name}",
             initializer=_install_worker_context,
         )
 
-    def submit(self, function: Callable[..., Any], /, *args, **kwargs) -> Future | None:
-        """Submit immediately or return ``None`` when this pool is full."""
+    def _take_seat(self) -> int:
+        """Return the lowest free seat index (caller holds ``self._lock``)."""
+        for index, entry in enumerate(self._seats):
+            if entry is None:
+                return index
+        # max_workers == len(seats)，跑到这里说明席位簿记与执行器脱节。
+        raise RuntimeError(f"{self.name}: no free seat for a running task")
+
+    def submit(
+        self,
+        function: Callable[..., Any],
+        /,
+        *args,
+        task: dict | None = None,
+        task_factory: Callable[[], dict] | None = None,
+        **kwargs,
+    ) -> Future | None:
+        """Submit immediately or return ``None`` when this pool is full.
+
+        ``task`` is cheap static monitor metadata (also used for the queued
+        preview).  ``task_factory`` is evaluated in the worker thread when
+        the run actually starts, so it may do fresh reads (git branch,
+        candidates file) without costing the watcher thread; its result
+        overrides ``task`` on the occupied seat.
+        """
         if not self._slots.acquire(blocking=False):
             return None
         state = _SubmissionState()
         state_lock = threading.Lock()
         with self._lock:
             self._queued += 1
+            self._task_token += 1
+            token = self._task_token
+            if task is not None:
+                self._queued_tasks.append((token, task))
+                while len(self._queued_tasks) > _QUEUED_PREVIEW_LIMIT:
+                    self._queued_tasks.popleft()
 
         def run():
+            meta = task
+            if task_factory is not None:
+                try:
+                    meta = task_factory()
+                except Exception:
+                    # 监看元数据失败绝不拖垮真任务；退到 submit 时的静态 task。
+                    meta = task
             with state_lock:
                 state.started = True
             with self._lock:
                 self._queued -= 1
                 self._running += 1
+                seat = self._take_seat()
+                self._seats[seat] = {
+                    "seat": seat,
+                    "task": meta or {},
+                    "started_at": time.time(),
+                }
+                self._drop_queued(token)
             try:
                 from xskill.utils.rate_limit import request_source
 
@@ -87,6 +146,7 @@ class BoundedExecutor:
             finally:
                 with self._lock:
                     self._running -= 1
+                    self._seats[seat] = None
                 self._slots.release()
 
         try:
@@ -94,6 +154,7 @@ class BoundedExecutor:
         except BaseException:
             with self._lock:
                 self._queued -= 1
+                self._drop_queued(token)
             self._slots.release()
             raise
 
@@ -106,10 +167,18 @@ class BoundedExecutor:
                 state.started = True
             with self._lock:
                 self._queued -= 1
+                self._drop_queued(token)
             self._slots.release()
 
         future.add_done_callback(release_cancelled)
         return future
+
+    def _drop_queued(self, token: int) -> None:
+        """Remove a queued-preview entry by token (caller holds ``self._lock``)."""
+        for item in self._queued_tasks:
+            if item[0] == token:
+                self._queued_tasks.remove(item)
+                return
 
     @property
     def available_capacity(self) -> int:
@@ -117,7 +186,10 @@ class BoundedExecutor:
             return self.total_capacity - self._running - self._queued
 
     @property
-    def status(self) -> dict[str, int | float]:
+    def status(self) -> dict[str, Any]:
+        """Counts plus the monitor view: fixed seats (``None`` = free) and a
+        FIFO preview of queued tasks.  Seats are copied so the status-file
+        writer never mutates live entries."""
         with self._lock:
             occupied = self._running + self._queued
             return {
@@ -129,6 +201,11 @@ class BoundedExecutor:
                 "completed": self._completed,
                 "failed": self._failed,
                 "occupancy": occupied / self.total_capacity,
+                "seats": [
+                    dict(entry) if entry is not None else None
+                    for entry in self._seats
+                ],
+                "queue": [dict(task) for _, task in self._queued_tasks],
             }
 
     def shutdown(self, *, wait: bool = False, cancel_futures: bool = True) -> None:

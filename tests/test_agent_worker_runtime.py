@@ -86,6 +86,164 @@ def test_all_pool_thread_names_are_visible():
             pool.shutdown(wait=True)
 
 
+def _wait_for(predicate, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_seats_are_fixed_completion_clears_only_own_index():
+    """流水线 Monitor 席位模型：一席一位，完成只清该坑，邻居不左挤。"""
+    pool = BoundedExecutor("edit", 3)
+    gates = [threading.Event() for _ in range(3)]
+    try:
+        futures = [
+            pool.submit(gate.wait, 2, task={"kind": "skill", "n": index})
+            for index, gate in enumerate(gates)
+        ]
+        assert all(future is not None for future in futures)
+        assert _wait_for(lambda: all(pool.status["seats"]))
+        seats = pool.status["seats"]
+        assert [seat["seat"] for seat in seats] == [0, 1, 2]
+        assert [seat["task"]["n"] for seat in seats] == [0, 1, 2]
+        assert all(seat["started_at"] > 0 for seat in seats)
+
+        gates[1].set()  # 中间席位完成：只清下标 1，0/2 不动
+        assert futures[1].result(2) is True
+        assert _wait_for(lambda: pool.status["seats"][1] is None)
+        seats = pool.status["seats"]
+        assert [seat["task"]["n"] if seat else None for seat in seats] == [0, None, 2]
+
+        gates[0].set()
+        gates[2].set()
+        for future in (futures[0], futures[2]):
+            future.result(2)
+        assert pool.status["seats"] == [None, None, None]
+        assert pool.status["completed"] == 3
+    finally:
+        for gate in gates:
+            gate.set()
+        pool.shutdown(wait=True)
+
+
+def test_new_task_takes_lowest_free_seat_and_task_factory_overrides():
+    """新任务补最低空席；task_factory 在工作线程起跑时求值并覆盖静态 task。"""
+    pool = BoundedExecutor("edit", 2)
+    gate = threading.Event()
+    try:
+        hold = pool.submit(gate.wait, 2, task={"kind": "skill", "skill_name": "held"})
+        assert hold is not None
+        assert _wait_for(lambda: pool.status["seats"][0] is not None)
+
+        fresh = pool.submit(
+            lambda: "done",
+            task={"kind": "skill", "skill_name": "static"},
+            task_factory=lambda: {"kind": "skill", "skill_name": "fresh",
+                                  "xfer": "baby_main"},
+        )
+        assert fresh is not None
+        assert fresh.result(2) == "done"
+        # factory 结果曾落在席位 1（最低空席）；完成后席位清空
+        assert pool.status["seats"][1] is None
+        gate.set()
+        hold.result(2)
+    finally:
+        gate.set()
+        pool.shutdown(wait=True)
+
+
+def test_task_factory_failure_falls_back_to_static_task():
+    """监看元数据求值失败绝不拖垮真任务：席位退回 submit 时的静态 task。"""
+    pool = BoundedExecutor("edit", 1)
+    try:
+        future = pool.submit(
+            lambda: "ok",
+            task={"kind": "skill", "skill_name": "static"},
+            task_factory=lambda: (_ for _ in ()).throw(RuntimeError("git down")),
+        )
+        assert future is not None
+        assert future.result(2) == "ok"
+        assert pool.status["completed"] == 1
+        assert pool.status["failed"] == 0
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_queued_preview_fifo_and_drop_on_start():
+    """排队预览：FIFO 记录 task 元数据，起跑即移除，席位起跑后不再出现。"""
+    pool = BoundedExecutor("split", 1)
+    gate = threading.Event()
+    try:
+        running = pool.submit(gate.wait, 2, task={"kind": "traj", "traj_id": "t0"})
+        assert running is not None
+        assert _wait_for(lambda: pool.status["running"] == 1)
+        queued = [
+            pool.submit(gate.wait, 2, task={"kind": "traj", "traj_id": f"t{index}"})
+            for index in (1, 2)
+        ]
+        assert all(future is not None for future in queued)
+        assert pool.status["queue"] == [
+            {"kind": "traj", "traj_id": "t1"},
+            {"kind": "traj", "traj_id": "t2"},
+        ]
+        gate.set()
+        running.result(2)
+        for future in queued:
+            future.result(2)
+        assert pool.status["queue"] == []
+        assert pool.status["queued"] == 0
+    finally:
+        gate.set()
+        pool.shutdown(wait=True)
+
+
+def test_queued_preview_never_exceeds_cap_and_status_copies_are_independent():
+    """预览只够看不许无限增长；status 的 seats/queue 是拷贝，可安全落盘。"""
+    from xskill.pipeline.worker_runtime import _QUEUED_PREVIEW_LIMIT
+
+    # workers=26 → 排队容量 52 > 预览上限 50，才能把预览顶到 cap。
+    pool = BoundedExecutor("split", 26)
+    gate = threading.Event()
+    try:
+        futures = [
+            pool.submit(gate.wait, 2, task={"n": index})
+            for index in range(26 + 52)
+        ]
+        assert all(future is not None for future in futures)
+        assert _wait_for(lambda: pool.status["running"] == 26)
+        assert _wait_for(lambda: len(pool.status["queue"]) == _QUEUED_PREVIEW_LIMIT)
+        preview = pool.status["queue"]
+        assert len(preview) == _QUEUED_PREVIEW_LIMIT
+        assert len({task["n"] for task in preview}) == _QUEUED_PREVIEW_LIMIT
+        preview[0]["n"] = -1
+        assert pool.status["queue"][0]["n"] != -1
+    finally:
+        gate.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def test_submit_rejection_leaves_no_seat_or_queue_residue():
+    """容量满拒收返回 None：席位/排队预览/计数都不留残渣。"""
+    pool = BoundedExecutor("edit", 1)
+    gate = threading.Event()
+    try:
+        accepted = [pool.submit(gate.wait, 2, task={"n": i}) for i in range(3)]
+        assert all(future is not None for future in accepted)
+        assert _wait_for(lambda: pool.status["running"] == 1)
+        assert _wait_for(lambda: pool.status["queued"] == 2)
+        assert pool.submit(gate.wait, 2, task={"n": 99}) is None
+        status = pool.status
+        assert status["queued"] == 2
+        assert [task["n"] for task in status["queue"]] == [1, 2]
+        assert len([seat for seat in status["seats"] if seat]) == 1
+    finally:
+        gate.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def test_shared_request_limiter_caps_real_http_inflight():
     limiter = SharedRequestLimiter(
         max_inflight=2,
