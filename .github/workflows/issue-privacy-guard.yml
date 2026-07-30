@@ -1,0 +1,70 @@
+# Auto-redact employee ids / hostnames / private IPs / labeled client ids
+# from issues, PRs, and comments. Cannot block creation (GitHub limitation),
+# but rewrites the body in place and leaves a short notice on issues/PRs.
+
+name: Issue privacy guard
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request_target:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: privacy-guard-${{ github.event.issue.number || github.event.pull_request.number || github.event.comment.id }}
+  cancel-in-progress: true
+
+jobs:
+  redact:
+    runs-on: ubuntu-latest
+    # Skip edits performed by this bot to avoid loops.
+    if: >
+      github.actor != 'github-actions[bot]'
+      && github.event.sender.type != 'Bot'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # pull_request_target runs in base context; use default ref (base).
+          persist-credentials: false
+
+      - name: Redact issue
+        if: github.event_name == 'issues'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python3 .github/scripts/redact_issue_pii.py --event issue
+
+      - name: Redact pull request
+        if: github.event_name == 'pull_request_target'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python3 .github/scripts/redact_issue_pii.py --event pull_request
+
+      - name: Redact issue comment
+        if: github.event_name == 'issue_comment'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python3 .github/scripts/redact_issue_pii.py --event issue_comment
+
+      - name: Redact PR review comment
+        if: github.event_name == 'pull_request_review_comment'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python3 .github/scripts/redact_issue_pii.py --event pull_request_review_comment

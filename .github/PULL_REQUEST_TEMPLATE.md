@@ -20,3 +20,8 @@
 ## Linked issues
 
 <!-- e.g. Closes #123 -->
+
+<!--
+Privacy: do NOT paste employee ids, DESKTOP- hostnames, raw client_id hex,
+private IPs, tokens, or passwords in the title, body, or comments.
+-->
