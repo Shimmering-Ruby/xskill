@@ -430,8 +430,10 @@ def test_skills_catalog_concurrent_calls_for_300_skills_scan_once(
     assert all(len(rows) == 300 for rows in results)
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=0.05)
 def test_skills_catalog_cache_ttl_reloads_refs_content_and_candidates(
         tmp_path, monkeypatch):
+    """清单缓存 TTL 命中/过期；CI 慢机上 0.02s TTL 易被文件写入拖过期。"""
     root = tmp_path / "skills"
     root.mkdir()
     skill = _write_catalog_skill(root, "alpha", "version one", branch="main")

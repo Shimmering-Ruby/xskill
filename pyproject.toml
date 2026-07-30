@@ -57,6 +57,9 @@ dev = [
     "pytest-timeout>=2",
     "pytest-asyncio>=0.21",
     "pytest-bdd>=8,<9",
+    # Known CI flakes (SQLite WAL lock / short TTL cache race) use
+    # ``@pytest.mark.flaky`` from this plugin; see marked tests below.
+    "pytest-rerunfailures>=14",
     "requests>=2",
     # HTTP LLM contract tests only.  The Python fixture downloads the pinned
     # @copilotkit/aimock npm artifact and manages its local Node.js process.
@@ -118,6 +121,9 @@ markers = [
     "compact: compact trigger behavior",
     "calibration: EMA calibration behavior",
     "unknown-family: unknown model family fallback behavior",
+    # Registered by pytest-rerunfailures; listed here so ``pytest --markers``
+    # documents the known CI flake retries.
+    "flaky: known intermittent CI failures; rerun via pytest-rerunfailures",
 ]
 addopts = "--ignore=tests/live --ignore=tests/stress"
 asyncio_mode = "strict"

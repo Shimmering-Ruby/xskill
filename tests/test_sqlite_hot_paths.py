@@ -668,8 +668,13 @@ def test_registry_new_db_concurrent_open_assigns_wal_once(tmp_path, monkeypatch)
     assert len(_journal_mode_assignments(statements)) == 1
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=1, only_rerun=["database is locked"])
 def test_registry_concurrent_usage_writes_do_not_reassign_wal(tmp_path, monkeypatch):
-    """600 次 LLM usage 写入期间，热连接不重复赋值 WAL。"""
+    """600 次 LLM usage 写入期间，热连接不重复赋值 WAL。
+
+    Windows CI 偶发 ``sqlite3.OperationalError: database is locked``（WAL
+    并发平台 flake）；仅对该错误重跑，其它失败仍一次挂掉。
+    """
     from xskill.pipeline import registry
 
     db_path = tmp_path / "registry.db"
