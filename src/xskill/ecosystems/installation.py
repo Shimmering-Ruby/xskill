@@ -333,6 +333,137 @@ def read_install_metadata(dest: Path) -> dict | None:
     return meta
 
 
+_GIT_COMMIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+
+def _git_tree_fingerprints(source: Path, sha: str) -> dict[str, str] | None:
+    """按 commit 的 git tree 重建逐文件内容指纹。
+
+    口径与 ``_safe_copy_file_fingerprints`` 一致：文件字节 sha256、POSIX
+    相对路径。任何一步读不到对象都返回 None（调用方按不可领养处理）。
+    """
+    try:
+        repo = Repo(str(source))
+    except (NotGitRepository, OSError):
+        return None
+    try:
+        try:
+            obj = repo[sha.encode("ascii")]
+        except KeyError:
+            return None
+        if not isinstance(obj, Commit):
+            return None
+        fingerprints: dict[str, str] = {}
+        stack: list[tuple[bytes, Path]] = [(obj.tree, Path())]
+        while stack:
+            tree_id, prefix = stack.pop()
+            try:
+                tree = repo[tree_id]
+            except KeyError:
+                return None
+            for raw_name, mode, entry_id in tree.iteritems():
+                try:
+                    name = raw_name.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    return None
+                relative = prefix / name
+                if stat.S_ISDIR(mode):
+                    stack.append((entry_id, relative))
+                elif stat.S_ISREG(mode):
+                    try:
+                        blob = repo[entry_id]
+                    except KeyError:
+                        return None
+                    fingerprints[relative.as_posix()] = hashlib.sha256(
+                        blob.data,
+                    ).hexdigest()
+        return fingerprints
+    except (OSError, ValueError, KeyError):
+        return None
+    finally:
+        repo.close()
+
+
+def adopt_orphan_copy_install(
+    dest: Path,
+    source: Path,
+    *,
+    legacy_meta_path: Path | None = None,
+) -> bool:
+    """孤儿 dest（无账本行、无 sidecar）按 legacy meta 的 source_sha 从 git
+    重建安装时基线并登记账本；成功返回 True。
+
+    历史迁移失败的存量 dest 只剩生态目录内老 meta（canary 比对数据）。
+    其中的 source_sha 记录了安装那一刻的源 commit——从 git object 取回该
+    提交的文件内容算指纹，三方回流就能区分 dest 侧用户编辑与 source 侧
+    前进，基线不靠猜。登记后清掉 dest 内旧 marker，账本此后是唯一身份
+    来源。任何一步拿不到数据都返回 False，维持原冻结状态（安全方向）。
+    """
+    from xskill.ecosystems.install_ledger import get_default_ledger
+
+    try:
+        if read_install_metadata(dest) is not None:
+            return False
+    except InstallationMetadataError:
+        return False
+    if legacy_meta_path is None:
+        return False
+    try:
+        legacy = json.loads(legacy_meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        return False
+    if not isinstance(legacy, dict):
+        return False
+    source_sha = legacy.get("source_sha")
+    if (
+        not isinstance(source_sha, str)
+        or _GIT_COMMIT_SHA_PATTERN.fullmatch(source_sha) is None
+    ):
+        return False
+    fingerprints = _git_tree_fingerprints(Path(source), source_sha)
+    if fingerprints is None:
+        return False
+    try:
+        resolved_source = str(Path(source).resolve())
+    except OSError:
+        return False
+    installed_at = legacy.get("installed_at")
+    if isinstance(installed_at, bool) or not isinstance(
+        installed_at, (int, float),
+    ):
+        installed_at = None
+    try:
+        get_default_ledger().record_install(
+            dest,
+            skill_name=Path(dest).name,
+            mode="copy",
+            source=resolved_source,
+            source_sha=source_sha,
+            installation_id=secrets.token_hex(16),
+            content_identity=_content_identity(Path(source), source_sha),
+            baseline_identity=_copy_baseline_identity(fingerprints),
+            file_fingerprints=fingerprints,
+            installed_at=installed_at,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "orphan copy install adoption failed path_hash=%s",
+            _path_hash(Path(dest)),
+        )
+        return False
+    try:
+        marker = Path(dest) / COPY_INSTALL_MARKER_NAME
+        if marker.is_symlink() or marker.is_file():
+            marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+    logger.info(
+        "orphan copy install adopted path_hash=%s",
+        _path_hash(Path(dest)),
+    )
+    return True
+
+
 def _validated_head_sha(repo: Repo, skill_path: Path) -> str | None:
     """读取并校验已打开仓库的 HEAD；不负责关闭 repo。"""
     try:

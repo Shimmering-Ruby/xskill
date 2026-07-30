@@ -565,13 +565,19 @@ class InstallLedger(_SqliteStore):
                         dest = root / dest_name
                         if self._import_sidecar(entry, dest):
                             stats["installs_imported"] += 1
-                        entry.unlink(missing_ok=True)
-                        stats["files_removed"] += 1
+                            entry.unlink(missing_ok=True)
+                            stats["files_removed"] += 1
+                        else:
+                            # 导入失败必须保留原文件等下轮重试：账本行缺失时
+                            # sidecar 是该 dest 唯一的安装记录，删掉即成孤儿。
+                            stats["errors"] += 1
                     elif ".removal-transaction-" in name:
                         if self._import_removal_record(entry, root):
                             stats["removals_imported"] += 1
-                        entry.unlink(missing_ok=True)
-                        stats["files_removed"] += 1
+                            entry.unlink(missing_ok=True)
+                            stats["files_removed"] += 1
+                        else:
+                            stats["errors"] += 1
                     elif ".removing-" in name or name.startswith(
                         ".xskill-removing-target-",
                     ):
