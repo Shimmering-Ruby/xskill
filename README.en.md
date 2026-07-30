@@ -185,6 +185,8 @@ xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md)
 
 ## 📰 News
 
+- **2026-07-30** `v0.6.29a4`: Dashboard adds a personal My page as the default landing for regular users with paginated contributions and world feed; the install ledger now heals orphaned installs left by a failed migration and reclaims out of manifest copies, fixing the metadata validation storm that froze reverse sync on Windows clients.
+- **2026-07-30** `v0.6.29a3`: Recommendation engine switches to pure relevance round robin across interest centers, UX scores persist in registry.db; install ledger moves to SQLite with transactional supersede based uninstall.
 - **2026-07-07** — `v0.6.2a2`: Fix "Access Denied" on Windows when Group Policy blocks schtasks; auto-fallback to Startup folder so `connect` backgrounds itself without admin rights.
 - **2026-07-07** — `v0.6.2`: User profiling + skill recommend engine (`--name` stable identity, multi-interest clustering, 80/20 quality+relevance hybrid, staging-priority canary); third-party SkillHub; UX score RESTful query; Windows scheduled-task daemon (`xskill start/stop/status`).
 - **2026-05-29** — Trae IDE / Trae Agent adapter.
