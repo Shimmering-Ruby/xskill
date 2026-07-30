@@ -91,7 +91,7 @@ class SkillRepo:
         )
 
     # ─── 清空（rebuild --force 用）──────────────────────────────
-    def wipe_all_skills(self) -> int:
+    def wipe_all_skills(self, *, db_path: Path | None = None) -> int:
         """删除仓里所有 skill 子目录（含各自 ``.git`` 子仓），返回删除个数。
 
         ``xskill rebuild --force`` 用：换强模型从零重建前先清空旧 skill。
@@ -118,8 +118,10 @@ class SkillRepo:
             idx.unlink()
         logger.info("wipe_all_skills: removed %d skill(s) under %s", n, self.root)
         if n:
-            from xskill.skill.catalog_store import catalog_root_key, delete_all_native
-            delete_all_native(root_key=catalog_root_key(self.root))
+            from xskill.skill.catalog_store import catalog_root_key, notify_native_wipe
+            notify_native_wipe(
+                root_key=catalog_root_key(self.root), db_path=db_path,
+            )
         return n
 
     def __repr__(self) -> str:

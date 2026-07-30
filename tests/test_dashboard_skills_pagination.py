@@ -50,6 +50,10 @@ def _client(tmp_path, monkeypatch, n):
         "xskill.config.get_registry_db_path",
         lambda: tmp_path / "_skills_catalog_registry.db",
     )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
+        lambda: tmp_path / "_skills_catalog_registry.db",
+    )
     app = FastAPI()
     mount_dashboard(app, {"dashboard": {"enabled": True, "public": True}}, db_path=db)
 
@@ -93,6 +97,10 @@ def test_standalone_projects_10000_skills_for_all_page_and_name(
         tmp_path, monkeypatch):
     monkeypatch.setattr(
         "xskill.config.get_registry_db_path",
+        lambda: tmp_path / "_skills_catalog_registry.db",
+    )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
         lambda: tmp_path / "_skills_catalog_registry.db",
     )
 

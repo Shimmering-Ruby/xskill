@@ -453,19 +453,19 @@ def _skills_catalog_bundle(skill_dir: Path, skillhub) -> "_CatalogBundle":
         _skills_catalog_cache_key(skill_dir, skillhub), build_bundle)
 
 
-def skills_catalog(skill_dir: Path, skillhub=None) -> list[dict]:
+def skills_catalog(skill_dir: Path, skillhub=None, *, db_path=None) -> list[dict]:
     """返回技能清单全量（查 ``skills_catalog`` 投影表）。
 
     分页请走 :func:`skills_catalog_page`。磁盘仍是真相源；表由写出口 UPSERT，
     冷启动对该 root 做一次性 backfill。返回独立可修改副本。
     """
     from xskill.skill.catalog_store import list_skills_catalog
-    return list_skills_catalog(skill_dir, skillhub=skillhub)
+    return list_skills_catalog(skill_dir, skillhub=skillhub, db_path=db_path)
 
 
 def skills_catalog_page(skill_dir: Path, skillhub=None, *,
                         limit: int = 0, offset: int = 0,
-                        name: str = "") -> dict:
+                        name: str = "", db_path=None) -> dict:
     """分页读取技能清单（查投影表，不扫盘）。
 
     - ``name`` 非空：精确匹配该名字。
@@ -477,7 +477,7 @@ def skills_catalog_page(skill_dir: Path, skillhub=None, *,
     from xskill.skill.catalog_store import page_skills_catalog
     return page_skills_catalog(
         skill_dir, skillhub=skillhub,
-        limit=limit, offset=offset, name=name,
+        limit=limit, offset=offset, name=name, db_path=db_path,
     )
 
 

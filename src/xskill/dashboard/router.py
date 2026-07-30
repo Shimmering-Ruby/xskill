@@ -157,7 +157,7 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         """
         page = skills_catalog_page(
             skill_dir, skillhub=_build_skillhub(),
-            limit=limit, offset=offset, name=name)
+            limit=limit, offset=offset, name=name, db_path=db_path)
         if expose_sensitive:
             return page
         for index, row in enumerate(page["skills"]):

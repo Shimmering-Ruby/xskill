@@ -102,8 +102,15 @@ def _ref_sha(skill_path: Path, branch: str) -> str:
     return ""
 
 
-def _read_native_row(skill_path: Path) -> dict:
-    """从单个 skill 目录读出投影行（API 字段 + 表扩展字段）。"""
+def _read_native_row(
+    skill_path: Path,
+    *,
+    candidates_count: int | None = None,
+) -> dict:
+    """从单个 skill 目录读出投影行（API 字段 + 表扩展字段）。
+
+    ``candidates_count`` 非空时跳过读 ``.candidates.yml``（写出口已有 data）。
+    """
     from xskill.skill.frontmatter import parse as fm_parse
 
     skill_path = Path(skill_path)
@@ -128,17 +135,18 @@ def _read_native_row(skill_path: Path) -> dict:
             version = metadata.get("version", 0)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning("failed to read skill metadata: %s", skill_md, exc_info=True)
-    candidates_count = 0
-    candidates_path = skill_path / ".candidates.yml"
-    if candidates_path.is_file():
-        try:
-            import yaml
-            data = yaml.safe_load(candidates_path.read_text(encoding="utf-8")) or {}
-            candidates_count = len(data.get("candidates", []) or [])
-        except Exception:  # pylint: disable=broad-exception-caught
-            logger.warning(
-                "failed to read candidate buffer: %s", candidates_path, exc_info=True,
-            )
+    if candidates_count is None:
+        candidates_count = 0
+        candidates_path = skill_path / ".candidates.yml"
+        if candidates_path.is_file():
+            try:
+                import yaml
+                data = yaml.safe_load(candidates_path.read_text(encoding="utf-8")) or {}
+                candidates_count = len(data.get("candidates", []) or [])
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "failed to read candidate buffer: %s", candidates_path, exc_info=True,
+                )
     main_sha = _ref_sha(skill_path, "main")
     staging_sha = _ref_sha(skill_path, "staging")
     distributable = 1 if state in ("main", "staging") and skill_md.is_file() else 0
@@ -151,7 +159,7 @@ def _read_native_row(skill_path: Path) -> dict:
         "description": description[:300],
         "version": version,
         "candidates": candidates_count,
-        "candidates_count": candidates_count,
+        "candidates_count": int(candidates_count),
         "main_sha": main_sha,
         "staging_sha": staging_sha,
         "distributable": distributable,
@@ -310,19 +318,50 @@ def _upsert_row(conn, row: dict) -> None:
     )
 
 
-def upsert_native_skill(skill_path: Path | str, *, db_path: Optional[Path] = None) -> None:
-    """写出口：按磁盘现状 UPSERT 一条自产 skill。"""
+_BACKFILL_WAIT_TIMEOUT_SECONDS = 120.0
+
+
+def resolve_catalog_db_path(explicit: Path | str | None = None) -> Path | None:
+    """解析投影表所用 registry 库路径。
+
+    写出口禁止 ``pooled_connection(None)`` 隐式摸全局库：必须显式传入，或从
+    当前 ``AgentToolContext.registry_db_path`` 读取。两者皆无则返回 ``None``
+    （调用方应跳过投影写入）。
+    """
+    if explicit is not None:
+        return Path(explicit)
+    try:
+        from xskill.agents.agent_tools import current_agent_tool_context
+        context = current_agent_tool_context()
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    if context.configured and context.registry_db_path is not None:
+        return Path(context.registry_db_path)
+    return None
+
+
+def upsert_native_skill(
+    skill_path: Path | str,
+    *,
+    db_path: Path,
+    candidates_count: int | None = None,
+) -> None:
+    """按磁盘现状 UPSERT 一条自产 skill。``db_path`` 必填，禁止隐式全局库。"""
+    if db_path is None:
+        raise TypeError("skills_catalog upsert requires explicit db_path")
     path = Path(skill_path)
     if not path.is_dir():
         raise FileNotFoundError(f"skill path not found for catalog upsert: {path}")
-    row = _read_native_row(path)
-    with pooled_connection(db_path) as conn:
+    row = _read_native_row(path, candidates_count=candidates_count)
+    with pooled_connection(Path(db_path)) as conn:
         _upsert_row(conn, row)
         conn.commit()
 
 
-def delete_native_skill(name: str, *, db_path: Optional[Path] = None) -> None:
-    with pooled_connection(db_path) as conn:
+def delete_native_skill(name: str, *, db_path: Path) -> None:
+    if db_path is None:
+        raise TypeError("skills_catalog delete requires explicit db_path")
+    with pooled_connection(Path(db_path)) as conn:
         conn.execute(
             "DELETE FROM skills_catalog WHERE catalog_key=?",
             (_native_catalog_key(name),),
@@ -330,9 +369,11 @@ def delete_native_skill(name: str, *, db_path: Optional[Path] = None) -> None:
         conn.commit()
 
 
-def delete_all_native(*, root_key: str = "", db_path: Optional[Path] = None) -> int:
+def delete_all_native(*, root_key: str = "", db_path: Path) -> int:
     """wipe_all_skills：删该 root 下全部 native 行；root_key 空则删所有 native。"""
-    with pooled_connection(db_path) as conn:
+    if db_path is None:
+        raise TypeError("skills_catalog wipe requires explicit db_path")
+    with pooled_connection(Path(db_path)) as conn:
         if root_key:
             cursor = conn.execute(
                 "DELETE FROM skills_catalog WHERE source=? AND root_key=?",
@@ -351,10 +392,145 @@ def rename_native_skill(
     old_name: str,
     new_skill_path: Path | str,
     *,
-    db_path: Optional[Path] = None,
+    db_path: Path,
 ) -> None:
-    delete_native_skill(old_name, db_path=db_path)
-    upsert_native_skill(new_skill_path, db_path=db_path)
+    """同一连接内 DELETE 旧行 + UPSERT 新行，避免中间态丢行。"""
+    if db_path is None:
+        raise TypeError("skills_catalog rename requires explicit db_path")
+    path = Path(new_skill_path)
+    if not path.is_dir():
+        raise FileNotFoundError(f"skill path not found for catalog rename: {path}")
+    row = _read_native_row(path)
+    with pooled_connection(Path(db_path)) as conn:
+        conn.execute(
+            "DELETE FROM skills_catalog WHERE catalog_key=?",
+            (_native_catalog_key(old_name),),
+        )
+        _upsert_row(conn, row)
+        conn.commit()
+
+
+def update_native_candidates_count(
+    skill_path: Path | str,
+    candidates_count: int,
+    *,
+    db_path: Path,
+) -> None:
+    """热路径：只改 ``candidates_count``，不重读 SKILL.md / yaml / refs。"""
+    if db_path is None:
+        raise TypeError("skills_catalog candidates update requires explicit db_path")
+    name = Path(skill_path).name
+    with pooled_connection(Path(db_path)) as conn:
+        conn.execute(
+            """
+            UPDATE skills_catalog
+            SET candidates_count=?, updated_at=datetime('now')
+            WHERE catalog_key=?
+            """,
+            (int(candidates_count), _native_catalog_key(name)),
+        )
+        conn.commit()
+
+
+def notify_native_upsert(
+    skill_path: Path | str,
+    *,
+    db_path: Path | str | None = None,
+    candidates_count: int | None = None,
+) -> None:
+    """写出口钩子：投影失败只记日志，绝不砸穿磁盘真相写路径。"""
+    try:
+        resolved = resolve_catalog_db_path(db_path)
+        if resolved is None:
+            logger.debug(
+                "skills_catalog skip upsert (no registry_db_path): %s", skill_path,
+            )
+            return
+        upsert_native_skill(
+            skill_path, db_path=resolved, candidates_count=candidates_count,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("skills_catalog upsert failed: %s", skill_path)
+
+
+def notify_native_candidates_count(
+    skill_path: Path | str,
+    candidates_count: int,
+    *,
+    db_path: Path | str | None = None,
+) -> None:
+    """candidates 落盘钩子：只用内存 count 更新投影列。"""
+    try:
+        resolved = resolve_catalog_db_path(db_path)
+        if resolved is None:
+            logger.debug(
+                "skills_catalog skip candidates_count (no registry_db_path): %s",
+                skill_path,
+            )
+            return
+        update_native_candidates_count(
+            skill_path, candidates_count, db_path=resolved,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "skills_catalog candidates_count update failed: %s", skill_path,
+        )
+
+
+def notify_native_delete(
+    name: str,
+    *,
+    db_path: Path | str | None = None,
+) -> None:
+    try:
+        resolved = resolve_catalog_db_path(db_path)
+        if resolved is None:
+            logger.debug(
+                "skills_catalog skip delete (no registry_db_path): %s", name,
+            )
+            return
+        delete_native_skill(name, db_path=resolved)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("skills_catalog delete failed: %s", name)
+
+
+def notify_native_rename(
+    old_name: str,
+    new_skill_path: Path | str,
+    *,
+    db_path: Path | str | None = None,
+) -> None:
+    try:
+        resolved = resolve_catalog_db_path(db_path)
+        if resolved is None:
+            logger.debug(
+                "skills_catalog skip rename (no registry_db_path): %s → %s",
+                old_name, new_skill_path,
+            )
+            return
+        rename_native_skill(old_name, new_skill_path, db_path=resolved)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "skills_catalog rename failed: %s → %s", old_name, new_skill_path,
+        )
+
+
+def notify_native_wipe(
+    *,
+    root_key: str = "",
+    db_path: Path | str | None = None,
+) -> None:
+    try:
+        resolved = resolve_catalog_db_path(db_path)
+        if resolved is None:
+            logger.debug(
+                "skills_catalog skip wipe (no registry_db_path): root_key=%s",
+                root_key,
+            )
+            return
+        delete_all_native(root_key=root_key, db_path=resolved)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("skills_catalog wipe failed: root_key=%s", root_key)
 
 
 def _meta_ready(conn, root_key: str, skillhub_key: str) -> bool:
@@ -431,7 +607,11 @@ def ensure_skills_catalog(
             _BACKFILL_FLIGHTS[flight_key] = flight
             owner = True
     if not owner:
-        flight.done.wait()
+        if not flight.done.wait(timeout=_BACKFILL_WAIT_TIMEOUT_SECONDS):
+            raise TimeoutError(
+                f"skills_catalog backfill wait timed out after "
+                f"{_BACKFILL_WAIT_TIMEOUT_SECONDS}s: root={root}"
+            )
         if flight.error is not None:
             raise flight.error
         return

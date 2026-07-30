@@ -488,6 +488,7 @@ class DirectoryWatcher:
             default_traj_root=traj_root,
             spill_root=self.spill_root,
             usage_ledger=self.usage_ledger,
+            registry_db_path=self.db_path,
         )
         # ── 跨技能并行写正文，且不阻塞扫描循环 ──
         # 每个 skill 文件夹是独立 git 仓（skill/git.py 各自 git init），仓锁
@@ -772,6 +773,7 @@ class DirectoryWatcher:
             default_traj_root=self.skill_dir,
             spill_root=self.spill_root,
             usage_ledger=self.usage_ledger,
+            registry_db_path=self.db_path,
         )
         for d in sorted(self.skill_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("."):
@@ -2094,6 +2096,7 @@ class DirectoryWatcher:
             default_traj_root=dir_path,
             spill_root=self.spill_root,
             usage_ledger=self.usage_ledger,
+            registry_db_path=self.db_path,
         )
         try:
             with agent_tools.use_agent_tool_context(tool_context):
@@ -2611,6 +2614,7 @@ def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
         usage_ledger=usage_ledger,
         cluster_write_queue=cluster_write_queue,
         cluster_result_recorder=recorder,
+        registry_db_path=db_path,
     )
     with agent_tools.use_agent_tool_context(tool_context):
         return _process_atom_task_bound(
@@ -2744,6 +2748,7 @@ def process_atom_batch(*, atom_ids: list[str], config: dict, skill_dir: Path,
         usage_ledger=usage_ledger,
         cluster_write_queue=cluster_write_queue,
         cluster_result_recorder=recorder,
+        registry_db_path=db_path,
     )
     with agent_tools.use_agent_tool_context(tool_context):
         return _process_atom_batch_bound(

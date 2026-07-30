@@ -1812,8 +1812,8 @@ def init_skill_repo_on_baby(skill_dir: str, name: str, description: str) -> None
         finally:
             repo.close()
     logger.info(f"🌱 init skill on baby branch: {skill_dir}")
-    from xskill.skill.catalog_store import upsert_native_skill
-    upsert_native_skill(skill_dir)
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(skill_dir)
 
 
 def commit_baby_to_main_branch(skill_dir: str, message: str) -> bool:
@@ -1844,8 +1844,8 @@ def commit_baby_to_main_branch(skill_dir: str, message: str) -> bool:
             del repo.refs[baby_ref]
             repo.refs.set_symbolic_ref(b"HEAD", main_ref)
     logger.info(f"🎓 baby → main graduated: {Path(skill_dir).name}: {message}")
-    from xskill.skill.catalog_store import upsert_native_skill
-    upsert_native_skill(skill_dir)
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(skill_dir)
     return True
 
 
@@ -1877,8 +1877,8 @@ def commit_baby_checkpoint(skill_dir: str, message: str) -> str | None:
         full_sha[:7],
         message,
     )
-    from xskill.skill.catalog_store import upsert_native_skill
-    upsert_native_skill(skill_dir)
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(skill_dir)
     return full_sha
 
 
@@ -1939,8 +1939,8 @@ def commit_to_staging_branch(skill_dir: str, message: str) -> bool:
             except Exception as e:
                 logger.warning("reset back to main failed: %s", e)
     logger.info(f"🚦 staging candidate committed: {Path(skill_dir).name}: {message}")
-    from xskill.skill.catalog_store import upsert_native_skill
-    upsert_native_skill(skill_dir)
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(skill_dir)
     return True
 
 
@@ -1968,8 +1968,8 @@ def commit_update_main_branch(skill_dir: str, message: str) -> bool:
                     return False
                 raise RuntimeError(f"commit_update_main_branch commit 失败: {err}")
     logger.info("♻️ main direct update commit: %s: %s", Path(skill_dir).name, message)
-    from xskill.skill.catalog_store import upsert_native_skill
-    upsert_native_skill(skill_dir)
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(skill_dir)
     return True
 
 

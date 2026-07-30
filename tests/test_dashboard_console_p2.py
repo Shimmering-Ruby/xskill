@@ -638,6 +638,10 @@ def test_admin_skills_uses_cached_catalog_and_keeps_skillrepo_scope(
         "xskill.config.get_registry_db_path",
         lambda: db,
     )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
+        lambda: db,
+    )
     # beta 起灰度 → canary；gamma 下线 → retired；alpha 近 30 日有使用
     _git(["checkout", "-q", "-b", "staging"], skills / "beta")
     R.retire_skill(skill_name="gamma", set_by="boss", db_path=db)

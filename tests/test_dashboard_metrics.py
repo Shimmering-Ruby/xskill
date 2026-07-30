@@ -34,6 +34,10 @@ def _isolate_skills_catalog_registry(tmp_path, monkeypatch):
         "xskill.config.get_registry_db_path",
         lambda: registry,
     )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
+        lambda: registry,
+    )
 
 
 def _seed_team(db):
@@ -463,7 +467,7 @@ def test_skills_catalog_upsert_picks_up_disk_mutations(tmp_path):
     assert (still_stale["state"], still_stale["description"], still_stale["candidates"]) == (
         "main", "version one", 0)
 
-    catalog_store.upsert_native_skill(skill)
+    catalog_store.upsert_native_skill(skill, db_path=tmp_path / "_skills_catalog_registry.db")
     refreshed = skills_catalog(root)[0]
     assert (refreshed["state"], refreshed["description"], refreshed["version"],
             refreshed["candidates"]) == ("staging", "version two", 2, 2)

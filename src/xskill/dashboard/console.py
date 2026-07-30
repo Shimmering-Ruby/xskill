@@ -624,7 +624,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                 usage30[rec.get("skill") or ""] = \
                     usage30.get(rec.get("skill") or "", 0) + 1
         out = []
-        for entry in skills_catalog(skill_dir):
+        for entry in skills_catalog(skill_dir, db_path=db_path):
             name = entry["name"]
             if name == "references" or not (skill_dir / name / "SKILL.md").is_file():
                 continue
@@ -675,7 +675,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         from xskill.skill.git import skill_repo_lock
         from xskill.skill.skill import delete_skill
         with skill_repo_lock(skill_dir / name):
-            ok = delete_skill(skill_dir, name)
+            ok = delete_skill(skill_dir, name, db_path=db_path)
         if not ok:
             raise HTTPException(status_code=500, detail="delete commit failed")
         purge_skill_records(skill_name=name, db_path=db_path)
