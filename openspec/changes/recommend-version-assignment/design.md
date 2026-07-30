@@ -39,8 +39,8 @@ skill_prefs                 -- 扩展：可选 side / sha 覆盖（缺省=仅钉
 
 ## Mock 审阅
 
-`mockups/` = 官方 static 副本 + `mock-api.js`（拦截 `/api/v1/dashboard/*`）。
-本地：`python3 -m http.server` 于该目录即可。
+`mockups/` = 官方 `index.html` 壳 + 精简 `app.js`：**数据全部写死**，无 fetch / 无 mock API。
+本地：`python3 -m http.server` 于该目录即可。重点看管理「当前推送」、技能详情「灰度路由」、我的槽位 side/sha。
 
 ## 非目标
 

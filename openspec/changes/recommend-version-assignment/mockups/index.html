@@ -78,7 +78,7 @@
   <aside class="w-52 shrink-0 bg-white border-r border-slate-200 flex flex-col sticky top-0 h-screen">
     <div class="px-5 pt-5 pb-4 flex items-center gap-2.5">
       <div class="w-8 h-8 rounded-xl bg-gradient-to-br from-teal-500 to-cyan-700 flex items-center justify-center text-white font-bold text-base">x</div>
-      <div><div class="font-bold text-[15px] leading-4 text-slate-900">xskill</div><div class="text-[10.5px] text-slate-400 mt-0.5">控制台 · mock</div></div>
+      <div><div class="font-bold text-[15px] leading-4 text-slate-900">xskill</div><div class="text-[10.5px] text-slate-400 mt-0.5">控制台 · 静态演示</div></div>
     </div>
     <nav class="px-3 space-y-0.5 mt-1 text-[13px]" id="nav">
       <a href="#overview" data-pg="overview" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="1.5" width="5.4" height="5.4" rx="1.5"/><rect x="9.1" y="1.5" width="5.4" height="5.4" rx="1.5"/><rect x="1.5" y="9.1" width="5.4" height="5.4" rx="1.5"/><rect x="9.1" y="9.1" width="5.4" height="5.4" rx="1.5"/></svg>总览</a>
@@ -87,14 +87,14 @@
       <a href="#traj" data-pg="traj" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h9M2 8h12M2 12h7"/><circle cx="13.5" cy="4" r="1.4" fill="currentColor" stroke="none"/></svg>轨迹 &amp; 原子</a>
       <a href="#users" data-pg="users" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5.5" cy="5" r="2.4"/><circle cx="11.5" cy="6" r="1.9"/><path d="M1.5 13.5c0-2.4 1.8-4 4-4s4 1.6 4 4M10 13.5c0-1.9 1.3-3.2 3-3.2s3 1.3 3 3.2" transform="scale(0.92)"/></svg>用户 &amp; 画像</a>
       <a href="#canary" data-pg="canary" class="nav-link flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 1.5h4M7 1.5v4.2L3 12a2 2 0 001.8 3h6.4A2 2 0 0013 12L9 5.7V1.5"/><path d="M4.5 10.5h7"/></svg>灰度 Canary</a>
-      <a href="#my" data-pg="my" class="nav-link auth-user hidden flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5.2" r="2.7"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/></svg>我的</a>
-      <a href="#admin" data-pg="admin" class="nav-link auth-admin hidden flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 2v3.6c0 3.6-2.3 6-5.5 7.4-3.2-1.4-5.5-3.8-5.5-7.4V3.5l5.5-2z"/></svg>管理</a>
-      <a href="#settings" data-pg="settings" class="nav-link auth-admin hidden flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2M3.8 3.8l1.5 1.5M10.7 10.7l1.5 1.5M12.2 3.8l-1.5 1.5M5.3 10.7l-1.5 1.5"/></svg>设置</a>
+      <a href="#my" data-pg="my" class="nav-link auth-user flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5.2" r="2.7"/><path d="M2.5 14c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/></svg>我的</a>
+      <a href="#admin" data-pg="admin" class="nav-link auth-admin flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 2v3.6c0 3.6-2.3 6-5.5 7.4-3.2-1.4-5.5-3.8-5.5-7.4V3.5l5.5-2z"/></svg>管理</a>
+      <a href="#settings" data-pg="settings" class="nav-link auth-admin flex items-center gap-2.5 px-3 py-2 rounded-lg text-slate-500 hover:bg-slate-50"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2M3.8 3.8l1.5 1.5M10.7 10.7l1.5 1.5M12.2 3.8l-1.5 1.5M5.3 10.7l-1.5 1.5"/></svg>设置</a>
     </nav>
     <div class="mt-auto px-4 py-4 border-t border-slate-100">
-      <div id="who-anon"><button id="btn-login" class="w-full py-1.5 rounded-lg ring-1 ring-slate-200 text-slate-600 hover:bg-slate-50 text-[12.5px]">登录</button></div>
-      <div id="who-user" class="hidden flex items-center justify-between gap-2">
-        <span class="text-[12.5px] text-slate-700 truncate"><b id="who-name"></b> <span id="who-role" class="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700"></span></span>
+      <div id="who-anon" class="hidden"><button id="btn-login" class="w-full py-1.5 rounded-lg ring-1 ring-slate-200 text-slate-600 hover:bg-slate-50 text-[12.5px]">登录</button></div>
+      <div id="who-user" class="flex items-center justify-between gap-2">
+        <span class="text-[12.5px] text-slate-700 truncate"><b id="who-name">admin</b> <span id="who-role" class="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">admin</span></span>
         <button id="btn-logout" class="text-[11px] text-slate-400 hover:bg-slate-50 px-1.5 py-0.5 rounded">退出</button>
       </div>
       <div class="mt-2 text-[10.5px] text-slate-400">connect --name 后终端打印登录 token</div>
@@ -320,8 +320,8 @@
 
     <!-- ══ 我的（P2 + #174） ══ -->
     <div class="sec-page" id="pg-my">
-      <div id="my-guard" class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">请先登录（左下角）。</div>
-      <div id="my-body" class="hidden">
+      <div id="my-guard" class="hidden bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">请先登录（左下角）。</div>
+      <div id="my-body">
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
           <div class="flex items-baseline justify-between">
             <h2 class="font-semibold text-sm">推给我的</h2>
@@ -418,8 +418,8 @@
 
     <!-- ══ 管理（admin） ══ -->
     <div class="sec-page" id="pg-admin">
-      <div id="admin-guard" class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">仅 admin。请先以 admin 登录（左下角）。</div>
-      <div id="admin-body" class="hidden">
+      <div id="admin-guard" class="hidden bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">仅 admin。请先以 admin 登录（左下角）。</div>
+      <div id="admin-body">
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
           <div class="flex items-baseline justify-between">
             <h2 class="font-semibold text-sm">用户 × 推送/配置</h2>
@@ -482,6 +482,5 @@
 <!-- P3:页内 toast(任意页面右下角弹) + 散点 hover 预览卡 -->
 <div id="toasts"></div>
 <div id="scatter-tip" class="hidden bg-slate-900 text-slate-100 rounded-xl px-3 py-2 text-[11px]"></div>
-<script src="mock-api.js"></script>
 <script src="app.js" defer></script>
 </body></html>
