@@ -24,7 +24,26 @@ const sideChip = side => side === 'staging'
   : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">main</span>';
 const bucketChip = b => `<span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET[b] || 'bg-slate-100 text-slate-500'}">${esc(b)}</span>`;
 
-// ── 写死数据 ──────────────────────────────────────────────────
+const PAGE = 5;
+const TRI_UP = '<svg width="12" height="8" viewBox="0 0 12 8" fill="currentColor"><path d="M6 0L12 8H0z"/></svg>';
+const TRI_DN = '<svg width="12" height="8" viewBox="0 0 12 8" fill="currentColor"><path d="M6 8L0 0h12z"/></svg>';
+
+function pagerCol(pagerId, page, total) {
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  const p = Math.min(page, pages - 1);
+  return `<div class="flex flex-col items-center gap-0.5 shrink-0 pt-0.5">
+    <button type="button" class="feed-tri pg-btn" data-pager="${esc(pagerId)}" data-dir="-1" ${p <= 0 ? 'disabled' : ''} title="上一页" aria-label="上一页">${TRI_UP}</button>
+    <span class="text-[10px] text-slate-400 tabular-nums leading-none py-1">${p + 1}/${pages}</span>
+    <button type="button" class="feed-tri pg-btn" data-pager="${esc(pagerId)}" data-dir="1" ${p >= pages - 1 ? 'disabled' : ''} title="下一页" aria-label="下一页">${TRI_DN}</button>
+  </div>`;
+}
+function pageSlice(arr, page) {
+  const pages = Math.max(1, Math.ceil(arr.length / PAGE));
+  const p = Math.max(0, Math.min(page, pages - 1));
+  return { page: p, pages, slice: arr.slice(p * PAGE, p * PAGE + PAGE), total: arr.length };
+}
+
+// ── 写死数据（用户数 > 5，方便演示翻页） ──────────────────────
 const SKILLS = [
   { name: 'web-flask', state: 'staging', description: 'Flask 路由与蓝图排错', version: 2, candidates: 4, main: 'a1b2c3d', staging: 'f9e8d7c' },
   { name: 'sql-migrate', state: 'staging', description: '数据库迁移冲突处理', version: 2, candidates: 3, main: '1122334', staging: '9988776' },
@@ -36,58 +55,48 @@ const SKILLS = [
   { name: 'csv-join', state: 'main', description: '多表 CSV 关联合并', version: 1, candidates: 1, main: '2718281', staging: null },
 ];
 
-// 每人当前推送（写死）
-const ASSIGN = {
-  alice: [
-    { skill: 'git-housekeeping', bucket: 'pinned', side: 'main', sha: 'deadbee', source: '全局 pin' },
-    { skill: 'pytest-fixture', bucket: 'pinned', side: 'main', sha: 'abcdef0', source: '自 pin' },
-    { skill: 'web-flask', bucket: 'ranked', side: 'staging', sha: 'f9e8d7c', source: '自动 · pin 覆盖 side' },
-    { skill: 'sql-migrate', bucket: 'ranked', side: 'main', sha: '1122334', source: '自动' },
-    { skill: 'docker-compose', bucket: 'recommended', side: 'main', sha: '13579bd', source: '自动' },
-  ],
-  bob: [
-    { skill: 'git-housekeeping', bucket: 'pinned', side: 'main', sha: 'deadbee', source: '全局 pin' },
-    { skill: 'web-flask', bucket: 'ranked', side: 'main', sha: 'a1b2c3d', source: '自动' },
-    { skill: 'sql-migrate', bucket: 'ranked', side: 'staging', sha: '9988776', source: '自动' },
-    { skill: 'pytest-fixture', bucket: 'recommended', side: 'staging', sha: 'c0ffeea', source: '自动' },
-  ],
-  carol: [
-    { skill: 'git-housekeeping', bucket: 'pinned', side: 'main', sha: 'deadbee', source: '全局 pin' },
-    { skill: 'docker-compose', bucket: 'pinned', side: 'main', sha: '13579bd', source: 'admin pin' },
-    { skill: 'web-flask', bucket: 'ranked', side: 'staging', sha: 'f9e8d7c', source: '自动' },
-    { skill: 'sql-migrate', bucket: 'ranked', side: 'main', sha: '1122334', source: '自动 · pin 覆盖 side' },
-  ],
-  dave: [
-    { skill: 'git-housekeeping', bucket: 'pinned', side: 'main', sha: 'deadbee', source: '全局 pin' },
-    { skill: 'web-flask', bucket: 'ranked', side: 'main', sha: 'a1b2c3d', source: '自动' },
-    { skill: 'openapi-client', bucket: 'recommended', side: 'main', sha: '2468ace', source: '自动' },
-  ],
-  erin: [
-    { skill: 'git-housekeeping', bucket: 'pinned', side: 'main', sha: 'deadbee', source: '全局 pin' },
-    { skill: 'web-flask', bucket: 'ranked', side: 'staging', sha: 'f9e8d7c', source: '自动' },
-    { skill: 'pytest-fixture', bucket: 'recommended', side: 'staging', sha: 'c0ffeea', source: '自动' },
-  ],
-  frank: [
-    { skill: 'git-housekeeping', bucket: 'pinned', side: 'main', sha: 'deadbee', source: '全局 pin' },
-    { skill: 'web-flask', bucket: 'pinned', side: 'main', sha: 'a1b2c3d', source: '自 pin' },
-    { skill: 'sql-migrate', bucket: 'ranked', side: 'staging', sha: '9988776', source: '自动' },
-    { skill: 'csv-join', bucket: 'recommended', side: 'main', sha: '2718281', source: '自动' },
-  ],
-};
-
-const USERS = [
-  { user: 'alice', ver: '0.6.29', rate: '30%', pinned: '2 · 0', hist: 155 },
-  { user: 'bob', ver: '0.6.29', rate: '28%', pinned: '1 · 1', hist: 98 },
-  { user: 'carol', ver: '0.6.28', rate: '35%', pinned: '2 · 0', hist: 72 },
-  { user: 'dave', ver: '0.6.29', rate: '22%', pinned: '1 · 0', hist: 41 },
-  { user: 'erin', ver: '未上报', rate: '19%', pinned: '1 · 0', hist: 33 },
-  { user: 'frank', ver: '0.6.29', rate: '31%', pinned: '2 · 0', hist: 120 },
+const USER_NAMES = [
+  'alice', 'bob', 'carol', 'dave', 'erin', 'frank',
+  'grace', 'hank', 'ivy', 'jack', 'kate', 'leo',
 ];
+
+// 每人当前推送；web-flask 刻意让 staging/main 都超过 5 人
+const ASSIGN = {};
+USER_NAMES.forEach((u, i) => {
+  const flaskSide = i % 2 === 0 ? 'staging' : 'main';
+  const flaskSha = flaskSide === 'staging' ? 'f9e8d7c' : 'a1b2c3d';
+  ASSIGN[u] = [
+    { skill: 'git-housekeeping', bucket: 'pinned', side: 'main', sha: 'deadbee', source: '全局 pin' },
+    { skill: 'web-flask', bucket: i < 2 ? 'pinned' : 'ranked', side: flaskSide, sha: flaskSha, source: i < 2 ? '自 pin' : '自动' },
+    { skill: 'sql-migrate', bucket: 'ranked', side: i % 3 === 0 ? 'staging' : 'main', sha: i % 3 === 0 ? '9988776' : '1122334', source: '自动' },
+    { skill: 'pytest-fixture', bucket: 'recommended', side: i % 2 ? 'staging' : 'main', sha: i % 2 ? 'c0ffeea' : 'abcdef0', source: '自动' },
+    { skill: 'docker-compose', bucket: 'recommended', side: 'main', sha: '13579bd', source: '自动' },
+    ...(i === 0 ? [{ skill: 'openapi-client', bucket: 'recommended', side: 'main', sha: '2468ace', source: '自动' },
+      { skill: 'csv-join', bucket: 'recommended', side: 'main', sha: '2718281', source: '自动' }] : []),
+  ];
+});
+
+const USERS = USER_NAMES.map((user, i) => ({
+  user,
+  ver: i === 4 ? '未上报' : '0.6.29',
+  rate: `${18 + (i * 3) % 20}%`,
+  pinned: `${1 + (i % 3)} · ${i === 1 ? 1 : 0}`,
+  hist: 30 + i * 12,
+}));
 
 const NAMES = {
   overview: '总览', skills: '技能库', pipeline: '流水线', traj: '轨迹 & 原子',
   users: '用户 & 画像', canary: '灰度 Canary', my: '我的', admin: '管理', settings: '设置',
 };
+
+// 翻页状态
+let adminUserPage = 0;
+let drawerUser = null;
+let drawerPage = 0;
+let curSkill = null;
+let routeStgPage = 0;
+let routeMainPage = 0;
+let mySlotPage = 0;
 
 // ── 路由 ──────────────────────────────────────────────────────
 function showPage(pg) {
@@ -108,26 +117,53 @@ function route() {
   const parts = h.split('/');
   if (parts[0] === 'skill' && parts[1]) {
     showPage('skills');
-    renderSkillDetail(decodeURIComponent(parts[1]));
+    const name = decodeURIComponent(parts[1]);
+    if (curSkill !== name) { routeStgPage = 0; routeMainPage = 0; }
+    renderSkillDetail(name);
     return;
   }
   const pg = parts[0] && NAMES[parts[0]] ? parts[0] : 'admin';
   showPage(pg);
   if (pg === 'skills') {
     const box = document.getElementById('skill-detail');
-    if (box && !box.dataset.keep) box.innerHTML = '';
+    if (box && !curSkill) box.innerHTML = '';
   }
+  if (pg === 'admin') renderAdmin();
+  if (pg === 'my') renderMy();
 }
 
-// ── 管理页 ────────────────────────────────────────────────────
+// ── 管理：用户表（上）翻页 ────────────────────────────────────
 function renderAdmin() {
   const gp = document.getElementById('admin-gpins');
   if (gp) {
     gp.innerHTML = '<span class="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">git-housekeeping</span>';
   }
-  const tb = document.getElementById('admin-users-body');
-  if (!tb) return;
-  tb.innerHTML = USERS.map(u => {
+  const wrap = document.getElementById('admin-users-body');
+  if (!wrap) return;
+
+  let host = document.getElementById('admin-users-pager-host');
+  if (!host) {
+    const tableWrap = wrap.closest('.overflow-x-auto');
+    if (tableWrap && tableWrap.parentNode) {
+      host = document.createElement('div');
+      host.id = 'admin-users-pager-host';
+      host.className = 'mt-2 flex gap-2 items-start';
+      const pager = document.createElement('div');
+      pager.id = 'admin-users-pager';
+      const pane = document.createElement('div');
+      pane.className = 'min-w-0 flex-1 overflow-x-auto';
+      tableWrap.parentNode.insertBefore(host, tableWrap);
+      host.appendChild(pager);
+      host.appendChild(pane);
+      pane.appendChild(tableWrap);
+    }
+  }
+  const pagerEl = document.getElementById('admin-users-pager');
+  const { page, slice } = pageSlice(USERS, adminUserPage);
+  adminUserPage = page;
+  if (pagerEl) pagerEl.innerHTML = pagerCol('admin-users', adminUserPage, USERS.length);
+
+  wrap.innerHTML = slice.map(u => {
     const slots = ASSIGN[u.user] || [];
     const stg = slots.filter(s => s.side === 'staging').length;
     return `<tr>
@@ -156,34 +192,43 @@ function renderAdmin() {
         <td class="text-right"><button class="text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 text-slate-400 cursor-not-allowed">下线</button></td></tr>`;
     }).join('');
   }
+  if (drawerUser) openDrawer(drawerUser, false);
 }
 
-function openDrawer(user) {
+function openDrawer(user, resetPage) {
+  drawerUser = user;
+  if (resetPage !== false) drawerPage = 0;
   const d = document.getElementById('admin-drawer');
   if (!d) return;
   const slots = ASSIGN[user] || [];
+  const { page, slice, total } = pageSlice(slots, drawerPage);
+  drawerPage = page;
   d.classList.remove('hidden');
   d.innerHTML = `<div class="flex items-baseline justify-between">
       <h3 class="font-medium text-[12.5px]">${esc(user)} 的当前推送
-        <span class="text-[10.5px] text-slate-400 font-normal ml-1">${slots.length} 槽（写死演示，不可改）</span></h3>
+        <span class="text-[10.5px] text-slate-400 font-normal ml-1">${total} 槽 · 每页 ${PAGE} 条</span></h3>
       <button id="adm-drawer-x" class="text-[11px] text-slate-400 hover:bg-slate-100 px-1.5 rounded">收起</button></div>
-    <div class="mt-2 space-y-1.5">${slots.map(s => `
-      <div class="flex items-center gap-2 px-2.5 py-2 rounded-lg ring-1 ring-slate-100 bg-white">
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-1.5 flex-wrap">
-            <a href="#skill/${encodeURIComponent(s.skill)}" class="font-medium text-teal-700 text-[12px]">${esc(s.skill)}</a>
-            ${bucketChip(s.bucket)} ${sideChip(s.side)}
-            <code class="text-[10px] text-slate-400">${esc(s.sha)}</code>
-            <span class="text-[10px] text-slate-400">· ${esc(s.source)}</span>
+    <div class="mt-2 flex gap-2 items-start">
+      ${pagerCol('drawer-slots', drawerPage, total)}
+      <div class="min-w-0 flex-1 space-y-1.5">${slice.map(s => `
+        <div class="flex items-center gap-2 px-2.5 py-2 rounded-lg ring-1 ring-slate-100 bg-white">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <a href="#skill/${encodeURIComponent(s.skill)}" class="font-medium text-teal-700 text-[12px]">${esc(s.skill)}</a>
+              ${bucketChip(s.bucket)} ${sideChip(s.side)}
+              <code class="text-[10px] text-slate-400">${esc(s.sha)}</code>
+              <span class="text-[10px] text-slate-400">· ${esc(s.source)}</span>
+            </div>
           </div>
-        </div>
-      </div>`).join('')}</div>`;
+        </div>`).join('') || '<span class="text-[11px] text-slate-400">无</span>'}</div>
+    </div>`;
 }
 
 // ── 技能库 ────────────────────────────────────────────────────
 function renderSkills() {
-  const put = (sel, val) => document.querySelectorAll(`[data-m="${sel}"]`).forEach(e => { e.textContent = val; });
-  put('skills.summary', `共 ${SKILLS.length} 个 · main 5 · staging 3`);
+  document.querySelectorAll('[data-m="skills.summary"]').forEach(e => {
+    e.textContent = `共 ${SKILLS.length} 个 · main 5 · staging 3`;
+  });
   const tb = document.getElementById('skills-body');
   if (!tb) return;
   tb.innerHTML = SKILLS.map(s => {
@@ -199,7 +244,18 @@ function renderSkills() {
   }).join('');
 }
 
+function routingLists(name) {
+  const stg = [], main = [];
+  USER_NAMES.forEach(u => {
+    const hit = (ASSIGN[u] || []).find(s => s.skill === name);
+    if (!hit) return;
+    (hit.side === 'staging' ? stg : main).push({ user: u, ...hit });
+  });
+  return { stg, main };
+}
+
 function renderSkillDetail(name) {
+  curSkill = name;
   const sk = SKILLS.find(s => s.name === name);
   const box = document.getElementById('skill-detail');
   if (!box) return;
@@ -207,12 +263,10 @@ function renderSkillDetail(name) {
     box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">未知 skill：${esc(name)}</div>`;
     return;
   }
-  const stg = [], main = [];
-  Object.keys(ASSIGN).forEach(u => {
-    const hit = (ASSIGN[u] || []).find(s => s.skill === name);
-    if (!hit) return;
-    (hit.side === 'staging' ? stg : main).push({ user: u, ...hit });
-  });
+  const { stg, main } = routingLists(name);
+  const stgP = pageSlice(stg, routeStgPage); routeStgPage = stgP.page;
+  const mainP = pageSlice(main, routeMainPage); routeMainPage = mainP.page;
+
   const row = u => `
     <div class="flex items-center gap-2 py-2 border-b border-slate-50 last:border-0">
       ${avatar(u.user, 'sm')}
@@ -224,6 +278,21 @@ function renderSkillDetail(name) {
         </div>
       </div>
     </div>`;
+
+  const listBlock = (title, titleCls, ringCls, bgCls, pagerId, page, list, sliced) => `
+    <div>
+      <div class="flex items-center justify-between mb-1">
+        <div class="text-[11px] font-medium ${titleCls}">${title}</div>
+        <span class="text-[10px] text-slate-400">${list.length} 人 · 每页 ${PAGE}</span>
+      </div>
+      <div class="flex gap-2 items-start">
+        ${pagerCol(pagerId, page, list.length)}
+        <div class="min-w-0 flex-1 rounded-xl ring-1 ${ringCls} ${bgCls} px-3">
+          ${sliced.map(row).join('') || '<div class="text-[11px] text-slate-400 py-2">无人</div>'}
+        </div>
+      </div>
+    </div>`;
+
   box.innerHTML = `
   <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
     <div class="text-xs text-slate-400 mb-1.5"><a href="#skills" class="text-teal-700 hover:underline">技能库</a> <span class="mx-1">/</span> <span class="text-slate-600">${esc(name)}</span></div>
@@ -241,31 +310,29 @@ function renderSkillDetail(name) {
     <div class="rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
       <div class="flex items-baseline justify-between">
         <h3 class="font-semibold text-sm">灰度路由</h3>
-        <span class="text-[11px] text-slate-400">${sk.staging ? `staging ${stg.length} · main ${main.length}` : '无 staging'}</span>
+        <span class="text-[11px] text-slate-400">${sk.staging ? `staging ${stg.length} · main ${main.length}` : '无 staging · 全员 main'}</span>
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
-        <div>
-          <div class="text-[11px] text-amber-700 font-medium mb-1">staging</div>
-          <div class="rounded-xl ring-1 ring-amber-100 bg-amber-50/40 px-3">${stg.map(row).join('') || '<div class="text-[11px] text-slate-400 py-2">无人</div>'}</div>
-        </div>
-        <div>
-          <div class="text-[11px] text-slate-500 font-medium mb-1">main</div>
-          <div class="rounded-xl ring-1 ring-slate-100 px-3">${main.map(row).join('') || '<div class="text-[11px] text-slate-400 py-2">无人</div>'}</div>
-        </div>
+      <div class="grid grid-cols-1 gap-4 mt-3">
+        ${listBlock('staging · 用户推荐', 'text-amber-700', 'ring-amber-100', 'bg-amber-50/40', 'route-stg', routeStgPage, stg, stgP.slice)}
+        ${listBlock('main · 用户推荐', 'text-slate-500', 'ring-slate-100', '', 'route-main', routeMainPage, main, mainP.slice)}
       </div>
     </div>
   </div>`;
   box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// ── 我的 ──────────────────────────────────────────────────────
+// ── 我的（槽位也按 5 翻页） ───────────────────────────────────
 function renderMy() {
-  const slots = ASSIGN.alice;
+  const slots = ASSIGN.alice || [];
+  const { page, slice, total } = pageSlice(slots, mySlotPage);
+  mySlotPage = page;
   const sum = document.getElementById('my-slot-sum');
-  if (sum) sum.textContent = `${slots.length}/100 槽位`;
+  if (sum) sum.textContent = `${total}/100 槽位 · 每页 ${PAGE}`;
   const el = document.getElementById('my-slots');
   if (el) {
-    el.innerHTML = slots.map(s => `
+    el.innerHTML = `<div class="flex gap-2 items-start">
+      ${pagerCol('my-slots', mySlotPage, total)}
+      <div class="min-w-0 flex-1 space-y-2">${slice.map(s => `
       <div class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl ring-1 ring-slate-100">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2 flex-wrap">
@@ -275,7 +342,7 @@ function renderMy() {
           </div>
           <div class="mt-1 text-[10px] text-slate-400">${esc(s.source)}</div>
         </div>
-      </div>`).join('');
+      </div>`).join('')}</div></div>`;
   }
   const blocked = document.getElementById('my-blocked');
   if (blocked) blocked.innerHTML = '<span class="text-[11px] text-slate-400">无</span>';
@@ -288,7 +355,6 @@ function renderMy() {
   }
 }
 
-// ── 其它页占位（保持壳子完整，不拉数） ────────────────────────
 function fillPlaceholders() {
   document.querySelectorAll('[data-m]').forEach(e => {
     if (e.textContent === '—' || e.textContent === '加载中…' || !e.textContent.trim()) {
@@ -310,10 +376,28 @@ function fillPlaceholders() {
   const tag = document.getElementById('tagcloud');
   if (tag && /加载中/.test(tag.textContent)) tag.innerHTML = '<span class="text-slate-400 text-xs">静态演示未填充</span>';
   const whoRole = document.getElementById('who-role');
-  if (whoRole) whoRole.textContent = 'admin';
+  if (whoRole && !whoRole.textContent) whoRole.textContent = 'admin';
 }
 
-// ── 事件（仅导航，不改数据） ──────────────────────────────────
+function bumpPager(id, dir) {
+  if (id === 'admin-users') {
+    adminUserPage += dir;
+    renderAdmin();
+  } else if (id === 'drawer-slots') {
+    drawerPage += dir;
+    openDrawer(drawerUser, false);
+  } else if (id === 'route-stg') {
+    routeStgPage += dir;
+    renderSkillDetail(curSkill);
+  } else if (id === 'route-main') {
+    routeMainPage += dir;
+    renderSkillDetail(curSkill);
+  } else if (id === 'my-slots') {
+    mySlotPage += dir;
+    renderMy();
+  }
+}
+
 document.getElementById('nav')?.addEventListener('click', e => {
   const a = e.target.closest('[data-pg]');
   if (!a) return;
@@ -321,10 +405,16 @@ document.getElementById('nav')?.addEventListener('click', e => {
   location.hash = a.dataset.pg;
 });
 document.addEventListener('click', e => {
+  const pg = e.target.closest('.pg-btn');
+  if (pg && !pg.disabled) {
+    bumpPager(pg.dataset.pager, parseInt(pg.dataset.dir, 10));
+    return;
+  }
   const cfg = e.target.closest('.adm-cfg');
-  if (cfg) { openDrawer(cfg.dataset.user); return; }
+  if (cfg) { openDrawer(cfg.dataset.user, true); return; }
   if (e.target.id === 'adm-drawer-x') {
     document.getElementById('admin-drawer')?.classList.add('hidden');
+    drawerUser = null;
     return;
   }
   const row = e.target.closest('[data-skill-row]');
@@ -332,10 +422,7 @@ document.addEventListener('click', e => {
 });
 window.addEventListener('hashchange', route);
 
-// 启动
 if (!location.hash || location.hash === '#') location.hash = '#admin';
-renderAdmin();
 renderSkills();
-renderMy();
 fillPlaceholders();
 route();
