@@ -268,6 +268,58 @@ def test_my_views_empty_db_do_not_crash(console_env):
     assert c.status_code == 200
     assert c.json()["steps"]["trajs"] == 0
     assert alice.get("/api/v1/dashboard/my/reco-trigger").json()["rows"] == []
+    t = alice.get("/api/v1/dashboard/my/contributions/trajs")
+    assert t.status_code == 200
+    body = t.json()
+    assert body["total"] == 0
+    assert body["trajs"] == []
+    m = alice.get("/api/v1/dashboard/my/manifest").json()
+    assert "slots" in m
+    for s in m["slots"]:
+        assert "my_triggers" in s
+        assert s["source"] in ("native", "upload", "skillhub")
+
+
+def test_my_contribution_trajs_paginates_user_trajs(console_env):
+    alice = console_env["alice"]
+    db = console_env["db"]
+    registry = console_env["registry"]
+    client_id = registry.find_by_user_name("alice")
+    sessions_dir = (
+        team_context().traj_root
+        / "clients"
+        / registry.dir_name_for(client_id)
+        / "sessions"
+    )
+    sessions_dir.mkdir(parents=True)
+    R.register_dir(
+        sessions_dir, label="alice", ecosystem="team_client", db_path=db,
+    )
+    with R.get_connection(db) as conn:
+        wd = conn.execute(
+            "SELECT id FROM watch_dirs WHERE path=?",
+            (str(sessions_dir.resolve()),),
+        ).fetchone()[0]
+        for i, name in enumerate(("t-c.md", "t-b.md", "t-a.md")):
+            conn.execute(
+                "INSERT INTO trajectories("
+                "watch_dir_id,filename,status,tasks_extracted,user_key,"
+                "discovered_at) VALUES(?,?,?,?,?,?)",
+                (wd, name, "done", 0, "alice",
+                 f"2026-07-{10 + i:02d} 00:00:00"),
+            )
+        conn.commit()
+    page = alice.get(
+        "/api/v1/dashboard/my/contributions/trajs?offset=0&limit=2"
+    ).json()
+    assert page["total"] == 3
+    assert len(page["trajs"]) == 2
+    # discovered_at 倒序 → t-a, t-b
+    assert [t["traj_id"] for t in page["trajs"]] == ["t-a", "t-b"]
+    page2 = alice.get(
+        "/api/v1/dashboard/my/contributions/trajs?offset=2&limit=2"
+    ).json()
+    assert [t["traj_id"] for t in page2["trajs"]] == ["t-c"]
 
 
 def test_users_matrix_lists_clients_with_version(console_env):

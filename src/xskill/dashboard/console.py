@@ -94,6 +94,70 @@ def _client_to_user(registry) -> dict[str, str]:
 # 推荐 × 触发（2.6 用户级精确口径）
 # ---------------------------------------------------------------------------
 
+def _norm_skill_source(raw: str | None) -> str:
+    """把 manifest/catalog 的 source 归一到 UI 三态: native / upload / skillhub。"""
+    if raw in ("skillhub", "upload"):
+        return raw
+    return "native"
+
+
+def _slot_source_fields(slot) -> dict:
+    raw = getattr(slot, "source", None) or "repo"
+    out = {
+        "source": _norm_skill_source(raw),
+        "source_path": getattr(slot, "source_path", None) or None,
+    }
+    return out
+
+
+def _skill_meta_for_names(names: list[str], *, db_path: Optional[Path],
+                          skill_dir: Path) -> dict[str, dict]:
+    """贡献关系图 skill 芯片用的轻量摘要。"""
+    from xskill.events import skill_main_producer
+    from xskill.dashboard.explore import skill_lineage
+
+    meta: dict[str, dict] = {}
+    for name in names:
+        if not name:
+            continue
+        entry: dict = {"source": "native", "source_path": None,
+                       "producer": None, "producer_trajs": None,
+                       "ux": None, "top": None, "recent": [], "trend": []}
+        # skillhub 目录启发式：skill_dir 下若有 .skillhub 元数据则标第三方
+        sub = Path(skill_dir) / name
+        if sub.is_dir():
+            # 尝试读 skillhub 路径标记
+            sp = None
+            for cand in (sub / "SOURCE_PATH", sub / ".source_path"):
+                if cand.is_file():
+                    sp = cand.read_text(encoding="utf-8").strip() or None
+                    break
+            if sp:
+                entry["source"] = "skillhub"
+                entry["source_path"] = sp
+        prod = skill_main_producer(name, db_path=db_path)
+        if prod and entry["source"] == "native":
+            entry["producer"] = prod["user"]
+            entry["producer_trajs"] = prod["traj_count"]
+        try:
+            lin = skill_lineage(Path(skill_dir), name, db_path=db_path)
+            entry["ux"] = lin.get("avg_ux")
+            by_user = lin.get("by_user") or []
+            if by_user:
+                top = by_user[0]
+                entry["top"] = {
+                    "user": top.get("user"),
+                    "count": (top.get("atoms") or top.get("count")
+                              or top.get("n") or top.get("triggers") or 0),
+                }
+                entry["recent"] = [{"user": u.get("user")}
+                                   for u in by_user[:3] if u.get("user")]
+        except Exception:  # noqa: BLE001 — 芯片摘要失败不挡主路径
+            pass
+        meta[name] = entry
+    return meta
+
+
 def reco_trigger_for_users(*, db_path: Optional[Path], skill_dir: Path,
                            registry) -> dict[str, list[dict]]:
     """全量算 user_key → [{skill, exposures, triggers, rate, last_trigger,
@@ -304,17 +368,34 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             retired=retired_skills(db_path=db_path),
         )
         slots = []
+        trigger_by_skill = {
+            r["skill"]: int(r.get("triggers") or 0)
+            for r in reco_trigger_for_users(
+                db_path=db_path, skill_dir=Path(ctx.skill_dir),
+                registry=ctx.client_registry).get(user, [])
+        }
+        from xskill.events import skill_main_producer
         for s in resp.slots:
             meta = prefs["pin_meta"].get(s.skill_name, {})
-            slots.append({
+            src = _slot_source_fields(s)
+            row = {
                 "skill_name": s.skill_name, "side": s.side, "sha": s.sha,
-                "bucket": s.bucket, "source": s.source,
+                "bucket": s.bucket,
+                "source": src["source"],
+                "source_path": src["source_path"],
+                "my_triggers": trigger_by_skill.get(s.skill_name, 0),
                 # pinned 细分:自己 pin / admin 代 pin / 全局 pin——前端置灰依据
                 "pin_scope": meta.get("scope", ""),
                 "pin_set_by": meta.get("set_by", ""),
                 "user_removable": (
                     s.bucket != "pinned" or meta.get("set_by") == user),
-            })
+            }
+            if src["source"] == "native":
+                prod = skill_main_producer(s.skill_name, db_path=db_path)
+                if prod:
+                    row["producer"] = prod["user"]
+                    row["producer_trajs"] = prod["traj_count"]
+            slots.append(row)
         blocked_rows = [r for r in prefs_for(user, db_path=db_path)
                         if r["pref"] == "blocked"]
         return {"user": user, "slots": slots,
@@ -419,6 +500,60 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                       "skills": len(my_skills)},
             "skills": my_skills,
             "usage": usage,
+        }
+
+    @router.get("/my/contributions/trajs")
+    def my_contribution_trajs(offset: int = 0, limit: int = 5,
+                              ident=Depends(require_user)):
+        """我的贡献去向：分页轨迹 + traj→atom→skill 去向（供关系图）。"""
+        ctx = _require_team_ctx()
+        from xskill.dashboard.explore import TrajExplorer
+        user = ident["user"]
+        limit = max(1, min(int(limit or 5), 20))
+        offset = max(0, int(offset or 0))
+        with pooled_connection(db_path) as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) n FROM trajectories t"
+                " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                " WHERE t.user_key=? AND "
+                f"{dashboard_visible_trajectory_sql('t', 'w')}",
+                (user,),
+            ).fetchone()["n"]
+            rows = conn.execute(
+                "SELECT t.filename FROM trajectories t"
+                " JOIN watch_dirs w ON t.watch_dir_id=w.id"
+                " WHERE t.user_key=? AND "
+                f"{dashboard_visible_trajectory_sql('t', 'w')}"
+                " ORDER BY t.discovered_at DESC, t.filename DESC"
+                " LIMIT ? OFFSET ?",
+                (user, limit, offset),
+            ).fetchall()
+        explorer = TrajExplorer(db_path=db_path, skill_dir=Path(ctx.skill_dir))
+        trajs = []
+        skill_names: set[str] = set()
+        for r in rows:
+            fn = r["filename"] or ""
+            traj_id = fn[:-3] if fn.endswith(".md") else fn
+            try:
+                atoms_raw = explorer.traj_atoms(traj_id)
+            except KeyError:
+                atoms_raw = []
+            atoms = []
+            for a in atoms_raw:
+                dests = [
+                    {"skill": d.get("skill"), "weightscore": d.get("weightscore"),
+                     "state": d.get("state")}
+                    for d in (a.get("destinations") or []) if d.get("skill")
+                ]
+                for d in dests:
+                    skill_names.add(d["skill"])
+                atoms.append({"atom_id": a.get("atom_id"), "destinations": dests})
+            trajs.append({"traj_id": traj_id, "atoms": atoms})
+        skill_meta = _skill_meta_for_names(
+            sorted(skill_names), db_path=db_path, skill_dir=Path(ctx.skill_dir))
+        return {
+            "user": user, "total": total, "offset": offset, "limit": limit,
+            "trajs": trajs, "skill_meta": skill_meta,
         }
 
     @router.get("/my/reco-trigger")

@@ -86,6 +86,36 @@ def skill_contributors(skill: str, *, min_weight: int = CONTRIBUTOR_MIN_WEIGHT,
     return {u: w for u, w in weights.items() if w >= min_weight}
 
 
+def skill_main_producer(skill: str, *,
+                        db_path: Optional[Path] = None) -> Optional[dict]:
+    """蒸馏资产主要贡献人：对该 skill 贡献来源轨迹数最多的 user_key。
+
+    返回 ``{"user": str, "traj_count": int}``；无人贡献时返回 ``None``。
+    """
+    with pooled_connection(db_path) as conn:
+        traj_user = {
+            (r["filename"][:-3] if r["filename"].endswith(".md")
+             else r["filename"]): (r["user_key"] or "")
+            for r in conn.execute(
+                "SELECT filename, user_key FROM trajectories").fetchall()
+        }
+        rows = conn.execute(
+            "SELECT atom_id FROM atom_adoption WHERE skill=?",
+            (skill,),
+        ).fetchall()
+    by_user: dict[str, set[str]] = {}
+    for r in rows:
+        traj = _traj_of_atom(r["atom_id"] or "")
+        user = traj_user.get(traj, "") if traj else ""
+        if not user or not traj:
+            continue
+        by_user.setdefault(user, set()).add(traj)
+    if not by_user:
+        return None
+    user, trajs = max(by_user.items(), key=lambda kv: (len(kv[1]), kv[0]))
+    return {"user": user, "traj_count": len(trajs)}
+
+
 class EventStore:
     """``events`` / ``event_targets`` / ``event_reads`` 三表的读写(registry.db)。"""
 
