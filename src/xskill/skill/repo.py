@@ -11,6 +11,7 @@ skill/repo.py — SkillRepo 集合 + 集合级 git 操作
 from __future__ import annotations
 
 import logging
+import operator
 import pickle
 import shutil
 from pathlib import Path
@@ -76,18 +77,25 @@ class SkillRepo:
         return sum(1 for _ in self)
 
     # ─── 索引 ──────────────────────────────────────────────────
-    def rebuild_index(self, *, atom_store_roots: list[Path] | None = None) -> None:
+    def rebuild_index(
+        self,
+        *,
+        atom_store_roots: list[Path] | None = None,
+        scope: str = "search",
+    ) -> None:
         """重建 .skill_index.pkl（向量检索用）。
 
-        ``atom_store_roots``：可选的 AtomTaskStore 根目录列表，用于计算每个 skill 的
-        ``atom_feat``；为 None 时 ``atom_feats`` 全部 absent（standalone 场景）。
+        ``scope``：``search``（默认）只写 description embeddings；``full`` 另算
+        ``atom_feats``（需 ``atom_store_roots``，会扫全部 atom，代价高）。
+        ``atom_store_roots``：仅 ``scope=full`` 时使用；为 None 时 ``atom_feats``
+        全部 absent。
         """
         from xskill.config import get_config
         from xskill.utils.llm import create_embed_client
         embed_client = create_embed_client(get_config())
         rebuild_skill_index(
             skill_dir=self.root, embed_client=embed_client,
-            atom_store_roots=atom_store_roots,
+            atom_store_roots=atom_store_roots, scope=scope,
         )
 
     # ─── 清空（rebuild --force 用）──────────────────────────────
@@ -163,20 +171,30 @@ def rebuild_skill_index(
     embed_client,
     atom_store_roots: list[Path] | None = None,
     last_n_atoms: int = 5,
+    scope: str = "search",
 ) -> None:
     """Rebuild ``<skill_dir>/.skill_index.pkl`` for skill semantic search.
 
     主特征 ``embeddings`` = **description-only** 向量（L2 归一）——不融合 tags/summary。
-    辅助 ``atom_feats`` = 每个 skill 最近 ``last_n_atoms`` 个被路由 atom 摘要均值向量
-    （独立存 ``atom_feats`` 字段，不并入 ``embeddings``）；无 atom 的 skill 该行为零向量、
-    ``atom_feat_present`` 标 False。``atom_store_roots`` 给定时才算 atom_feat，否则全部
-    不存在（present=False）。
+
+    ``scope``：
+    - ``search``（默认）：只写 description embeddings；``atom_feats`` 全零、
+      ``atom_feat_present`` 全 False；**不扫描** atom store。用于检索止血。
+    - ``full``：另算 ``atom_feats`` = 每个 skill 最近 ``last_n_atoms`` 个被路由
+      atom 摘要均值（独立字段，不并入 ``embeddings``）。会扫全部
+      ``atom_store_roots`` 下 atom（代价高，O(atoms) 一次扫描 + summary embed）。
+      无 ``atom_store_roots`` 或某 skill 无 atom 时该行零向量、present=False。
+
+    非法 ``scope`` 抛 ``ValueError``，不做静默兜底。
     """
     skill_root = Path(skill_dir)
     if embed_client is None:
         raise RuntimeError("rebuild_skill_index: embed_client is required")
-
-    from xskill.recommend.skill_feature import last_n_atom_summaries
+    if scope not in ("search", "full"):
+        raise ValueError(
+            f"rebuild_skill_index: invalid scope {scope!r}; "
+            "expected 'search' or 'full'"
+        )
 
     entries = []
     for skill_path in sorted(skill_root.iterdir()):
@@ -204,23 +222,77 @@ def rebuild_skill_index(
     norms[norms == 0] = 1
     embeddings = embeddings / norms
 
-    # 辅助属性 atom_feat：每个 skill 最近 N atom 摘要均值（独立，不并入 embeddings）
+    # 辅助属性 atom_feat：仅 scope=full；search 路径明确跳过 atom 扫描
     dim = embeddings.shape[1]
     atom_feats = numpy.zeros((len(skill_names), dim), dtype=float)
     atom_present = [False] * len(skill_names)
-    for i, name in enumerate(skill_names):
-        summaries = last_n_atom_summaries(
-            name, atom_store_roots, n=last_n_atoms,
-        )
-        if not summaries:
-            continue
-        vecs = numpy.asarray(embed_store.encode_cached(summaries), dtype=float)
-        mean = vecs.mean(axis=0)
-        n = float(numpy.linalg.norm(mean))
-        atom_feats[i] = mean / n if n > 0 else mean
-        atom_present[i] = True
 
-    # 本轮已覆盖全部 description + summary，压掉已删除/改写条目的陈旧向量。
+    if scope == "full" and atom_store_roots:
+        # 一次扫完全部 atom，按 skill 聚最近 N 条，再对去重 summary 组批 embed
+        # ——避免旧实现「每 skill 重复全表扫」的 O(skills×atoms)。
+        from xskill.pipeline.atom import AtomTaskStore
+
+        skill_name_set = set(skill_names)
+        collected_by_skill: dict[str, list[tuple[float, str]]] = {
+            name: [] for name in skill_names
+        }
+        for root in atom_store_roots:
+            store = AtomTaskStore(root=Path(root))
+            for atom in store.all_atoms():
+                if not atom.summary:
+                    continue
+                used_skills = atom.used_skills or []
+                atom_path = (
+                    Path(root) / atom.traj_id / "tasks" / f"{atom.atom_id}.json"
+                )
+                try:
+                    mtime = atom_path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                for used_name in used_skills:
+                    if used_name in skill_name_set:
+                        collected_by_skill[used_name].append(
+                            (mtime, atom.summary),
+                        )
+
+        summary_lists: list[list[str]] = []
+        unique_summaries: list[str] = []
+        seen_summaries: set[str] = set()
+        for name in skill_names:
+            rows = collected_by_skill[name]
+            rows.sort(key=operator.itemgetter(0), reverse=True)
+            summaries = [text for _mtime, text in rows[:last_n_atoms]]
+            summary_lists.append(summaries)
+            for text in summaries:
+                if text not in seen_summaries:
+                    seen_summaries.add(text)
+                    unique_summaries.append(text)
+
+        summary_vectors: dict[str, numpy.ndarray] = {}
+        if unique_summaries:
+            vectors = numpy.asarray(
+                embed_store.encode_cached(unique_summaries), dtype=float,
+            )
+            for text, vector in zip(unique_summaries, vectors):
+                summary_vectors[text] = vector
+
+        for index, summaries in enumerate(summary_lists):
+            if not summaries:
+                continue
+            vecs = numpy.asarray(
+                [summary_vectors[text] for text in summaries], dtype=float,
+            )
+            mean = vecs.mean(axis=0)
+            norm = float(numpy.linalg.norm(mean))
+            atom_feats[index] = mean / norm if norm > 0 else mean
+            atom_present[index] = True
+    elif scope == "full":
+        logger.info(
+            "rebuild_skill_index scope=full but atom_store_roots is empty; "
+            "atom_feats left absent"
+        )
+
+    # 本轮已覆盖全部 description（+ full 时的 summary），压掉陈旧向量。
     embed_store.flush_pruned()
 
     index_data = {
@@ -238,7 +310,10 @@ def rebuild_skill_index(
     with open(index_path, "wb") as index_file:
         pickle.dump(index_data, index_file)
 
-    logger.info("skill index rebuilt: %d entries -> %s", len(skill_names), index_path)
+    logger.info(
+        "skill index rebuilt (scope=%s): %d entries -> %s",
+        scope, len(skill_names), index_path,
+    )
 
 
 def search_skill_index(*, skill_dir: Path, query: str, embed_client, top_k: int = 5) -> list[dict]:
