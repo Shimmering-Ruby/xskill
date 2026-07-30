@@ -248,9 +248,6 @@ class ClusterWriteQueue:
         )
 
     def call(self, function: Callable[[], Any]) -> Any:
-        with self._lock:
-            self._queued += 1
-
         def run():
             with self._lock:
                 self._queued -= 1
@@ -269,7 +266,13 @@ class ClusterWriteQueue:
                 with self._lock:
                     self._running -= 1
 
-        return self._executor.submit(run).result()
+        # 计数与 submit 必须在同一把锁内：否则调用线程在「计数+1」之后、
+        # 「submit」之前被调度踢下 CPU，后到的调用会先 submit，单 worker
+        # 执行器便不再按调用进入顺序执行（CI 慢机上实测顺序翻转）。
+        with self._lock:
+            self._queued += 1
+            future = self._executor.submit(run)
+        return future.result()
 
     @property
     def status(self) -> dict[str, int]:

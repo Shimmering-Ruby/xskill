@@ -473,7 +473,7 @@ def test_skills_catalog_upsert_picks_up_disk_mutations(tmp_path):
             refreshed["candidates"]) == ("staging", "version two", 2, 2)
 
 
-def test_skills_catalog_cache_isolates_roots_and_skillhub_inputs(tmp_path):
+def test_skills_catalog_isolates_roots_and_skillhub_inputs(tmp_path):
     root_a = tmp_path / "a"; root_a.mkdir()
     root_b = tmp_path / "b"; root_b.mkdir()
     _write_catalog_skill(root_a, "same", "root a")

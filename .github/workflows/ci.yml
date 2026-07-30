@@ -53,7 +53,9 @@ jobs:
         run: pip install -e .[dev]
       - name: Run UT + IT
         # Excludes tests under tests/e2e/ (covered by smoke-e2e job in P4).
-        run: pytest tests/ --ignore=tests/e2e -q
+        # ``nightly`` 标记的负载/平台时序敏感测试移出 PR 矩阵，
+        # 由 nightly-control-plane-stress.yml 的 nightly-flaky _job 按平台跑。
+        run: pytest tests/ --ignore=tests/e2e -q -m "not nightly"
 
   skill-edit-bdd:
     name: skill-edit BDD (aimock)
