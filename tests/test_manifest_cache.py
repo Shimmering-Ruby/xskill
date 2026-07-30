@@ -127,6 +127,16 @@ def test_catalog_ranking_reuses_ref_read_by_scan(tmp_path, monkeypatch):
 
     monkeypatch.setattr(manifest, "main_sha", counted_main)
     monkeypatch.setattr(manifest, "staging_sha", counted_staging)
+
+    # ranked 现从 ux_scores DB 取均分；FakeSkill.score 注入到查询结果
+    score_by_name = {s.name: s.score for s in skills}
+    monkeypatch.setattr(
+        "xskill.pipeline.ux_scores_store.avg_scores_for_refs",
+        lambda refs_map, **_kw: {
+            name: score_by_name[name]
+            for name in refs_map if name in score_by_name
+        },
+    )
     response = manifest.build_manifest(
         client_id="client", skill_dir=root, probability=0.0,
         ranked_slots=2, total_slots=2,

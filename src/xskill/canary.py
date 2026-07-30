@@ -493,7 +493,19 @@ def append_ux_score(
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    db_rec = dict(record)
+    db_rec["skill_name"] = Path(skill_dir).name
+    _mirror_ux_score_to_db(db_rec)
     return True
+
+
+def _mirror_ux_score_to_db(record: dict) -> None:
+    """写盘成功后旁路入库；失败只打日志，由定时盘→库任务兜底。"""
+    try:
+        from xskill.pipeline.ux_scores_store import insert_ux_score
+        insert_ux_score(record)
+    except Exception:
+        logger.debug("ux_scores db mirror failed", exc_info=True)
 
 
 def recent_scores(
@@ -503,7 +515,15 @@ def recent_scores(
     commit_sha: str,
     n: int,
 ) -> list[dict]:
-    all_ = load_ux_scores(skill_dir)
+    skill_name = Path(skill_dir).name
+    all_: list[dict] = []
+    try:
+        from xskill.pipeline.ux_scores_store import load_ux_scores_for_skill
+        all_ = load_ux_scores_for_skill(skill_name, side=side, days=0)
+    except Exception:
+        logger.debug("ux_scores db read failed; fallback jsonl", exc_info=True)
+    if not all_:
+        all_ = load_ux_scores(skill_dir)
     filtered = [
         s for s in all_
         if s.get("side") == side and s.get("commit_sha") == commit_sha
@@ -831,17 +851,16 @@ class AtomCanary:
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        db_rec = dict(record)
+        db_rec["skill_name"] = Path(self.skill_dir).name
+        _mirror_ux_score_to_db(db_rec)
         return True
 
     def recent(self, *, side: str, commit_sha: str, n: int) -> list[dict]:
         """与 ``recent_scores`` 同语义，但读 atom_id 字段。"""
-        all_ = load_ux_scores(self.skill_dir)
-        filtered = [
-            s for s in all_
-            if s.get("side") == side and s.get("commit_sha") == commit_sha
-        ]
-        filtered.sort(key=lambda s: s.get("scored_at", ""), reverse=True)
-        return filtered[:n]
+        return recent_scores(
+            self.skill_dir, side=side, commit_sha=commit_sha, n=n,
+        )
 
     def check_and_decide(self, *, config: "CanaryConfig | None" = None,
                          weights: "dict[str, float] | None" = None) -> dict:

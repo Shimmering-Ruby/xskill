@@ -1213,6 +1213,20 @@ def create_app(home_root: Path | str | None = None,
             team_server,
             poll_interval,
         )
+        from xskill.config import ux_scores_sync_config
+        ux_sync_cfg = ux_scores_sync_config(_config)
+        ux_sync_scheduler = _WorkerSched(
+            "ux-scores-sync",
+            [_sys.executable, "-m", "xskill._workers", "ux-scores-sync"],
+            interval=ux_sync_cfg["interval"],
+            timeout=ux_sync_cfg["timeout"],
+        )
+        ux_sync_scheduler.start()
+        _schedulers.append(ux_sync_scheduler)
+        logger.info(
+            "ux_scores disk→db sync every %.0fs via subprocess",
+            ux_sync_cfg["interval"],
+        )
         if not team_server:
             ingest_interval = min(poll_interval, 1.0)
             ingest_scheduler = _WorkerSched(

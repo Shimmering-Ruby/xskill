@@ -111,6 +111,16 @@ class CanaryGitOps:
 
     def ux_scores(self, side: Optional[str] = None,
                   days: int = 30) -> list[dict]:
+        skill_name = self.skill_path.name
+        try:
+            from xskill.pipeline.ux_scores_store import load_ux_scores_for_skill
+            db_scores = load_ux_scores_for_skill(
+                skill_name, side=side, days=days,
+            )
+            if db_scores:
+                return db_scores
+        except Exception:
+            pass
         scores = _canary.load_ux_scores(self.skill_path)
         if side is not None:
             scores = [s for s in scores if s.get("side") == side]

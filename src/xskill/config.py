@@ -191,6 +191,8 @@ server:
   profile_refresh_shutdown_timeout: 5 # 停机等待画像 worker 的最长秒数
   profile_refresh_interval: 600    # 画像短命子进程调度周期(秒;画像变化慢,默认 10min,与 watcher 解耦)
   profile_refresh_timeout: 1800    # 单轮画像子进程硬上限(秒;冷启动大量 client 兜底)
+  ux_scores_sync_interval: 30      # 盘上 .ux_scores.jsonl → registry.db 同步周期(秒)
+  ux_scores_sync_timeout: 300      # 单轮 UX 同步子进程硬上限(秒)
 
 # ===== Watcher (scan scheduling only) =====
 watcher:
@@ -775,6 +777,23 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
         "interval": float(interval),
         "timeout": float(timeout),
     }
+
+
+def ux_scores_sync_config(cfg: Optional[dict] = None) -> dict:
+    """盘上 UX jsonl → registry.db 定时同步配置。"""
+    section = (cfg or {}).get("server") or {}
+    interval = section.get("ux_scores_sync_interval", 30)
+    timeout = section.get("ux_scores_sync_timeout", 300)
+    for key, value in (
+        ("ux_scores_sync_interval", interval),
+        ("ux_scores_sync_timeout", timeout),
+    ):
+        if (not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0):
+            raise ValueError(f"server.{key} 必须是正数，got {value!r}")
+    return {"interval": float(interval), "timeout": float(timeout)}
 
 
 def team_sync_config(cfg: Optional[dict] = None) -> dict:

@@ -148,10 +148,19 @@ class _ManifestCatalogCache:
                 continue
             refs[skill.name] = (current_main, staging_sha(skill.path))
             skills.append(skill)
-        skills.sort(
-            key=lambda skill: _rank_key(skill, main_ref=refs[skill.name][0]),
-            reverse=True,
-        )
+        # ranked 排序键：UX 均分来自 registry.db ux_scores，不再逐 skill 扫 jsonl
+        main_refs = {name: pair[0] for name, pair in refs.items()}
+        try:
+            from xskill.pipeline.ux_scores_store import avg_scores_for_refs
+            ux_avgs = avg_scores_for_refs(main_refs, side="main", days=30)
+        except Exception:
+            _logger.debug("ux_scores avg lookup failed; default 0", exc_info=True)
+            ux_avgs = {}
+
+        def rank_key(skill: Skill) -> tuple[float, int]:
+            return (ux_avgs.get(skill.name, 0.0), skill.use_count)
+
+        skills.sort(key=rank_key, reverse=True)
         repo_names = {skill.name for skill in skills}
         search_by_id: dict[str, Skill] = {}
         for skill in skills:
