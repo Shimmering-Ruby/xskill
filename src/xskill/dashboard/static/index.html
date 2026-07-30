@@ -106,7 +106,6 @@
     <div class="flex items-center justify-between mb-4">
       <h1 class="text-xl font-bold tracking-tight" id="pgname">总览</h1>
       <div class="flex items-center gap-3">
-        <span class="text-[11px] text-slate-400">指标口径见 docs/dashboard-metrics.md（卡片 ⓘ 同源）</span>
         <!-- P3 全局铃铛:所有页面可见(登录后),未读数轮询 -->
         <div class="relative auth-user hidden" id="bell-wrap">
           <button id="bell-btn" class="relative w-8 h-8 rounded-lg ring-1 ring-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center" title="通知">
@@ -128,26 +127,26 @@
     <div class="sec-page on" id="pg-overview">
       <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
-          <div class="text-[11px] text-slate-400 font-medium">轨迹 <span class="hint" title="registry 中已入库的轨迹行数。">ⓘ</span></div>
+          <div class="text-[11px] text-slate-400 font-medium">轨迹</div>
           <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.trajs">—</div>
         </div>
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
-          <div class="text-[11px] text-slate-400 font-medium">原子 <span class="hint" title="所有轨迹拆出的 AtomTask 总数。">ⓘ</span></div>
+          <div class="text-[11px] text-slate-400 font-medium">原子</div>
           <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.atoms">—</div>
-          <div class="mt-0.5 text-[11px] text-slate-500">单轨迹均 <span class="tabular-nums" data-m="overview.avg_atoms_per_traj">—</span> <span class="hint" title="已成功拆分轨迹的原子数之和 ÷ 已成功拆分轨迹数。">ⓘ</span></div>
+          <div class="mt-0.5 text-[11px] text-slate-500">单轨迹均 <span class="tabular-nums" data-m="overview.avg_atoms_per_traj">—</span></div>
         </div>
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
-          <div class="text-[11px] text-slate-400 font-medium">平均 ux <span class="hint" title="所有轨迹的平均用户体验分（1–10）。">ⓘ</span></div>
+          <div class="text-[11px] text-slate-400 font-medium">平均 ux</div>
           <div class="mt-1 flex items-baseline gap-1"><span class="text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.avg_ux">—</span><span class="text-xs text-slate-400">/10</span></div>
           <div class="mt-0.5 text-[11px] text-slate-500" data-m="overview.ux_n"></div>
         </div>
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
-          <div class="text-[11px] text-slate-400 font-medium">处理成功率 <span class="hint" title="处理到 done 的轨迹占比。终态口径：done ÷ (done+error+filtered)，在途轨迹不进分母。">ⓘ</span></div>
+          <div class="text-[11px] text-slate-400 font-medium">处理成功率</div>
           <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.success_rate">—</div>
           <div class="mt-0.5 text-[11px] text-slate-500" data-m="overview.filtered"></div>
         </div>
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
-          <div class="text-[11px] text-slate-400 font-medium">重试率 <span class="hint" title="处理中发生过重试的轨迹占比。">ⓘ</span></div>
+          <div class="text-[11px] text-slate-400 font-medium">重试率</div>
           <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="overview.retry_rate">—</div>
         </div>
       </div>
@@ -163,9 +162,9 @@
           <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
             <h2 class="font-semibold text-sm">关键比率</h2>
             <div class="mt-3 grid grid-cols-3 gap-3 text-center">
-              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.trigger">—</div><div class="text-[11px] text-slate-400 mt-0.5">推荐触发率 <span class="hint" title="被推荐给用户的 skill 中、随后被实际采用的占比。">ⓘ</span></div></div>
-              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.adoption">—</div><div class="text-[11px] text-slate-400 mt-0.5">原子采纳率 <span class="hint" title="拆出的原子中被聚合进某个 skill 的比例。">ⓘ</span></div></div>
-              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.promotion">—</div><div class="text-[11px] text-slate-400 mt-0.5">canary 晋升率 <span class="hint" title="灰度候选裁决中晋升为正式版的比例 = 晋升 ÷ 已裁决（晋升+拒绝+超时丢弃）。">ⓘ</span></div></div>
+              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.trigger">—</div><div class="text-[11px] text-slate-400 mt-0.5">推荐触发率</div></div>
+              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.adoption">—</div><div class="text-[11px] text-slate-400 mt-0.5">原子采纳率</div></div>
+              <div><div class="text-lg font-semibold tabular-nums" data-m="rates.promotion">—</div><div class="text-[11px] text-slate-400 mt-0.5">canary 晋升率</div></div>
             </div>
           </div>
           <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
@@ -215,9 +214,9 @@
         <div class="overflow-x-auto">
         <table class="w-full mt-2 text-[12.5px]">
           <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
-            <th class="text-left font-medium py-2">技能</th><th class="text-left font-medium">状态 <span class="hint" title="baby=cluster 刚建的草稿；main=已正式产出；staging=灰度候选并存。">ⓘ</span></th>
+            <th class="text-left font-medium py-2">技能</th><th class="text-left font-medium">状态</th>
             <th class="text-left font-medium">描述</th><th class="text-right font-medium">版本</th>
-            <th class="text-right font-medium">候选 <span class="hint" title=".candidates.yml 里待攒分的 atom 数。">ⓘ</span></th></tr></thead>
+            <th class="text-right font-medium">候选</th></tr></thead>
           <tbody id="skills-body" class="divide-y divide-slate-50"><tr><td colspan="5" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
           <div id="skills-pager" class="flex items-center justify-end gap-2 mt-2 text-[11px] text-slate-500"></div>
         </div>
@@ -280,7 +279,7 @@
         <table class="w-full mt-2 text-[12.5px]">
           <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
             <th class="text-left font-medium py-2">用户</th><th class="text-left font-medium">状态</th>
-            <th class="text-left font-medium">上次活跃</th><th class="text-left font-medium">版本 <span class="hint" title="client 上报的 xskill 版本;低于 server 当前版本标‘落后’;空=旧 client 未上报。">ⓘ</span></th><th class="text-right font-medium">轨迹 · 原子</th>
+            <th class="text-left font-medium">上次活跃</th><th class="text-left font-medium">版本</th><th class="text-right font-medium">轨迹 · 原子</th>
             <th class="text-left font-medium pl-6">harness</th><th class="text-left font-medium">主力模型</th></tr></thead>
           <tbody id="ustatus-body" class="divide-y divide-slate-50"><tr><td colspan="7" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
         </div>
@@ -302,7 +301,7 @@
     <div class="sec-page" id="pg-canary">
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 px-5 py-4">
-          <div class="text-[11px] text-slate-400 font-medium">canary 晋升率 <span class="hint" title="灰度候选裁决中晋升为正式版的比例 = 晋升 ÷ 已裁决（晋升+拒绝+超时丢弃）。">ⓘ</span></div>
+          <div class="text-[11px] text-slate-400 font-medium">canary 晋升率</div>
           <div class="mt-1 text-[26px] font-semibold tracking-tight tabular-nums" data-m="rates.promotion2">—</div>
           <div class="mt-0.5 text-[11px] text-slate-500" data-m="promotion.detail">—</div>
         </div>
@@ -428,7 +427,7 @@
               <button id="gpin-add" class="px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-700 text-white">+ 全局 pin</button></div>
           </div>
           <div class="overflow-x-auto"><table class="w-full mt-2 text-[12.5px]">
-            <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100"><th class="text-left font-medium py-2">用户</th><th class="text-left font-medium">版本</th><th class="text-right font-medium">被推荐</th><th class="text-right font-medium">触发率</th><th class="text-right font-medium">pinned·blocked</th><th class="text-left font-medium pl-6">轨迹处理</th><th class="text-left font-medium pl-6">停推建议</th><th class="text-right font-medium">操作</th></tr></thead>
+            <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100"><th class="text-left font-medium py-2">用户</th><th class="text-left font-medium">版本</th><th class="text-right font-medium">当前推送</th><th class="text-right font-medium">灰度</th><th class="text-right font-medium">触发率</th><th class="text-right font-medium">pinned·blocked</th><th class="text-left font-medium pl-6">轨迹处理</th><th class="text-left font-medium pl-6">停推建议</th><th class="text-right font-medium">操作</th></tr></thead>
             <tbody id="admin-users-body" class="divide-y divide-slate-50"><tr><td colspan="8" class="py-2 text-slate-400">加载中…</td></tr></tbody></table></div>
           <div id="admin-drawer" class="hidden mt-3 rounded-xl ring-1 ring-slate-200 bg-slate-50 p-4"></div>
         </div>
