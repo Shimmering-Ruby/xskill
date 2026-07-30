@@ -73,13 +73,20 @@
   }
 
   function pathOf(url) {
-    const u = String(url);
+    // app.js 多数用相对路径 api/v1/...（无前导 /）；统一成 /api/v1/...
+    let u = String(url);
+    const q = u.indexOf('?');
+    const query = q >= 0 ? u.slice(q) : '';
+    if (q >= 0) u = u.slice(0, q);
     const i = u.indexOf('/api/');
-    return i >= 0 ? u.slice(i) : u;
+    if (i >= 0) return u.slice(i) + query;
+    if (u.startsWith('api/')) return '/' + u + query;
+    return u + query;
   }
 
   async function handle(url, init) {
-    const path = pathOf(url).replace(/\?.*$/, '');
+    const full = pathOf(url);
+    const path = full.replace(/\?.*$/, '');
     const method = ((init && init.method) || 'GET').toUpperCase();
     let body = {};
     if (init && init.body) {
@@ -108,13 +115,28 @@
     }
     if (path === '/api/v1/dashboard/by-domain') return json({ by_ecosystem: [], by_model: [] });
     if (path === '/api/v1/dashboard/cost') return json({ total: 12.3, by_model: [], by_step: [] });
-    if (path.startsWith('/api/v1/dashboard/skills')) {
+    if (path === '/api/v1/dashboard/skills' || path.startsWith('/api/v1/dashboard/skills')) {
       const list = Object.keys(SKILLS).map(n => ({
-        name: n, state: SKILLS[n].hasStaging ? 'staging' : 'main',
-        description: n + ' skill', versions: SKILLS[n].hasStaging ? 2 : 1,
-        candidates: 3, source: 'native',
+        name: n,
+        state: SKILLS[n].hasStaging ? 'staging' : 'main',
+        description: n.replace(/-/g, ' ') + ' — mock skill',
+        version: SKILLS[n].hasStaging ? 2 : 1,
+        candidates: SKILLS[n].hasStaging ? 4 : 1,
+        source: 'native',
       }));
-      return json({ skills: list, total: list.length, summary: list.length + ' skills' });
+      const by_state = {};
+      list.forEach(s => { by_state[s.state] = (by_state[s.state] || 0) + 1; });
+      // ?name= 定向查一条（skillSource / 详情用）
+      const q = full.includes('?') ? new URLSearchParams(full.slice(full.indexOf('?') + 1)) : null;
+      const nameQ = q && q.get('name');
+      if (nameQ) {
+        const hit = list.filter(s => s.name === nameQ);
+        return json({ skills: hit, total: hit.length, by_state });
+      }
+      const limit = q ? parseInt(q.get('limit') || '0', 10) : 0;
+      const offset = q ? parseInt(q.get('offset') || '0', 10) : 0;
+      const page = limit > 0 ? list.slice(offset, offset + limit) : list;
+      return json({ skills: page, total: list.length, by_state });
     }
     if (path === '/api/v1/dashboard/dirs') return json({ dirs: [] });
     if (path === '/api/v1/dashboard/users/status') {
