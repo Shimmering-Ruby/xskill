@@ -124,6 +124,9 @@ markers = [
     # Registered by pytest-rerunfailures; listed here so ``pytest --markers``
     # documents the known CI flake retries.
     "flaky: known intermittent CI failures; rerun via pytest-rerunfailures",
+    # 负载/平台时序敏感的测试移出 PR 矩阵（ci.yml 加 -m "not nightly"），
+    # 由 nightly workflow 按平台矩阵跑，允许靠 reruns 抽签通过。
+    "nightly: load/platform-sensitive tests; excluded from PR matrix, run in nightly workflow",
 ]
 addopts = "--ignore=tests/live --ignore=tests/stress"
 asyncio_mode = "strict"

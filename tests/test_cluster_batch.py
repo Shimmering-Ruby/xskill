@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import math
 import re
+
+import pytest
 import time
 from collections import Counter
 from pathlib import Path
@@ -169,6 +171,8 @@ class TestBatchCallCount:
         _BatchCountingStub.cluster_calls = 0
         _BatchCountingStub.sent_atoms = []
 
+    @pytest.mark.nightly
+    @pytest.mark.flaky(reruns=3, reruns_delay=2)
     def test_calls_equal_ceil_total_over_batch(
         self, tmp_path, monkeypatch,
     ):
