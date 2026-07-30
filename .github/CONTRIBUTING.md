@@ -67,3 +67,16 @@ drives the process.
 Use the bug report template. A bug we cannot reproduce cannot be fixed —
 include exact steps, environment, expected vs actual. Security issues go
 through [`SECURITY.md`](./SECURITY.md), not public issues.
+
+## Privacy in issues and PRs
+
+Do **not** paste internal identifiers into public issues, PRs, or comments:
+
+- employee / staff ids (for example `c` followed by many digits)
+- machine hostnames such as `DESKTOP-…`
+- raw `client_id` hex strings
+- private IP addresses, tokens, passwords, or API keys
+
+Use placeholders (`user-<redacted>`, `host-<redacted>`, `client-<redacted>`).
+Issue and PR templates carry the same reminder. Workflow
+`issue-privacy-guard` auto-redacts common patterns when they appear.

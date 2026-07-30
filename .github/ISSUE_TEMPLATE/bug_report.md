@@ -6,6 +6,13 @@ labels: bug
 assignees: ''
 ---
 
+<!--
+Privacy: do NOT paste employee ids (c00…), machine hostnames (DESKTOP-…),
+raw client_id hex, private IPs, tokens, or passwords. Use placeholders like
+user-<redacted> / host-<redacted> / client-<redacted>.
+A GitHub Action will auto-redact common patterns if they slip in.
+-->
+
 ## Environment
 
 - xskill version (`xskill --help` header / `/api/v1/health`):
@@ -27,7 +34,8 @@ assignees: ''
 
 ## Actual
 
-<!-- What actually happened. Paste logs / tracebacks in a code block. -->
+<!-- What actually happened. Paste logs / tracebacks in a code block.
+     Scrub employee ids, hostnames, client ids, and private IPs first. -->
 
 ## Severity
 

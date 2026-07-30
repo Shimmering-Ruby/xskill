@@ -6,6 +6,13 @@ labels: enhancement
 assignees: ''
 ---
 
+<!--
+Privacy: do NOT paste employee ids (c00…), machine hostnames (DESKTOP-…),
+raw client_id hex, private IPs, tokens, or passwords. Use placeholders like
+user-<redacted> / host-<redacted> / client-<redacted>.
+A GitHub Action will auto-redact common patterns if they slip in.
+-->
+
 ## Problem
 
 <!-- What are you trying to do that xskill makes hard or impossible today? -->
