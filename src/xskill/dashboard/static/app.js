@@ -1026,6 +1026,13 @@ function pmSelectedSeat() {
   return (pool.seats || [])[pmSelected.seat] || null;
 }
 
+// 日志区是否贴底：仅贴底时跟随新行，用户上滚后不被轮询抢走位置
+function pmLogNearBottom(el, pad) {
+  if (!el) return true;
+  pad = pad == null ? 48 : pad;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= pad;
+}
+
 function pmRenderDrawer() {
   const dr = document.getElementById('pm-drawer');
   const seat = pmSelectedSeat();
@@ -1041,10 +1048,12 @@ function pmRenderDrawer() {
   const task = seat.task || {};
   const age = pmAgeText(pmSeatAge(seat));
   const def = PM_POOLS.find(p => p.key === pmSelected.pool);
-  // 抽屉随 live 轮询重渲染：同一任务的日志内容要保住，否则每 3s 闪回「加载中」
+  // 抽屉随 live 轮询重渲染：同一任务的日志内容与滚动位置要保住，否则每 3s 闪回/跳底
   const hasStream = task.kind === 'skill' || task.kind === 'traj';
-  const existingLog = (hasStream && pmLogKey && document.getElementById('pm-log'))
-    ? document.getElementById('pm-log').innerHTML : '';
+  const existingEl = (hasStream && pmLogKey) ? document.getElementById('pm-log') : null;
+  const existingLog = existingEl ? existingEl.innerHTML : '';
+  const stickBottom = pmLogNearBottom(existingEl);
+  const savedScroll = existingEl ? existingEl.scrollTop : 0;
   const logPane = `<div class="pm-log" id="pm-log">${existingLog || '<div class="dim">日志加载中…</div>'}</div>`;
   let head = '', logHtml = '';
   if (task.kind === 'skill') {
@@ -1068,6 +1077,10 @@ function pmRenderDrawer() {
   dr.className = 'pm-drawer ring-1 ring-slate-200';
   dr.innerHTML = `<div class="flex items-start justify-between gap-2"><div class="min-w-0">${head}</div>
     <button type="button" class="pm-btn ghost shrink-0" data-pm-close>关闭</button></div>${logHtml}`;
+  const newLog = document.getElementById('pm-log');
+  if (newLog && existingLog) {
+    newLog.scrollTop = stickBottom ? newLog.scrollHeight : savedScroll;
+  }
   if (task.kind === 'skill' || task.kind === 'traj') pmStartLog(task.kind, task.kind === 'skill' ? task.skill_name : task.traj_id);
   else pmStopLog();
 }
@@ -1087,20 +1100,21 @@ async function pmPollLog() {
     const log = document.getElementById('pm-log');
     if (!log) return;
     if (!r.exists) { log.innerHTML = `<div class="dim">${esc(r.message || '该任务暂无日志文件')}</div>`; return; }
+    const stickBottom = pmLogNearBottom(log);
     log.innerHTML = (r.lines || []).map(l => {
       const cls = pmLogClassify(l);
       return cls ? `<div class="${cls}">${esc(l)}</div>` : `<div>${esc(l)}</div>`;
     }).join('') || '<div class="dim">（日志为空）</div>';
     if (r.truncated) log.insertAdjacentHTML('afterbegin', '<div class="dim">…（仅显示日志尾部）</div>');
-    log.scrollTop = log.scrollHeight;
+    if (stickBottom) log.scrollTop = log.scrollHeight;
   } catch (e) {
     const log = document.getElementById('pm-log');
     if (log) log.innerHTML = `<div class="err">日志读取失败：${esc(e.message)}</div>`;
   }
 }
 function pmStartLog(kind, name) {
-  const key = kind + ':' + name;
-  if (pmLogKey === key) return;
+  // pmLogKey 是 {kind,name}，不可与字符串 key 做 ===（否则每次抽屉重渲染都会重启轮询并强制贴底）
+  if (pmLogKey && pmLogKey.kind === kind && pmLogKey.name === name) return;
   pmStopLog();
   pmLogKey = { kind, name };
   pmPollLog();
