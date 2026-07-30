@@ -352,18 +352,14 @@ def _read_install_meta_ts(dest_dir: Path) -> tuple[bool, Optional[float]]:
     from xskill.ecosystems.installation import (
         InstallationMetadataError,
         read_install_metadata,
-        read_install_metadata_file,
     )
 
     try:
         data = read_install_metadata(dest_dir)
-        if data is None:
-            data = read_install_metadata_file(
-                dest_dir / _OPENCLAW_INSTALL_META,
-                dest_dir,
-            )
     except InstallationMetadataError:
         return False, None
+    if data is None:
+        data = _read_legacy_meta_lenient(dest_dir / _OPENCLAW_INSTALL_META)
     if data is None:
         return True, None
     installed_timestamp = data.get("installed_at")
@@ -373,6 +369,23 @@ def _read_install_meta_ts(dest_dir: Path) -> tuple[bool, Optional[float]]:
     ):
         return False, None
     return True, float(installed_timestamp)
+
+
+def _read_legacy_meta_lenient(meta_path: Path) -> Optional[dict]:
+    """宽松读 openclaw 老位置 meta，只作 installed_at 数据源。
+
+    该文件由 ``install_to_openclaw`` 为 canary 比对而写，只有
+    source_sha/side/installed_at/ecosystem 四个字段——不是安装账格式，
+    不能过 ``read_install_metadata_file`` 的严格校验（必报 DAMAGED）。
+    这里只取其 dict，取不到就当没有（安全跳过，不算读失败）。
+    """
+    try:
+        parsed = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
 def _is_reparse_point(file_stat: os.stat_result) -> bool:
@@ -1278,8 +1291,18 @@ def reverse_sync_copy_dest(
     并发：copy 期间 dest 也可能继续变化。锁只保护 source；任何扫描/复制异常
     返回 ``FAILED``，调用安装器必须保留 dest，供下一轮安全重试。
     """
-    from xskill.ecosystems.installation import read_copy_install_baseline
+    from xskill.ecosystems.installation import (
+        adopt_orphan_copy_install,
+        read_copy_install_baseline,
+    )
     from xskill.skill.git import skill_repo_lock
+
+    # 孤儿自愈：迁移失败留下的存量 dest 没有账本行，先按生态目录内老 meta
+    # 的 source_sha 从 git 重建安装基线登记；失败则维持原冻结语义。
+    adopt_orphan_copy_install(
+        dest_dir, source_dir,
+        legacy_meta_path=Path(dest_dir) / _OPENCLAW_INSTALL_META,
+    )
 
     try:
         with skill_repo_lock(source_dir):
