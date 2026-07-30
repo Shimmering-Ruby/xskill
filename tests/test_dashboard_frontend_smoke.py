@@ -155,3 +155,45 @@ def test_appjs_routes_skillhub_detail_by_source():
     assert "dashboard/skillhub/" in js
     assert "/ux?days=" in js
     assert "/ux/atoms?days=" in js
+
+
+def test_pipeline_log_scroll_is_sticky_not_forced():
+    """#178: 流水线日志仅在贴底时跟随；pmStartLog 用 kind/name 比较，避免抽屉重渲染重启轮询。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function pmLogNearBottom(" in js
+    assert "if (stickBottom) log.scrollTop = log.scrollHeight" in js
+    # 禁止无条件贴底（旧逻辑）
+    assert re.search(
+        r"if \(r\.truncated\).*?\n\s*log\.scrollTop = log\.scrollHeight",
+        js,
+        re.S,
+    ) is None
+    assert "pmLogKey.kind === kind && pmLogKey.name === name" in js
+    # 抽屉重渲染后恢复滚动
+    assert "stickBottom ? newLog.scrollHeight : savedScroll" in js
+
+
+def test_pm_log_near_bottom_behavior():
+    """pmLogNearBottom：贴底/上滚两种姿态。"""
+    script = f"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const source = fs.readFileSync({json.dumps(str(STATIC / "app.js"))}, 'utf8');
+const start = source.indexOf('function pmLogNearBottom(');
+const end = source.indexOf('function pmRenderDrawer(');
+if (start < 0 || end < 0) throw new Error('pmLogNearBottom marker missing');
+const context = vm.createContext({{}});
+vm.runInContext(source.slice(start, end) + '\\nthis.pmLogNearBottom = pmLogNearBottom;', context);
+const near = context.pmLogNearBottom;
+const bottom = {{ scrollHeight: 1000, scrollTop: 920, clientHeight: 80 }};
+const mid = {{ scrollHeight: 1000, scrollTop: 200, clientHeight: 80 }};
+process.stdout.write(JSON.stringify([near(null), near(bottom), near(mid)]));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert json.loads(result.stdout) == [True, True, False]
