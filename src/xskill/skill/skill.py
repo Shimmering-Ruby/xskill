@@ -559,7 +559,7 @@ def _set_frozen(skill_dir: Path, name: str, frozen: bool) -> bool:
     return True
 
 
-def delete_skill(skill_dir: Path, name: str) -> bool:
+def delete_skill(skill_dir: Path, name: str, *, db_path: Path | None = None) -> bool:
     """Delete a skill directory and commit."""
     skill_path = skill_dir / name
     if not skill_path.is_dir():
@@ -570,6 +570,8 @@ def delete_skill(skill_dir: Path, name: str) -> bool:
     committed = commit_changes(str(skill_dir), f"delete skill: {name}")
     if committed:
         logger.info(f"deleted: {name}")
+        from xskill.skill.catalog_store import notify_native_delete
+        notify_native_delete(name, db_path=db_path)
     return committed
 
 

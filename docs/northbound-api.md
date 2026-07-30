@@ -135,7 +135,7 @@ standalone 与 team server 均可用（无需 team token）。
 | GET | `/api/v1/trajectories/list` | 轨迹列表 |
 | GET | `/api/v1/registry/dirs` | 已注册 watch dir 列表 |
 | POST | `/api/v1/registry/dirs` | 注册 watch dir |
-| POST | `/api/v1/reindex` | 重建 skill 向量索引（★ 本 PR：传 `atom_store_roots` 算 `atom_feats`，重建后失效引擎缓存） |
+| POST | `/api/v1/reindex` | 重建 skill 向量索引。Query `scope=search`（**默认**）：只写 description→`.skill_index.pkl` embeddings，不扫 atom；`scope=full`：另算 `atom_feats`（扫全部 client atom，代价高）。重建后失效引擎缓存。非法 scope → 400。 |
 
 ---
 

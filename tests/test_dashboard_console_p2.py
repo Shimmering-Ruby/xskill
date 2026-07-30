@@ -629,11 +629,19 @@ def test_users_matrix_reads_prefs_in_one_query(console_env, monkeypatch):
 
 def test_admin_skills_uses_cached_catalog_and_keeps_skillrepo_scope(
         console_env, monkeypatch):
-    """技能生命周期表：状态取共享清单缓存(不再逐 skill 现读 git ref)，
+    """技能生命周期表：状态取投影表（冷启动一次 backfill），
     但列出的 skill 集合仍与 SkillRepo 完全一致。"""
-    import xskill.dashboard.metrics as dashboard_metrics
+    import xskill.skill.catalog_store as catalog_store
     db = console_env["db"]
     skills = console_env["skills"]
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path",
+        lambda: db,
+    )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
+        lambda: db,
+    )
     # beta 起灰度 → canary；gamma 下线 → retired；alpha 近 30 日有使用
     _git(["checkout", "-q", "-b", "staging"], skills / "beta")
     R.retire_skill(skill_name="gamma", set_by="boss", db_path=db)
@@ -651,20 +659,19 @@ def test_admin_skills_uses_cached_catalog_and_keeps_skillrepo_scope(
     _clear_console_caches()
 
     scans: list[int] = []
-    real_build = dashboard_metrics._build_skills_catalog_uncached
+    real_scan = catalog_store.scan_skills_catalog
 
-    def counting_build(*args, **kwargs):
+    def counting_scan(*args, **kwargs):
         scans.append(1)
-        return real_build(*args, **kwargs)
+        return real_scan(*args, **kwargs)
 
-    monkeypatch.setattr(
-        dashboard_metrics, "_build_skills_catalog_uncached", counting_build)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", counting_scan)
 
     boss = console_env["boss"]
     first = boss.get("/api/v1/dashboard/admin/skills").json()
     second = boss.get("/api/v1/dashboard/admin/skills").json()
 
-    assert len(scans) == 1                    # 两次请求共用一次清单扫描
+    assert len(scans) == 1                    # 两次请求共用一次 backfill 扫盘
     assert first == second
     assert first["skills"] == [
         {"name": "alpha", "state": "active", "usage_30d": 2},

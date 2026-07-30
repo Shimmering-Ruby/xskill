@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import xskill.dashboard.metrics as dashboard_metrics
+import xskill.skill.catalog_store as catalog_store
 from xskill.pipeline.registry import (
     TrajectoryStatus,
     get_connection,
@@ -23,6 +24,20 @@ SUCCESSFULLY_SPLIT_STATUSES = (
     TrajectoryStatus.CLUSTERING,
     TrajectoryStatus.DONE,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skills_catalog_registry(tmp_path, monkeypatch):
+    """技能清单投影表写入隔离 registry，避免污染本机 DB / 串测。"""
+    registry = tmp_path / "_skills_catalog_registry.db"
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path",
+        lambda: registry,
+    )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
+        lambda: registry,
+    )
 
 
 def _seed_team(db):
@@ -407,7 +422,7 @@ def test_skills_catalog_concurrent_calls_for_300_skills_scan_once(
     for i in range(300):
         _write_catalog_skill(root, f"skill-{i:03d}", f"description {i}")
 
-    original = dashboard_metrics._build_skills_catalog_uncached
+    original = catalog_store.scan_skills_catalog
     calls = 0
     calls_lock = threading.Lock()
 
@@ -417,7 +432,7 @@ def test_skills_catalog_concurrent_calls_for_300_skills_scan_once(
             calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(dashboard_metrics, "_build_skills_catalog_uncached", counted)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", counted)
     barrier = threading.Barrier(32)
 
     def load():
@@ -430,20 +445,15 @@ def test_skills_catalog_concurrent_calls_for_300_skills_scan_once(
     assert all(len(rows) == 300 for rows in results)
 
 
-@pytest.mark.flaky(reruns=3, reruns_delay=0.05)
-def test_skills_catalog_cache_ttl_reloads_refs_content_and_candidates(
-        tmp_path, monkeypatch):
-    """清单缓存 TTL 命中/过期；CI 慢机上 0.02s TTL 易被文件写入拖过期。"""
+def test_skills_catalog_upsert_picks_up_disk_mutations(tmp_path):
+    """投影表：仅改盘不 UPSERT 时列表保持旧值；写出口 UPSERT 后立即可见。"""
     root = tmp_path / "skills"
     root.mkdir()
     skill = _write_catalog_skill(root, "alpha", "version one", branch="main")
-    # 清单缓存与它内部复用的 sync 仓快照(_rows_from_manifest_snapshot 的
-    # max_age_seconds)同用这个 TTL,两处都要缩短才能观察到过期重扫。
-    monkeypatch.setattr(dashboard_metrics, "_SKILLS_CATALOG_TTL_SECONDS", 0.02)
-    monkeypatch.setattr(
-        dashboard_metrics._skills_catalog_cache, "ttl_seconds", 0.02)
 
     first = skills_catalog(root)[0]
+    assert first["description"] == "version one"
+
     (skill / ".git" / "refs" / "heads" / "staging").write_text("sha2\n", encoding="utf-8")
     (skill / "SKILL.md").write_text(
         "---\nname: alpha\ndescription: version two\n"
@@ -453,14 +463,14 @@ def test_skills_catalog_cache_ttl_reloads_refs_content_and_candidates(
     (skill / ".candidates.yml").write_text(
         "candidates:\n  - summary: one\n  - summary: two\n", encoding="utf-8")
 
-    still_cached = skills_catalog(root)[0]
-    assert (still_cached["state"], still_cached["description"], still_cached["candidates"]) == (
+    still_stale = skills_catalog(root)[0]
+    assert (still_stale["state"], still_stale["description"], still_stale["candidates"]) == (
         "main", "version one", 0)
-    time.sleep(0.04)
+
+    catalog_store.upsert_native_skill(skill, db_path=tmp_path / "_skills_catalog_registry.db")
     refreshed = skills_catalog(root)[0]
     assert (refreshed["state"], refreshed["description"], refreshed["version"],
             refreshed["candidates"]) == ("staging", "version two", 2, 2)
-    assert first == still_cached
 
 
 def test_skills_catalog_cache_isolates_roots_and_skillhub_inputs(tmp_path):
@@ -481,7 +491,7 @@ def test_skills_catalog_cache_isolates_roots_and_skillhub_inputs(tmp_path):
         ("same", "root b"), ("hub-b", "B")]
 
 
-def test_skills_catalog_equivalent_skillhub_instances_share_cache(
+def test_skills_catalog_equivalent_skillhub_instances_share_backfill(
         tmp_path, monkeypatch):
     from xskill.recommend.skillhub import SkillHub
 
@@ -490,7 +500,7 @@ def test_skills_catalog_equivalent_skillhub_instances_share_cache(
     _write_catalog_skill(hub_root, "vendor", "third party")
     first_hub = SkillHub(enabled=True, hub_dir=hub_root, embed_client=None)
     second_hub = SkillHub(enabled=True, hub_dir=hub_root, embed_client=object())
-    original = dashboard_metrics._build_skills_catalog_uncached
+    original = catalog_store.scan_skills_catalog
     calls = 0
 
     def counted(*args, **kwargs):
@@ -498,14 +508,13 @@ def test_skills_catalog_equivalent_skillhub_instances_share_cache(
         calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(
-        dashboard_metrics, "_build_skills_catalog_uncached", counted)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", counted)
     assert skills_catalog(root, skillhub=first_hub) == skills_catalog(
         root, skillhub=second_hub)
     assert calls == 1
 
 
-def test_skills_catalog_failed_build_does_not_poison_cache(tmp_path):
+def test_skills_catalog_failed_backfill_does_not_poison_meta(tmp_path):
     from xskill.recommend.skillhub import SkillHub
 
     root = tmp_path / "skills"; root.mkdir()
@@ -520,16 +529,16 @@ def test_skills_catalog_failed_build_does_not_poison_cache(tmp_path):
         ("vendor", "skillhub")]
 
 
-def test_skills_catalog_concurrent_failure_is_shared_and_cleans_flight(
+def test_skills_catalog_concurrent_failure_is_shared(
         tmp_path, monkeypatch):
     root = tmp_path / "skills"; root.mkdir()
-    original = dashboard_metrics._build_skills_catalog_uncached
+    original = catalog_store.scan_skills_catalog
     entered = threading.Event()
     release = threading.Event()
     calls = 0
     calls_lock = threading.Lock()
 
-    def failing(*args, **kwargs):
+    def failing(*_args, **_kwargs):
         nonlocal calls
         with calls_lock:
             calls += 1
@@ -537,8 +546,7 @@ def test_skills_catalog_concurrent_failure_is_shared_and_cleans_flight(
         assert release.wait(timeout=5)
         raise FileNotFoundError("catalog unavailable")
 
-    monkeypatch.setattr(
-        dashboard_metrics, "_build_skills_catalog_uncached", failing)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", failing)
 
     def load_error():
         try:
@@ -556,29 +564,17 @@ def test_skills_catalog_concurrent_failure_is_shared_and_cleans_flight(
 
     assert calls == 1
     assert all(isinstance(error, FileNotFoundError) for error in errors)
-    assert len({id(error) for error in errors}) == len(errors)
-    key = dashboard_metrics._skills_catalog_cache_key(root, None)
-    assert dashboard_metrics._skills_catalog_cache.in_flight_count == 0
-    assert key not in dashboard_metrics._skills_catalog_cache
 
-    monkeypatch.setattr(
-        dashboard_metrics, "_build_skills_catalog_uncached", original)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", original)
     assert skills_catalog(root) == []
 
 
-def test_skills_catalog_cache_has_bounded_number_of_keys(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        dashboard_metrics._skills_catalog_cache, "max_entries", 2)
-    dashboard_metrics._skills_catalog_cache.clear()
-
+def test_skills_catalog_isolates_multiple_roots(tmp_path):
     for index in range(3):
         root = tmp_path / f"skills-{index}"
         root.mkdir()
         _write_catalog_skill(root, f"skill-{index}", f"description {index}")
         assert len(skills_catalog(root)) == 1
-
-    assert len(dashboard_metrics._skills_catalog_cache) == 2
-    assert dashboard_metrics._skills_catalog_cache.in_flight_count == 0
 
 
 def test_skills_catalog_returns_independent_copies(tmp_path):
@@ -594,73 +590,90 @@ def test_skills_catalog_returns_independent_copies(tmp_path):
     assert second[0]["description"] == "original"
 
 
-def test_skills_catalog_page_counts_from_cache_and_deepcopies_only_page(
-        tmp_path, monkeypatch):
-    """L9：分页只深拷贝当前页，total/by_state 从缓存 bundle 取；改页不污染缓存。"""
+def _fake_scan_rows(root, count):
+    root_key = catalog_store.catalog_root_key(root)
+    rows = []
+    for index in range(count):
+        state = "main" if index % 2 else "staging"
+        name = f"s{index:04d}"
+        rows.append({
+            "catalog_key": f"native:{name}",
+            "root_key": root_key,
+            "name": name,
+            "repo_name": name,
+            "source": "native",
+            "state": state,
+            "description": "",
+            "version": 1,
+            "candidates": 0,
+            "candidates_count": 0,
+            "main_sha": "",
+            "staging_sha": "",
+            "distributable": 1,
+            "search_id": name,
+            "hub": "",
+            "skill_id": "",
+            "use_count": 0,
+        })
+    return rows
+
+
+def test_skills_catalog_page_counts_and_page_isolation(tmp_path, monkeypatch):
+    """分页：total/by_state 按全量；改返回页不污染下一请求。"""
     root = tmp_path / "skills"
-    rows = [
-        {"name": f"s{index}",
-         "state": "main" if index % 2 else "staging",
-         "source": "native", "description": "", "version": 1, "candidates": 0}
-        for index in range(300)
-    ]
+    root.mkdir()
+    rows = _fake_scan_rows(root, 300)
+
     def build_rows(*_args, **_kwargs):
         return [dict(entry) for entry in rows]
 
-    monkeypatch.setattr(
-        dashboard_metrics, "_build_skills_catalog_uncached", build_rows)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", build_rows)
 
     page = skills_catalog_page(root, limit=10, offset=20)
     assert page["total"] == 300
     assert page["by_state"] == {"staging": 150, "main": 150}
     assert [entry["name"] for entry in page["skills"]] == [
-        f"s{index}" for index in range(20, 30)]
+        f"s{index:04d}" for index in range(20, 30)]
     assert page["offset"] == 20 and page["limit"] == 10
 
-    # 改写返回页不得污染缓存里的行（只深拷贝当前页的保证）。
     page["skills"][0]["description"] = "caller mutation"
     fresh = skills_catalog_page(root, limit=10, offset=20)
     assert fresh["skills"][0]["description"] == ""
-    # 返回的 by_state 是独立副本，改它也不动缓存。
     page["by_state"]["main"] = -1
     assert skills_catalog_page(root, limit=1)["by_state"]["main"] == 150
 
 
-def test_skills_catalog_page_builds_once_across_requests(tmp_path, monkeypatch):
-    """L9：多次翻页 / 计数只触发一次磁盘扫描（缓存 bundle 复用）。"""
+def test_skills_catalog_page_backfills_once_across_requests(tmp_path, monkeypatch):
+    """多次翻页只触发一次扫盘 backfill。"""
     root = tmp_path / "skills"
+    root.mkdir()
     calls = 0
 
     def counted(*_args, **_kwargs):
         nonlocal calls
         calls += 1
-        return [{"name": f"s{index}", "state": "main", "source": "native",
-                 "description": "", "version": 1, "candidates": 0}
-                for index in range(50)]
+        return _fake_scan_rows(root, 50)
 
-    monkeypatch.setattr(
-        dashboard_metrics, "_build_skills_catalog_uncached", counted)
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", counted)
     skills_catalog_page(root, limit=10, offset=0)
     skills_catalog_page(root, limit=10, offset=10)
-    skills_catalog_page(root, name="s7")
+    skills_catalog_page(root, name="s0007")
     assert calls == 1
 
 
 def test_skills_catalog_page_name_filter_returns_matches(tmp_path, monkeypatch):
-    """L9：name 定向查返回匹配条目，total/by_state 仍按全量。"""
+    """name 定向查返回匹配条目，total/by_state 仍按全量。"""
     root = tmp_path / "skills"
+    root.mkdir()
 
     def build_thousand(*_args, **_kwargs):
-        return [{"name": f"s{index}", "state": "main", "source": "native",
-                 "description": "", "version": 1, "candidates": 0}
-                for index in range(1000)]
+        return _fake_scan_rows(root, 1000)
 
-    monkeypatch.setattr(
-        dashboard_metrics, "_build_skills_catalog_uncached", build_thousand)
-    page = skills_catalog_page(root, name="s512")
-    assert [entry["name"] for entry in page["skills"]] == ["s512"]
+    monkeypatch.setattr(catalog_store, "scan_skills_catalog", build_thousand)
+    page = skills_catalog_page(root, name="s0512")
+    assert [entry["name"] for entry in page["skills"]] == ["s0512"]
     assert page["total"] == 1000
-    assert page["by_state"] == {"main": 1000}
+    assert page["by_state"] == {"main": 500, "staging": 500}
 
 
 def test_users_lists_team_clients(tmp_path):

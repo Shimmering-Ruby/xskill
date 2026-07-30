@@ -1372,10 +1372,12 @@ def cmd_rebuild(args, _xskill) -> int:
             return 2
 
     if args.force:
-        from xskill.config import get_skill_dir
+        from xskill.config import get_registry_db_path, get_skill_dir
         from xskill.pipeline.registry import clear_rebuild_derived_state
         from xskill.skill.repo import SkillRepo
-        skill_count = SkillRepo(get_skill_dir()).wipe_all_skills()
+        skill_count = SkillRepo(get_skill_dir()).wipe_all_skills(
+            db_path=get_registry_db_path(),
+        )
         print(f"--force: 清空 skill 仓（删 {skill_count} 个 skill）")
         deleted_counts = clear_rebuild_derived_state()
         print(

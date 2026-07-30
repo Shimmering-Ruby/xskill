@@ -219,6 +219,40 @@ CREATE TABLE IF NOT EXISTS skill_lifecycle (
     ts         TEXT DEFAULT (datetime('now'))
 );
 
+-- skills 列表投影表：磁盘为真相源；写出口 UPSERT；dashboard 分页查表。
+-- catalog_key=native:{name} | skillhub:{skill_id}；root_key=自产 skill 根目录。
+CREATE TABLE IF NOT EXISTS skills_catalog (
+    catalog_key       TEXT PRIMARY KEY,
+    root_key          TEXT NOT NULL DEFAULT '',
+    name              TEXT NOT NULL,
+    repo_name         TEXT NOT NULL DEFAULT '',
+    source            TEXT NOT NULL CHECK(source IN ('native','skillhub')),
+    state             TEXT NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    version           INTEGER NOT NULL DEFAULT 0,
+    candidates_count  INTEGER NOT NULL DEFAULT 0,
+    main_sha          TEXT NOT NULL DEFAULT '',
+    staging_sha       TEXT NOT NULL DEFAULT '',
+    distributable     INTEGER NOT NULL DEFAULT 0,
+    search_id         TEXT NOT NULL DEFAULT '',
+    hub               TEXT NOT NULL DEFAULT '',
+    skill_id          TEXT NOT NULL DEFAULT '',
+    use_count         INTEGER NOT NULL DEFAULT 0,
+    updated_at        TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_skills_catalog_root
+    ON skills_catalog(root_key);
+CREATE INDEX IF NOT EXISTS idx_skills_catalog_root_name
+    ON skills_catalog(root_key, name);
+CREATE INDEX IF NOT EXISTS idx_skills_catalog_root_state
+    ON skills_catalog(root_key, state);
+
+CREATE TABLE IF NOT EXISTS skills_catalog_meta (
+    root_key      TEXT PRIMARY KEY,
+    backfilled_at TEXT NOT NULL,
+    skillhub_key  TEXT NOT NULL DEFAULT ''
+);
+
 -- P3-3.1 events:四类既有事实源的消费者(D7),通知+世界消息共用。
 -- kind: feedback(他人触发+ux打分) / push_edit(修改分支) / canary(裁决) / pin。
 -- targets 单独成表:一条事件可通知多个贡献者;世界消息 feed 直接读 events。
