@@ -127,6 +127,7 @@ class TestRecommendConfig:
         assert "recommend:" in CONFIG_TEMPLATE
         assert "quality_ratio" in CONFIG_TEMPLATE
         assert "cluster_centers" in CONFIG_TEMPLATE
+        assert "per_center" not in CONFIG_TEMPLATE
 
 
 # ── skillhub_config ───────────────────────────────────────────────

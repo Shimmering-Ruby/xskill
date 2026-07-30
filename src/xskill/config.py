@@ -248,7 +248,7 @@ team:
 # ===== Skill recommend engine =====
 # 用户画像 + skill 特征 + 推荐引擎参数。仅 team server 端生效。
 recommend:
-  quality_ratio:   0.8   # 推荐位中按 ux 质量排序的占比；其余按向量相关性
+  quality_ratio:   0.8   # 已废弃：引擎忽略；recommended 纯相关性轮询，不足时 UX 回填
   cluster_centers: 5     # 用户兴趣聚类中心上限（≤5）；atom 少时自动降 k
   last_n_atoms:    5     # skill.atom_feat 取最近 N 个被路由 atom 摘要的均值
   # staging_need:   5    # 可选；缺省 None = 复用 canary.min_samples（推荐侧达量阈值，
@@ -640,6 +640,7 @@ def recommend_config(cfg: Optional[dict] = None) -> dict:
     返回 ``{quality_ratio, cluster_centers, last_n_atoms, staging_need}``。
     ``staging_need`` 缺省 None = 复用 ``canary.min_samples``（推荐侧达量阈值，
     比 total_samples 更适合小团队；引擎构造时解析）。
+    ``quality_ratio`` 仍校验/返回以兼容旧 yaml，推荐引擎已忽略。
     """
     section = (cfg or {}).get("recommend") or {}
     quality_ratio = section.get("quality_ratio", 0.8)

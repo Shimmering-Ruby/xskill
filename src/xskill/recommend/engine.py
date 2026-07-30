@@ -4,7 +4,8 @@
 （``.skill_index.pkl``，仅 main+staging 可分发 skill，排除 baby）。
 
 - ``update_user_interest``：atom 触发 → 重扫用户 atom 摘要 → 重新聚类 → upsert 画像。
-- ``get_skill_for_client``：80% 质量（ux）+ 20% 相关性（向量 KNN），质量不足相关性回填。
+- ``get_skill_for_client``：recommended 纯相关性（按兴趣中心轮询，每中心每轮
+  取 1 个最高分未选 skill，多轮填满）；冷启动或相关性不足时 UX 序回填。
 - ``resolve_side``：staging 优先达量（未达量→staging；staging 达量 main 未达量→main；
   双侧达量→``pick_side`` 确定性分流），修复 pickside 饿死。记录双向推荐。
 - ``find_friend`` / ``find_tag_for_user`` / ``find_tag_for_skill``。
@@ -15,7 +16,6 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
-import math
 from operator import attrgetter, itemgetter
 from pathlib import Path
 import threading
@@ -530,12 +530,13 @@ class SkillRecommendEngine:
         persist_recommendations: bool = True,
         candidate_pool_quality_ordered: bool = False,
     ) -> list["Skill"]:
-        """80% 质量 + 20% 相关性，质量不足相关性回填；记录推荐 + resolve side。
+        """recommended 纯相关性：按兴趣中心轮询（每中心每轮 1 个），多轮填满
+        ``skill_num``；冷启动或相关性不足时 UX 序回填；记录推荐 + resolve side。
 
         ``exclude_names``：从候选池排除的 skill 名（如已占 ranked 槽位的），供
         ``_pick_recommended`` 在 ranked 之外选 recommended 位用。
         ``candidate_pool_quality_ordered`` 表示调用方已按同一质量键排好候选，
-        可避免 manifest 热路径重复读取每个 skill 的评分文件。
+        可避免 manifest 热路径重复读取每个 skill 的评分文件（仅用于 UX 回填）。
         """
         source_pool = (
             list(candidate_pool)
@@ -546,8 +547,6 @@ class SkillRecommendEngine:
         if exclude_names:
             pool = [s for s in pool if s.name not in exclude_names]
 
-        quality_ratio = self.rcfg["quality_ratio"]
-        qn = min(math.ceil(skill_num * quality_ratio), len(pool))
         if candidate_pool_quality_ordered:
             quality_ordered = pool
         else:
@@ -565,49 +564,52 @@ class SkillRecommendEngine:
             decorated = [(quality_keys[skill.name], skill) for skill in pool]
             decorated.sort(key=itemgetter(0), reverse=True)
             quality_ordered = [skill for _key, skill in decorated]
-        quality = quality_ordered[:qn]
-        quality_names = {s.name for s in quality}
 
         relevance: list["Skill"] = []
+        picked: set[str] = set()
         ci = client_user.client_interest
         if ci is not None and ci.feature_tensor is not None:
             names, embs, is_hub = self._combined_relevance(source_pool)
             by_name = {s.name: s for s in pool}  # pool 已排除 exclude_names
-            picked = set(quality_names)
-            for center in ci.feature_tensor:
-                if len(quality) + len(relevance) >= skill_num:
-                    break
-                if embs.shape[0] == 0:
-                    break
-                sims = embs @ np.asarray(center, dtype=float)
-                order = np.argsort(-sims)
-                for i in order:
-                    nm = names[i]
-                    if exclude_names and nm in exclude_names:
-                        continue
-                    if nm in picked:
-                        continue
-                    if is_hub.get(nm):
-                        entry = self.skillhub.entry(nm)
-                        if entry is not None:
-                            relevance.append(entry)
-                            picked.add(nm)
-                            if len(quality) + len(relevance) >= skill_num:
-                                break
-                    elif nm in by_name:
-                        relevance.append(by_name[nm])
-                        picked.add(nm)
-                        if len(quality) + len(relevance) >= skill_num:
+            centers = list(ci.feature_tensor)
+            if len(centers) > 0 and embs.shape[0] > 0:
+                while len(relevance) < skill_num:
+                    progress = False
+                    for center in centers:
+                        if len(relevance) >= skill_num:
                             break
+                        sims = embs @ np.asarray(center, dtype=float)
+                        order = np.argsort(-sims)
+                        for i in order:
+                            nm = names[i]
+                            if exclude_names and nm in exclude_names:
+                                continue
+                            if nm in picked:
+                                continue
+                            if is_hub.get(nm):
+                                entry = self.skillhub.entry(nm)
+                                if entry is None:
+                                    continue
+                                relevance.append(entry)
+                            elif nm in by_name:
+                                relevance.append(by_name[nm])
+                            else:
+                                continue
+                            picked.add(nm)
+                            progress = True
+                            break  # 每中心每轮只取 1 个
+                    if not progress:
+                        break
 
-        chosen = quality + relevance
-        # 回填：质量池不足时从 pool（ux 序）补齐至 skill_num
+        chosen = relevance
+        # 回填：冷启动或相关性不足时从 pool（ux 序）补齐至 skill_num
         if len(chosen) < skill_num:
             for s in quality_ordered:
                 if len(chosen) >= skill_num:
                     break
-                if s not in chosen:
+                if s.name not in picked:
                     chosen.append(s)
+                    picked.add(s.name)
 
         chosen = chosen[:skill_num]
         # 记录推荐 + resolve side（双向）

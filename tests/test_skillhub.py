@@ -231,12 +231,12 @@ class TestEngineSkillhubPool:
         assert any(n.startswith("extfoo@") for n in hub_names)  # 三方 skill 进了检索池
         assert "s0" in all_names
 
-    def test_skillhub_not_in_quality_bucket(self, tmp_path):
+    def test_skillhub_not_in_distributable_pool(self, tmp_path):
         hub_dir = tmp_path / "hub"
         _write_hub_skill(hub_dir, "extfoo", "django migration helper")
         eng = self._engine(tmp_path, skillhub_enabled=True, hub_dir=hub_dir)
         pool = eng._distributable_skills()
-        # 三方 skill 无 git/main → 不在可分发池 → 不进质量位
+        # 三方 skill 无 git/main → 不在可分发池
         assert all(s.name != "extfoo" for s in pool)
 
     def test_skillhub_disabled_not_in_pool(self, tmp_path):
