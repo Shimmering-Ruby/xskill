@@ -111,6 +111,20 @@ class CanaryGitOps:
 
     def ux_scores(self, side: Optional[str] = None,
                   days: int = 30) -> list[dict]:
+        skill_name = self.skill_path.name
+        try:
+            from xskill.pipeline.ux_scores_store import load_ux_scores_for_skill
+            db_scores = load_ux_scores_for_skill(
+                skill_name, side=side, days=days,
+            )
+            if db_scores:
+                return db_scores
+        except Exception:
+            # DB 未就绪 / 查询失败：回退盘文件（镜像未到时也走此路径）
+            import logging
+            logging.getLogger("xskill.skill").debug(
+                "ux_scores db read failed; fallback jsonl", exc_info=True,
+            )
         scores = _canary.load_ux_scores(self.skill_path)
         if side is not None:
             scores = [s for s in scores if s.get("side") == side]

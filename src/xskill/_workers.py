@@ -341,6 +341,20 @@ def run_profile_refresh_once() -> int:
             service.stop(timeout=pr_cfg["shutdown_timeout"])
 
 
+def run_ux_scores_sync_once() -> int:
+    """扫 skill_dir 盘上 ``.ux_scores.jsonl`` → ``registry.db.ux_scores``。"""
+    from xskill.config import get_skill_dir
+    from xskill.pipeline.ux_scores_store import sync_ux_scores_from_skill_dir
+
+    skill_dir = get_skill_dir()
+    stats = sync_ux_scores_from_skill_dir(skill_dir)
+    logger.info(
+        "ux_scores sync done skills=%s lines=%s inserted=%s",
+        stats["skills"], stats["lines"], stats["inserted"],
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m xskill._workers <kind>`` 入口(供调度器 spawn)。"""
     import argparse
@@ -358,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest.add_argument("--loop", action="store_true")
     p_ingest.add_argument("--interval", type=float, default=0.5)
     sub.add_parser("profile-refresh")
+    sub.add_parser("ux-scores-sync")
     args = parser.parse_args(argv)
 
     configure_logging(get_logs_dir(), debug=False, quiet=False, stdout=True)
@@ -370,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
                 interval=args.interval,
             )
         return run_ecosystem_ingest_once(home=args.home)
+    if args.kind == "ux-scores-sync":
+        return run_ux_scores_sync_once()
     return run_profile_refresh_once()
 
 

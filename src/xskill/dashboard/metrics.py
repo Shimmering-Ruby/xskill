@@ -57,6 +57,9 @@ def load_usage_records(skill_dir: Optional[Path]) -> list[dict]:
 
     调用方拿到的每条记录都是独立的可改写副本（记录里全是 JSON 标量，逐条
     ``dict()`` 即与深拷贝等价），缓存内的共享记录永不被调用方改写。
+
+    ranked/canary 已切 ``registry.db.ux_scores``；看板仍按 skill_dir 扫盘
+    （多 root 隔离、无 atom/traj 键的旧 fixture 仍可用）。DB 由 sync worker 维护。
     """
     if not skill_dir:
         return []
@@ -87,7 +90,6 @@ def load_usage_records(skill_dir: Optional[Path]) -> list[dict]:
     cached = _usage_records_cache.get_or_build(
         _catalog_path_key(root), build_records)
     return [dict(record) for record in cached]
-
 
 def _resolve_local_root(path: str, db_dir: Path) -> Path:
     """把 watch_dir 路径解析成本机可读路径。

@@ -148,10 +148,22 @@ class _ManifestCatalogCache:
                 continue
             refs[skill.name] = (current_main, staging_sha(skill.path))
             skills.append(skill)
-        skills.sort(
-            key=lambda skill: _rank_key(skill, main_ref=refs[skill.name][0]),
-            reverse=True,
-        )
+        # ranked 排序键：UX 均分来自 registry.db ux_scores，不再逐 skill 扫 jsonl
+        main_refs = {name: pair[0] for name, pair in refs.items()}
+        try:
+            from xskill.pipeline.ux_scores_store import avg_scores_for_refs
+            ux_avgs = avg_scores_for_refs(main_refs, side="main", days=30)
+        except Exception:
+            _logger.warning(
+                "ux_scores avg lookup failed; ranked falls back to use_count",
+                exc_info=True,
+            )
+            ux_avgs = {}
+
+        def rank_key(skill: Skill) -> tuple[float, int]:
+            return (ux_avgs.get(skill.name, 0.0), skill.use_count)
+
+        skills.sort(key=rank_key, reverse=True)
         repo_names = {skill.name for skill in skills}
         search_by_id: dict[str, Skill] = {}
         for skill in skills:
@@ -213,21 +225,6 @@ def set_recommend_engine(eng) -> None:
 def get_recommend_engine():
     """返回已注入的引擎（未注入时 None）。供 api 层在 /sync 刷新用户画像用。"""
     return _engine
-
-
-def _rank_key(skill: Skill, *, main_ref: str | None = None) -> tuple[float, int]:
-    """排序键：(main 侧近 30 天 ux 均分, use_count)，都缺则 (0.0, 0)。"""
-    if main_ref is None:
-        avg = skill.ux_avg(side="main", days=30)
-    else:
-        rows = skill.recent_ux_scores(side="main", days=30)
-        scores = [
-            row.get("score") for row in rows
-            if row.get("commit_sha") == main_ref
-            and isinstance(row.get("score"), (int, float))
-        ]
-        avg = sum(scores) / len(scores) if scores else None
-    return (avg if avg is not None else 0.0, skill.use_count)
 
 
 def _resolve_slot(

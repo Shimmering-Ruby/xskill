@@ -305,6 +305,31 @@ CREATE TABLE IF NOT EXISTS scatter_cache (
     computed_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_key, method)
 );
+
+-- UX 体验分事实源（盘上 .ux_scores.jsonl 由定时任务 sync 入库；读路径查本表）
+CREATE TABLE IF NOT EXISTS ux_scores (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name  TEXT NOT NULL,
+    side        TEXT NOT NULL,
+    commit_sha  TEXT NOT NULL DEFAULT '',
+    score       REAL NOT NULL,
+    scored_at   TEXT NOT NULL,
+    atom_id     TEXT NOT NULL DEFAULT '',
+    traj_id     TEXT NOT NULL DEFAULT '',
+    reasons     TEXT NOT NULL DEFAULT '',
+    user_model  TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ux_atom
+    ON ux_scores(skill_name, side, atom_id) WHERE atom_id != '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ux_traj
+    ON ux_scores(skill_name, side, traj_id) WHERE traj_id != '';
+CREATE INDEX IF NOT EXISTS idx_ux_rank
+    ON ux_scores(skill_name, side, commit_sha, scored_at);
+
+CREATE TABLE IF NOT EXISTS ux_scores_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
