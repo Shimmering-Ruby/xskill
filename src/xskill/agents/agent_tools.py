@@ -82,6 +82,8 @@ class AgentToolContext:
     skill_edit_skill_name: str | None = None
     skill_edit_batch_ids: tuple[str, ...] = ()
     grep_fallback_warned: bool = False
+    # 实例 registry.db；skills_catalog 写出口从此取库，禁止隐式摸全局库。
+    registry_db_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -89,6 +91,12 @@ class AgentToolContext:
             "config",
             _freeze_config(self.config or {}),
         )
+        if self.registry_db_path is not None:
+            object.__setattr__(
+                self,
+                "registry_db_path",
+                Path(self.registry_db_path),
+            )
 
 
 _EMPTY_AGENT_TOOL_CONTEXT = AgentToolContext()
@@ -114,6 +122,7 @@ def create_agent_tool_context(
     cluster_result_recorder=None,
     skill_edit_skill_name=None,
     skill_edit_batch_ids=(),
+    registry_db_path=None,
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -141,6 +150,9 @@ def create_agent_tool_context(
         ),
         skill_edit_batch_ids=tuple(
             str(atom_id) for atom_id in (skill_edit_batch_ids or ())
+        ),
+        registry_db_path=(
+            Path(registry_db_path) if registry_db_path is not None else None
         ),
     )
 
@@ -250,6 +262,7 @@ class AgentToolConfig:
             "skill_edit_skill_name": current.skill_edit_skill_name,
             "skill_edit_batch_ids": current.skill_edit_batch_ids,
             "grep_fallback_warned": current.grep_fallback_warned,
+            "registry_db_path": current.registry_db_path,
         }
 
     def restore(self, snapshot: dict) -> None:
@@ -266,6 +279,7 @@ class AgentToolConfig:
             cluster_result_recorder=snapshot.get("cluster_result_recorder"),
             skill_edit_skill_name=snapshot.get("skill_edit_skill_name"),
             skill_edit_batch_ids=snapshot.get("skill_edit_batch_ids") or (),
+            registry_db_path=snapshot.get("registry_db_path"),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()
@@ -1823,6 +1837,8 @@ def absorb_user_edit_to_main(skill_name: str, message: str) -> str:
             shutil.rmtree(canary_md, ignore_errors=True)
         result += " (deleted in-flight staging)"
 
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(target)
     return result
 
 
@@ -1876,6 +1892,8 @@ def rename_skill(old_name: str, new_name: str) -> str:
     run_git(["add", "-A"], cwd=str(new_path))
     run_git(["commit", "-m", f"rename: {old_slug} → {new_slug}"], cwd=str(new_path))
     logger.info(f"renamed baby skill: {old_slug} → {new_slug}")
+    from xskill.skill.catalog_store import notify_native_rename
+    notify_native_rename(old_slug, new_path)
     return f"renamed: {old_slug} → {new_slug}"
 
 

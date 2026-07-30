@@ -1,0 +1,141 @@
+"""skills_catalog 投影表：UPSERT / DELETE / backfill / page。"""
+from __future__ import annotations
+
+import pytest
+
+from xskill.skill import catalog_store
+from xskill.skill.git import commit_baby_to_main_branch, init_skill_repo_on_baby
+
+
+@pytest.fixture(autouse=True)
+def _isolate_registry(tmp_path, monkeypatch):
+    registry = tmp_path / "registry.db"
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path",
+        lambda: registry,
+    )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
+        lambda: registry,
+    )
+
+
+def test_init_and_graduate_upsert_native_row(tmp_path):
+    from xskill.agents import agent_tools
+    root = tmp_path / "skills"
+    root.mkdir()
+    registry = tmp_path / "registry.db"
+    context = agent_tools.create_agent_tool_context(
+        skill_dir=root,
+        atom_skill_dir=root,
+        registry_db_path=registry,
+    )
+    with agent_tools.use_agent_tool_context(context):
+        init_skill_repo_on_baby(
+            str(root / "demo"), name="demo", description="baby desc",
+        )
+        page = catalog_store.page_skills_catalog(root, limit=10, db_path=registry)
+        assert page["total"] == 1
+        assert page["skills"][0]["state"] == "baby"
+        assert "baby desc" in page["skills"][0]["description"]
+
+        assert commit_baby_to_main_branch(str(root / "demo"), "graduate")
+        page = catalog_store.page_skills_catalog(root, limit=10, db_path=registry)
+        assert page["skills"][0]["state"] == "main"
+
+
+def test_delete_native_removes_row(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    registry = tmp_path / "registry.db"
+    init_skill_repo_on_baby(
+        str(root / "gone"), name="gone", description="x",
+    )
+    catalog_store.ensure_skills_catalog(root, db_path=registry)
+    catalog_store.delete_native_skill("gone", db_path=registry)
+    assert catalog_store.list_skills_catalog(root, db_path=registry) == []
+
+
+def test_backfill_replaces_stale_native_and_hub(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    registry = tmp_path / "registry.db"
+    init_skill_repo_on_baby(
+        str(root / "keep"), name="keep", description="keep me",
+    )
+    catalog_store.ensure_skills_catalog(root, db_path=registry)
+    hub = [{
+        "display_name": "hub-skill",
+        "source_path": "team/x",
+        "skill_id": "hub-skill@1",
+        "description": "from hub",
+        "use_count": 2,
+    }]
+    count = catalog_store.backfill_skills_catalog(
+        root, skillhub=hub, db_path=registry,
+    )
+    assert count == 2
+    rows = catalog_store.list_skills_catalog(
+        root, skillhub=hub, db_path=registry,
+    )
+    assert [row["name"] for row in rows] == ["keep", "hub-skill"]
+    assert rows[1]["use_count"] == 2
+
+
+def test_candidates_notify_uses_count_not_reread(tmp_path, monkeypatch):
+    registry = tmp_path / "registry.db"
+    root = tmp_path / "skills"
+    skill = root / "demo"
+    skill.mkdir(parents=True)
+    (skill / ".git" / "refs" / "heads").mkdir(parents=True)
+    (skill / ".git" / "refs" / "heads" / "baby").write_text("sha\n", encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: d\nmetadata:\n  version: 0\n---\n",
+        encoding="utf-8",
+    )
+    catalog_store.ensure_skills_catalog(root, db_path=registry)
+    catalog_store.notify_native_candidates_count(skill, 3, db_path=registry)
+    page = catalog_store.page_skills_catalog(root, db_path=registry)
+    assert page["skills"][0]["candidates"] == 3
+
+
+def test_notify_upsert_without_db_path_skips_global(tmp_path, monkeypatch):
+    """无 registry_db_path 时 hook 不得创建全局库。"""
+    global_db = tmp_path / "global" / "registry.db"
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path",
+        lambda: global_db,
+    )
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.get_registry_db_path",
+        lambda: global_db,
+    )
+    root = tmp_path / "skills"
+    root.mkdir()
+    skill = root / "solo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: solo\ndescription: d\n---\n", encoding="utf-8",
+    )
+    catalog_store.notify_native_upsert(skill)
+    assert not global_db.exists()
+
+def test_rename_is_single_transaction(tmp_path):
+    registry = tmp_path / "registry.db"
+    root = tmp_path / "skills"
+    old_path = root / "old"
+    new_path = root / "new"
+    old_path.mkdir(parents=True)
+    (old_path / ".git" / "refs" / "heads").mkdir(parents=True)
+    (old_path / ".git" / "refs" / "heads" / "baby").write_text("a\n", encoding="utf-8")
+    (old_path / "SKILL.md").write_text(
+        "---\nname: old\ndescription: d\n---\n", encoding="utf-8",
+    )
+    catalog_store.upsert_native_skill(old_path, db_path=registry)
+    old_path.rename(new_path)
+    (new_path / "SKILL.md").write_text(
+        "---\nname: new\ndescription: d\n---\n", encoding="utf-8",
+    )
+    catalog_store.rename_native_skill("old", new_path, db_path=registry)
+    rows = catalog_store.list_skills_catalog(root, db_path=registry)
+    assert [row["name"] for row in rows] == ["new"]

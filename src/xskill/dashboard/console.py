@@ -605,8 +605,8 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
     def admin_skills(_=Depends(require_admin)):
         """技能生命周期表：状态徽章 + 近 30 日使用数。
 
-        状态取 ``skills_catalog`` 的短时缓存清单（其 ``state`` 已由同一次扫描读出
-        staging/main/baby 分支），不再逐个 skill 现读一次 git ref——十万级技能库
+        状态取 ``skills_catalog`` 投影表（其 ``state`` 已由 backfill/写出口写出
+        staging/main/baby），不再逐个 skill 现读一次 git ref——十万级技能库
         下那是每请求十万次文件读。清单口径比 SkillRepo 宽（它列所有非隐藏目录），
         故这里补上 SkillRepo 的两条筛选：``references`` 与无 SKILL.md 的目录不是
         skill，保持响应与旧实现逐条一致。
@@ -624,7 +624,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                 usage30[rec.get("skill") or ""] = \
                     usage30.get(rec.get("skill") or "", 0) + 1
         out = []
-        for entry in skills_catalog(skill_dir):
+        for entry in skills_catalog(skill_dir, db_path=db_path):
             name = entry["name"]
             if name == "references" or not (skill_dir / name / "SKILL.md").is_file():
                 continue
@@ -675,7 +675,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         from xskill.skill.git import skill_repo_lock
         from xskill.skill.skill import delete_skill
         with skill_repo_lock(skill_dir / name):
-            ok = delete_skill(skill_dir, name)
+            ok = delete_skill(skill_dir, name, db_path=db_path)
         if not ok:
             raise HTTPException(status_code=500, detail="delete commit failed")
         purge_skill_records(skill_name=name, db_path=db_path)
