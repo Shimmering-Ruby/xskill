@@ -400,6 +400,7 @@ function renderDiff(diff) {
 }
 
 let _curSkill = null;
+let _skillBackHash = null; // 从「我的」贡献图点入时回到 #my
 // 判定某 skill 属于自产(native)还是三方(skillhub)——从技能库列表载荷取
 // source 字段(列表由另一路渲染，本函数只读)。jc 已缓存该端点，无额外请求。
 // 拿不到 source / 请求失败 → 安全兜底按自产走，绝不因缺字段崩。
@@ -417,6 +418,9 @@ async function skillSource(name) {
 async function openSkill(name) {
   _curSkill = name;
   const box = document.getElementById('skill-detail');
+  const back = _skillBackHash === 'my'
+    ? `<a href="#my" class="text-teal-700 hover:underline">我的</a>`
+    : '技能库';
   box.innerHTML = `<div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">加载 ${esc(name)} …</div>`;
   // 三方 skill 无 git / staging，走 skillhub 专用端点(自产 detail 对其 404)。
   if (await skillSource(name) === 'skillhub') { await renderSkillhubDetail(name, box); return; }
@@ -466,7 +470,7 @@ async function openSkill(name) {
 
   box.innerHTML = `
   <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
-    <div class="text-xs text-slate-400 mb-1.5">技能库 <span class="mx-1">/</span> <span class="text-slate-600">${esc(name)}</span></div>
+    <div class="text-xs text-slate-400 mb-1.5">${back} <span class="mx-1">/</span> <span class="text-slate-600">${esc(name)}</span></div>
     <div class="flex items-start justify-between gap-3 flex-wrap">
       <div>
         <h2 class="text-lg font-bold tracking-tight">${esc(name)}</h2>
@@ -1184,7 +1188,13 @@ function route() {
     openSkill(parts[1]).catch(console.error);
     return;
   }
-  showPage(parts[0] || 'overview');
+  // #174：普通用户默认进「我的」；admin 保持总览
+  let pg = parts[0] || '';
+  if (!pg || pg === 'overview') {
+    if (IDENT && IDENT.role !== 'admin') pg = 'my';
+    else pg = pg || 'overview';
+  }
+  showPage(pg);
 }
 window.addEventListener('hashchange', route);
 
@@ -1199,9 +1209,9 @@ document.addEventListener('click', async e => {
     return;
   }
   const row = e.target.closest('[data-skill-row]');
-  if (row) { location.hash = 'skill/' + encodeURIComponent(row.dataset.skillRow); return; }
+  if (row) { _skillBackHash = null; location.hash = 'skill/' + encodeURIComponent(row.dataset.skillRow); return; }
   const sj = e.target.closest('.skill-jump');
-  if (sj) { location.hash = 'skill/' + encodeURIComponent(sj.dataset.skill); return; }
+  if (sj) { _skillBackHash = null; location.hash = 'skill/' + encodeURIComponent(sj.dataset.skill); return; }
   const aj = e.target.closest('[data-atom-jump]');
   if (aj) { location.hash = 'traj/' + aj.dataset.atomJump; return; }
   const step = e.target.closest('.atom-step');
@@ -1312,6 +1322,11 @@ async function initIdent() {
   applyIdent();
   if (IDENT) { loadMy().catch(console.error); initEvents(); }
   if (IDENT && IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
+  // 登录后若仍停在空/#overview，普通用户跳到「我的」
+  if (IDENT && IDENT.role !== 'admin') {
+    const h = (location.hash || '').replace(/^#/, '');
+    if (!h || h === 'overview') location.hash = '#my';
+  }
 }
 
 // 登录弹窗
@@ -1330,6 +1345,7 @@ document.getElementById('login-submit').addEventListener('click', async () => {
     loadMy().catch(console.error);
     initEvents();
     if (IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
+    else location.hash = '#my';
   } catch (e) { err.textContent = e.message; }
 });
 document.getElementById('login-secret').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('login-submit').click(); });
@@ -1344,10 +1360,195 @@ const BUCKET_CHIP = {
   ranked: 'bg-teal-50 text-teal-700 ring-1 ring-teal-100',
   recommended: 'bg-sky-100 text-sky-700',
 };
+const TRAJ_PAGE = 5;
+const RT_PAGE = 10;
+const FEED_PAGE = 5;
+let _rtRows = [];
+let _rtPage = 0;
+let _rtOpen = false;
+let _contribOpen = true;
+let _trajPage = 0;
+let _contribTraj = null;
+let _contribPayload = null; // {total, trajs, skill_meta}
+let _feedPages = []; // cached pages of events
+let _feedPage = 0;
+let _feedBefore = null;
+let _feedExhausted = false;
+
 function bucketLabel(s) {
   if (s.bucket !== 'pinned') return s.bucket;
   return s.pin_scope === 'global' ? 'pinned·全局' : (s.user_removable ? 'pinned·自己' : 'pinned·admin');
 }
+function mySourceBadge(s, withDetail) {
+  const src = s.source || 'native';
+  let b = `<span class="src-badge src-native">自产</span>`;
+  if (src === 'skillhub') b = `<span class="src-badge src-hub">第三方</span>`;
+  else if (src === 'upload') b = `<span class="src-badge src-upload">上传</span>`;
+  if (src === 'native' && s.producer) {
+    b += ` <span class="text-[10px] text-slate-500">主要贡献人 <b class="font-medium text-slate-700">${esc(s.producer)}</b></span>`;
+    if (withDetail && s.producer_trajs != null) b += ` <span class="src-path">${s.producer_trajs} 条轨迹</span>`;
+  } else if (withDetail) {
+    if (s.source_path) b += ` <span class="src-path">${esc(s.source_path)}</span>`;
+  }
+  return b;
+}
+function sparkline(vals, w, h) {
+  vals = vals && vals.length ? vals : [0];
+  w = w || 48; h = h || 18;
+  const pad = 1;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = max - min || 1;
+  const pts = vals.map((v, i) => {
+    const x = pad + i * (w - 2 * pad) / Math.max(1, vals.length - 1);
+    const y = h - pad - ((v - min) / span) * (h - 2 * pad);
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ');
+  const up = vals[vals.length - 1] >= vals[0];
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline fill="none" stroke="${up ? '#0d9488' : '#e11d48'}" stroke-width="1.5" points="${pts}"/></svg>`;
+}
+
+function contribRelationGraph(trajId, atoms) {
+  if (!atoms.length) return { svg: '<span class="text-slate-400 text-xs">暂无原子</span>', skills: [], H: 40, top: 18, rowH: 78, chipH: 68, atomN: 0, skillN: 0 };
+  const skills = [];
+  atoms.forEach(a => (a.destinations || []).forEach(d => {
+    if (d.skill && !skills.includes(d.skill)) skills.push(d.skill);
+  }));
+  const rowH = 78, chipH = 68, top = 18;
+  const H = Math.max(atoms.length, skills.length || 1) * rowH + 12;
+  const ay = i => top + i * rowH + (Math.max(0, skills.length - atoms.length) * rowH) / 2;
+  const sy = i => top + i * rowH + (Math.max(0, atoms.length - skills.length) * rowH) / 2;
+  const midY = 8 + (H - 16) / 2;
+  const W = 300;
+  const edges = atoms.map((a, i) =>
+    `<path d="M90 ${midY} C 132 ${midY} 132 ${ay(i)} 158 ${ay(i)}" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>`).join('')
+    + atoms.flatMap((a, i) => (a.destinations || []).map(d => {
+      const si = skills.indexOf(d.skill);
+      return `<path d="M176 ${ay(i)} C 228 ${ay(i)} 228 ${sy(si)} 280 ${sy(si)}" fill="none" stroke="#14b8a6" stroke-width="2"/>
+        <text x="226" y="${(ay(i) + sy(si)) / 2 - 4}" font-size="9" fill="#94a3b8" text-anchor="middle">${d.weightscore != null ? 'ws ' + esc(d.weightscore) : ''}</text>`;
+    })).join('');
+  const atomNodes = atoms.map((a, i) => {
+    const hit = (a.destinations || []).length;
+    return `<g>
+      <circle cx="167" cy="${ay(i)}" r="${hit ? 10 : 8}" fill="${hit ? '#0d9488' : '#e2e8f0'}"/>
+      <text x="167" y="${ay(i) + 3.2}" font-size="9.5" font-family="ui-monospace,monospace" text-anchor="middle" fill="${hit ? '#fff' : '#64748b'}">${esc(String(a.atom_id || '').slice(-2))}</text>
+      <title>${esc(a.atom_id)}</title>
+    </g>`;
+  }).join('');
+  const skillAnchors = skills.map((sk, i) =>
+    `<circle cx="288" cy="${sy(i)}" r="4.5" fill="#0d9488"/>`).join('');
+  const label = trajId.length > 12 ? trajId.slice(0, 11) + '…' : trajId;
+  const svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="display:block">
+      <rect x="8" y="${midY - 13}" width="80" height="26" rx="7" fill="#134e4a"/>
+      <text x="48" y="${midY + 3.5}" font-size="9.5" fill="#fff" text-anchor="middle" font-family="ui-monospace,monospace">${esc(label)}</text>
+      ${edges}${atomNodes}${skillAnchors}
+    </svg>`;
+  return { svg, skills, H, top, rowH, chipH, atomN: atoms.length, skillN: skills.length };
+}
+function contribSkillChips(skills, layout, metaMap) {
+  if (!skills.length) return '<span class="text-[11px] text-slate-400 px-1">暂无关联 skill</span>';
+  const top = layout.top + (Math.max(0, layout.atomN - layout.skillN) * layout.rowH) / 2;
+  const chipH = layout.chipH || 68;
+  return `<div style="position:relative;height:${layout.H}px;width:268px">${skills.map((sk, i) => {
+    const m = metaMap[sk] || {};
+    const y = top + i * layout.rowH - chipH / 2;
+    const recent = (m.recent || []).slice(0, 2).map(u => esc(u.user)).join(' · ');
+    const topU = m.top || {};
+    return `<button type="button" class="skill-chip graph-skill" data-skill="${esc(sk)}" style="position:absolute;left:0;top:${y}px">
+      <div class="min-w-0 flex-1">
+        <div class="nm">${esc(sk)}</div>
+        <div class="meta">${mySourceBadge(m)}<span class="text-[10px] text-slate-500">ux <b class="tabular-nums text-slate-700">${m.ux != null ? esc(m.ux) : '—'}</b></span></div>
+        <div class="text-[10px] text-slate-400 truncate leading-tight">最近 ${recent || '—'} · 最多 ${esc(topU.user || '—')}×${topU.count != null ? topU.count : 0}</div>
+      </div>
+      <div class="shrink-0 opacity-90">${sparkline(m.trend || [0])}</div>
+    </button>`;
+  }).join('')}</div>`;
+}
+
+async function renderContribDetail() {
+  const listEl = document.getElementById('contrib-traj-list');
+  const graphEl = document.getElementById('contrib-graph');
+  const skillsEl = document.getElementById('contrib-skills');
+  if (!listEl || !_contribOpen) return;
+  const offset = _trajPage * TRAJ_PAGE;
+  let d;
+  try {
+    d = await j(`/api/v1/dashboard/my/contributions/trajs?offset=${offset}&limit=${TRAJ_PAGE}`);
+  } catch (e) {
+    listEl.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`;
+    return;
+  }
+  _contribPayload = d;
+  const total = d.total || 0;
+  const pages = Math.max(1, Math.ceil(total / TRAJ_PAGE));
+  if (_trajPage >= pages) _trajPage = pages - 1;
+  const trajs = d.trajs || [];
+  if (!trajs.find(t => t.traj_id === _contribTraj) && trajs[0]) _contribTraj = trajs[0].traj_id;
+  document.getElementById('traj-page-sum').textContent = `${total} 条`;
+  document.getElementById('traj-page-label').textContent = `${_trajPage + 1}/${pages}`;
+  document.getElementById('traj-up').disabled = _trajPage === 0;
+  document.getElementById('traj-down').disabled = _trajPage >= pages - 1;
+  listEl.innerHTML = trajs.map(t => {
+    const adopted = t.atoms.filter(a => (a.destinations || []).length).length;
+    const on = t.traj_id === _contribTraj;
+    return `<a href="javascript:void(0)" class="contrib-traj ${on ? 'on' : ''}" data-traj="${esc(t.traj_id)}">
+      <code class="text-[11px]">${esc(t.traj_id)}</code>
+      <span class="text-slate-400 ml-1">${t.atoms.length} 原子 · ${adopted} 采纳</span>
+    </a>`;
+  }).join('') || '<span class="text-[11px] text-slate-400">暂无轨迹</span>';
+  const cur = trajs.find(t => t.traj_id === _contribTraj) || trajs[0];
+  if (!cur) {
+    graphEl.innerHTML = '';
+    skillsEl.innerHTML = '';
+    return;
+  }
+  const g = contribRelationGraph(cur.traj_id, cur.atoms || []);
+  graphEl.innerHTML = g.svg;
+  skillsEl.innerHTML = contribSkillChips(g.skills, g, d.skill_meta || {});
+}
+function setContribOpen(on) {
+  _contribOpen = on;
+  const detail = document.getElementById('contrib-detail');
+  const btn = document.getElementById('contrib-toggle');
+  if (detail) detail.classList.toggle('hidden', !on);
+  if (btn) btn.textContent = on ? '收起' : '展开';
+  if (on) renderContribDetail().catch(console.error);
+}
+
+function renderRT() {
+  const total = _rtRows.length;
+  const pages = Math.max(1, Math.ceil(total / RT_PAGE));
+  if (_rtPage >= pages) _rtPage = pages - 1;
+  const start = _rtPage * RT_PAGE;
+  const slice = _rtRows.slice(start, start + RT_PAGE);
+  const VC = { '高价值': 'bg-emerald-100 text-emerald-700', '正常': 'bg-slate-100 text-slate-600' };
+  const sum = document.getElementById('rt-sum');
+  if (!_rtOpen) {
+    if (sum) sum.textContent = `${total} 条`;
+    return;
+  }
+  rows('my-rt-body', slice.map(r => `<tr>
+    <td class="py-2"><span class="skill-jump cursor-pointer text-teal-700" data-skill="${esc(r.skill)}">${esc(r.skill)}</span> ${mySourceBadge(r)}</td>
+    <td class="text-right tabular-nums">${r.exposures}</td><td class="text-right tabular-nums">${r.triggers}</td>
+    <td class="text-right tabular-nums">${pctf(r.rate)}</td>
+    <td class="pl-6"><span class="text-[10px] px-1.5 py-0.5 rounded ${VC[r.verdict] || 'bg-rose-100 text-rose-700'}">${esc(r.verdict)}</span></td></tr>`).join(''),
+    '暂无推荐记录');
+  if (sum) sum.textContent = total ? `${start + 1}–${start + slice.length} / ${total}` : '0 条';
+  const lab = document.getElementById('rt-page-label');
+  if (lab) lab.textContent = `${_rtPage + 1} / ${pages}`;
+  const prev = document.getElementById('rt-prev');
+  const next = document.getElementById('rt-next');
+  if (prev) prev.disabled = _rtPage === 0;
+  if (next) next.disabled = _rtPage >= pages - 1;
+}
+function setRtOpen(on) {
+  _rtOpen = on;
+  const body = document.getElementById('rt-body');
+  const btn = document.getElementById('rt-toggle');
+  if (body) body.classList.toggle('hidden', !on);
+  if (btn) btn.textContent = on ? '收起' : '展开';
+  renderRT();
+}
+
 async function loadMy() {
   if (!IDENT) return;
   const [m, ct, rt] = await Promise.all([
@@ -1357,39 +1558,48 @@ async function loadMy() {
   ]);
   document.getElementById('my-slot-sum').textContent = `${m.slots.length}/${m.total_slots} 槽位`;
   document.getElementById('my-slots').innerHTML = m.slots.map(s => `
-    <div class="flex items-center gap-2.5 px-3 py-2 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50">
-      <span class="skill-jump cursor-pointer font-medium text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${s.skill_name}">${s.skill_name}</span>
-      <span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP[s.bucket] || 'bg-slate-100 text-slate-500'}">${bucketLabel(s)}</span>
-      <span class="text-[10px] text-slate-400">${s.side}</span>
-      <span class="flex-1"></span>
+    <div class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="skill-jump cursor-pointer font-medium text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${esc(s.skill_name)}">${esc(s.skill_name)}</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP[s.bucket] || 'bg-slate-100 text-slate-500'}">${bucketLabel(s)}</span>
+          <span class="text-[10px] text-slate-400">${esc(s.side)}</span>
+        </div>
+        <div class="mt-1 flex items-center gap-1.5 flex-wrap">${mySourceBadge(s, true)}</div>
+      </div>
+      <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 tabular-nums">我触发 ${s.my_triggers ?? 0} 次</span>
       ${s.bucket === 'pinned'
-        ? (s.user_removable ? `<button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${s.skill_name}" data-act="clear">取消 pin</button>`
-                            : `<span class="text-[10px] text-slate-300 cursor-not-allowed" title="admin/全局 pin,不可取消">锁定</span>`)
-        : `<button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${s.skill_name}" data-act="pin">pin</button>
-           <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50 text-rose-600" data-skill="${s.skill_name}" data-act="block" title="不再推送">✕</button>`}
+        ? (s.user_removable ? `<button class="my-pref shrink-0 text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="clear">取消 pin</button>`
+                            : `<span class="shrink-0 text-[10px] text-slate-300 cursor-not-allowed" title="admin/全局 pin,不可取消">锁定</span>`)
+        : `<div class="shrink-0 flex gap-1.5">
+             <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="pin">pin</button>
+             <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50 text-rose-600" data-skill="${esc(s.skill_name)}" data-act="block" title="不再推送">✕</button>
+           </div>`}
     </div>`).join('') || '<span class="text-slate-400">暂无槽位</span>';
   document.getElementById('my-blocked').innerHTML = m.blocked.map(b => `
-    <span class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-rose-50 text-rose-700 ring-1 ring-rose-200">${b.skill_name}
-      <button class="my-pref font-medium" data-skill="${b.skill_name}" data-act="clear">恢复</button></span>`).join('')
+    <span class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-rose-50 text-rose-700 ring-1 ring-rose-200">${esc(b.skill_name)}
+      <button class="my-pref font-medium" data-skill="${esc(b.skill_name)}" data-act="clear">恢复</button></span>`).join('')
     || '<span class="text-[11px] text-slate-400">无</span>';
   const st = ct.steps;
   document.getElementById('my-steps').innerHTML =
     [['轨迹', st.trajs], ['原子', st.atoms], ['被采纳', st.adopted_atoms], ['进入 skill', st.skills]]
-      .map(([k, v], i) => `${i ? '<span class="text-slate-300">→</span>' : ''}
-        <div class="px-4 py-2 rounded-xl bg-slate-50 ring-1 ring-slate-100 text-center">
-          <div class="text-lg font-semibold tabular-nums">${v}</div><div class="text-[10.5px] text-slate-400">${k}</div></div>`).join('');
-  document.getElementById('my-usage').innerHTML = ct.usage.map(u => `
-    <div class="flex items-center gap-2 text-[12.5px]"><span class="skill-jump cursor-pointer text-teal-700" data-skill="${u.skill}">${u.skill}</span>
-      <span class="text-[11px] text-slate-400">均分 ${u.avg_score ?? '—'}</span>
-      <span class="flex flex-wrap gap-1">${u.users.map(x => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">${x.user}×${x.count}</span>`).join('')}</span></div>`).join('')
-    || '<span class="text-[11px] text-slate-400">还没有被他人使用的记录</span>';
-  const VC = { '高价值': 'bg-emerald-100 text-emerald-700', '正常': 'bg-slate-100 text-slate-600' };
-  rows('my-rt-body', rt.rows.map(r => `<tr>
-    <td class="py-2"><span class="skill-jump cursor-pointer text-teal-700" data-skill="${r.skill}">${r.skill}</span></td>
-    <td class="text-right tabular-nums">${r.exposures}</td><td class="text-right tabular-nums">${r.triggers}</td>
-    <td class="text-right tabular-nums">${pctf(r.rate)}</td>
-    <td class="pl-6"><span class="text-[10px] px-1.5 py-0.5 rounded ${VC[r.verdict] || 'bg-rose-100 text-rose-700'}">${r.verdict}</span></td></tr>`).join(''),
-    '暂无推荐记录');
+      .map(([k, v], i) => `${i ? '<span class="text-slate-300 text-xs">→</span>' : ''}
+        <div class="px-3 py-1.5 rounded-lg bg-slate-50 ring-1 ring-slate-100 text-center min-w-[4.5rem]">
+          <div class="text-base font-semibold tabular-nums leading-tight">${v}</div><div class="text-[10px] text-slate-400">${k}</div></div>`).join('');
+
+  _rtRows = (rt.rows || []).slice().sort((a, b) =>
+    (b.triggers - a.triggers) || (b.exposures - a.exposures) || String(a.skill).localeCompare(String(b.skill)));
+  // 附上来源：从槽位 meta 不够，历史推荐行暂用 native 兜底；有 skillhub 名在 slots 里则复用
+  const slotSrc = Object.fromEntries((m.slots || []).map(s => [s.skill_name, s]));
+  _rtRows.forEach(r => {
+    const s = slotSrc[r.skill];
+    if (s) { r.source = s.source; r.source_path = s.source_path; r.producer = s.producer; r.producer_trajs = s.producer_trajs; }
+  });
+  _rtPage = 0;
+  setRtOpen(false);
+  _trajPage = 0;
+  _contribTraj = null;
+  setContribOpen(true);
 }
 document.addEventListener('click', async e => {
   const b = e.target.closest('.my-pref');
@@ -1397,6 +1607,32 @@ document.addEventListener('click', async e => {
   try { await jpost('/api/v1/dashboard/my/prefs', { skill_name: b.dataset.skill, action: b.dataset.act }); await loadMy(); }
   catch (err) { alert(err.message); }
 });
+document.getElementById('contrib-toggle')?.addEventListener('click', () => setContribOpen(!_contribOpen));
+document.getElementById('contrib-traj-list')?.addEventListener('click', e => {
+  const a = e.target.closest('.contrib-traj');
+  if (!a) return;
+  _contribTraj = a.dataset.traj;
+  renderContribDetail().catch(console.error);
+});
+document.getElementById('contrib-skills')?.addEventListener('click', e => {
+  const g = e.target.closest('.graph-skill');
+  if (!g) return;
+  _skillBackHash = 'my';
+  location.hash = 'skill/' + encodeURIComponent(g.getAttribute('data-skill'));
+});
+document.getElementById('traj-up')?.addEventListener('click', () => {
+  _trajPage--;
+  _contribTraj = null;
+  renderContribDetail().catch(console.error);
+});
+document.getElementById('traj-down')?.addEventListener('click', () => {
+  _trajPage++;
+  _contribTraj = null;
+  renderContribDetail().catch(console.error);
+});
+document.getElementById('rt-toggle')?.addEventListener('click', () => setRtOpen(!_rtOpen));
+document.getElementById('rt-prev')?.addEventListener('click', () => { _rtPage--; renderRT(); });
+document.getElementById('rt-next')?.addEventListener('click', () => { _rtPage++; renderRT(); });
 
 // ── 管理 ────────────────────────────────────────────────────────
 async function loadAdmin() {
@@ -1706,45 +1942,93 @@ document.addEventListener('click', async e => {
   }
 });
 
-// ── 世界消息 feed(卡片式,按天分组;Q6 登录可见) ──────────────────
-let _feedBefore = null, _feedLastDay = null;
+// ── 世界消息 feed（三角翻页,每页 5;区分自己/他人） ──────────────
 function dayLabel(d) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const day = new Date(d); day.setHours(0, 0, 0, 0);
   const diff = Math.round((today - day) / 86400000);
   return diff <= 0 ? '今天' : diff === 1 ? '昨天' : `${day.getMonth() + 1}-${String(day.getDate()).padStart(2, '0')}`;
 }
-async function loadWorldFeed(more) {
+function paintFeedPage() {
   const el = document.getElementById('world-feed');
-  if (!el || !IDENT) return;
-  const q = '/api/v1/dashboard/events?scope=world&limit=30' + (more && _feedBefore ? '&before_id=' + _feedBefore : '');
-  let d;
-  try { d = await j(q); }
-  catch (e) { el.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`; return; }
-  const evs = d.events || [];
-  if (!more) { el.innerHTML = ''; _feedLastDay = null; }
-  if (!evs.length && !more) { el.innerHTML = '<span class="text-slate-400 text-xs">还没有团队动态</span>'; return; }
-  const frag = document.createElement('div');
+  if (!el) return;
+  const pages = _feedPages.length;
+  const sum = document.getElementById('feed-sum');
+  const lab = document.getElementById('feed-page-label');
+  const up = document.getElementById('feed-up');
+  const down = document.getElementById('feed-down');
+  if (!pages) {
+    el.innerHTML = '<span class="text-slate-400 text-xs">还没有团队动态</span>';
+    if (sum) sum.textContent = '';
+    if (lab) lab.textContent = '0/0';
+    if (up) up.disabled = true;
+    if (down) down.disabled = true;
+    return;
+  }
+  if (_feedPage >= pages) _feedPage = pages - 1;
+  if (_feedPage < 0) _feedPage = 0;
+  const evs = _feedPages[_feedPage] || [];
+  let lastDay = null;
+  el.innerHTML = '';
   evs.forEach(ev => {
     const dl = dayLabel(evDate(ev));
-    if (dl !== _feedLastDay) {
-      frag.insertAdjacentHTML('beforeend', `<div class="text-[10.5px] text-slate-400 font-medium mt-3 mb-1.5 first:mt-0">${esc(dl)}</div>`);
-      _feedLastDay = dl;
+    if (dl !== lastDay) {
+      el.insertAdjacentHTML('beforeend', `<div class="text-[10.5px] text-slate-400 font-medium mt-2.5 mb-1 first:mt-0">${esc(dl)}</div>`);
+      lastDay = dl;
     }
-    frag.insertAdjacentHTML('beforeend', `
-      <div class="flex items-start gap-2.5 px-3 py-2.5 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50 mb-1.5 text-xs">
+    const mine = IDENT && ev.actor === IDENT.user;
+    const ring = mine ? 'ring-teal-200 bg-teal-50/40' : 'ring-slate-100';
+    el.insertAdjacentHTML('beforeend', `
+      <div class="flex items-start gap-2.5 px-3 py-2 rounded-xl ring-1 ${ring} hover:bg-slate-50 mb-1 text-xs">
         ${avatar(ev.actor || 'xs', 'sm')}
         <div class="min-w-0 flex-1">${evParts(ev).html}</div>
         <span class="text-[10.5px] text-slate-400 shrink-0" title="${esc(ev.ts)} UTC">${relTime(ev)}</span>
       </div>`);
   });
-  el.appendChild(frag);
-  if (evs.length) _feedBefore = evs[evs.length - 1].id;
-  const moreBtn = document.getElementById('feed-more');
-  if (moreBtn) moreBtn.classList.toggle('hidden', evs.length < 30);
+  const shownFrom = _feedPage * FEED_PAGE + 1;
+  const shownTo = shownFrom + evs.length - 1;
+  if (sum) sum.textContent = evs.length ? `${shownFrom}–${shownTo}` : '';
+  if (lab) lab.textContent = `${_feedPage + 1}/${_feedExhausted ? pages : (pages + '+')}`;
+  if (up) up.disabled = _feedPage === 0;
+  if (down) down.disabled = _feedPage >= pages - 1 && _feedExhausted;
 }
-const _feedMoreBtn = document.getElementById('feed-more');
-if (_feedMoreBtn) _feedMoreBtn.addEventListener('click', () => loadWorldFeed(true).catch(console.error));
+async function ensureFeedPage(idx) {
+  while (_feedPages.length <= idx && !_feedExhausted) {
+    const q = '/api/v1/dashboard/events?scope=world&limit=' + FEED_PAGE
+      + (_feedBefore ? '&before_id=' + _feedBefore : '');
+    const d = await j(q);
+    const evs = d.events || [];
+    if (!evs.length) { _feedExhausted = true; break; }
+    _feedPages.push(evs);
+    _feedBefore = evs[evs.length - 1].id;
+    if (evs.length < FEED_PAGE) _feedExhausted = true;
+  }
+}
+async function loadWorldFeed() {
+  const el = document.getElementById('world-feed');
+  if (!el || !IDENT) return;
+  _feedPages = [];
+  _feedPage = 0;
+  _feedBefore = null;
+  _feedExhausted = false;
+  try {
+    await ensureFeedPage(0);
+    paintFeedPage();
+  } catch (e) {
+    el.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`;
+  }
+}
+document.getElementById('feed-up')?.addEventListener('click', () => {
+  _feedPage--;
+  paintFeedPage();
+});
+document.getElementById('feed-down')?.addEventListener('click', async () => {
+  try {
+    await ensureFeedPage(_feedPage + 1);
+    if (_feedPages[_feedPage + 1]) _feedPage++;
+    paintFeedPage();
+  } catch (e) { console.error(e); }
+});
 
 // ── 画像散点(图③):t-SNE 投影(邻域保持,簇分离比线性 PCA 明显),原子=圆点按簇着色,中心=◆,skill=▲ ──
 const CLUSTER_COLORS = ['#0d9488', '#6366f1', '#f59e0b', '#f43f5e', '#0ea5e9'];

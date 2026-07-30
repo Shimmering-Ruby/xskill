@@ -61,6 +61,7 @@ _BUILTIN_ONLY_OPERATIONS = {
     ("get", "/api/v1/dashboard/my/manifest"),
     ("post", "/api/v1/dashboard/my/prefs"),
     ("get", "/api/v1/dashboard/my/contributions"),
+    ("get", "/api/v1/dashboard/my/contributions/trajs"),
     ("get", "/api/v1/dashboard/my/reco-trigger"),
     ("get", "/api/v1/dashboard/events"),
     ("get", "/api/v1/dashboard/events/unread"),

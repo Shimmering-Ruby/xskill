@@ -24,6 +24,7 @@ from xskill.events import (
     CONTRIBUTOR_MIN_WEIGHT,
     EventStore,
     skill_contributors,
+    skill_main_producer,
     ux_band,
 )
 from xskill.pipeline import registry as R
@@ -66,6 +67,32 @@ def test_contributors_sum_and_threshold(reg_db):
     c2 = skill_contributors("skill-x", min_weight=1, db_path=reg_db)
     assert c2 == {"alice": 5, "bob": 1}
     assert CONTRIBUTOR_MIN_WEIGHT == 3
+
+
+def test_skill_main_producer_by_traj_count(reg_db):
+    """主要贡献人按贡献轨迹条数，而非 weightscore 总和。"""
+    from xskill.events import skill_main_producers
+    # alice 1 条轨迹(2 atoms)、bob 1 条轨迹 → 并列按名字 alice 优先? 我们用 max(len, name)
+    # 给 bob 再加一条轨迹，bob 应胜出
+    conn = R.get_connection(reg_db)
+    wd = conn.execute("SELECT id FROM watch_dirs LIMIT 1").fetchone()[0]
+    conn.execute(
+        "INSERT INTO trajectories(watch_dir_id,filename,user_key) VALUES(?,?,?)",
+        (wd, "traj_b2.md", "bob"))
+    conn.commit()
+    conn.close()
+    R.record_atom_adoption(atom_id="atom_traj_b2_0001", skill="skill-x",
+                           weightscore=1, was_new=True, db_path=reg_db)
+    prod = skill_main_producer("skill-x", db_path=reg_db)
+    assert prod is not None
+    assert prod["user"] == "bob"
+    assert prod["traj_count"] == 2
+    assert skill_main_producer("no-such", db_path=reg_db) is None
+    # 批量接口与单 skill 一致，且同页多 skill 只扫一次 trajectories
+    batch = skill_main_producers(["skill-x", "no-such", "skill-x"],
+                                 db_path=reg_db)
+    assert batch["skill-x"] == prod
+    assert "no-such" not in batch
 
 
 def test_feedback_dedup_by_traj(reg_db):
