@@ -1,6 +1,6 @@
 """test_recommend_engine.py — §5 SkillRecommendEngine
 
-TDD: baby 排除、update_user_interest、80/20+回填、staging 优先达量、双向记录、
+TDD: baby 排除、update_user_interest、纯相关性轮询+回填、staging 优先达量、双向记录、
 find_friend、find_tag_*。
 """
 from __future__ import annotations
@@ -487,28 +487,27 @@ class TestGetSkill:
         _write_index(skill_dir, [f"s{i}" for i in range(5)], dim=5)
         return skill_dir, shas
 
-    def test_standard_80_20(self, tmp_path):
+    def test_pure_relevance_from_profile(self, tmp_path):
         skill_dir, shas = self._setup5(tmp_path)
-        # s0..s3 有 ux 分；s4 无
+        # s0..s3 有 ux 分；s4 无 — recommended 不再按 quality_ratio 占质量位
         for i in range(4):
             append_ux_score(skill_dir / f"s{i}", traj_id="t", skill_name=f"s{i}",
                             side="main", commit_sha=shas[f"s{i}"], score=5 + i, reasons="r")
         traj_root = tmp_path / "traj"
         eng = _engine(tmp_path, skill_dir, traj_root)
-        # 用户 feature_tensor = [one-hot(s4)] → 相关性应选 s4
+        # 用户 feature_tensor = [one-hot(s4)] → 相关性应优先 s4
         ci = ClientInterest("u1")
         ci._feature_tensor = np.array([[0.0, 0.0, 0.0, 0.0, 1.0]])  # s4 one-hot
         ci._mean_tensor = np.array([0.0, 0.0, 0.0, 0.0, 1.0])
         user = ClientUser("u1", client_interest=ci)
-        # 预置画像让 find 不报错
         eng.profile_store.upsert("u1", feature_tensor=ci._feature_tensor,
                                  mean_tensor=ci._mean_tensor, used_skills=[])
         skills = eng.get_skill_for_client(user, skill_num=5)
         names = [s.name for s in skills]
-        # 质量 4 个（s0..s3）+ 相关性 1 个（s4）
+        assert names[0] == "s4"  # 单中心对齐 s4，相关性首位
         assert set(names) == {"s0", "s1", "s2", "s3", "s4"}
 
-    def test_backfill_when_quality_small(self, tmp_path):
+    def test_backfill_when_cold_start(self, tmp_path):
         skill_dir, shas = self._setup5(tmp_path)
         # 只有 s0 有 ux 分
         append_ux_score(skill_dir / "s0", traj_id="t", skill_name="s0",
@@ -516,8 +515,48 @@ class TestGetSkill:
         eng = _engine(tmp_path, skill_dir, tmp_path / "traj")
         user = ClientUser("u1")  # 冷启动无画像
         skills = eng.get_skill_for_client(user, skill_num=5)
-        assert len(skills) == 5  # 质量 1 + 回填 4
-        assert "s0" in [s.name for s in skills]
+        assert len(skills) == 5  # 无画像 → 全 UX 回填
+        assert skills[0].name == "s0"  # ux 最高优先
+
+    def test_relevance_round_robin_per_center(self, tmp_path):
+        """多兴趣中心时每轮每中心取 1 个，轮询填满名额。"""
+        skill_dir = tmp_path / "skills"
+        names = [f"s{i}" for i in range(6)]
+        for i, name in enumerate(names):
+            _make_main_skill(skill_dir, name, desc=f"desc {i}")
+        _write_index(skill_dir, names, dim=6)
+        traj_root = tmp_path / "traj"
+        cfg = {
+            "recommend": {"staging_need": 3},
+            "canary": {"min_samples": 3, "total_samples": 3},
+            "skillhub": {"enabled": False},
+        }
+        eng = SkillRecommendEngine(
+            config=cfg,
+            skill_dir=skill_dir,
+            traj_root=traj_root,
+            embed_client=FakeEmbed(dim=6),
+            profile_db=tmp_path / "profile.db",
+        )
+        # 两个中心：分别对齐 s0 / s3
+        ci = ClientInterest("u1")
+        ci._feature_tensor = np.array([
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        ])
+        ci._mean_tensor = ci._feature_tensor.mean(axis=0)
+        user = ClientUser("u1", client_interest=ci)
+        eng.profile_store.upsert(
+            "u1", feature_tensor=ci._feature_tensor,
+            mean_tensor=ci._mean_tensor, used_skills=[],
+        )
+        skills = eng.get_skill_for_client(user, skill_num=4)
+        got = [s.name for s in skills]
+        # 第一轮：各中心 1 个 → s0, s3；第二轮再各 1 个 → s1, s4…
+        assert "s0" in got and "s3" in got
+        assert len(got) == 4
+        assert got[0] == "s0"
+        assert got[1] == "s3"
 
 
 # ── resolve_side staging 优先达量 ─────────────────────────────────

@@ -295,7 +295,7 @@ team:
     skill_slots: 100              # manifest 总槽位
     ranked_slots: 80              # 其中 ux 滑窗占；其余 = recommended(画像相关性)
 recommend:
-  quality_ratio: 0.8              # recommended 桶里质量位占比；其余=相关性
+  quality_ratio: 0.8              # 已废弃：引擎忽略；recommended 纯相关性轮询
   cluster_centers: 5              # 用户兴趣聚类中心上限
   last_n_atoms: 5                 # skill.atom_feat 取最近 N atom
   staging_need: 3                 # 可选；缺省=复用 canary.min_samples
