@@ -271,3 +271,83 @@ def test_cleanup_reaps_orphaned_ecosystem_links(server_app, tmp_path):
     assert foreign.is_symlink()      # 第三方 link 保留
     assert manual.is_dir()           # 手动真目录保留
     assert wanted.is_symlink()       # keep 内的即便 dangling 也保留
+
+
+def test_cleanup_reaps_orphan_copy_dests_with_legacy_meta(server_app, tmp_path):
+    """cleanup 收掉不在 manifest、带 dest 内老 meta、且无手改痕迹的 copy 孤儿；
+    无 meta 手建目录、keep 内同结构目录、有手改 mtime 的孤儿一律不碰。"""
+    import json
+    import os
+    import time
+
+    tc = _client(server_app, tmp_path)
+    manifest = tc.sync()
+    keep_name = next(s.skill_name for s in manifest.slots)
+    agents = tmp_path / "client_home" / ".agents" / "skills"
+    agents.mkdir(parents=True)
+    installed_at = time.time() - 600
+
+    def _write_legacy_meta(dest: Path, *, at: float = installed_at) -> None:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "SKILL.md").write_text("# body\n", encoding="utf-8")
+        (dest / ".xskill-install-meta.json").write_text(
+            json.dumps({
+                "source_sha": "a" * 40,
+                "side": "main",
+                "installed_at": at,
+                "ecosystem": "openclaw",
+            }),
+            encoding="utf-8",
+        )
+        # 文件 mtime 压到安装时刻，模拟「装完未改」
+        os.utime(dest / "SKILL.md", (at, at))
+        os.utime(dest / ".xskill-install-meta.json", (at, at))
+
+    orphan = agents / "stale-orphan-copy"
+    _write_legacy_meta(orphan)
+
+    kept = agents / keep_name
+    _write_legacy_meta(kept)
+
+    manual = agents / "manual-no-meta"
+    manual.mkdir()
+    (manual / "SKILL.md").write_text("# manual\n", encoding="utf-8")
+
+    edited = agents / "edited-orphan-copy"
+    _write_legacy_meta(edited, at=installed_at)
+    (edited / "SKILL.md").write_text("# user edited\n", encoding="utf-8")
+    # 默认 mtime=now ≫ installed_at → 手改痕迹，应跳过
+
+    tc.cleanup(manifest)
+
+    assert not orphan.exists()
+    assert kept.is_dir() and (kept / "SKILL.md").is_file()
+    assert manual.is_dir()
+    assert edited.is_dir()
+    assert (edited / "SKILL.md").read_text(encoding="utf-8") == "# user edited\n"
+
+
+def test_orphan_copy_content_matches_install_helper(tmp_path):
+    """无账本 copy：mtime 未前进才可 reap；缺 meta / 坏 installed_at / 已改 → False。"""
+    import json
+    import os
+    import time
+
+    from xskill.team.client.daemon import _orphan_copy_content_matches_install
+
+    at = time.time() - 100
+    dest = tmp_path / "skill"
+    dest.mkdir()
+    (dest / "SKILL.md").write_text("x", encoding="utf-8")
+    assert _orphan_copy_content_matches_install(dest) is False
+
+    (dest / ".xskill-install-meta.json").write_text(
+        json.dumps({"installed_at": at, "source_sha": "a" * 40}),
+        encoding="utf-8",
+    )
+    os.utime(dest / "SKILL.md", (at, at))
+    os.utime(dest / ".xskill-install-meta.json", (at, at))
+    assert _orphan_copy_content_matches_install(dest) is True
+
+    (dest / "SKILL.md").write_text("changed", encoding="utf-8")
+    assert _orphan_copy_content_matches_install(dest) is False
