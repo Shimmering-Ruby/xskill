@@ -275,8 +275,62 @@ def read_install_metadata_file(metadata_path: Path, dest: Path) -> dict | None:
 
 
 def read_install_metadata(dest: Path) -> dict | None:
-    """读取安装元数据；仅文件明确不存在时返回 ``None``。"""
-    return read_install_metadata_file(install_metadata_path(dest), dest)
+    """读取安装元数据；优先 InstallLedger，其次遗留 sidecar（并回填 ledger）。
+
+    仅「账本与 sidecar 都不存在」时返回 ``None``。sidecar 损坏仍 fail-loud。
+    """
+    from xskill.ecosystems.install_ledger import get_default_ledger
+
+    ledger = get_default_ledger()
+    row = ledger.read_install(dest)
+    if row is not None:
+        return row
+    sidecar = install_metadata_path(dest)
+    try:
+        meta = read_install_metadata_file(sidecar, dest)
+    except AttributeError:
+        _raise_metadata_error(dest, "INSTALL_METADATA_READ_FAILED")
+    if meta is None:
+        return None
+    try:
+        ledger.record_install(
+            dest,
+            skill_name=Path(dest).name,
+            mode=str(meta["mode"]),
+            source=str(meta["source"]),
+            source_sha=str(meta.get("source_sha") or ""),
+            installation_id=str(meta["installation_id"]),
+            content_identity=str(meta["content_identity"]),
+            baseline_identity=(
+                meta["baseline_identity"]
+                if isinstance(meta.get("baseline_identity"), str)
+                else None
+            ),
+            file_fingerprints=(
+                meta["file_fingerprints"]
+                if isinstance(meta.get("file_fingerprints"), dict)
+                else None
+            ),
+            installed_at=(
+                float(meta["installed_at"])
+                if isinstance(meta.get("installed_at"), (int, float))
+                else None
+            ),
+        )
+        try:
+            if hasattr(sidecar, "unlink"):
+                sidecar.unlink(missing_ok=True)
+            marker = Path(dest) / COPY_INSTALL_MARKER_NAME
+            if marker.is_file():
+                marker.unlink(missing_ok=True)
+        except OSError:
+            pass
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "install ledger backfill failed path_hash=%s",
+            _path_hash(dest),
+        )
+    return meta
 
 
 def _validated_head_sha(repo: Repo, skill_path: Path) -> str | None:
@@ -693,10 +747,11 @@ def copy_install_identity_matches(
     *,
     metadata: dict | None = None,
 ) -> bool:
-    """copy 仅在 target marker 与 sidecar 双向匹配时才视为 xskill 所有。
+    """copy 安装是否仍由 xskill 账本声明为所有。
 
-    旧 sidecar 没有 ``installation_id`` 时明确返回 False，绝不据此递归删除。
-    ``metadata`` 用于卸载事务校验已经隔离/改名后的目标。
+    以 InstallLedger（或遗留 sidecar 回填）中的 installation_id /
+    content_identity / baseline_identity 为准。若目录内仍有旧 marker，
+    则必须与账本一致；无 marker 时仅认账本（DB 化后的常态）。
     """
     if metadata is None:
         metadata = read_install_metadata(dest)
@@ -725,12 +780,15 @@ def copy_install_identity_matches(
         or _INSTALLATION_ID_PATTERN.fullmatch(installation_id) is None
         or not isinstance(content_identity, str)
         or _CONTENT_IDENTITY_PATTERN.fullmatch(content_identity) is None
+        or not isinstance(baseline_identity, str)
+        or _CONTENT_IDENTITY_PATTERN.fullmatch(baseline_identity) is None
     ):
         return False
     marker = _safe_read_copy_identity_marker(dest)
+    if marker is None:
+        return True
     return (
-        marker is not None
-        and marker.get("installation_id") == installation_id
+        marker.get("installation_id") == installation_id
         and marker.get("content_identity") == content_identity
         and marker.get("baseline_identity") == baseline_identity
     )
@@ -764,7 +822,12 @@ def read_copy_install_baseline(
 def write_install_metadata(
     dest: Path, source: Path, mode: InstallMode,
 ) -> None:
-    """安装成功后原子写入 sidecar；copy 同时写 target 内部身份 marker。"""
+    """安装成功后写入 InstallLedger（作废同 dest 未完成卸装）。
+
+    不再向用户生态目录写 sidecar / copy identity marker。
+    """
+    from xskill.ecosystems.install_ledger import get_default_ledger
+
     try:
         resolved_source = str(source.resolve())
     except Exception:  # pylint: disable=broad-exception-caught
@@ -774,50 +837,98 @@ def write_install_metadata(
         content_identity = _content_identity(source, source_sha)
     except Exception:  # pylint: disable=broad-exception-caught
         _raise_metadata_error(dest, "INSTALL_CONTENT_IDENTITY_FAILED")
-    metadata = {
-        "mode": mode,
-        "source": resolved_source,
-        "source_sha": source_sha,
-        "installed_at": time.time(),
-        "installation_id": secrets.token_hex(16),
-        "content_identity": content_identity,
-    }
+    installation_id = secrets.token_hex(16)
+    baseline_identity = None
+    file_fingerprints = None
     write_stage = "copy_baseline"
     try:
         if mode == "copy":
             file_fingerprints = _safe_copy_file_fingerprints(dest)
-            baseline_identity = _copy_baseline_identity(
-                file_fingerprints,
-            )
-            metadata["baseline_identity"] = baseline_identity
-            metadata["file_fingerprints"] = file_fingerprints
+            baseline_identity = _copy_baseline_identity(file_fingerprints)
+            metadata_probe = {
+                "mode": mode,
+                "source": resolved_source,
+                "source_sha": source_sha,
+                "installed_at": time.time(),
+                "installation_id": installation_id,
+                "content_identity": content_identity,
+                "baseline_identity": baseline_identity,
+                "file_fingerprints": file_fingerprints,
+            }
             metadata_bytes = json.dumps(
-                metadata,
+                metadata_probe,
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode("utf-8", errors="strict")
             if len(metadata_bytes) > _MAX_INSTALL_METADATA_BYTES:
                 raise OSError("installation metadata exceeds size limit")
-            write_stage = "copy_identity_marker"
-            _atomic_write_json(
-                dest / COPY_INSTALL_MARKER_NAME,
-                {
-                    "schema_version": 1,
-                    "installation_id": metadata["installation_id"],
-                    "content_identity": metadata["content_identity"],
-                    "baseline_identity": metadata["baseline_identity"],
-                },
-            )
-        write_stage = "install_sidecar"
-        _atomic_write_json(install_metadata_path(dest), metadata)
+        write_stage = "install_ledger"
+        get_default_ledger().record_install(
+            dest,
+            skill_name=Path(dest).name,
+            mode=mode,
+            source=resolved_source,
+            source_sha=source_sha,
+            installation_id=installation_id,
+            content_identity=content_identity,
+            baseline_identity=baseline_identity,
+            file_fingerprints=file_fingerprints,
+        )
+        write_stage = "legacy_sidecar_cleanup"
+        for leftover in (
+            install_metadata_path(dest),
+            Path(dest) / COPY_INSTALL_MARKER_NAME,
+        ):
+            try:
+                if leftover.is_symlink() or leftover.is_file():
+                    leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except InstallationMetadataError:
+        raise
     except Exception as write_error:  # pylint: disable=broad-exception-caught
         _log_metadata_write_cause(dest, write_stage, write_error)
         _raise_metadata_error(dest, "INSTALL_METADATA_WRITE_FAILED")
-    if mode == "copy" and not copy_install_identity_matches(
-        dest, source, metadata=metadata,
-    ):
-        _raise_metadata_error(dest, "INSTALL_METADATA_VERIFY_FAILED")
+    if mode == "copy":
+        metadata = {
+            "mode": mode,
+            "source": resolved_source,
+            "source_sha": source_sha,
+            "installed_at": time.time(),
+            "installation_id": installation_id,
+            "content_identity": content_identity,
+            "baseline_identity": baseline_identity,
+            "file_fingerprints": file_fingerprints,
+        }
+        if not copy_install_identity_matches(
+            dest, source, metadata=metadata,
+        ):
+            _raise_metadata_error(dest, "INSTALL_METADATA_VERIFY_FAILED")
+
+
+def refresh_copy_install_baseline(dest: Path) -> bool:
+    """安装器在 record 之后再次写入 dest 时，同步账本指纹（不升 generation）。
+
+    返回是否成功更新了一条 active copy 行。
+    """
+    from xskill.ecosystems.install_ledger import get_default_ledger
+
+    dest = Path(dest)
+    ledger = get_default_ledger()
+    meta = ledger.read_install(dest)
+    if meta is None or meta.get("mode") != "copy":
+        return False
+    try:
+        file_fingerprints = _safe_copy_file_fingerprints(dest)
+        baseline_identity = _copy_baseline_identity(file_fingerprints)
+    except OSError:
+        return False
+    return ledger.update_copy_baseline(
+        dest,
+        file_fingerprints=file_fingerprints,
+        baseline_identity=baseline_identity,
+    )
 
 
 def is_link_or_junction(path: Path) -> bool:

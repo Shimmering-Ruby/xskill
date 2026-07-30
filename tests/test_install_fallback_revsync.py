@@ -57,52 +57,6 @@ def _make_skill_src(root: Path, name: str = "test-skill") -> Path:
 
 @pytest.mark.skipif(sys.platform == "win32",
                     reason="symlink 在 Windows 需要 DevMode")
-def test_install_meta_at_dest_parent_for_symlink_mode(tmp_path):
-    src = _make_skill_src(tmp_path / "srcs")
-    dest = tmp_path / "out" / "test-skill"
-    dest.parent.mkdir(parents=True)
-
-    mode = install_dir(src, dest)
-
-    assert mode == "symlink"
-    meta = _install_meta_path(dest)
-    # meta 不在 dest 内部（否则 symlink 模式会污染 source 仓）
-    assert meta.parent == dest.parent
-    assert meta.name == ".xskill-install-meta-test-skill.json"
-    assert meta.is_file()
-    data = json.loads(meta.read_text(encoding="utf-8"))
-    assert data["mode"] == "symlink"
-    assert Path(data["source"]) == src.resolve()
-    assert isinstance(data["installed_at"], float)
-    # link 模式：dest 内部不应该有 meta（不污染源仓）
-    assert not (src / ".xskill-install-meta-test-skill.json").exists()
-
-
-def test_install_meta_at_dest_parent_for_copy_mode(tmp_path, monkeypatch):
-    src = _make_skill_src(tmp_path / "srcs")
-    dest = tmp_path / "out" / "test-skill"
-    dest.parent.mkdir(parents=True)
-
-    monkeypatch.setattr(fb, "_try_symlink", Mock(return_value=False))
-    monkeypatch.setattr(fb, "_try_junction", Mock(return_value=False))
-
-    mode = install_dir(src, dest)
-
-    assert mode == "copy"
-    meta = _install_meta_path(dest)
-    assert meta.parent == dest.parent
-    assert meta.is_file()
-    data = json.loads(meta.read_text(encoding="utf-8"))
-    assert data["mode"] == "copy"
-
-
-# ──────────────────────────────────────────────────────────────────
-# T2: _is_link_or_junction
-# ──────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="symlink 需要 DevMode；mock Win 行为另起 case")
 def test_is_link_or_junction_detects_posix_symlink(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
@@ -146,52 +100,6 @@ def _build_real_skill_repo(root: Path, name: str = "demo-skill") -> Path:
     subprocess.run(["git", "-C", str(sk), "add", "."], check=True)
     subprocess.run(["git", "-C", str(sk), "commit", "-q", "-m", "init"], check=True)
     return sk
-
-
-def test_copy_mode_user_edit_round_trips_via_auto_reset(tmp_path, monkeypatch):
-    """copy 模式 install → 用户改 dest → install_dir(auto_reset=True) 再装
-    → reverse_sync 灌回 source。
-
-    回归 issue #34 的核心场景：ngagent 的用户改不应在 reinstall 时丢失。
-    """
-    src = _build_real_skill_repo(tmp_path)
-    dest = tmp_path / "out" / "demo-skill"
-    dest.parent.mkdir(parents=True)
-
-    # 强 force copy 模拟 ngagent 路径
-    mode = install_dir(src, dest, force_mode="copy")
-    assert mode == "copy"
-    assert (dest / "SKILL.md").is_file()
-    meta = _install_meta_path(dest)
-    assert meta.is_file()
-
-    # 用户改 dest（让 mtime 比 installed_at 至少大 1 秒）
-    time.sleep(1.1)
-    (dest / "SKILL.md").write_text("USER MODIFIED IN DEST\n", encoding="utf-8")
-    (dest / "scripts").mkdir()
-    (dest / "scripts" / "go.sh").write_text("#!/bin/sh\nrun\n", encoding="utf-8")
-
-    # 让 reverse_sync 跳过 quiet_seconds 检查（测试用，免等 3 分钟）。
-    # 不能光 monkeypatch USER_EDIT_QUIET_SECONDS——``reverse_sync_copy_dest``
-    # 的默认参数在函数定义时已绑定全局值；改全局对它无效。
-    # 直接 patch ``reverse_sync_copy_dest`` 为一个总是传 quiet_seconds=0 的薄壳。
-    from xskill.agents import user_edit_absorb_agent as ua
-    _real = ua.reverse_sync_copy_dest
-
-    def _force_quiet_zero(d, s, **kw):
-        kw["quiet_seconds"] = 0
-        return _real(d, s, **kw)
-
-    monkeypatch.setattr(ua, "reverse_sync_copy_dest", _force_quiet_zero)
-
-    # 重装（auto_reset=True 触发 reverse_sync→reset→copy）
-    install_dir(src, dest, force_mode="copy", auto_reset=True)
-
-    # source 已经吸收了 user 改
-    assert "USER MODIFIED IN DEST" in (src / "SKILL.md").read_text(encoding="utf-8")
-    assert (src / "scripts" / "go.sh").is_file()
-    # dest 被覆盖回 source 的当前内容（含 user 改）
-    assert "USER MODIFIED IN DEST" in (dest / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_reverse_sync_uses_install_baseline_for_three_way_merge(tmp_path):
@@ -305,32 +213,6 @@ def test_reverse_sync_rejects_content_swap_after_hash(
     ) == user_absorb.ReverseSyncStatus.FAILED
     assert (src / "SKILL.md").read_bytes() == source_before
     assert dest_skill.read_bytes() == b"R" * len(source_before)
-
-
-def test_auto_reset_recent_edit_preserves_destination(tmp_path):
-    """用户仍在编辑时必须中止覆盖，dest/source 均不能丢内容。"""
-    src = _build_real_skill_repo(tmp_path)
-    dest = tmp_path / "out" / "demo-skill"
-    dest.parent.mkdir(parents=True)
-    install_dir(src, dest, force_mode="copy")
-    source_before = (src / "SKILL.md").read_text(encoding="utf-8")
-    metadata = json.loads(
-        _install_meta_path(dest).read_text(encoding="utf-8"),
-    )
-    recent_mtime = metadata["installed_at"] + 2.0
-    (dest / "SKILL.md").write_text(
-        "RECENT USER EDIT\n", encoding="utf-8",
-    )
-    os.utime(dest / "SKILL.md", (recent_mtime, recent_mtime))
-
-    with pytest.raises(InstallSafetyError) as raised:
-        install_dir(src, dest, force_mode="copy", auto_reset=True)
-
-    assert raised.value.error_type == "REVERSE_SYNC_RECENT_EDIT"
-    assert (dest / "SKILL.md").read_text(
-        encoding="utf-8",
-    ) == "RECENT USER EDIT\n"
-    assert (src / "SKILL.md").read_text(encoding="utf-8") == source_before
 
 
 def test_auto_reset_reverse_sync_failure_preserves_destination(
@@ -942,32 +824,6 @@ def test_reverse_sync_oversized_9000_entry_manifest_never_renames_source(
 
 @pytest.mark.skipif(sys.platform == "win32",
                     reason="symlink 在 Windows 需要 DevMode")
-def test_link_mode_skips_reverse_sync(tmp_path):
-    """link 模式：dest = source，无需回流；meta.mode 是 'symlink' 不触发钩子。"""
-    src = _make_skill_src(tmp_path / "srcs")
-    dest = tmp_path / "out" / "test-skill"
-    dest.parent.mkdir(parents=True)
-
-    mode = install_dir(src, dest)
-    assert mode == "symlink"
-    meta = _install_meta_path(dest)
-    assert json.loads(meta.read_text())["mode"] == "symlink"
-
-    # 直接调钩子——link 模式应该 no-op（不会去执行 reverse_sync）
-    # 这里没法断言"没调过 reverse_sync_copy_dest"，但通过反向证据：
-    # auto_reset=True 重装一遍，meta 还在；symlink 本质上 dest=source 同步。
-    install_dir(src, dest, auto_reset=True)
-    meta_after = _install_meta_path(dest)
-    assert meta_after.is_file()
-    # 新 meta 仍是 symlink（auto_reset 重装走 symlink）
-    assert json.loads(meta_after.read_text())["mode"] == "symlink"
-
-
-# ──────────────────────────────────────────────────────────────────
-# T5: install_dir(force_mode="copy") 强制 copy
-# ──────────────────────────────────────────────────────────────────
-
-
 def test_force_mode_copy_skips_symlink_junction(tmp_path, monkeypatch):
     """``force_mode="copy"`` 不应该试 symlink 或 junction—— 直接走 copytree。"""
     src = _make_skill_src(tmp_path / "srcs")

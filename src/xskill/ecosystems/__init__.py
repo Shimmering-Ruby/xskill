@@ -133,6 +133,11 @@ from xskill.ecosystems.installation import (
     read_skill_head_sha,
     write_install_metadata,
 )
+from xskill.ecosystems.install_ledger import (
+    InstallLedger,
+    get_default_ledger,
+    remove_owned_dest,
+)
 
 # sqlite-back 生态 id → spec 映射（`xskill read` / 上传入库按 --eco 选 spec）。
 # 只含 source_kind="sqlite" 的生态；JSONL 生态（cc/codex/...）不在此表。
@@ -174,6 +179,7 @@ __all__ = [
     "read_install_metadata_file", "read_skill_head_sha",
     "link_install_metadata_is_current",
     "write_install_metadata",
+    "InstallLedger", "get_default_ledger", "remove_owned_dest",
     # Compatibility re-exports used by historical callers and tests.
     "_agents_skills_path", "_sanitize_for_filename",
     "_cc_projects_path", "_cc_skills_path", "_cc_traj_id",

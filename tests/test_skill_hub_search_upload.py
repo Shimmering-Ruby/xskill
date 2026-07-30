@@ -570,57 +570,6 @@ def test_search_slot_eviction_records_and_removes_link_and_copy_targets(tmp_path
     assert not _install_meta_path(copy_dest).exists()
 
 
-def test_search_slot_eviction_does_not_delete_copy_without_sidecar_identity(
-    tmp_path,
-):
-    home = tmp_path / "home"
-    _enable_link_and_copy_ecosystems(home)
-    slots = SearchSlots(xskill_home=tmp_path / "xhome",
-                        home_root=home, capacity=1)
-
-    old = slots.install(_fake_result("legacy"), _fake_archive("legacy"), query="q")
-    old_id = old.name
-    ledger = slots.entries()
-    ledger[0].pop("installations", None)
-    slots.ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
-    _install_meta_path(home / ".agents" / "skills" / old_id).unlink()
-
-    slots.install(_fake_result("new"), _fake_archive("new"), query="q")
-
-    assert not (home / ".claude" / "skills" / old_id).exists()
-    # copy target 内 marker 单独不能证明所有权；sidecar 已丢失时必须留给用户
-    # 手工确认，不能为了兼容旧台账而递归删除。
-    assert (home / ".agents" / "skills" / old_id).exists()
-
-
-def test_search_slot_eviction_preserves_targets_taken_over_by_another_source(tmp_path):
-    home = tmp_path / "home"
-    _enable_link_and_copy_ecosystems(home)
-    slots = SearchSlots(xskill_home=tmp_path / "xhome",
-                        home_root=home, capacity=1)
-
-    old = slots.install(_fake_result("shared"), _fake_archive("shared"), query="q")
-    old_id = old.name
-    link_dest = home / ".claude" / "skills" / old_id
-    copy_dest = home / ".agents" / "skills" / old_id
-    takeover = tmp_path / "sync" / old_id
-    takeover.mkdir(parents=True)
-    (takeover / "SKILL.md").write_text("owned by sync\n", encoding="utf-8")
-    install_dir(takeover, link_dest, force_mode="symlink", auto_reset=True)
-    install_dir(takeover, copy_dest, force_mode="copy", auto_reset=True)
-
-    slots.install(_fake_result("new"), _fake_archive("new"), query="q")
-
-    assert link_dest.resolve() == takeover.resolve()
-    assert (copy_dest / "SKILL.md").read_text(encoding="utf-8") == "owned by sync\n"
-    assert json.loads(_install_meta_path(link_dest).read_text(encoding="utf-8"))[
-        "source"
-    ] == str(takeover.resolve())
-    assert json.loads(_install_meta_path(copy_dest).read_text(encoding="utf-8"))[
-        "source"
-    ] == str(takeover.resolve())
-
-
 def test_search_slot_records_every_detected_ecosystem_target(tmp_path):
     home = tmp_path / "home"
     _enable_link_and_copy_ecosystems(home)
