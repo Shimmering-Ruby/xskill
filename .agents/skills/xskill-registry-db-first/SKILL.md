@@ -45,7 +45,7 @@ description: >-
 | `installations.sqlite` | client | 生态安装账本与卸装任务；禁止再扫用户 skills 目录「猜安装」 | `ecosystems/install_ledger.py` |
 | `chat_sessions.db` | （路径已定，包内基本未接线） | 勿新建平行会话库；要用先接此路径 | `config.CHAT_DB` |
 
-配置里已有盘→库周期例：`ux_scores_sync_interval`（`.ux_scores.jsonl` → `registry.db`）、`profile-refresh` → `team_profile.db`。新投影应同样：**写出口同步 + 可选定时 reconcile（挂 `_workers`）**。
+配置里已有盘→库周期例：`ux_scores_sync_interval` → worker `ux-scores-sync`（实现为 **`skill_dir_sync` 一轮 `iterdir`**，同时 reconcile `.ux_scores.jsonl` 与 `atom_candidate_pending` 等）、`profile-refresh` → `team_profile.db`。新投影应：**写出口同步 + 可选定时 reconcile**；reconcile **必须挂进现有合扫**，禁止为每个新投影再开一轮全量扫盘。
 
 **不是 SQLite、别当成业务库乱扫：** `.skill_index.pkl` / embed cache（向量）；atom 文件树（内容真相，列表类查询仍走投影）。
 
@@ -62,7 +62,7 @@ description: >-
 |---|---|---|
 | skill 列表 / 分页 / state | `registry.db` → `skills_catalog` | 扫 `skill/` |
 | atom 已采纳去向 | `registry.db` → `atom_adoption` | 扫盘 |
-| atom 在途 pending | `registry.db` 投影表（待建 `atom_candidate_pending`）；写出口挂 candidates 落盘闸 | per-atom `iterdir`+`load_candidates` |
+| atom 在途 pending | `registry.db` → `atom_candidate_pending`；写出口挂 candidates 落盘闸；漂移由 `skill_dir_sync` 合扫 reconcile | per-atom `iterdir`+`load_candidates` |
 | 推荐曝光 / 历史推荐矩阵曝光侧 | `registry.db` → `recommendation_log` | 扫盘 |
 | UX / 触发 | `registry.db` → `ux_scores`（同步自 jsonl） | 请求里全盘扫 jsonl |
 | 当前「推给我的」槽位 | `build_manifest`（live 组装；catalog 短 TTL）；画像读 `team_profile.db` | 当「再扫一遍 skill 仓」 |
@@ -75,8 +75,8 @@ description: >-
 ## 同步入口形态（写新投影时照抄）
 
 1. **事件钩子**（首选）：唯一落盘闸旁 upsert（例：candidates 保存旁更新 pending 表；catalog 的 native notify）。
-2. **ensure / 冷启动一次 backfill**：带 meta flag，只跑一次全量扫。
-3. **定时 reconcile**（可选）：类似 `ux_scores_sync_interval`，修漂移，不替代钩子。
+2. **ensure / 冷启动一次 backfill**：带 meta flag，只跑一次全量扫（首请求兜底；worker 合扫也会标记 ready）。
+3. **定时 reconcile（合扫）**：挂 `pipeline/skill_dir_sync.py` 的同一次 `skill_dir` 遍历（由 `ux-scores-sync` worker 调用）。按文件 mtime 增量；**不要**新建「再扫一遍 N 个 skill」的独立 worker。
 
 查询代码里只允许 `SELECT`；发现漂移 → 修同步入口，不要在查询里补扫盘。
 

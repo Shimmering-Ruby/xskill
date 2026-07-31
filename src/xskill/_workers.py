@@ -342,15 +342,24 @@ def run_profile_refresh_once() -> int:
 
 
 def run_ux_scores_sync_once() -> int:
-    """扫 skill_dir 盘上 ``.ux_scores.jsonl`` → ``registry.db.ux_scores``。"""
+    """一轮扫 skill_dir：UX jsonl + candidates pending 等盘→库投影。
+
+    入口名仍为 ``ux-scores-sync``（配置键不变）；新投影挂
+    ``skill_dir_sync``，禁止再开独立全量扫盘 worker。
+    """
     from xskill.config import get_skill_dir
-    from xskill.pipeline.ux_scores_store import sync_ux_scores_from_skill_dir
+    from xskill.pipeline.skill_dir_sync import sync_skill_disk_projections
 
     skill_dir = get_skill_dir()
-    stats = sync_ux_scores_from_skill_dir(skill_dir)
+    stats = sync_skill_disk_projections(skill_dir)
+    ux = stats["ux"]
+    pending = stats["pending"]
     logger.info(
-        "ux_scores sync done skills=%s lines=%s inserted=%s",
-        stats["skills"], stats["lines"], stats["inserted"],
+        "skill_dir sync done ux(skills=%s lines=%s inserted=%s) "
+        "pending(skills=%s synced=%s skipped=%s orphans=%s)",
+        ux["skills"], ux["lines"], ux["inserted"],
+        pending["skills"], pending["synced"], pending["skipped"],
+        pending["orphans"],
     )
     return 0
 

@@ -341,6 +341,8 @@ CREATE TABLE IF NOT EXISTS atom_candidate_pending (
 );
 CREATE INDEX IF NOT EXISTS idx_acp_skill ON atom_candidate_pending(skill);
 
+-- root_key = skill_dir 绝对路径 → backfill/reconcile ready 标记；
+-- root_key = pending_mtime:{skill} → .candidates.yml mtime（合扫增量跳过）。
 CREATE TABLE IF NOT EXISTS atom_candidate_pending_meta (
     root_key      TEXT PRIMARY KEY,
     backfilled_at TEXT NOT NULL
