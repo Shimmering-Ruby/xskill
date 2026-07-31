@@ -22,7 +22,6 @@ logger = logging.getLogger("xskill.config")
 # ─── 默认根路径 ─────────────────────────────────────────────────
 XSKILL_HOME = Path.home() / ".xskill"
 CONFIG_PATH = XSKILL_HOME / "config.yaml"
-CHAT_DB = XSKILL_HOME / "chat_sessions.db"
 LOGS_DIR = XSKILL_HOME / "logs"
 
 _config: dict = {}
@@ -923,10 +922,6 @@ def get_registry_db_path(
         Path(xskill_home) if xskill_home is not None else XSKILL_HOME
     ).expanduser().resolve()
     return state_root / "registry.db"
-
-
-def get_chat_db_path() -> Path:
-    return CHAT_DB
 
 
 # ─── team (C/S 模式) 路径 ───────────────────────────────────────
