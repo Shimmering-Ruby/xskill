@@ -10,7 +10,7 @@ description: >-
 
 改读数据相关代码，或审查业务请求是否又在扫盘时，先看本 skill。
 
-各库职责见 [databases.md](databases.md)。
+各库职责与每张表的 schema 见 [databases.md](databases.md)。
 
 ## 架构
 
