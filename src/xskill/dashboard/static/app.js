@@ -1384,6 +1384,7 @@ let _contribOpen = true;
 let _trajPage = 0;
 let _contribTraj = null;
 let _contribPayload = null; // {total, trajs, skill_meta}
+let _contribPayloadOffset = null; // 与 _contribPayload 对应的 offset；同页切换不重请求
 let _feedPages = []; // cached pages of events
 let _feedPage = 0;
 let _feedBefore = null;
@@ -1485,13 +1486,18 @@ async function renderContribDetail() {
   if (!listEl || !_contribOpen) return;
   const offset = _trajPage * TRAJ_PAGE;
   let d;
-  try {
-    d = await j(`/api/v1/dashboard/my/contributions/trajs?offset=${offset}&limit=${TRAJ_PAGE}`);
-  } catch (e) {
-    listEl.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`;
-    return;
+  if (_contribPayload && _contribPayloadOffset === offset) {
+    d = _contribPayload;
+  } else {
+    try {
+      d = await j(`/api/v1/dashboard/my/contributions/trajs?offset=${offset}&limit=${TRAJ_PAGE}`);
+    } catch (e) {
+      listEl.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`;
+      return;
+    }
+    _contribPayload = d;
+    _contribPayloadOffset = offset;
   }
-  _contribPayload = d;
   const total = d.total || 0;
   const pages = Math.max(1, Math.ceil(total / TRAJ_PAGE));
   if (_trajPage >= pages) _trajPage = pages - 1;
@@ -1613,6 +1619,8 @@ async function loadMy() {
   setRtOpen(false);
   _trajPage = 0;
   _contribTraj = null;
+  _contribPayload = null;
+  _contribPayloadOffset = null;
   setContribOpen(true);
 }
 document.addEventListener('click', async e => {

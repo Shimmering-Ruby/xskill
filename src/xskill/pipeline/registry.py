@@ -330,6 +330,21 @@ CREATE TABLE IF NOT EXISTS ux_scores_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- atom 在途 pending 投影：真相仍是各 skill 的 .candidates.yml；
+-- 写出口（candidates 落盘闸）同步；dashboard 读路径只查本表，禁止 per-atom 扫盘。
+CREATE TABLE IF NOT EXISTS atom_candidate_pending (
+    atom_id     TEXT PRIMARY KEY,
+    skill       TEXT NOT NULL,
+    weightscore INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_acp_skill ON atom_candidate_pending(skill);
+
+CREATE TABLE IF NOT EXISTS atom_candidate_pending_meta (
+    root_key      TEXT PRIMARY KEY,
+    backfilled_at TEXT NOT NULL
+);
 """
 
 
@@ -858,6 +873,203 @@ def record_atom_adoption(*, atom_id: str, skill: str, weightscore: int,
             (atom_id, skill, int(weightscore), 1 if was_new else 0),
         )
         conn.commit()
+
+
+def _atom_pending_root_key(skill_dir: Path | str) -> str:
+    path = Path(skill_dir).expanduser()
+    try:
+        return str(path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return str(path.absolute())
+
+
+def sync_atom_candidate_pending_for_skill(
+    skill: str,
+    candidates: list,
+    *,
+    db_path: Optional[Path] = None,
+) -> None:
+    """按某 skill 当前 candidates 快照替换其 pending 投影行。
+
+    ``atom_id`` 为主键：同 atom 若改挂到其他 skill，ON CONFLICT 覆盖 skill 列。
+    """
+    rows: list[tuple[str, str, int]] = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        atom_id = candidate.get("atom_id") or ""
+        if not atom_id:
+            continue
+        rows.append((str(atom_id), skill, int(candidate.get("weightscore") or 0)))
+    with pooled_connection(db_path) as conn:
+        conn.execute(
+            "DELETE FROM atom_candidate_pending WHERE skill=?", (skill,),
+        )
+        if rows:
+            conn.executemany(
+                """
+                INSERT INTO atom_candidate_pending(atom_id, skill, weightscore)
+                VALUES (?, ?, ?)
+                ON CONFLICT(atom_id) DO UPDATE SET
+                    skill=excluded.skill,
+                    weightscore=excluded.weightscore,
+                    updated_at=datetime('now')
+                """,
+                rows,
+            )
+        conn.commit()
+
+
+def delete_atom_candidate_pending_for_skill(
+    skill: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> None:
+    with pooled_connection(db_path) as conn:
+        conn.execute(
+            "DELETE FROM atom_candidate_pending WHERE skill=?", (skill,),
+        )
+        conn.commit()
+
+
+def notify_atom_pending_sync(
+    skill_path: Path | str,
+    candidates: list,
+    *,
+    db_path: Path | str | None = None,
+) -> None:
+    """candidates 落盘钩子：投影失败只记日志，不阻断磁盘写。"""
+    try:
+        from xskill.skill.catalog_store import resolve_catalog_db_path
+        resolved = resolve_catalog_db_path(db_path)
+        if resolved is None:
+            logger.debug(
+                "atom_candidate_pending skip sync (no registry_db_path): %s",
+                skill_path,
+            )
+            return
+        sync_atom_candidate_pending_for_skill(
+            Path(skill_path).name, candidates, db_path=resolved,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "atom_candidate_pending sync failed: %s", skill_path,
+        )
+
+
+def notify_atom_pending_delete(
+    skill: str,
+    *,
+    db_path: Path | str | None = None,
+) -> None:
+    try:
+        from xskill.skill.catalog_store import resolve_catalog_db_path
+        resolved = resolve_catalog_db_path(db_path)
+        if resolved is None:
+            logger.debug(
+                "atom_candidate_pending skip delete (no registry_db_path): %s",
+                skill,
+            )
+            return
+        delete_atom_candidate_pending_for_skill(skill, db_path=resolved)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception(
+            "atom_candidate_pending delete failed: %s", skill,
+        )
+
+
+_ATOM_PENDING_BACKFILL_LOCK = threading.Lock()
+
+
+def backfill_atom_candidate_pending(
+    skill_dir: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> int:
+    """一次扫盘把各 skill 的 .candidates.yml 灌进 pending 投影表。"""
+    skill_dir = Path(skill_dir)
+    root = _atom_pending_root_key(skill_dir)
+    from xskill.skill.candidates import load_candidates
+
+    rows: list[tuple[str, str, int]] = []
+    if skill_dir.is_dir():
+        for skill_path in sorted(skill_dir.iterdir()):
+            if not skill_path.is_dir() or skill_path.name.startswith("."):
+                continue
+            try:
+                data = load_candidates(skill_path)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "atom_candidate_pending backfill skip %s",
+                    skill_path, exc_info=True,
+                )
+                continue
+            for candidate in data.get("candidates", []) or []:
+                if not isinstance(candidate, dict):
+                    continue
+                atom_id = candidate.get("atom_id") or ""
+                if not atom_id:
+                    continue
+                rows.append((
+                    str(atom_id),
+                    skill_path.name,
+                    int(candidate.get("weightscore") or 0),
+                ))
+    with pooled_connection(db_path) as conn:
+        conn.execute("DELETE FROM atom_candidate_pending")
+        if rows:
+            conn.executemany(
+                """
+                INSERT INTO atom_candidate_pending(atom_id, skill, weightscore)
+                VALUES (?, ?, ?)
+                ON CONFLICT(atom_id) DO UPDATE SET
+                    skill=excluded.skill,
+                    weightscore=excluded.weightscore,
+                    updated_at=datetime('now')
+                """,
+                rows,
+            )
+        conn.execute(
+            """
+            INSERT INTO atom_candidate_pending_meta(root_key, backfilled_at)
+            VALUES (?, datetime('now'))
+            ON CONFLICT(root_key) DO UPDATE SET
+                backfilled_at=datetime('now')
+            """,
+            (root,),
+        )
+        conn.commit()
+    logger.info(
+        "atom_candidate_pending backfill: root=%s rows=%d", root, len(rows),
+    )
+    return len(rows)
+
+
+def ensure_atom_pending_backfilled(
+    skill_dir: Path | str,
+    db_path: Optional[Path] = None,
+) -> None:
+    """该 root 尚未 backfill 时做一次扫盘灌表（对齐 skills_catalog ensure）。"""
+    skill_dir = Path(skill_dir)
+    if not skill_dir.is_dir():
+        return
+    root = _atom_pending_root_key(skill_dir)
+    with pooled_connection(db_path) as conn:
+        ready = conn.execute(
+            "SELECT 1 FROM atom_candidate_pending_meta WHERE root_key=?",
+            (root,),
+        ).fetchone()
+        if ready is not None:
+            return
+    with _ATOM_PENDING_BACKFILL_LOCK:
+        with pooled_connection(db_path) as conn:
+            ready = conn.execute(
+                "SELECT 1 FROM atom_candidate_pending_meta WHERE root_key=?",
+                (root,),
+            ).fetchone()
+            if ready is not None:
+                return
+        backfill_atom_candidate_pending(skill_dir, db_path=db_path)
 
 
 def record_trigger_eval(*, skill: str, version_sha: Optional[str], exp_id: str,

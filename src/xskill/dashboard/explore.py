@@ -118,26 +118,30 @@ class TrajExplorer:
         return d
 
     def _atom_destinations(self, atom_id: str) -> list[dict]:
-        """该 atom 的去向：进入了哪些 skill（adoption 事件 + 在途 candidates）。"""
+        """该 atom 的去向：进入了哪些 skill（adoption 事件 + 在途 pending 投影）。"""
         out: list[dict] = []
+        if self._skill_dir and Path(self._skill_dir).is_dir():
+            from xskill.pipeline.registry import ensure_atom_pending_backfilled
+            ensure_atom_pending_backfilled(self._skill_dir, self._db)
         with pooled_connection(self._db) as conn:
             rows = conn.execute(
                 "SELECT skill, weightscore, ts FROM atom_adoption WHERE atom_id=?"
                 " ORDER BY ts", (atom_id,)).fetchall()
+            pending = conn.execute(
+                "SELECT skill, weightscore FROM atom_candidate_pending"
+                " WHERE atom_id=?",
+                (atom_id,),
+            ).fetchall()
         for r in rows:
             out.append({"skill": r["skill"], "weightscore": r["weightscore"],
                         "state": "adopted", "ts": r["ts"]})
-        if self._skill_dir and Path(self._skill_dir).is_dir():
-            from xskill.skill.candidates import load_candidates
-            adopted = {o["skill"] for o in out}
-            for d in sorted(Path(self._skill_dir).iterdir()):
-                if not d.is_dir() or d.name.startswith(".") or d.name in adopted:
-                    continue
-                for c in load_candidates(d).get("candidates", []):
-                    if c.get("atom_id") == atom_id:
-                        out.append({"skill": d.name,
-                                    "weightscore": c.get("weightscore"),
-                                    "state": "pending", "ts": ""})
+        adopted = {o["skill"] for o in out}
+        for r in pending:
+            if r["skill"] in adopted:
+                continue
+            out.append({"skill": r["skill"],
+                        "weightscore": r["weightscore"],
+                        "state": "pending", "ts": ""})
         return out
 
 
@@ -149,10 +153,16 @@ def skill_lineage(skill_dir: Path, name: str,
     sub = Path(skill_dir) / name
     if not sub.is_dir():
         raise KeyError(f"skill not found: {name}")
+    from xskill.pipeline.registry import ensure_atom_pending_backfilled
+    ensure_atom_pending_backfilled(skill_dir, db_path)
     with pooled_connection(db_path) as conn:
         adoption = conn.execute(
             "SELECT atom_id, weightscore, ts FROM atom_adoption WHERE skill=?"
             " ORDER BY ts", (name,)).fetchall()
+        pending = conn.execute(
+            "SELECT atom_id, weightscore FROM atom_candidate_pending"
+            " WHERE skill=?", (name,),
+        ).fetchall()
         wd_rows = conn.execute(
             "SELECT t.filename fn, t.source_model model, w.label label,"
             " w.path wpath FROM trajectories t"
@@ -167,17 +177,16 @@ def skill_lineage(skill_dir: Path, name: str,
         traj_info[stem] = {"user": r["label"] or "(local)",
                            "model": r["model"] or "",
                            "root": _resolve_local_root(r["wpath"], db_dir)}
-    from xskill.skill.candidates import load_candidates
     from xskill.dashboard.metrics import _traj_of_atom
     entries: dict[str, dict] = {}
     for r in adoption:
         entries[r["atom_id"]] = {"atom_id": r["atom_id"], "state": "adopted",
                                  "weightscore": r["weightscore"], "ts": r["ts"]}
-    for c in load_candidates(sub).get("candidates", []):
-        aid = c.get("atom_id") or ""
+    for r in pending:
+        aid = r["atom_id"] or ""
         if aid and aid not in entries:
             entries[aid] = {"atom_id": aid, "state": "pending",
-                            "weightscore": c.get("weightscore"), "ts": ""}
+                            "weightscore": r["weightscore"], "ts": ""}
     atoms_out: list[dict] = []
     by_user: dict[str, int] = {}
     by_model: dict[str, int] = {}

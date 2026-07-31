@@ -134,6 +134,11 @@ def _atomic_save_candidates_unlocked(skill_dir: Path, data: dict) -> None:
         skill_dir,
         len(data.get("candidates", []) or []),
     )
+    from xskill.pipeline.registry import notify_atom_pending_sync
+    notify_atom_pending_sync(
+        skill_dir,
+        data.get("candidates", []) or [],
+    )
 
 
 def save_candidates(skill_dir: Path, data: dict) -> None:
