@@ -800,14 +800,17 @@ def team_sync(
             traj_root=_ctx.traj_root,
             telemetry_submit=telemetry_submit,
         )
+        resp.server_slots = 0
+        resp.take_n = 0
     else:
         # P2-2.4 控制面注入:blocked 排除→pinned 占位→ranked→recommended。
         # best-effort 读取(D8:超量在写入侧拒绝,这里读挂了退回无 prefs 分发,
         # 后台链路绝不因控制面阻塞)。user_key=user_name(D5),匿名 client 只吃全局。
         prefs = None
         retired = None
+        user_key = ""
         try:
-            user_key = _ctx.client_registry.user_name_for(client_id)
+            user_key = _ctx.client_registry.user_name_for(client_id) or ""
             prefs, retired = _manifest_controls(user_key)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning("skill prefs lookup failed, serving without control-plane",
@@ -823,6 +826,16 @@ def team_sync(
             retired=retired,
             telemetry_submit=telemetry_submit,
         )
+        resp.server_slots = total_slots
+        # client 截取安装数：默认=服务器 skill_slots；看板可改 user_client_settings
+        try:
+            from xskill.pipeline.registry import get_client_take_n
+            resp.take_n = get_client_take_n(
+                user_key, default=total_slots,
+            ) if user_key else total_slots
+        except Exception:  # pylint: disable=broad-exception-caught
+            resp.take_n = total_slots
+            logger.debug("take_n lookup failed", exc_info=True)
     # 本次响应必须使用 request() 之前的已落库画像。request 只操作
     # 有界内存队列；服务缺失、正在停止、队列满或自身异常都不改变
     # /sync 的成功响应。

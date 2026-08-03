@@ -85,8 +85,11 @@ class SkillSlot(BaseModel):
 
 
 class SyncResponse(BaseModel):
-    slots: list[SkillSlot] = Field(default_factory=list)   # ≤100
+    slots: list[SkillSlot] = Field(default_factory=list)   # ≤ skill_slots
     server_time: float
+    # client 截取安装：对 slots 取前 take_n；None=装全部（兼容旧 client）
+    take_n: int | None = None
+    server_slots: int | None = None
 
 
 class PushEditResponse(BaseModel):

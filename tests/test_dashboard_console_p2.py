@@ -275,9 +275,59 @@ def test_my_views_empty_db_do_not_crash(console_env):
     assert body["trajs"] == []
     m = alice.get("/api/v1/dashboard/my/manifest").json()
     assert "slots" in m
+    assert "server_push" in m
+    assert m["server_slots"] == 3
     for s in m["slots"]:
         assert "my_triggers" in s
         assert s["source"] in ("native", "upload", "skillhub")
+    assert alice.get("/api/v1/dashboard/my/settings").status_code == 200
+    assert alice.get("/api/v1/dashboard/my/uploads").json()["skills"] == []
+    assert alice.get("/api/v1/dashboard/my/commits").json()["commits"] == []
+
+
+def test_my_settings_take_n_truncates_manifest_slots(console_env):
+    """看板改 take_n：slots=截取安装集，server_push 仍为完整服务器队列。"""
+    alice = console_env["alice"]
+    m0 = alice.get("/api/v1/dashboard/my/manifest").json()
+    assert len(m0["server_push"]) == m0["server_pushed"] == 3
+    assert len(m0["slots"]) == 3  # 默认 take_n = skill_slots
+    r = alice.post("/api/v1/dashboard/my/settings", json={"take_n": 1})
+    assert r.status_code == 200
+    assert r.json()["take_n"] == 1
+    m = alice.get("/api/v1/dashboard/my/manifest").json()
+    assert m["settings"]["take_n"] == 1
+    assert len(m["server_push"]) == 3
+    assert len(m["slots"]) == 1
+    assert m["slots"][0]["skill_name"] == m["server_push"][0]["skill_name"]
+    assert m["installed"] == 1
+    r0 = alice.post("/api/v1/dashboard/my/settings", json={"take_n": 0})
+    assert r0.status_code == 200 and r0.json()["take_n"] == 0
+    m0b = alice.get("/api/v1/dashboard/my/manifest").json()
+    assert m0b["slots"] == []
+    assert len(m0b["server_push"]) == 3
+    bad = alice.post("/api/v1/dashboard/my/settings", json={"take_n": -1})
+    assert bad.status_code == 400
+    # 超过 skill_slots 夹取
+    hi = alice.post("/api/v1/dashboard/my/settings", json={"push_count": 99})
+    assert hi.status_code == 200 and hi.json()["take_n"] == 3
+
+
+def test_my_commits_from_push_edit_events(console_env):
+    alice, db = console_env["alice"], console_env["db"]
+    from xskill.events import EventStore
+    store = EventStore(db)
+    store.emit_push_edit(actor="alice", skill="alpha",
+                         branch="user-staging/c1", ref_sha="a" * 40)
+    store.emit_canary(skill="alpha", action="promoted",
+                      main_avg=7.0, staging_avg=8.0)
+    store.emit_push_edit(actor="alice", skill="beta",
+                         branch="user-staging/c1", ref_sha="b" * 40)
+    body = alice.get("/api/v1/dashboard/my/commits").json()
+    assert body["total"] >= 2
+    by_skill = {c["skill"]: c for c in body["commits"]}
+    assert by_skill["alpha"]["status"] == "absorbed"
+    assert "被吸收到" in by_skill["alpha"]["status_label"]
+    assert by_skill["beta"]["status"] in ("canary", "live")
 
 
 def test_my_contribution_trajs_paginates_user_trajs(console_env):

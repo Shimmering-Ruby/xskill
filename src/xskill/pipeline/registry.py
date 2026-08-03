@@ -210,6 +210,13 @@ CREATE TABLE IF NOT EXISTS skill_prefs (
     PRIMARY KEY (user_key, skill_name)
 );
 
+-- client 截取安装数 take_n：对服务器推送队列取前 N 装入 harness；NULL=跟服务器 skill_slots。
+CREATE TABLE IF NOT EXISTS user_client_settings (
+    user_key   TEXT PRIMARY KEY,
+    take_n     INTEGER,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- P2-2.4c skill 生命周期:retired=下线(停止分发/推荐,数据与 git 历史保留)。
 -- 删除是物理动作不入此表;"在役"=无行。
 CREATE TABLE IF NOT EXISTS skill_lifecycle (
@@ -737,6 +744,39 @@ def prefs_for(user_key: str, *, db_path: Optional[Path] = None) -> list[dict]:
             " WHERE user_key=? ORDER BY ts",
             (user_key,),
         ).fetchall()]
+
+
+def get_client_take_n(user_key: str, *, default: int,
+                      db_path: Optional[Path] = None) -> int:
+    """读用户 client 截取安装数；无行或 NULL → ``default``（通常=服务器 skill_slots）。"""
+    if not user_key:
+        return max(0, int(default))
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT take_n FROM user_client_settings WHERE user_key=?",
+            (user_key,),
+        ).fetchone()
+    if row is None or row["take_n"] is None:
+        return max(0, int(default))
+    return max(0, int(row["take_n"]))
+
+
+def set_client_take_n(user_key: str, take_n: int, *, max_n: int,
+                      db_path: Optional[Path] = None) -> int:
+    """写入 take_n，夹取到 ``[0, max_n]``，返回落盘值。"""
+    if not user_key:
+        raise ValueError("user_key required")
+    n = max(0, min(int(max_n), int(take_n)))
+    with pooled_connection(db_path) as conn:
+        conn.execute(
+            "INSERT INTO user_client_settings(user_key, take_n, updated_at)"
+            " VALUES(?,?,datetime('now'))"
+            " ON CONFLICT(user_key) DO UPDATE SET"
+            " take_n=excluded.take_n, updated_at=datetime('now')",
+            (user_key, n),
+        )
+        conn.commit()
+    return n
 
 
 def effective_prefs(user_key: str, *, db_path: Optional[Path] = None) -> dict:
