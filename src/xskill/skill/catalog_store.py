@@ -150,13 +150,15 @@ def _read_native_row(
     main_sha = _ref_sha(skill_path, "main")
     staging_sha = _ref_sha(skill_path, "staging")
     distributable = 1 if state in ("main", "staging") and skill_md.is_file() else 0
+    desc_cut = description[:300]
+    from xskill.recommend.skill_vector_store import content_sha_for_text
     return {
         "catalog_key": _native_catalog_key(skill_path.name),
         "name": skill_path.name,
         "repo_name": skill_path.name,
         "source": _SOURCE_NATIVE,
         "state": state,
-        "description": description[:300],
+        "description": desc_cut,
         "version": version,
         "candidates": candidates_count,
         "candidates_count": int(candidates_count),
@@ -167,6 +169,7 @@ def _read_native_row(
         "hub": "",
         "skill_id": "",
         "use_count": 0,
+        "content_sha": content_sha_for_text(desc_cut) if desc_cut else "",
         "root_key": _root_key(skill_path.parent),
     }
 
@@ -201,20 +204,26 @@ def _skillhub_fingerprint(skillhub) -> str:
 
 
 def _skillhub_rows(skillhub) -> list[dict]:
+    from xskill.recommend.skill_vector_store import content_sha_for_text
+
     rows: list[dict] = []
     for entry in _skillhub_entries(skillhub):
         description = str(entry.get("description") or "").strip().replace("\n", " ")
+        desc_cut = description[:300]
         skill_id = entry.get("skill_id") or entry.get("name") or ""
         name = entry.get("display_name") or entry.get("name") or ""
         hub = entry.get("source_path") or ""
         use_count = entry.get("use_count", 0) or 0
+        sha = entry.get("content_sha") or (
+            content_sha_for_text(desc_cut) if desc_cut else ""
+        )
         rows.append({
             "catalog_key": _skillhub_catalog_key(str(skill_id)),
             "name": name,
             "repo_name": name,
             "source": _SOURCE_SKILLHUB,
             "state": "skillhub",
-            "description": description[:300],
+            "description": desc_cut,
             "version": 0,
             "candidates": 0,
             "candidates_count": 0,
@@ -225,6 +234,7 @@ def _skillhub_rows(skillhub) -> list[dict]:
             "hub": hub,
             "skill_id": str(skill_id),
             "use_count": use_count,
+            "content_sha": sha,
             "root_key": "",
         })
     rows.sort(key=operator.itemgetter("hub", "name"))
@@ -272,13 +282,20 @@ def catalog_api_row(stored: dict) -> dict:
 
 
 def _upsert_row(conn, row: dict) -> None:
+    from xskill.recommend.skill_vector_store import content_sha_for_text
+
+    description = row["description"]
+    content_sha = row.get("content_sha") or (
+        content_sha_for_text(description) if description else ""
+    )
     conn.execute(
         """
         INSERT INTO skills_catalog(
             catalog_key, root_key, name, repo_name, source, state,
             description, version, candidates_count, main_sha, staging_sha,
-            distributable, search_id, hub, skill_id, use_count, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+            distributable, search_id, hub, skill_id, use_count, content_sha,
+            updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
         ON CONFLICT(catalog_key) DO UPDATE SET
             root_key=excluded.root_key,
             name=excluded.name,
@@ -295,6 +312,7 @@ def _upsert_row(conn, row: dict) -> None:
             hub=excluded.hub,
             skill_id=excluded.skill_id,
             use_count=excluded.use_count,
+            content_sha=excluded.content_sha,
             updated_at=datetime('now')
         """,
         (
@@ -304,7 +322,7 @@ def _upsert_row(conn, row: dict) -> None:
             row["repo_name"],
             row["source"],
             row["state"],
-            row["description"],
+            description,
             int(row["version"] or 0),
             int(row["candidates_count"]),
             row["main_sha"],
@@ -314,6 +332,7 @@ def _upsert_row(conn, row: dict) -> None:
             row.get("hub") or "",
             row.get("skill_id") or "",
             int(row.get("use_count") or 0),
+            content_sha,
         ),
     )
 

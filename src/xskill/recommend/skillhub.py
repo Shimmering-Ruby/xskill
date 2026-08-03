@@ -783,7 +783,11 @@ class SkillHub:
 
     def _semantic_ranks(self, index_bundle: dict,
                         normalized_query: str) -> dict[int, int]:
-        """对有缓存向量的文档按 query↔description cosine 降序给出 1-based 排名。"""
+        """对有缓存向量的文档按 query↔description cosine 降序给出 1-based 排名。
+
+        编排（BM25/RRF/缓存）不变；向量召回优先走 Milvus Lite，不可用时
+        退回原 ``corpus_matrix @ query``。
+        """
         rank_cache = index_bundle["semantic_rank_cache"]
         rank_cache_lock = index_bundle["semantic_rank_cache_lock"]
         with rank_cache_lock:
@@ -797,14 +801,23 @@ class SkillHub:
         if not present_indices:
             return {}
         query_vector = self._embed_query(normalized_query, index_bundle["fingerprint"])
-        if query_vector is None or query_vector.shape[0] != corpus_matrix.shape[1]:
+        if query_vector is None:
             return {}
-        similarities = corpus_matrix @ query_vector
-        order = np.argsort(-similarities)
-        ranks = {
-            present_indices[position]: rank
-            for rank, position in enumerate(order.tolist(), start=1)
-        }
+
+        milvus_ranks = self._semantic_ranks_milvus(
+            index_bundle, query_vector, present_indices,
+        )
+        if milvus_ranks is not None:
+            ranks = milvus_ranks
+        else:
+            if query_vector.shape[0] != corpus_matrix.shape[1]:
+                return {}
+            similarities = corpus_matrix @ query_vector
+            order = np.argsort(-similarities)
+            ranks = {
+                present_indices[position]: rank
+                for rank, position in enumerate(order.tolist(), start=1)
+            }
         with rank_cache_lock:
             cached = rank_cache.get(normalized_query)
             if cached is not None:
@@ -814,6 +827,59 @@ class SkillHub:
             while len(rank_cache) > SEARCH_RANK_CACHE_CAPACITY:
                 rank_cache.popitem(last=False)
         return ranks
+
+    def _semantic_ranks_milvus(
+        self,
+        index_bundle: dict,
+        query_vector: np.ndarray,
+        present_indices: list[int],
+    ) -> dict[int, int] | None:
+        """用 Milvus search 产出与 ``present_indices`` 对齐的 1-based 排名。"""
+        try:
+            from xskill.config import XSKILL_HOME
+            from xskill.recommend.skill_vector_store import (
+                default_vector_db_path,
+                open_skill_vector_index,
+            )
+
+            path = default_vector_db_path(XSKILL_HOME)
+            if not path.is_file():
+                return None
+            index = open_skill_vector_index(path, dim=int(query_vector.shape[0]))
+            hits = index.search(
+                [float(x) for x in query_vector.tolist()],
+                top_k=max(len(present_indices), 1),
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("milvus semantic ranks unavailable", exc_info=True)
+            return None
+        entries = index_bundle["entries"]
+        # name / skill_id / catalog_key → entry index
+        key_to_idx: dict[str, int] = {}
+        for idx in present_indices:
+            entry = entries[idx]
+            for key in (
+                entry.get("name"),
+                entry.get("skill_id"),
+                entry.get("display_name"),
+            ):
+                if key:
+                    key_to_idx[str(key)] = idx
+        ranks: dict[int, int] = {}
+        rank = 1
+        for catalog_key, _score in hits:
+            name = catalog_key.split(":", 1)[-1] if ":" in catalog_key else catalog_key
+            row = index.get(catalog_key)
+            candidates = [name]
+            if row and row.get("name"):
+                candidates.insert(0, row["name"])
+            for cand in candidates:
+                idx = key_to_idx.get(cand)
+                if idx is not None and idx not in ranks:
+                    ranks[idx] = rank
+                    rank += 1
+                    break
+        return ranks or None
 
     def _embed_query(self, normalized_query: str,
                      fingerprint: tuple) -> np.ndarray | None:

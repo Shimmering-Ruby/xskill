@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS skills_catalog (
     hub               TEXT NOT NULL DEFAULT '',
     skill_id          TEXT NOT NULL DEFAULT '',
     use_count         INTEGER NOT NULL DEFAULT 0,
+    content_sha       TEXT NOT NULL DEFAULT '',
     updated_at        TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_skills_catalog_root
@@ -251,6 +252,22 @@ CREATE TABLE IF NOT EXISTS skills_catalog_meta (
     root_key      TEXT PRIMARY KEY,
     backfilled_at TEXT NOT NULL,
     skillhub_key  TEXT NOT NULL DEFAULT ''
+);
+
+-- 预计算推荐结果：/sync 只读；重活进程写入（脏算）。
+CREATE TABLE IF NOT EXISTS client_recommend_slots (
+    user_key     TEXT PRIMARY KEY,
+    slots_json   TEXT NOT NULL DEFAULT '[]',
+    fingerprint  TEXT NOT NULL DEFAULT '',
+    computed_at  TEXT NOT NULL,
+    stale        INTEGER NOT NULL DEFAULT 0
+);
+
+-- 推荐脏队列：仅重活进程消费。
+CREATE TABLE IF NOT EXISTS recommend_dirty (
+    user_key   TEXT PRIMARY KEY,
+    reason     TEXT NOT NULL DEFAULT '',
+    marked_at  TEXT NOT NULL
 );
 
 -- P3-3.1 events:四类既有事实源的消费者(D7),通知+世界消息共用。
@@ -535,6 +552,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
         # 已有行历史上都是用户手动 register，标 'manual'
         conn.execute("UPDATE watch_dirs SET ecosystem='manual' WHERE ecosystem IS NULL")
+
+    # skills_catalog.content_sha：与 Milvus 向量索引对齐的一致性键
+    cur = conn.execute("PRAGMA table_info(skills_catalog)")
+    sc_cols = {row[1] for row in cur.fetchall()}
+    if "content_sha" not in sc_cols:
+        conn.execute(
+            "ALTER TABLE skills_catalog ADD COLUMN content_sha TEXT NOT NULL DEFAULT ''"
+        )
+
     # Backfill status from has_meta/has_embedding —— **只在首次补 status 列时跑一次**。
     # 以前每次 get_connection 都跑这条,会把任何 status='discovered' 的**活行**
     # （rebuild 重置 / error 重试 / 僵尸清理刚翻回的）在下次连接时打回 'indexed'，
@@ -645,6 +671,12 @@ def set_skill_pref(*, user_key: str, skill_name: str, pref: str, set_by: str,
             (user_key, skill_name, pref, set_by),
         )
         conn.commit()
+    try:
+        from xskill.recommend.recommend_store import mark_recommend_dirty
+
+        mark_recommend_dirty(user_key, reason=f"pref_{pref}", db_path=db_path)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("mark recommend dirty after pref failed", exc_info=True)
 
 
 def _check_pin_quota(conn, *, user_key: str, skill_name: str,
@@ -686,7 +718,15 @@ def clear_skill_pref(*, user_key: str, skill_name: str,
             (user_key, skill_name),
         )
         conn.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+    if deleted:
+        try:
+            from xskill.recommend.recommend_store import mark_recommend_dirty
+
+            mark_recommend_dirty(user_key, reason="pref_cleared", db_path=db_path)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("mark recommend dirty after clear pref failed", exc_info=True)
+    return deleted
 
 
 def prefs_for(user_key: str, *, db_path: Optional[Path] = None) -> list[dict]:
