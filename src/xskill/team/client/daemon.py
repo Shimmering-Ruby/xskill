@@ -489,6 +489,9 @@ class TeamClient:
         # 上面的 working-copy 驱动清理看不见"工作副本已被 out-of-band 删除、生态
         # link 却还在"的孤儿；按生态目录反向再收一遍。
         self._reap_orphaned_ecosystem_links(keep)
+        # copy 孤儿（有老 meta、无账本或卸装拒删）同样逃出 working-copy 驱动清理；
+        # 推荐流 delta 必须能清掉，否则 .agents 只增不减。
+        self._reap_orphan_copy_dests(keep)
 
     def _reap_orphaned_ecosystem_links(self, keep: set[str]) -> None:
         """扫生态 dest 根目录，收掉 manifest 已不含、且指向 xskill 工作副本根的
@@ -522,6 +525,69 @@ class TeamClient:
                         "reaped orphaned ecosystem link target_hash=%s",
                         _target_path_hash(entry),
                     )
+
+    def _reap_orphan_copy_dests(self, keep: set[str]) -> None:
+        """收掉 manifest 已不含、带 dest 内老 install-meta 的 copy 真目录。
+
+        身份：``dest/.xskill-install-meta.json`` 证明曾由 xskill copy 安装（相对
+        无痕迹手建目录）。名字仍在 keep 的留给 reconcile，不删——避免把仍在
+        推荐里、同样带老 meta 的正常 openclaw 安装每轮拆掉重装。
+
+        手改保护：文件 mtime 相对 meta ``installed_at`` 已前进（含静默期内）则
+        跳过，避免在回流/push-edit 之前清掉本地改动。无账本时 ``remove_owned_dest``
+        拒删，故此处在安全判定后直接 ``rmtree``。
+        """
+        from xskill.ecosystems.install_ledger import get_default_ledger
+
+        ledger = get_default_ledger()
+        for root in _ecosystem_skill_roots(self.home_root):
+            if not root.is_dir():
+                continue
+            try:
+                entries = sorted(root.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.name in keep:
+                    continue
+                if is_link_or_junction(entry):
+                    continue
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:
+                    continue
+                if not (entry / _LEGACY_DEST_INSTALL_META).is_file():
+                    continue
+                # 有账本行：走正式卸装（指纹不符=用户改过则拒删，与现语义一致）
+                if ledger.read_install(entry) is not None:
+                    if _remove_owned_install_target(entry, None):
+                        logger.info(
+                            "reaped orphan copy dest via ledger "
+                            "target_hash=%s",
+                            _target_path_hash(entry),
+                        )
+                    continue
+                if not _orphan_copy_content_matches_install(entry):
+                    logger.info(
+                        "skip orphan copy reap (dest edit markers) "
+                        "target_hash=%s",
+                        _target_path_hash(entry),
+                    )
+                    continue
+                try:
+                    shutil.rmtree(entry)
+                except OSError:
+                    logger.warning(
+                        "reap orphan copy dest failed target_hash=%s "
+                        "error_type=ORPHAN_COPY_REAP_FAILED",
+                        _target_path_hash(entry),
+                    )
+                    continue
+                logger.info(
+                    "reaped orphan copy dest target_hash=%s",
+                    _target_path_hash(entry),
+                )
 
     def _uninstall_from_ecosystems(self, repo_dir: Path) -> None:
         uninstall_skill_from_ecosystems(
@@ -683,6 +749,52 @@ def _ecosystem_skill_roots(home_root: Path) -> list[Path]:
         home_root / ".trae-cn" / "skills",
         home_root / ".trae" / "skills",
     ]
+
+
+# openclaw / copy 安装写在 dest 内部的老 meta（与旁路 sidecar 不同）。
+_LEGACY_DEST_INSTALL_META = ".xskill-install-meta.json"
+
+
+def _orphan_copy_content_matches_install(dest: Path) -> bool:
+    """无账本 copy 孤儿：内容是否仍像「刚装好、无手改」。
+
+    与 reverse_sync 的 dest 判定同口径：可读 ``installed_at``，且工作区文件
+    max(mtime) 相对安装时刻未前进 ≥1s。读失败或已有改动痕迹 → False（不删）。
+    """
+    meta_path = dest / _LEGACY_DEST_INSTALL_META
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    installed_at = meta.get("installed_at")
+    if isinstance(installed_at, bool) or not isinstance(installed_at, (int, float)):
+        return False
+    max_mtime = 0.0
+    try:
+        for dirpath, dirnames, filenames in os.walk(dest):
+            # 不把 meta / marker 自身的写入当成用户手改
+            if Path(dirpath) == dest:
+                dirnames[:] = [d for d in dirnames if d != ".git"]
+                filenames = [
+                    n for n in filenames
+                    if n not in {
+                        _LEGACY_DEST_INSTALL_META,
+                        ".xskill-install-identity.json",
+                    }
+                ]
+            for name in filenames:
+                try:
+                    max_mtime = max(
+                        max_mtime,
+                        (Path(dirpath) / name).lstat().st_mtime,
+                    )
+                except OSError:
+                    return False
+    except OSError:
+        return False
+    return max_mtime - float(installed_at) < 1.0
 
 
 def _all_install_targets(skill_name: str, home_root: Path) -> list[Path]:

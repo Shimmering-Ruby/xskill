@@ -1122,13 +1122,12 @@ def create_app(home_root: Path | str | None = None,
                     app,
                     max_workers=team_sync_cfg["workers"],
                 )
-                # 画像刷新改为定时短命子进程(python -m xskill._workers profile-refresh):重计算
-                # (含散点物化子系统)全在独立子进程,web 进程不再起常驻 worker 线程,
-                # GIL 与事件循环隔离。/sync 只读已落库画像(profile_refresh_service=None
-                # 时 api.team_sync 的入队守卫自然跳过)。
+                # 重活合并：画像 + Milvus 对账 + 脏用户推荐预计算，全在独立子进程。
+                # Web /sync 只读已落库画像与 client_recommend_slots
+                # (profile_refresh_service=None 时 api.team_sync 入队守卫跳过)。
                 profile_scheduler = IntervalSubprocessScheduler(
-                    "profile-refresh",
-                    [_sys.executable, "-m", "xskill._workers", "profile-refresh"],
+                    "recommend-heavy",
+                    [_sys.executable, "-m", "xskill._workers", "recommend-heavy"],
                     interval=profile_refresh_cfg["interval"],
                     timeout=profile_refresh_cfg["timeout"],
                 )
@@ -1136,7 +1135,7 @@ def create_app(home_root: Path | str | None = None,
                 _schedulers.append(profile_scheduler)
                 logger.info(
                     "team server context ready (traj_root=%s, "
-                    "profile refresh every %.0fs via subprocess)",
+                    "recommend-heavy every %.0fs via subprocess)",
                     traj_root, profile_refresh_cfg["interval"],
                 )
             except Exception:

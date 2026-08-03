@@ -292,6 +292,24 @@ class ProfileRefreshService:
             if changed and self._scatter_enabled:
                 for scatter_method in ("tsne", "umap"):
                     self.submit_scatter(client_id, scatter_method)
+            if changed:
+                try:
+                    from xskill.recommend.recommend_store import mark_recommend_dirty
+
+                    user_key = client_id
+                    reg = getattr(self.engine, "client_registry", None)
+                    if reg is not None:
+                        try:
+                            name = reg.user_name_for(client_id)
+                            if name:
+                                user_key = name
+                        except Exception:  # pylint: disable=broad-exception-caught
+                            pass
+                    mark_recommend_dirty(user_key, reason="profile_changed")
+                except Exception:  # pylint: disable=broad-exception-caught
+                    logger.debug(
+                        "mark recommend dirty failed for %s", client_id, exc_info=True,
+                    )
 
             with self._condition:
                 self._states.pop(client_id, None)

@@ -46,6 +46,8 @@ dependencies = [
     # ``python:3.9-slim``）默认没装 git，SkillEditAgent 等链路又要跑 git
     # init/commit/branch；走 dulwich 后零依赖系统 git。
     "dulwich>=0.21",
+    # 嵌入式向量索引（Milvus Lite）：技能检索/推荐 KNN，替代 numpy 全库乘。
+    "pymilvus>=2.4.2",
     # Python 3.9 上 pydantic 需要它来求值 `X | Y` 联合注解（PEP 604 语法
     # 3.10 才原生支持）；3.10+ 不安装。
     "eval_type_backport; python_version < '3.10'",

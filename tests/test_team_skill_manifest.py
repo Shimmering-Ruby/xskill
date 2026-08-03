@@ -355,29 +355,23 @@ def test_build_manifest_cold_start_recommended_equals_ux(tmp_path):
 
 
 def test_build_manifest_warm_recommended_is_profile_driven(tmp_path):
-    """暖路径：有画像 → recommended 受画像影响，且排除 ranked / 已用。"""
+    """暖路径：/sync 只读重活预写的推荐表（不在请求内算质心 KNN）。"""
+    from xskill.recommend.recommend_store import save_recommend_slots
+
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
     names = [f"skill-{i:02d}" for i in range(30)]
     for nm in names:
         _make_skill(skill_dir, nm)
-    # 自造索引：让 ux 尾部（ranked 之外）有一个主题簇
-    emb = np.zeros((30, 30), dtype=np.float32)
-    for i in range(30):
-        emb[i, i] = 1.0
-    # 把 skill-25 / skill-26 拉到同一维度（主题簇），client 用过 skill-25
-    emb[25, :] = 0.0
-    emb[26, :] = 0.0
-    emb[25, 5] = 1.0
-    emb[26, 5] = 1.0
-    with open(skill_dir / ".skill_index.pkl", "wb") as f:
-        pickle.dump({"skill_names": names, "embeddings": emb,
-                     "texts": names, "method": "test"}, f)
+    _write_skill_index(skill_dir, names)
 
     traj_root = tmp_path / "traj"
-    # client 用过 skill-25（会落在 ranked 之外，因为所有 skill ux 相同→按名排序，
-    # ranked_slots=20 时 skill-00..19 进 ranked，skill-20..29 是候选）
-    _save_atom(traj_root, "cid-warm", "traj_a", 1, ["skill-25"])
+    # ranked_slots=20 → skill-00..19 进 ranked；推荐表由重活进程写入
+    # （此处模拟画像结果：skill-26 最相关，且不含已用 skill-25）
+    save_recommend_slots(
+        "cid-warm",
+        ["skill-26", "skill-27", "skill-28", "skill-29", "skill-24"],
+    )
 
     resp = build_manifest(client_id="cid-warm", skill_dir=skill_dir,
                           probability=0.2, ranked_slots=20, total_slots=25,
@@ -385,7 +379,6 @@ def test_build_manifest_warm_recommended_is_profile_driven(tmp_path):
     ranked = {s.skill_name for s in resp.slots if s.bucket == "ranked"}
     reco = [s.skill_name for s in resp.slots if s.bucket == "recommended"]
     assert len(reco) == 5
-    assert all(n not in ranked for n in reco)        # 不在 ranked-80
-    assert "skill-25" not in reco                    # 排除已用
-    # skill-26 与 client 质心同向（cosine=1），别的候选 cosine=0 → 必排第一
+    assert all(n not in ranked for n in reco)
+    assert "skill-25" not in reco
     assert reco[0] == "skill-26"

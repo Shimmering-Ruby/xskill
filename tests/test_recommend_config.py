@@ -137,20 +137,29 @@ class TestSkillhubConfig:
         cfg = skillhub_config({})
         assert cfg["enabled"] is False
         assert cfg["dir"] == Path.home() / ".xskill" / "skillhub_skills"
+        assert cfg["scan_ttl_seconds"] == 3600.0
 
     def test_reads_overrides_from_dict(self, tmp_path):
         d = tmp_path / "hub"
-        cfg = skillhub_config({"skillhub": {"enabled": True, "dir": str(d)}})
+        cfg = skillhub_config({
+            "skillhub": {"enabled": True, "dir": str(d), "scan_ttl_seconds": 120},
+        })
         assert cfg["enabled"] is True
         assert cfg["dir"] == d
+        assert cfg["scan_ttl_seconds"] == 120.0
 
     def test_bad_enabled_fails_loud(self):
         with pytest.raises(ValueError, match="enabled"):
             skillhub_config({"skillhub": {"enabled": "yes"}})
 
+    def test_bad_scan_ttl_fails_loud(self):
+        with pytest.raises(ValueError, match="scan_ttl_seconds"):
+            skillhub_config({"skillhub": {"scan_ttl_seconds": -1}})
+
     def test_template_contains_skillhub_section(self):
         assert "skillhub:" in CONFIG_TEMPLATE
         assert "skillhub_skills" in CONFIG_TEMPLATE
+        assert "scan_ttl_seconds" in CONFIG_TEMPLATE
 
 
 # ── allow_anonymous_user ─────────────────────────────────────────

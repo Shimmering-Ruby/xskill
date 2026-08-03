@@ -93,7 +93,7 @@ class SkillHub:
     """三方 skill 扫描器 + ux 查询。``enabled=False``（缺省）时为 no-op。"""
 
     def __init__(self, *, enabled: bool, hub_dir: Path | str, embed_client,
-                 scan_ttl_seconds: float = 5.0,
+                 scan_ttl_seconds: float = 3600.0,
                  search_max_embed: int = 2, search_timeout_s: float = 3.0):
         self.enabled = bool(enabled)
         self.dir = Path(hub_dir)
@@ -153,6 +153,7 @@ class SkillHub:
         search_cfg = embedding_search_config(config)
         return cls(
             enabled=cfg["enabled"], hub_dir=cfg["dir"], embed_client=embed_client,
+            scan_ttl_seconds=cfg["scan_ttl_seconds"],
             search_max_embed=search_cfg["max_embed"],
             search_timeout_s=search_cfg["search_timeout_s"],
         )
@@ -559,6 +560,11 @@ class SkillHub:
         ordered_indices = self._rank_score_groups(
             score_groups, entries, limit,
         )
+        # 精确命中（display_name / skill_id / 去 hash 的 id / 目录名）置顶，
+        # 避免长名称里的热词（如 bootstrap）被 RRF 挤出 TopN。
+        ordered_indices = self._promote_exact_matches(
+            normalized_query, entries, ordered_indices, limit,
+        )
         results: list[dict] = []
         for entry_index in ordered_indices:
             result_entry = dict(entries[entry_index])
@@ -568,6 +574,48 @@ class SkillHub:
             results.append(result_entry)
         self._cache_search_results(index_bundle, result_cache_key, results)
         return results
+
+    @staticmethod
+    def _entry_exact_keys(entry: dict) -> set[str]:
+        """可与规范化 query 精确相等的键集合。"""
+        keys: set[str] = set()
+        display = str(entry.get("display_name") or "").strip().lower()
+        if display:
+            keys.add(display)
+        skill_id = str(entry.get("skill_id") or entry.get("name") or "").strip().lower()
+        if skill_id:
+            keys.add(skill_id)
+            stem = skill_id.split("@", 1)[0].strip()
+            if stem:
+                keys.add(stem)
+        source_path = str(entry.get("source_path") or "").strip().lower()
+        if source_path:
+            keys.add(source_path)
+            keys.add(Path(source_path).name)
+        return keys
+
+    @classmethod
+    def _promote_exact_matches(
+        cls,
+        normalized_query: str,
+        entries: list[dict],
+        ordered_indices: list[int],
+        limit: int,
+    ) -> list[int]:
+        """精确命中插到最前；多条精确命中时按 skill_id 稳定排序。"""
+        if not normalized_query or limit <= 0:
+            return ordered_indices
+        exact = [
+            idx for idx, entry in enumerate(entries)
+            if normalized_query in cls._entry_exact_keys(entry)
+        ]
+        if not exact:
+            return ordered_indices
+        exact.sort(key=lambda idx: str(entries[idx].get("skill_id") or ""))
+        exact_set = set(exact)
+        rest = [idx for idx in ordered_indices if idx not in exact_set]
+        # 精确命中也可能不在 RRF 截断窗口内，必须从全量 entries 拉回
+        return (exact + rest)[:limit]
 
     def cached_search(self, query: str, limit: int = 5) -> list[dict] | None:
         """Return a current final-result cache hit without scanning or ranking.
@@ -783,7 +831,11 @@ class SkillHub:
 
     def _semantic_ranks(self, index_bundle: dict,
                         normalized_query: str) -> dict[int, int]:
-        """对有缓存向量的文档按 query↔description cosine 降序给出 1-based 排名。"""
+        """对有缓存向量的文档按 query↔description cosine 降序给出 1-based 排名。
+
+        编排（BM25/RRF/缓存）不变；向量召回优先走 Milvus Lite，不可用时
+        退回原 ``corpus_matrix @ query``。
+        """
         rank_cache = index_bundle["semantic_rank_cache"]
         rank_cache_lock = index_bundle["semantic_rank_cache_lock"]
         with rank_cache_lock:
@@ -797,14 +849,23 @@ class SkillHub:
         if not present_indices:
             return {}
         query_vector = self._embed_query(normalized_query, index_bundle["fingerprint"])
-        if query_vector is None or query_vector.shape[0] != corpus_matrix.shape[1]:
+        if query_vector is None:
             return {}
-        similarities = corpus_matrix @ query_vector
-        order = np.argsort(-similarities)
-        ranks = {
-            present_indices[position]: rank
-            for rank, position in enumerate(order.tolist(), start=1)
-        }
+
+        milvus_ranks = self._semantic_ranks_milvus(
+            index_bundle, query_vector, present_indices,
+        )
+        if milvus_ranks is not None:
+            ranks = milvus_ranks
+        else:
+            if query_vector.shape[0] != corpus_matrix.shape[1]:
+                return {}
+            similarities = corpus_matrix @ query_vector
+            order = np.argsort(-similarities)
+            ranks = {
+                present_indices[position]: rank
+                for rank, position in enumerate(order.tolist(), start=1)
+            }
         with rank_cache_lock:
             cached = rank_cache.get(normalized_query)
             if cached is not None:
@@ -814,6 +875,59 @@ class SkillHub:
             while len(rank_cache) > SEARCH_RANK_CACHE_CAPACITY:
                 rank_cache.popitem(last=False)
         return ranks
+
+    def _semantic_ranks_milvus(
+        self,
+        index_bundle: dict,
+        query_vector: np.ndarray,
+        present_indices: list[int],
+    ) -> dict[int, int] | None:
+        """用 Milvus search 产出与 ``present_indices`` 对齐的 1-based 排名。"""
+        try:
+            from xskill.config import XSKILL_HOME
+            from xskill.recommend.skill_vector_store import (
+                default_vector_db_path,
+                open_skill_vector_index,
+            )
+
+            path = default_vector_db_path(XSKILL_HOME)
+            if not path.is_file():
+                return None
+            index = open_skill_vector_index(path, dim=int(query_vector.shape[0]))
+            hits = index.search(
+                [float(x) for x in query_vector.tolist()],
+                top_k=max(len(present_indices), 1),
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("milvus semantic ranks unavailable", exc_info=True)
+            return None
+        entries = index_bundle["entries"]
+        # name / skill_id / catalog_key → entry index
+        key_to_idx: dict[str, int] = {}
+        for idx in present_indices:
+            entry = entries[idx]
+            for key in (
+                entry.get("name"),
+                entry.get("skill_id"),
+                entry.get("display_name"),
+            ):
+                if key:
+                    key_to_idx[str(key)] = idx
+        ranks: dict[int, int] = {}
+        rank = 1
+        for catalog_key, _score in hits:
+            name = catalog_key.split(":", 1)[-1] if ":" in catalog_key else catalog_key
+            row = index.get(catalog_key)
+            candidates = [name]
+            if row and row.get("name"):
+                candidates.insert(0, row["name"])
+            for cand in candidates:
+                idx = key_to_idx.get(cand)
+                if idx is not None and idx not in ranks:
+                    ranks[idx] = rank
+                    rank += 1
+                    break
+        return ranks or None
 
     def _embed_query(self, normalized_query: str,
                      fingerprint: tuple) -> np.ndarray | None:
