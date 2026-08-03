@@ -93,7 +93,7 @@ class SkillHub:
     """三方 skill 扫描器 + ux 查询。``enabled=False``（缺省）时为 no-op。"""
 
     def __init__(self, *, enabled: bool, hub_dir: Path | str, embed_client,
-                 scan_ttl_seconds: float = 5.0,
+                 scan_ttl_seconds: float = 3600.0,
                  search_max_embed: int = 2, search_timeout_s: float = 3.0):
         self.enabled = bool(enabled)
         self.dir = Path(hub_dir)
@@ -153,6 +153,7 @@ class SkillHub:
         search_cfg = embedding_search_config(config)
         return cls(
             enabled=cfg["enabled"], hub_dir=cfg["dir"], embed_client=embed_client,
+            scan_ttl_seconds=cfg["scan_ttl_seconds"],
             search_max_embed=search_cfg["max_embed"],
             search_timeout_s=search_cfg["search_timeout_s"],
         )

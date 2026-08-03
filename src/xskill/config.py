@@ -262,6 +262,7 @@ recommend:
 skillhub:
   enabled: false                      # 缺省关；true 才扫描
   dir:     ~/.xskill/skillhub_skills  # 三方 skill 目录；启用时缺失会抛错（不静默跳过）
+  scan_ttl_seconds: 3600              # L1 快照 TTL；过期后下一次访问才惰性扫盘（非定时）
 
 # ===== Dashboard (the built-in web console served by `xskill serve`) =====
 dashboard:
@@ -694,7 +695,8 @@ def recommend_config(cfg: Optional[dict] = None) -> dict:
 def skillhub_config(cfg: Optional[dict] = None) -> dict:
     """读 config 的 ``skillhub`` 段，显式默认。
 
-    返回 ``{enabled: bool, dir: Path}``。``dir`` 缺省 ``~/.xskill/skillhub_skills``。
+    返回 ``{enabled: bool, dir: Path, scan_ttl_seconds: float}``。
+    ``dir`` 缺省 ``~/.xskill/skillhub_skills``；``scan_ttl_seconds`` 缺省 3600。
     目录是否存在不在此校验——由 ``SkillHub`` 初始化时按 no-fallback 抛错。
     """
     section = (cfg or {}).get("skillhub") or {}
@@ -708,7 +710,21 @@ def skillhub_config(cfg: Optional[dict] = None) -> dict:
         raise ValueError(
             f"skillhub.dir 必须是字符串路径，got {type(raw_dir).__name__}"
         )
-    return {"enabled": enabled, "dir": Path(raw_dir).expanduser()}
+    scan_ttl_seconds = section.get("scan_ttl_seconds", 3600.0)
+    if (
+        not isinstance(scan_ttl_seconds, (int, float))
+        or isinstance(scan_ttl_seconds, bool)
+        or not math.isfinite(scan_ttl_seconds)
+        or scan_ttl_seconds < 0
+    ):
+        raise ValueError(
+            f"skillhub.scan_ttl_seconds 必须是非负有限数，got {scan_ttl_seconds!r}"
+        )
+    return {
+        "enabled": enabled,
+        "dir": Path(raw_dir).expanduser(),
+        "scan_ttl_seconds": float(scan_ttl_seconds),
+    }
 
 
 def embedding_search_config(cfg: Optional[dict] = None) -> dict:
