@@ -1581,13 +1581,154 @@ async function renderContribDetail() {
   graphEl.innerHTML = g.svg;
   skillsEl.innerHTML = contribSkillChips(g.skills, g, d.skill_meta || {});
 }
+let _myUploads = [];
+let _myUploadSelected = null;
+
+function renderMyUploadsList() {
+  const box = document.getElementById('my-uploads-list');
+  const sum = document.getElementById('my-uploads-sum');
+  if (sum) sum.textContent = `${_myUploads.length} 个`;
+  if (!box) return;
+  if (!_myUploads.length) {
+    box.innerHTML = '<div class="text-[11px] text-slate-400 py-2">还没有上传过 skill</div>';
+    return;
+  }
+  box.innerHTML = _myUploads.map(s => {
+    const on = _myUploadSelected === s.name;
+    return `<div class="flex items-stretch gap-1 rounded-lg ring-1 ${on ? 'ring-teal-200 bg-teal-50' : 'ring-slate-100'}">
+      <button type="button" class="skill-jump min-w-0 flex-1 text-left px-2.5 py-2 rounded-lg hover:bg-white/60" data-skill="${esc(s.name)}" title="打开技能详情">
+        <div class="text-[12.5px] font-medium text-teal-700 truncate">${esc(s.name)}</div>
+        <div class="text-[10.5px] text-slate-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
+          <span class="src-badge src-upload">上传</span>
+          <span>${s.uses_30d ?? 0} 次 · ${s.users_30d ?? 0} 人</span>
+          <span>ux <b class="text-slate-600 tabular-nums">${s.avg_ux != null ? esc(s.avg_ux) : '—'}</b></span>
+        </div>
+      </button>
+      <button type="button" class="my-upload-usage shrink-0 px-2 text-[10.5px] text-slate-500 hover:text-teal-700 hover:bg-white/70 rounded-r-lg" data-skill="${esc(s.name)}" title="查看使用情况">使用</button>
+    </div>`;
+  }).join('');
+}
+
+async function loadMyUploadUsage(name) {
+  const box = document.getElementById('my-uploads-usage');
+  if (!box) return;
+  if (!name) {
+    box.innerHTML = '<div class="text-[11px] text-slate-400">点左侧旁的「使用」查看谁在用、评分原子</div>';
+    return;
+  }
+  _myUploadSelected = name;
+  renderMyUploadsList();
+  box.innerHTML = `<div class="text-[11px] text-slate-400">加载 ${esc(name)} 使用情况…</div>`;
+  try {
+    const d = await j('/api/v1/dashboard/my/uploads/' + encodeURIComponent(name) + '/usage');
+    if (_myUploadSelected !== name) return;
+    const s = d.summary || {};
+    const rowsHtml = (d.recent || []).map(u => {
+      const atoms = (u.atoms || []).map(a => {
+        const jump = `${esc(a.traj_id)}/${esc(a.atom_id)}`;
+        return `<button type="button" class="atom-score" data-atom-jump="${jump}" title="${esc(a.intent || a.atom_id)}">
+          <span class="font-mono font-normal text-[10px] opacity-70">${esc(String(a.atom_id || '').slice(-4))}</span>
+          <span>${a.score != null ? esc(a.score) : '—'}</span>
+        </button>`;
+      }).join(' ') || '<span class="text-[10.5px] text-slate-300">无原子明细</span>';
+      return `<div class="py-2 border-b border-slate-100 last:border-0">
+        <div class="flex items-center justify-between gap-2">
+          <span class="flex items-center gap-2 min-w-0">${avatar(u.user, 'sm')}<span class="font-medium truncate">${esc(u.user)}</span></span>
+          <span class="text-[11px] text-slate-400 shrink-0 tabular-nums">${u.uses} 次 · 均 ${u.avg_ux != null ? esc(u.avg_ux) : '—'}</span>
+        </div>
+        <div class="mt-1.5 flex flex-wrap gap-1.5">${atoms}</div>
+        <div class="mt-1 text-[10.5px] text-slate-400">${fdate(u.last_used).slice(0, 10)}</div>
+      </div>`;
+    }).join('') || '<div class="py-3 text-slate-400 text-[11px]">近 30 天暂无使用</div>';
+    box.innerHTML = `
+      <div class="flex items-baseline justify-between flex-wrap gap-2">
+        <div>
+          <button type="button" class="skill-jump text-[13px] font-semibold text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${esc(name)}">${esc(name)}</button>
+          <div class="text-[11px] text-slate-400 mt-0.5">近 ${s.days || 30} 天 · 点评分徽章进原子页</div>
+        </div>
+        <div class="flex gap-3 text-[11px] text-slate-500">
+          <span>使用 <b class="text-slate-800 tabular-nums">${s.uses ?? 0}</b></span>
+          <span>用户 <b class="text-slate-800 tabular-nums">${s.users ?? 0}</b></span>
+          <span>均分 <b class="text-slate-800 tabular-nums">${s.avg_ux != null ? esc(s.avg_ux) : '—'}</b></span>
+        </div>
+      </div>
+      <div class="mt-2 max-h-56 overflow-y-auto">${rowsHtml}</div>`;
+  } catch (err) {
+    box.innerHTML = `<div class="text-[11px] text-rose-600">${esc(err.message)}</div>`;
+  }
+}
+
+async function loadMyUploads() {
+  try {
+    const d = await j('/api/v1/dashboard/my/uploads');
+    _myUploads = d.skills || [];
+  } catch {
+    _myUploads = [];
+  }
+  if (_myUploadSelected && !_myUploads.some(s => s.name === _myUploadSelected)) {
+    _myUploadSelected = null;
+  }
+  if (!_myUploadSelected && _myUploads[0]) _myUploadSelected = _myUploads[0].name;
+  renderMyUploadsList();
+  await loadMyUploadUsage(_myUploadSelected);
+}
+
+function commitStatusPill(c) {
+  const st = c.status || 'live';
+  let label = c.status_label;
+  if (!label) {
+    if (st === 'canary') label = '灰测中';
+    else if (st === 'absorbed') {
+      const into = (c.absorbed_into && c.absorbed_into.label) || ('main@' + String(c.sha || '').slice(0, 7));
+      label = '被吸收到 ' + into;
+    } else label = '已上线';
+  }
+  const cls = st === 'canary' ? 'canary' : (st === 'absorbed' ? 'absorbed' : 'live');
+  return `<span class="commit-pill ${cls}">${esc(label)}</span>`;
+}
+
+async function loadMyCommits() {
+  const box = document.getElementById('my-commits-list');
+  const sum = document.getElementById('my-commits-sum');
+  if (!box) return;
+  box.innerHTML = '<div class="text-[11px] text-slate-400">加载中…</div>';
+  try {
+    const d = await j('/api/v1/dashboard/my/commits');
+    const list = d.commits || [];
+    if (sum) sum.textContent = `${list.length} 条`;
+    if (!list.length) {
+      box.innerHTML = '<div class="text-[11px] text-slate-400 py-2">还没有线上提交的 skill commit</div>';
+      return;
+    }
+    box.innerHTML = list.map(c => `
+      <div class="commit-row">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            <button type="button" class="skill-jump font-medium text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${esc(c.skill)}">${esc(c.skill)}</button>
+            ${commitStatusPill(c)}
+            <button type="button" class="skill-jump font-mono text-[11px] text-slate-500 hover:text-teal-700" data-skill="${esc(c.skill)}" title="打开技能详情">${esc(String(c.sha || '').slice(0, 7))}</button>
+          </div>
+          <div class="mt-1 text-[12.5px] text-slate-700 truncate" title="${esc(c.subject)}">${esc(c.subject || '—')}</div>
+          <div class="mt-1 text-[10.5px] text-slate-400">${fdate(c.ts)} · 本地改 → 线上提交</div>
+        </div>
+      </div>`).join('');
+  } catch (err) {
+    if (sum) sum.textContent = '—';
+    box.innerHTML = `<div class="text-[11px] text-rose-600">${esc(err.message)}</div>`;
+  }
+}
+
 function setContribOpen(on) {
   _contribOpen = on;
   const detail = document.getElementById('contrib-detail');
   const btn = document.getElementById('contrib-toggle');
   if (detail) detail.classList.toggle('hidden', !on);
   if (btn) btn.textContent = on ? '收起' : '展开';
-  if (on) renderContribDetail().catch(console.error);
+  if (on) {
+    renderContribDetail().catch(console.error);
+    loadMyUploads().catch(console.error);
+    loadMyCommits().catch(console.error);
+  }
 }
 
 function renderRT() {
@@ -1625,35 +1766,175 @@ function setRtOpen(on) {
   renderRT();
 }
 
+let _mySlotsAll = [];
+let _mySlotsQ = '';
+let _mySlotsQTimer = null;
+let _myBlocked = [];
+let _myTotalSlots = 0;
+let _myServerPushed = 0;
+let _myServerQueue = [];
+let _myServerPushDefault = 100;
+let _myPrefSaving = false;
+let _myPrefSaveTimer = null;
+
+function _mySlotRowHtml(s) {
+  const pinned = s.bucket === 'pinned';
+  const locked = pinned && !s.user_removable;
+  return `<div class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50">
+    ${s.rank != null ? `<span class="text-[10px] text-slate-400 tabular-nums shrink-0">#${s.rank}</span>` : ''}
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="skill-jump cursor-pointer font-medium text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${esc(s.skill_name)}">${esc(s.skill_name)}</span>
+        <span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP[s.bucket] || 'bg-slate-100 text-slate-500'}">${bucketLabel(s)}</span>
+        <span class="text-[10px] px-1.5 py-0.5 rounded ${s.side === 'staging' ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-100' : 'bg-slate-100 text-slate-500'}">${esc(s.side || 'main')}</span>
+        ${s.sha ? `<code class="text-[10px] text-slate-400">${esc(String(s.sha).slice(0, 7))}</code>` : ''}
+      </div>
+      <div class="mt-1 flex items-center gap-1.5 flex-wrap">${mySourceBadge(s, true)}</div>
+    </div>
+    <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 tabular-nums">我触发 ${s.my_triggers ?? 0} 次</span>
+    ${pinned
+      ? (locked
+        ? `<span class="shrink-0 text-[10px] text-slate-300 cursor-not-allowed" title="admin/全局 pin,不可取消">锁定</span>`
+        : `<button class="my-pref shrink-0 text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="clear">取消 pin</button>`)
+      : `<div class="shrink-0 flex gap-1.5">
+           <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="pin">pin</button>
+           <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50 text-rose-600" data-skill="${esc(s.skill_name)}" data-act="block" title="不再推送">✕</button>
+         </div>`}
+  </div>`;
+}
+
+function applyTakeNToSlots(take) {
+  const n = Math.max(0, Math.min(_myServerPushDefault, Math.floor(Number(take) || 0)));
+  _myTotalSlots = n;
+  _mySlotsAll = (_myServerQueue || []).slice(0, n).map((s, i) => ({
+    ...s, rank: i + 1, installed: true,
+  }));
+  renderMySlots();
+  return n;
+}
+
+function renderMySlots() {
+  const q = (_mySlotsQ || '').trim().toLowerCase();
+  const list = q
+    ? _mySlotsAll.filter(s => String(s.skill_name || '').toLowerCase().includes(q)
+      || String(s.display_name || '').toLowerCase().includes(q))
+    : _mySlotsAll;
+  const sum = document.getElementById('my-slot-sum');
+  if (sum) {
+    const srv = _myServerPushed || _myServerQueue.length || _myServerPushDefault;
+    sum.textContent = q
+      ? `匹配 ${list.length} / ${_mySlotsAll.length} · 已装 ${_mySlotsAll.length} / 服务器 ${srv}`
+      : `已装 ${_mySlotsAll.length} · 服务器推送 ${srv}`;
+  }
+  const box = document.getElementById('my-slots');
+  if (box) {
+    let empty = '暂无已安装 skill';
+    if (q) empty = '无匹配技能';
+    else if (_myTotalSlots === 0) empty = '安装个数为 0：服务器仍可能推送，但本机不装 harness';
+    box.innerHTML = list.map(_mySlotRowHtml).join('')
+      || `<span class="text-slate-400">${empty}</span>`;
+  }
+}
+
+function syncPushStepper(push) {
+  const n = Math.max(0, Math.min(_myServerPushDefault, Math.floor(Number(push) || 0)));
+  const hidden = document.getElementById('my-push-count');
+  const val = document.getElementById('my-push-val');
+  const unit = document.getElementById('my-push-unit');
+  const up = document.getElementById('my-push-up');
+  const down = document.getElementById('my-push-down');
+  if (hidden) hidden.value = String(n);
+  if (val) {
+    val.max = String(_myServerPushDefault);
+    val.min = '0';
+    if (document.activeElement !== val) val.value = String(n);
+  }
+  if (unit) unit.textContent = n === 0 ? '个（不安装）' : '个 SKILL';
+  if (up) up.disabled = n >= _myServerPushDefault;
+  if (down) down.disabled = n <= 0;
+  return n;
+}
+
+function commitPushValEdit() {
+  const val = document.getElementById('my-push-val');
+  let n = Number(val && val.value);
+  if (!Number.isFinite(n) || n < 0) n = 0;
+  n = syncPushStepper(n);
+  applyTakeNToSlots(n);
+  scheduleSaveMyPrefs({ take_n: n });
+}
+
+function applyMyPrefForm(st) {
+  const max = st.server_slots != null ? st.server_slots
+    : (st.max != null ? st.max : (st.server_default != null ? st.server_default : 100));
+  _myServerPushDefault = max;
+  if (st.server_pushed != null) _myServerPushed = st.server_pushed;
+  const maxLabel = document.getElementById('my-push-max-label');
+  const take = st.take_n != null ? st.take_n : (st.push_count != null ? st.push_count : max);
+  syncPushStepper(take);
+  if (maxLabel) maxLabel.textContent = `服务器 skill_slots=${max} · client 截取安装`;
+  const step = document.getElementById('my-push-step');
+  if (step) {
+    step.title = `client 从服务器推送队列截取前 N 个安装到 harness（上限=服务器 skill_slots ${max}；0=不安装）`;
+  }
+}
+
+async function saveMyPrefs(partial) {
+  const nEl = document.getElementById('my-push-count');
+  let n = Number(partial && partial.take_n != null ? partial.take_n
+    : (partial && partial.push_count != null ? partial.push_count : (nEl && nEl.value)));
+  if (!Number.isFinite(n) || n < 0) n = 0;
+  n = Math.min(_myServerPushDefault, Math.floor(n));
+  const msg = document.getElementById('my-pref-msg');
+  if (_myPrefSaving) return;
+  _myPrefSaving = true;
+  try {
+    const saved = await jpost('/api/v1/dashboard/my/settings', { take_n: n });
+    applyMyPrefForm(saved);
+    applyTakeNToSlots(n);
+    if (msg) {
+      msg.textContent = n === 0 ? '已保存：不安装' : '已保存';
+      msg.className = 'text-[11px] text-emerald-600';
+    }
+  } catch (err) {
+    if (msg) { msg.textContent = err.message || '保存失败'; msg.className = 'text-[11px] text-rose-600'; }
+  } finally {
+    _myPrefSaving = false;
+  }
+}
+
+function scheduleSaveMyPrefs(partial) {
+  clearTimeout(_myPrefSaveTimer);
+  _myPrefSaveTimer = setTimeout(() => saveMyPrefs(partial).catch(console.error), 180);
+}
+
 async function loadMy() {
   if (!IDENT) return;
-  const [m, ct, rt] = await Promise.all([
+  const [m, ct, rt, pref] = await Promise.all([
     j('/api/v1/dashboard/my/manifest'),
     j('/api/v1/dashboard/my/contributions'),
     j('/api/v1/dashboard/my/reco-trigger'),
+    j('/api/v1/dashboard/my/settings').catch(() => null),
   ]);
-  document.getElementById('my-slot-sum').textContent = `${m.slots.length}/${m.total_slots} 槽位`;
-  document.getElementById('my-slots').innerHTML = m.slots.map(s => `
-    <div class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50">
-      <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="skill-jump cursor-pointer font-medium text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${esc(s.skill_name)}">${esc(s.skill_name)}</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP[s.bucket] || 'bg-slate-100 text-slate-500'}">${bucketLabel(s)}</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded ${s.side === 'staging' ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-100' : 'bg-slate-100 text-slate-500'}">${esc(s.side || 'main')}</span>
-          ${s.sha ? `<code class="text-[10px] text-slate-400">${esc(String(s.sha).slice(0, 7))}</code>` : ''}
-        </div>
-        <div class="mt-1 flex items-center gap-1.5 flex-wrap">${mySourceBadge(s, true)}</div>
-      </div>
-      <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 tabular-nums">我触发 ${s.my_triggers ?? 0} 次</span>
-      ${s.bucket === 'pinned'
-        ? (s.user_removable ? `<button class="my-pref shrink-0 text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="clear">取消 pin</button>`
-                            : `<span class="shrink-0 text-[10px] text-slate-300 cursor-not-allowed" title="admin/全局 pin,不可取消">锁定</span>`)
-        : `<div class="shrink-0 flex gap-1.5">
-             <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="pin">pin</button>
-             <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50 text-rose-600" data-skill="${esc(s.skill_name)}" data-act="block" title="不再推送">✕</button>
-           </div>`}
-    </div>`).join('') || '<span class="text-slate-400">暂无槽位</span>';
-  document.getElementById('my-blocked').innerHTML = m.blocked.map(b => `
+  _myServerQueue = (m.server_push && m.server_push.length)
+    ? m.server_push.slice()
+    : (m.slots || []).slice();
+  _myBlocked = m.blocked || [];
+  _myServerPushed = m.server_pushed != null ? m.server_pushed : _myServerQueue.length;
+  _myServerPushDefault = m.server_slots != null ? m.server_slots : _myServerPushDefault;
+  const take = (pref && pref.take_n != null) ? pref.take_n
+    : (m.settings && m.settings.take_n != null) ? m.settings.take_n
+    : (m.total_slots != null ? m.total_slots : _myServerPushDefault);
+  const qEl = document.getElementById('my-slots-q');
+  if (qEl) _mySlotsQ = qEl.value;
+  applyMyPrefForm(pref || m.settings || {
+    take_n: take,
+    server_slots: _myServerPushDefault,
+    server_pushed: _myServerPushed,
+    max: _myServerPushDefault,
+  });
+  applyTakeNToSlots(take);
+  document.getElementById('my-blocked').innerHTML = _myBlocked.map(b => `
     <span class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-rose-50 text-rose-700 ring-1 ring-rose-200">${esc(b.skill_name)}
       <button class="my-pref font-medium" data-skill="${esc(b.skill_name)}" data-act="clear">恢复</button></span>`).join('')
     || '<span class="text-[11px] text-slate-400">无</span>';
@@ -1666,8 +1947,7 @@ async function loadMy() {
 
   _rtRows = (rt.rows || []).slice().sort((a, b) =>
     (b.triggers - a.triggers) || (b.exposures - a.exposures) || String(a.skill).localeCompare(String(b.skill)));
-  // 附上来源：从槽位 meta 不够，历史推荐行暂用 native 兜底；有 skillhub 名在 slots 里则复用
-  const slotSrc = Object.fromEntries((m.slots || []).map(s => [s.skill_name, s]));
+  const slotSrc = Object.fromEntries((_mySlotsAll || []).map(s => [s.skill_name, s]));
   _rtRows.forEach(r => {
     const s = slotSrc[r.skill];
     if (s) { r.source = s.source; r.source_path = s.source_path; r.producer = s.producer; r.producer_trajs = s.producer_trajs; }
@@ -1690,6 +1970,36 @@ document.getElementById('contrib-traj-list')?.addEventListener('click', e => {
   if (!a) return;
   _contribTraj = a.dataset.traj;
   renderContribDetail().catch(console.error);
+});
+document.getElementById('my-uploads-list')?.addEventListener('click', e => {
+  const usage = e.target.closest('.my-upload-usage');
+  if (usage) {
+    e.preventDefault();
+    e.stopPropagation();
+    loadMyUploadUsage(usage.dataset.skill).catch(console.error);
+  }
+});
+function bumpPushCount(delta) {
+  const cur = Number(document.getElementById('my-push-count')?.value) || 0;
+  const next = syncPushStepper(cur + delta);
+  applyTakeNToSlots(next);
+  scheduleSaveMyPrefs({ take_n: next });
+}
+document.getElementById('my-push-up')?.addEventListener('click', () => bumpPushCount(1));
+document.getElementById('my-push-down')?.addEventListener('click', () => bumpPushCount(-1));
+document.getElementById('my-push-val')?.addEventListener('change', () => commitPushValEdit());
+document.getElementById('my-push-val')?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    syncPushStepper(document.getElementById('my-push-count')?.value);
+    e.target.blur();
+  }
+});
+document.getElementById('my-slots-q')?.addEventListener('input', e => {
+  _mySlotsQ = e.target.value || '';
+  clearTimeout(_mySlotsQTimer);
+  _mySlotsQTimer = setTimeout(() => renderMySlots(), 80);
 });
 document.getElementById('contrib-skills')?.addEventListener('click', e => {
   const g = e.target.closest('.graph-skill');

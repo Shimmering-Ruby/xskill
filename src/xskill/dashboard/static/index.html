@@ -70,6 +70,25 @@
   .src-hub{background:#e0e7ff;color:#4338ca}
   .src-upload{background:#fef3c7;color:#b45309}
   .src-path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:#94a3b8}
+  .push-ctl{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+  .push-ctl .p,.push-ctl .u{font-size:13px;color:#334155;font-weight:500}
+  .push-step{display:inline-flex;align-items:stretch;border:1px solid #e2e8f0;border-radius:9px;background:#fff;overflow:hidden;height:34px}
+  .push-step .n{display:block;width:2.6rem;min-width:2.4rem;height:100%;padding:0 6px;border:0;outline:none;background:transparent;text-align:center;font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;color:#0f766e;line-height:34px;font-family:inherit;-moz-appearance:textfield}
+  .push-step .n::-webkit-outer-spin-button,.push-step .n::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  .push-step .n:focus{background:#f0fdfa}
+  .push-step-btns{display:flex;flex-direction:column;border-left:1px solid #e2e8f0}
+  .push-step-btns button{width:24px;height:17px;display:flex;align-items:center;justify-content:center;color:#64748b;background:#fff;border:0;cursor:pointer}
+  .push-step-btns button:hover{background:#f1f5f9;color:#0f766e}
+  .push-step-btns button:disabled{opacity:.35;cursor:default;background:#fff;color:#94a3b8}
+  .push-step-btns button+button{border-top:1px solid #e2e8f0}
+  .atom-score{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:6px;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;cursor:pointer;background:#f0fdfa;color:#0f766e;border:1px solid #ccfbf1}
+  .atom-score:hover{background:#ccfbf1}
+  .commit-row{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:10px;border:1px solid #f1f5f9}
+  .commit-row:hover{background:#f8fafc;border-color:#e2e8f0}
+  .commit-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:550;line-height:1.4;white-space:nowrap}
+  .commit-pill.live{background:#ecfdf5;color:#047857;box-shadow:inset 0 0 0 1px #a7f3d0}
+  .commit-pill.canary{background:#fffbeb;color:#b45309;box-shadow:inset 0 0 0 1px #fde68a}
+  .commit-pill.absorbed{background:#f1f5f9;color:#475569;box-shadow:inset 0 0 0 1px #e2e8f0}
 </style></head>
 <body class="bg-slate-100 text-slate-900 text-[13px] leading-normal">
 <div class="flex min-h-screen">
@@ -323,9 +342,32 @@
       <div id="my-guard" class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 text-slate-400">请先登录（左下角）。</div>
       <div id="my-body" class="hidden">
         <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
-          <div class="flex items-baseline justify-between">
-            <h2 class="font-semibold text-sm">推给我的</h2>
-            <span class="text-[11px] text-slate-400" id="my-slot-sum">—</span>
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-3 flex-wrap min-w-0">
+              <div class="push-ctl" id="my-push-step" title="client 截取服务器推送队列前 N 个并安装到 harness">
+                <span class="p">推给我</span>
+                <div class="push-step">
+                  <input type="number" class="n" id="my-push-val" value="0" min="0" max="100" step="1" inputmode="numeric" title="点击直接编辑" aria-label="安装个数">
+                  <div class="push-step-btns">
+                    <button type="button" id="my-push-up" title="增加" aria-label="增加推送个数">
+                      <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor"><path d="M5 0l5 6H0z"/></svg>
+                    </button>
+                    <button type="button" id="my-push-down" title="减少" aria-label="减少推送个数">
+                      <svg width="10" height="6" viewBox="0 0 10 6" fill="currentColor"><path d="M5 6L0 0h10z"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <span class="u" id="my-push-unit">个 SKILL</span>
+              </div>
+              <input type="hidden" id="my-push-count" value="0">
+              <span id="my-pref-msg" class="text-[11px] text-slate-400"></span>
+              <span id="my-push-max-label" class="hidden"></span>
+            </div>
+            <div class="flex items-center gap-2">
+              <input id="my-slots-q" autocomplete="off" placeholder="检索技能"
+                class="ring-1 ring-slate-200 rounded-lg px-2.5 py-1 text-[12px] outline-none focus:ring-teal-500 w-44 bg-white">
+              <span class="text-[11px] text-slate-400" id="my-slot-sum">—</span>
+            </div>
           </div>
           <div id="my-slots" class="mt-3 space-y-2"><span class="text-slate-400">加载中…</span></div>
           <div class="mt-4"><h3 class="text-[12.5px] font-medium text-slate-500">已屏蔽</h3>
@@ -368,6 +410,33 @@
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div class="mt-4 pt-3 border-t border-slate-100">
+                <div class="flex items-baseline justify-between px-0.5">
+                  <h3 class="font-semibold text-sm text-slate-700">我上传的 skill</h3>
+                  <span class="text-[11px] text-slate-400" id="my-uploads-sum">—</span>
+                </div>
+                <p class="text-[10.5px] text-slate-400 px-0.5 mt-0.5">点 skill 进详情；右侧可展开用户评分原子</p>
+                <div class="grid grid-cols-12 gap-3 mt-2">
+                  <div class="col-span-12 md:col-span-4">
+                    <div id="my-uploads-list" class="space-y-1.5 max-h-64 overflow-y-auto"></div>
+                  </div>
+                  <div class="col-span-12 md:col-span-8">
+                    <div id="my-uploads-usage" class="rounded-xl ring-1 ring-slate-100 bg-slate-50 px-3 py-3 min-h-[10rem]">
+                      <div class="text-[11px] text-slate-400">点左侧旁的「使用」查看谁在用、评分原子</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-4 pt-3 border-t border-slate-100">
+                <div class="flex items-baseline justify-between px-0.5">
+                  <h3 class="font-semibold text-sm text-slate-700">我贡献的 skill commit</h3>
+                  <span class="text-[11px] text-slate-400" id="my-commits-sum">—</span>
+                </div>
+                <p class="text-[10.5px] text-slate-400 px-0.5 mt-0.5">本地改 skill → 线上提交；状态：被吸收 / 灰测中 / 已上线</p>
+                <div id="my-commits-list" class="mt-2 space-y-1.5 max-h-72 overflow-y-auto"></div>
               </div>
             </div>
           </div>

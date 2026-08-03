@@ -177,6 +177,20 @@ class TeamClient:
             raise RuntimeError(f"sync failed: HTTP {resp.status_code} — {resp.text}")
         return SyncResponse.model_validate(resp.json())
 
+    @staticmethod
+    def apply_client_take(manifest: SyncResponse) -> SyncResponse:
+        """按 server 下发的 ``take_n`` 截取安装队列；``None``=装全部（旧 server）。
+
+        截取后的 slots 同时驱动 reconcile 与 cleanup——减小 N 时尾部会被卸掉。
+        """
+        if manifest.take_n is None:
+            return manifest
+        n = max(0, int(manifest.take_n))
+        if n >= len(manifest.slots):
+            return manifest
+        manifest.slots = list(manifest.slots[:n])
+        return manifest
+
     # ── ③ reconcile ─────────────────────────────────────────────
     def reconcile_skill_sides(self, manifest: SyncResponse) -> None:
         """对 manifest 每个 slot：拉 bundle → 对齐 side → 装到本机生态。
@@ -598,7 +612,7 @@ class TeamClient:
     def _tick(self) -> None:
         try:
             self.collect_and_upload()
-            manifest = self.sync()
+            manifest = self.apply_client_take(self.sync())
             self.reconcile_skill_sides(manifest)
             self.reconcile_downloaded_skills()
             self.push_user_edits()

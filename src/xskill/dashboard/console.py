@@ -24,12 +24,14 @@ from xskill.pipeline.registry import (
     clear_skill_pref,
     dashboard_visible_trajectory_sql,
     effective_prefs,
+    get_client_take_n,
     manifest_control_plane_snapshot,
     pooled_connection,
     prefs_for,
     purge_skill_records,
     retire_skill,
     retired_skills,
+    set_client_take_n,
     set_skill_pref,
     unretire_skill,
 )
@@ -248,6 +250,190 @@ def _emit_pin_event(db_path: Optional[Path], *, actor: str, skill: str,
         logger.debug("pin event emit skipped", exc_info=True)
 
 
+def _settings_payload(user: str, *, server_slots: int, server_pushed: int,
+                      db_path: Optional[Path]) -> dict:
+    take = get_client_take_n(user, default=server_slots, db_path=db_path)
+    take = max(0, min(int(server_slots), int(take)))
+    return {
+        "user": user,
+        "take_n": take,
+        "push_count": take,
+        "server_slots": server_slots,
+        "server_default": server_slots,
+        "max": server_slots,
+        "server_pushed": server_pushed,
+    }
+
+
+def _pack_manifest_slots(resp_slots, *, user: str, prefs: dict,
+                         skill_dir: Path, db_path: Optional[Path],
+                         registry) -> list[dict]:
+    """把 SyncResponse.slots 打成看板行（含 source / pin / my_triggers）。"""
+    trigger_by_skill = {
+        r["skill"]: int(r.get("triggers") or 0)
+        for r in reco_trigger_for_users(
+            db_path=db_path, skill_dir=Path(skill_dir),
+            registry=registry).get(user, [])
+    }
+    from xskill.events import skill_main_producers
+    native_names = []
+    slot_srcs = []
+    for s in resp_slots:
+        src = _slot_source_fields(s)
+        slot_srcs.append(src)
+        if src["source"] == "native":
+            native_names.append(s.skill_name)
+    producers = skill_main_producers(native_names, db_path=db_path)
+    slots = []
+    for i, (s, src) in enumerate(zip(resp_slots, slot_srcs), start=1):
+        meta = prefs["pin_meta"].get(s.skill_name, {})
+        row = {
+            "skill_name": s.skill_name, "side": s.side, "sha": s.sha,
+            "bucket": s.bucket,
+            "source": src["source"],
+            "source_path": src["source_path"],
+            "my_triggers": trigger_by_skill.get(s.skill_name, 0),
+            "pin_scope": meta.get("scope", ""),
+            "pin_set_by": meta.get("set_by", ""),
+            "user_removable": (
+                s.bucket != "pinned" or meta.get("set_by") == user),
+            "rank": i,
+            "installed": True,
+        }
+        if src["source"] == "native":
+            prod = producers.get(s.skill_name)
+            if prod:
+                row["producer"] = prod["user"]
+                row["producer_trajs"] = prod["traj_count"]
+        slots.append(row)
+    return slots
+
+
+def _user_upload_dirs(user: str, ctx) -> list[tuple[str, Path]]:
+    """列出 ``user_skill_hub/<owner>/`` 下我上传的 skill 目录。"""
+    hub = getattr(ctx, "skillhub", None)
+    hub_dir = Path(getattr(hub, "dir", "") or "")
+    if not hub or not getattr(hub, "enabled", False) or not hub_dir.is_dir():
+        return []
+    from xskill.team.server.client_registry import safe_dir_name
+    client_id = ctx.client_registry.find_by_user_name(user) or user
+    try:
+        owner = safe_dir_name(user, client_id)
+    except ValueError:
+        owner = client_id
+    root = hub_dir / "user_skill_hub" / owner
+    if not root.is_dir():
+        return []
+    out: list[tuple[str, Path]] = []
+    for d in sorted(root.iterdir()):
+        if d.is_dir() and not d.name.startswith(".") and (d / "SKILL.md").is_file():
+            name = d.name
+            try:
+                from xskill.skill.frontmatter import parse_strict
+                fm, _ = parse_strict(
+                    (d / "SKILL.md").read_text(encoding="utf-8", errors="replace"))
+                name = str(fm.get("name") or d.name).strip() or d.name
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            out.append((name, d))
+    return out
+
+
+def _usage_summary_for_skill(skill_names: set[str], *, skill_dir: Path,
+                             db_path: Optional[Path],
+                             days: int = 30) -> dict:
+    """按 skill 名集合聚合近 ``days`` 天使用摘要。"""
+    from datetime import datetime, timedelta, timezone
+    from xskill.dashboard.metrics import load_usage_records
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%S")
+    traj_user = _traj_user_map(db_path)
+    users: dict[str, int] = {}
+    scores: list[float] = []
+    uses = 0
+    for rec in load_usage_records(skill_dir):
+        if (rec.get("skill") or "") not in skill_names:
+            continue
+        ts = rec.get("scored_at") or ""
+        if ts and ts < cutoff:
+            continue
+        uses += 1
+        u = traj_user.get(rec.get("traj_id") or "", "") or "(unknown)"
+        users[u] = users.get(u, 0) + 1
+        if rec.get("score") is not None:
+            try:
+                scores.append(float(rec["score"]))
+            except (TypeError, ValueError):
+                pass
+    return {
+        "uses_30d": uses,
+        "users_30d": len(users),
+        "avg_ux": round(sum(scores) / len(scores), 2) if scores else None,
+    }
+
+
+def _commit_status_for_push(ev: dict, *, skill_dir: Path,
+                            later_canaries: list[dict]) -> dict:
+    """把 push_edit 事件映射为 live / canary / absorbed。"""
+    import json as _json
+    payload = ev.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = _json.loads(payload)
+        except Exception:  # pylint: disable=broad-exception-caught
+            payload = {}
+    sha = str(payload.get("ref_sha") or "")
+    branch = str(payload.get("branch") or "")
+    skill = ev.get("skill") or ""
+    side = "staging" if "staging" in branch else "main"
+    # 后续 canary 晋升 → 被吸收
+    for c in later_canaries:
+        if (c.get("skill") or "") != skill:
+            continue
+        cp = c.get("payload") or {}
+        if isinstance(cp, str):
+            try:
+                cp = _json.loads(cp)
+            except Exception:  # pylint: disable=broad-exception-caught
+                cp = {}
+        if cp.get("action") == "promoted":
+            label = f"main@{sha[:7]}" if sha else "main"
+            return {
+                "status": "absorbed",
+                "status_label": f"被吸收到 {label}",
+                "absorbed_into": {"side": "main", "label": label},
+                "side": "main",
+                "sha": sha,
+                "subject": f"本地改后提交（{branch or 'branch'}）",
+            }
+    # 仓内仍有 staging / 分支名含 staging → 灰测中
+    repo = Path(skill_dir) / skill if skill else None
+    has_staging = False
+    if repo and (repo / ".git").is_dir():
+        try:
+            from xskill.dashboard.metrics import _branches
+            has_staging = "staging" in _branches(repo)
+        except Exception:  # pylint: disable=broad-exception-caught
+            has_staging = False
+    if side == "staging" or has_staging:
+        return {
+            "status": "canary",
+            "status_label": "灰测中",
+            "absorbed_into": None,
+            "side": "staging",
+            "sha": sha,
+            "subject": f"本地改后提交灰测（{branch or 'staging'}）",
+        }
+    return {
+        "status": "live",
+        "status_label": "已上线",
+        "absorbed_into": None,
+        "side": "main",
+        "sha": sha,
+        "subject": f"本地改后提交（{branch or 'main'}）",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 请求模型
 # ---------------------------------------------------------------------------
@@ -258,6 +444,12 @@ PrefAction = Literal["pin", "block", "clear"]
 class MyPrefRequest(BaseModel):
     skill_name: str
     action: PrefAction
+
+
+class MySettingsRequest(BaseModel):
+    """client 截取安装数。``push_count`` 为旧字段别名。"""
+    take_n: Optional[int] = None
+    push_count: Optional[int] = None
 
 
 class AdminPrefRequest(BaseModel):
@@ -349,7 +541,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
 
     @router.get("/my/manifest")
     def my_manifest(ident=Depends(require_user)):
-        """登录用户视角的 slot 清单 + 已屏蔽组。槽位 chip 标注注入类型。"""
+        """登录用户视角：服务器推送队列 + client take_n 截取后的已安装列表。"""
         ctx = _require_team_ctx()
         from xskill.team.server.api import live_manifest_tuning
         from xskill.team.server.skill_manifest import build_manifest
@@ -368,49 +560,78 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             prefs=prefs,
             retired=retired_skills(db_path=db_path),
         )
-        slots = []
-        trigger_by_skill = {
-            r["skill"]: int(r.get("triggers") or 0)
-            for r in reco_trigger_for_users(
-                db_path=db_path, skill_dir=Path(ctx.skill_dir),
-                registry=ctx.client_registry).get(user, [])
-        }
-        from xskill.events import skill_main_producers
-        native_names = []
-        slot_srcs = []
-        for s in resp.slots:
-            src = _slot_source_fields(s)
-            slot_srcs.append(src)
-            if src["source"] == "native":
-                native_names.append(s.skill_name)
-        producers = skill_main_producers(native_names, db_path=db_path)
-        for s, src in zip(resp.slots, slot_srcs):
-            meta = prefs["pin_meta"].get(s.skill_name, {})
-            row = {
-                "skill_name": s.skill_name, "side": s.side, "sha": s.sha,
-                "bucket": s.bucket,
-                "source": src["source"],
-                "source_path": src["source_path"],
-                "my_triggers": trigger_by_skill.get(s.skill_name, 0),
-                # pinned 细分:自己 pin / admin 代 pin / 全局 pin——前端置灰依据
-                "pin_scope": meta.get("scope", ""),
-                "pin_set_by": meta.get("set_by", ""),
-                "user_removable": (
-                    s.bucket != "pinned" or meta.get("set_by") == user),
-            }
-            if src["source"] == "native":
-                prod = producers.get(s.skill_name)
-                if prod:
-                    row["producer"] = prod["user"]
-                    row["producer_trajs"] = prod["traj_count"]
-            slots.append(row)
+        server_push = _pack_manifest_slots(
+            resp.slots, user=user, prefs=prefs, skill_dir=ctx.skill_dir,
+            db_path=db_path, registry=ctx.client_registry)
+        take_n = get_client_take_n(user, default=total_slots, db_path=db_path)
+        take_n = max(0, min(int(total_slots), int(take_n)))
+        for i, row in enumerate(server_push):
+            row["installed"] = i < take_n
+            row["rank"] = i + 1
+        slots = [dict(r, installed=True) for r in server_push[:take_n]]
         blocked_rows = [r for r in prefs_for(user, db_path=db_path)
                         if r["pref"] == "blocked"]
-        return {"user": user, "slots": slots,
-                "blocked": [{"skill_name": r["skill_name"],
-                             "set_by": r["set_by"], "ts": r["ts"]}
-                            for r in blocked_rows],
-                "total_slots": total_slots}
+        settings = _settings_payload(
+            user, server_slots=total_slots, server_pushed=len(server_push),
+            db_path=db_path)
+        return {
+            "user": user,
+            "slots": slots,
+            "server_push": server_push,
+            "blocked": [{"skill_name": r["skill_name"],
+                         "set_by": r["set_by"], "ts": r["ts"]}
+                        for r in blocked_rows],
+            "total_slots": take_n,
+            "server_slots": total_slots,
+            "server_pushed": len(server_push),
+            "installed": len(slots),
+            "settings": settings,
+        }
+
+    @router.get("/my/settings")
+    def my_settings_get(ident=Depends(require_user)):
+        """读 client take_n（截取安装数）。"""
+        ctx = _require_team_ctx()
+        from xskill.team.server.api import live_manifest_tuning
+        from xskill.team.server.skill_manifest import build_manifest
+        user = ident["user"]
+        total_slots, ranked_slots, probability = live_manifest_tuning()
+        client_id = ctx.client_registry.find_by_user_name(user) or user
+        prefs = effective_prefs(user, db_path=db_path)
+        resp = build_manifest(
+            client_id=client_id, skill_dir=ctx.skill_dir,
+            probability=probability, ranked_slots=ranked_slots,
+            total_slots=total_slots, traj_root=ctx.traj_root,
+            prefs=prefs, retired=retired_skills(db_path=db_path),
+        )
+        return _settings_payload(
+            user, server_slots=total_slots, server_pushed=len(resp.slots),
+            db_path=db_path)
+
+    @router.post("/my/settings")
+    def my_settings_set(req: MySettingsRequest, ident=Depends(require_user)):
+        """写 client take_n；夹取到 ``[0, skill_slots]``。"""
+        _require_team_ctx()
+        user = ident["user"]
+        raw = req.take_n if req.take_n is not None else req.push_count
+        if raw is None:
+            raise HTTPException(status_code=400, detail="缺少 take_n")
+        try:
+            n = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="安装个数须为 ≥0 的整数") from exc
+        if n < 0:
+            raise HTTPException(status_code=400, detail="安装个数须为 ≥0 的整数")
+        max_n = _total_slots()
+        take = set_client_take_n(user, n, max_n=max_n, db_path=db_path)
+        return {
+            "ok": True,
+            **_settings_payload(
+                user, server_slots=max_n, server_pushed=max_n, db_path=db_path),
+            "take_n": take,
+            "push_count": take,
+        }
 
     @router.post("/my/prefs")
     def my_prefs(req: MyPrefRequest, ident=Depends(require_user)):
@@ -446,6 +667,134 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             _emit_pin_event(db_path, actor=user, skill=req.skill_name,
                             target_user=user, scope="user")
         return {"ok": True}
+
+    @router.get("/my/uploads")
+    def my_uploads(ident=Depends(require_user)):
+        """我上传到 SkillHub 的 skill 列表 + 近 30 天使用摘要。"""
+        ctx = _require_team_ctx()
+        user = ident["user"]
+        skills = []
+        for name, path in _user_upload_dirs(user, ctx):
+            aliases = {name, path.name}
+            summary = _usage_summary_for_skill(
+                aliases, skill_dir=Path(ctx.skill_dir), db_path=db_path)
+            uploaded_at = None
+            try:
+                from datetime import datetime, timezone
+                uploaded_at = datetime.fromtimestamp(
+                    path.stat().st_mtime, tz=timezone.utc,
+                ).strftime("%Y-%m-%dT%H:%M:%S")
+            except OSError:
+                pass
+            skills.append({
+                "name": name,
+                "dir_name": path.name,
+                "uploaded_at": uploaded_at,
+                **summary,
+            })
+        return {"user": user, "skills": skills, "total": len(skills)}
+
+    @router.get("/my/uploads/{name}/usage")
+    def my_upload_usage(name: str, ident=Depends(require_user)):
+        """某上传 skill 的使用明细：用户 × 评分原子。"""
+        ctx = _require_team_ctx()
+        from xskill.dashboard.metrics import load_usage_records
+        user = ident["user"]
+        uploads = {n: p for n, p in _user_upload_dirs(user, ctx)}
+        path = uploads.get(name)
+        if path is None:
+            # 也允许用目录名查
+            for n, p in uploads.items():
+                if p.name == name:
+                    path = p
+                    name = n
+                    break
+        if path is None:
+            raise HTTPException(status_code=404, detail="not found")
+        aliases = {name, path.name}
+        traj_user = _traj_user_map(db_path)
+        by_user: dict[str, dict] = {}
+        for rec in load_usage_records(Path(ctx.skill_dir)):
+            if (rec.get("skill") or "") not in aliases:
+                continue
+            u = traj_user.get(rec.get("traj_id") or "", "") or "(unknown)"
+            entry = by_user.setdefault(
+                u, {"user": u, "uses": 0, "scores": [], "atoms": [],
+                    "last_used": ""})
+            entry["uses"] += 1
+            ts = rec.get("scored_at") or ""
+            if ts > (entry["last_used"] or ""):
+                entry["last_used"] = ts
+            score = rec.get("score")
+            if score is not None:
+                try:
+                    entry["scores"].append(float(score))
+                except (TypeError, ValueError):
+                    pass
+            if rec.get("atom_id"):
+                entry["atoms"].append({
+                    "atom_id": rec.get("atom_id"),
+                    "traj_id": rec.get("traj_id") or "",
+                    "score": rec.get("score"),
+                    "intent": "",
+                    "scored_at": ts,
+                })
+        recent = []
+        for e in by_user.values():
+            scores = e.pop("scores")
+            e["avg_ux"] = round(sum(scores) / len(scores), 2) if scores else None
+            e["atoms"].sort(key=lambda a: a.get("scored_at") or "", reverse=True)
+            recent.append(e)
+        recent.sort(key=lambda r: r["uses"], reverse=True)
+        uses = sum(r["uses"] for r in recent)
+        avg = None
+        if uses:
+            weighted = [r["avg_ux"] for r in recent
+                        if r["avg_ux"] is not None]
+            if weighted:
+                # 近似：用户均分再平均（与 mock 展示一致即可）
+                avg = round(sum(weighted) / len(weighted), 2)
+        return {
+            "skill": name,
+            "summary": {"uses": uses, "users": len(recent),
+                        "avg_ux": avg, "days": 30},
+            "recent": recent,
+        }
+
+    @router.get("/my/commits")
+    def my_commits(ident=Depends(require_user)):
+        """我贡献的 skill commit（本地改 → 线上 push_edit）及状态 pill。"""
+        ctx = _require_team_ctx()
+        user = ident["user"]
+        with pooled_connection(db_path) as conn:
+            push_rows = [dict(r) for r in conn.execute(
+                "SELECT id, ts, actor, skill, payload FROM events"
+                " WHERE kind='push_edit' AND actor=?"
+                " ORDER BY id DESC LIMIT 100",
+                (user,),
+            ).fetchall()]
+            canary_rows = [dict(r) for r in conn.execute(
+                "SELECT id, ts, skill, payload FROM events"
+                " WHERE kind='canary' ORDER BY id DESC LIMIT 500",
+            ).fetchall()]
+        import json as _json
+        for row in push_rows + canary_rows:
+            try:
+                row["payload"] = _json.loads(row.get("payload") or "{}")
+            except Exception:  # pylint: disable=broad-exception-caught
+                row["payload"] = {}
+        commits = []
+        for ev in push_rows:
+            later = [c for c in canary_rows if c["id"] > ev["id"]]
+            st = _commit_status_for_push(
+                ev, skill_dir=Path(ctx.skill_dir), later_canaries=later)
+            commits.append({
+                "skill": ev.get("skill") or "",
+                "ts": ev.get("ts") or "",
+                "event_id": ev.get("id"),
+                **st,
+            })
+        return {"user": user, "commits": commits, "total": len(commits)}
 
     @router.get("/my/contributions")
     def my_contributions(ident=Depends(require_user)):
