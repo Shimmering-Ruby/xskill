@@ -887,13 +887,22 @@ class SkillHub:
             from xskill.config import XSKILL_HOME
             from xskill.recommend.skill_vector_store import (
                 default_vector_db_path,
-                open_skill_vector_index,
+                pymilvus_available,
+                try_open_milvus_lite_index,
+                warn_milvus_unavailable_hourly,
             )
 
+            if not pymilvus_available():
+                warn_milvus_unavailable_hourly("pymilvus not installed")
+                return None
             path = default_vector_db_path(XSKILL_HOME)
             if not path.is_file():
                 return None
-            index = open_skill_vector_index(path, dim=int(query_vector.shape[0]))
+            index = try_open_milvus_lite_index(
+                path, dim=int(query_vector.shape[0]),
+            )
+            if index is None:
+                return None
             hits = index.search(
                 [float(x) for x in query_vector.tolist()],
                 top_k=max(len(present_indices), 1),
