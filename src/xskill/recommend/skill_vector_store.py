@@ -1,12 +1,17 @@
-"""技能向量索引：Milvus Lite（嵌入式）+ 与 skills_catalog 最终一致。
+"""技能向量索引：Milvus Lite（嵌入式，可选）+ 与 skills_catalog 最终一致。
 
 业务真相在 SQLite ``skills_catalog``；本模块只维护检索索引。
 主键与 ``catalog_key`` 对齐；``content_sha`` 变了才 re-embed/upsert。
+
+``pymilvus`` 为 optional extra（``xskill[milvus]``）。未安装时：
+- 检索侧走引擎/skillhub 的 numpy 全库乘 fallback；
+- 重活进程用内存索引对账（不落 ``skill_vectors.db``），并每小时 warn 一次。
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Protocol, Sequence
 
@@ -14,6 +19,11 @@ logger = logging.getLogger("xskill.skill_vector_store")
 
 COLLECTION = "skill_vectors"
 DEFAULT_DIM = 8  # fake/tests；生产由首条真实向量决定或配置
+
+# 未装 / 打不开 Milvus 时的节流警告（写进 xskill.log）
+_MILVUS_WARN_INTERVAL_S = 3600.0
+_milvus_last_warn_mono = 0.0
+_pymilvus_import_ok: Optional[bool] = None
 
 
 def content_sha_for_text(text: str) -> str:
@@ -302,13 +312,71 @@ def default_vector_db_path(xskill_home: Path | None = None) -> Path:
     return home.expanduser().resolve() / "skill_vectors.db"
 
 
+def pymilvus_available() -> bool:
+    """``pymilvus`` 是否可 import（不探测 Lite 运行时是否能开库）。"""
+    global _pymilvus_import_ok
+    if _pymilvus_import_ok is not None:
+        return _pymilvus_import_ok
+    try:
+        import pymilvus  # noqa: F401
+    except ImportError:
+        _pymilvus_import_ok = False
+    else:
+        _pymilvus_import_ok = True
+    return _pymilvus_import_ok
+
+
+def warn_milvus_unavailable_hourly(reason: str) -> None:
+    """服务器侧无 Milvus 时每小时最多一条 WARNING（进 ``xskill.log``）。"""
+    global _milvus_last_warn_mono
+    now = time.monotonic()
+    if (now - _milvus_last_warn_mono) < _MILVUS_WARN_INTERVAL_S:
+        return
+    _milvus_last_warn_mono = now
+    logger.warning(
+        "Milvus Lite unavailable (%s); skill vector search uses slower "
+        "numpy/in-memory fallback and may hurt recommend/search performance "
+        "on large catalogs. Prefer: pip install 'xskill[milvus]' "
+        "(or pip install 'pymilvus>=2.4.2').",
+        reason,
+    )
+
+
+def try_open_milvus_lite_index(
+    db_path: Path | str | None = None,
+    *,
+    dim: int = DEFAULT_DIM,
+) -> Optional[SkillVectorIndex]:
+    """仅打开真正的 Milvus Lite；不可用返回 ``None``（并可能 hourly warn）。"""
+    if not pymilvus_available():
+        warn_milvus_unavailable_hourly("pymilvus not installed")
+        return None
+    path = Path(db_path) if db_path else default_vector_db_path()
+    try:
+        return MilvusLiteSkillVectorIndex(path, dim=dim)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        warn_milvus_unavailable_hourly(
+            f"open failed: {type(exc).__name__}: {exc}",
+        )
+        logger.debug("MilvusLiteSkillVectorIndex open failed", exc_info=True)
+        return None
+
+
 def open_skill_vector_index(
     db_path: Path | str | None = None,
     *,
     dim: int = DEFAULT_DIM,
     memory: bool = False,
 ) -> SkillVectorIndex:
+    """打开向量索引。
+
+    - ``memory=True``：测试用纯内存。
+    - 默认尝试 Milvus Lite；``pymilvus`` 未装或开库失败 → 内存索引 + 节流 warn
+      （不落盘；引擎检索侧另有 numpy fallback）。
+    """
     if memory:
         return MemorySkillVectorIndex(dim=dim)
-    path = Path(db_path) if db_path else default_vector_db_path()
-    return MilvusLiteSkillVectorIndex(path, dim=dim)
+    milvus = try_open_milvus_lite_index(db_path, dim=dim)
+    if milvus is not None:
+        return milvus
+    return MemorySkillVectorIndex(dim=dim)

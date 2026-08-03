@@ -210,6 +210,7 @@ def run_recommend_heavy_once(
         dim = DEFAULT_DIM
     else:
         dim = len(embed_fn("dimension probe"))
+    # open_skill_vector_index：无 pymilvus 时退回内存索引并 hourly warn
     index = memory_index or open_skill_vector_index(vdb, dim=dim)
     vec_stats = run_vector_reconcile(
         db_path=registry,

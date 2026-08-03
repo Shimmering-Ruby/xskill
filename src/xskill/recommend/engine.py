@@ -703,13 +703,20 @@ class SkillRecommendEngine:
             from xskill.config import XSKILL_HOME
             from xskill.recommend.skill_vector_store import (
                 default_vector_db_path,
-                open_skill_vector_index,
+                pymilvus_available,
+                try_open_milvus_lite_index,
+                warn_milvus_unavailable_hourly,
             )
 
+            if not pymilvus_available():
+                warn_milvus_unavailable_hourly("pymilvus not installed")
+                return None
             path = default_vector_db_path(XSKILL_HOME)
             if not path.is_file():
                 return None
-            index = open_skill_vector_index(path, dim=len(query_vec))
+            index = try_open_milvus_lite_index(path, dim=len(query_vec))
+            if index is None:
+                return None
             hits = index.search(list(map(float, query_vec)), top_k=top_k)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.debug("milvus relevance_search unavailable", exc_info=True)
