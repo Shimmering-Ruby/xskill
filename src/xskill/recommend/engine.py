@@ -682,13 +682,47 @@ class SkillRecommendEngine:
 
     # ── 5.6 find_friend ──────────────────────────────────────────
     def relevance_search(self, query_vec, top_k: int = 5) -> list[tuple[str, bool]]:
-        """在合并检索池（可分发 + 三方 skill）做 KNN，返回 ``(name, is_skillhub)``。"""
+        """在合并检索池（可分发 + 三方 skill）做 KNN，返回 ``(name, is_skillhub)``。
+
+        优先读重活进程维护的 Milvus Lite 索引；不可用时退回原 numpy 全库乘。
+        """
+        milvus_hits = self._relevance_search_milvus(query_vec, top_k=top_k)
+        if milvus_hits is not None:
+            return milvus_hits
         names, embs, is_hub = self._combined_relevance()
         if embs.shape[0] == 0:
             return []
         sims = embs @ np.asarray(query_vec, dtype=float)
         order = np.argsort(-sims)[:top_k]
         return [(names[i], is_hub.get(names[i], False)) for i in order]
+
+    def _relevance_search_milvus(
+        self, query_vec, *, top_k: int,
+    ) -> Optional[list[tuple[str, bool]]]:
+        try:
+            from xskill.config import XSKILL_HOME
+            from xskill.recommend.skill_vector_store import (
+                default_vector_db_path,
+                open_skill_vector_index,
+            )
+
+            path = default_vector_db_path(XSKILL_HOME)
+            if not path.is_file():
+                return None
+            index = open_skill_vector_index(path, dim=len(query_vec))
+            hits = index.search(list(map(float, query_vec)), top_k=top_k)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug("milvus relevance_search unavailable", exc_info=True)
+            return None
+        out: list[tuple[str, bool]] = []
+        for catalog_key, _score in hits:
+            is_hub = catalog_key.startswith("skillhub:")
+            name = catalog_key.split(":", 1)[-1] if ":" in catalog_key else catalog_key
+            row = index.get(catalog_key)
+            if row and row.get("name"):
+                name = row["name"]
+            out.append((name, is_hub))
+        return out
 
     def load_client_user(
         self, user_id: str, *, include_recommended: bool = True,
