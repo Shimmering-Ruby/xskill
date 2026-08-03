@@ -560,6 +560,11 @@ class SkillHub:
         ordered_indices = self._rank_score_groups(
             score_groups, entries, limit,
         )
+        # 精确命中（display_name / skill_id / 去 hash 的 id / 目录名）置顶，
+        # 避免长名称里的热词（如 bootstrap）被 RRF 挤出 TopN。
+        ordered_indices = self._promote_exact_matches(
+            normalized_query, entries, ordered_indices, limit,
+        )
         results: list[dict] = []
         for entry_index in ordered_indices:
             result_entry = dict(entries[entry_index])
@@ -569,6 +574,48 @@ class SkillHub:
             results.append(result_entry)
         self._cache_search_results(index_bundle, result_cache_key, results)
         return results
+
+    @staticmethod
+    def _entry_exact_keys(entry: dict) -> set[str]:
+        """可与规范化 query 精确相等的键集合。"""
+        keys: set[str] = set()
+        display = str(entry.get("display_name") or "").strip().lower()
+        if display:
+            keys.add(display)
+        skill_id = str(entry.get("skill_id") or entry.get("name") or "").strip().lower()
+        if skill_id:
+            keys.add(skill_id)
+            stem = skill_id.split("@", 1)[0].strip()
+            if stem:
+                keys.add(stem)
+        source_path = str(entry.get("source_path") or "").strip().lower()
+        if source_path:
+            keys.add(source_path)
+            keys.add(Path(source_path).name)
+        return keys
+
+    @classmethod
+    def _promote_exact_matches(
+        cls,
+        normalized_query: str,
+        entries: list[dict],
+        ordered_indices: list[int],
+        limit: int,
+    ) -> list[int]:
+        """精确命中插到最前；多条精确命中时按 skill_id 稳定排序。"""
+        if not normalized_query or limit <= 0:
+            return ordered_indices
+        exact = [
+            idx for idx, entry in enumerate(entries)
+            if normalized_query in cls._entry_exact_keys(entry)
+        ]
+        if not exact:
+            return ordered_indices
+        exact.sort(key=lambda idx: str(entries[idx].get("skill_id") or ""))
+        exact_set = set(exact)
+        rest = [idx for idx in ordered_indices if idx not in exact_set]
+        # 精确命中也可能不在 RRF 截断窗口内，必须从全量 entries 拉回
+        return (exact + rest)[:limit]
 
     def cached_search(self, query: str, limit: int = 5) -> list[dict] | None:
         """Return a current final-result cache hit without scanning or ranking.
