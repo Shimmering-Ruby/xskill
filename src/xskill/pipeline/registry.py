@@ -206,6 +206,8 @@ CREATE TABLE IF NOT EXISTS skill_prefs (
     skill_name TEXT NOT NULL,
     pref       TEXT NOT NULL CHECK(pref IN ('pinned','blocked')),
     set_by     TEXT DEFAULT '',
+    -- pin 时可钉 side（main|staging）；空串=走 pick_side / resolve_side
+    side       TEXT NOT NULL DEFAULT '',
     ts         TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_key, skill_name)
 );
@@ -568,6 +570,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE skills_catalog ADD COLUMN content_sha TEXT NOT NULL DEFAULT ''"
         )
 
+    # skill_prefs.side：pin 时可钉灰度侧（空=自动分流）
+    cur = conn.execute("PRAGMA table_info(skill_prefs)")
+    pref_cols = {row[1] for row in cur.fetchall()}
+    if "side" not in pref_cols:
+        conn.execute(
+            "ALTER TABLE skill_prefs ADD COLUMN side TEXT NOT NULL DEFAULT ''"
+        )
+
     # Backfill status from has_meta/has_embedding —— **只在首次补 status 列时跑一次**。
     # 以前每次 get_connection 都跑这条,会把任何 status='discovered' 的**活行**
     # （rebuild 重置 / error 重试 / 僵尸清理刚翻回的）在下次连接时打回 'indexed'，
@@ -653,6 +663,7 @@ class PinQuotaExceeded(ValueError):
 
 def set_skill_pref(*, user_key: str, skill_name: str, pref: str, set_by: str,
                    max_pinned: Optional[int] = None,
+                   side: Optional[str] = None,
                    db_path: Optional[Path] = None) -> None:
     """写入/覆盖一条偏好(pinned|blocked)。
 
@@ -660,23 +671,48 @@ def set_skill_pref(*, user_key: str, skill_name: str, pref: str, set_by: str,
     pinned + 全局 pinned 合计(去重,含本次)不得超过 max_pinned,超量抛
     ``PinQuotaExceeded``,超量状态根本不可能入库;全局 pin 则对**全员**
     逐一校验合计。sync 读路径永远不需要处理该错误。
+
+    ``side``: 仅 pin 有意义；``None``=更新时保留原 side / 新建为空；
+    ``''``=清除 side 覆盖；``main``|``staging``=钉到该侧。blocked 写入时
+    强制清空 side。
     """
     if pref not in ("pinned", "blocked"):
         raise ValueError(f"pref 必须是 pinned|blocked,得到 {pref!r}")
     if not user_key or not skill_name:
         raise ValueError("user_key/skill_name 不能为空")
+    if side is not None and side not in ("", "main", "staging"):
+        raise ValueError(f"side 必须是 main|staging|空串,得到 {side!r}")
     with pooled_connection(db_path) as conn:
         if pref == "pinned" and max_pinned is not None:
             _check_pin_quota(conn, user_key=user_key, skill_name=skill_name,
                              max_pinned=max_pinned)
-        conn.execute(
-            "INSERT INTO skill_prefs(user_key,skill_name,pref,set_by)"
-            " VALUES(?,?,?,?)"
-            " ON CONFLICT(user_key,skill_name)"
-            " DO UPDATE SET pref=excluded.pref, set_by=excluded.set_by,"
-            "               ts=datetime('now')",
-            (user_key, skill_name, pref, set_by),
-        )
+        if pref == "blocked":
+            side_val = ""
+            update_side = True
+        elif side is None:
+            side_val = ""
+            update_side = False
+        else:
+            side_val = side
+            update_side = True
+        if update_side:
+            conn.execute(
+                "INSERT INTO skill_prefs(user_key,skill_name,pref,set_by,side)"
+                " VALUES(?,?,?,?,?)"
+                " ON CONFLICT(user_key,skill_name)"
+                " DO UPDATE SET pref=excluded.pref, set_by=excluded.set_by,"
+                "               side=excluded.side, ts=datetime('now')",
+                (user_key, skill_name, pref, set_by, side_val),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO skill_prefs(user_key,skill_name,pref,set_by,side)"
+                " VALUES(?,?,?,?,?)"
+                " ON CONFLICT(user_key,skill_name)"
+                " DO UPDATE SET pref=excluded.pref, set_by=excluded.set_by,"
+                "               ts=datetime('now')",
+                (user_key, skill_name, pref, set_by, side_val),
+            )
         conn.commit()
     try:
         from xskill.recommend.recommend_store import mark_recommend_dirty
@@ -684,6 +720,29 @@ def set_skill_pref(*, user_key: str, skill_name: str, pref: str, set_by: str,
         mark_recommend_dirty(user_key, reason=f"pref_{pref}", db_path=db_path)
     except Exception:  # pylint: disable=broad-exception-caught
         logger.debug("mark recommend dirty after pref failed", exc_info=True)
+
+
+def clear_skill_pref_side(*, user_key: str, skill_name: str,
+                          db_path: Optional[Path] = None) -> bool:
+    """清除 pin 的 side 覆盖（保留 pin）。无 pinned 行 → False。"""
+    with pooled_connection(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE skill_prefs SET side='', ts=datetime('now')"
+            " WHERE user_key=? AND skill_name=? AND pref='pinned'",
+            (user_key, skill_name),
+        )
+        conn.commit()
+        cleared = cur.rowcount > 0
+    if cleared:
+        try:
+            from xskill.recommend.recommend_store import mark_recommend_dirty
+
+            mark_recommend_dirty(
+                user_key, reason="pref_side_cleared", db_path=db_path)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.debug(
+                "mark recommend dirty after clear side failed", exc_info=True)
+    return cleared
 
 
 def _check_pin_quota(conn, *, user_key: str, skill_name: str,
@@ -740,7 +799,7 @@ def prefs_for(user_key: str, *, db_path: Optional[Path] = None) -> list[dict]:
     """某 user_key(或 '*global*')的全部偏好行。"""
     with pooled_connection(db_path) as conn:
         return [dict(r) for r in conn.execute(
-            "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
+            "SELECT user_key, skill_name, pref, set_by, side, ts FROM skill_prefs"
             " WHERE user_key=? ORDER BY ts",
             (user_key,),
         ).fetchall()]
@@ -781,15 +840,17 @@ def set_client_take_n(user_key: str, take_n: int, *, max_n: int,
 
 def effective_prefs(user_key: str, *, db_path: Optional[Path] = None) -> dict:
     """manifest 注入用的合并视图:{'pinned': [...有序...], 'blocked': set,
-    'pin_meta': {skill: set_by}}。
+    'pin_meta': {skill: set_by}, 'side': {skill: main|staging}}。
 
     合并规则:全局行先于用户行(admin 全局 pin 排最前);同一 skill 用户行
     与全局行冲突时,**blocked 优先**(任何一侧屏蔽即不分发——全局屏蔽用户
     不能自行恢复;用户自己屏蔽的全局推荐仅对自己生效)。
+    side 覆盖同序合并：后写的用户行覆盖全局；用户 pin 且 side 为空则清除
+    该 skill 的 side 覆盖。
     """
     with pooled_connection(db_path) as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
+            "SELECT user_key, skill_name, pref, set_by, side, ts FROM skill_prefs"
             " WHERE user_key IN (?, ?) ORDER BY CASE user_key WHEN ? THEN 0"
             " ELSE 1 END, ts",
             (GLOBAL_PREF_KEY, user_key, GLOBAL_PREF_KEY),
@@ -797,15 +858,25 @@ def effective_prefs(user_key: str, *, db_path: Optional[Path] = None) -> dict:
     blocked = {r["skill_name"] for r in rows if r["pref"] == "blocked"}
     pinned: list[str] = []
     pin_meta: dict = {}
+    side_map: dict[str, str] = {}
     for r in rows:
-        if r["pref"] == "pinned" and r["skill_name"] not in blocked \
-                and r["skill_name"] not in pinned:
-            pinned.append(r["skill_name"])
-            pin_meta[r["skill_name"]] = {
+        name = r["skill_name"]
+        if r["pref"] == "pinned" and name not in blocked:
+            if name not in pinned:
+                pinned.append(name)
+            pin_meta[name] = {
                 "set_by": r["set_by"],
                 "scope": "global" if r["user_key"] == GLOBAL_PREF_KEY else "user",
             }
-    return {"pinned": pinned, "blocked": blocked, "pin_meta": pin_meta}
+            ov = (r.get("side") or "").strip()
+            if ov in ("main", "staging"):
+                side_map[name] = ov
+            elif r["user_key"] != GLOBAL_PREF_KEY:
+                side_map.pop(name, None)
+    return {
+        "pinned": pinned, "blocked": blocked,
+        "pin_meta": pin_meta, "side": side_map,
+    }
 
 
 def manifest_control_plane_snapshot(
@@ -814,7 +885,7 @@ def manifest_control_plane_snapshot(
     """一次查询取得 manifest 所需的全部偏好和下线状态。"""
     with pooled_connection(db_path) as conn:
         rows = [dict(row) for row in conn.execute(
-            "SELECT user_key, skill_name, pref, set_by, ts FROM skill_prefs"
+            "SELECT user_key, skill_name, pref, set_by, side, ts FROM skill_prefs"
             " ORDER BY CASE user_key WHEN ? THEN 0 ELSE 1 END, ts",
             (GLOBAL_PREF_KEY,),
         ).fetchall()]
