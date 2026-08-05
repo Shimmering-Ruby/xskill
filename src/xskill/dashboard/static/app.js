@@ -1520,11 +1520,10 @@ function route() {
     openSkill(parts[1]).catch(console.error);
     return;
   }
-  // #174：普通用户默认进「我的」；admin 保持总览
+  // #174：仅「无 hash」时普通用户默认进「我的」；显式 #overview / 点总览应可打开，不得再劫持
   let pg = parts[0] || '';
-  if (!pg || pg === 'overview') {
-    if (IDENT && IDENT.role !== 'admin') pg = 'my';
-    else pg = pg || 'overview';
+  if (!pg) {
+    pg = (IDENT && IDENT.role !== 'admin') ? 'my' : 'overview';
   }
   showPage(pg);
 }
@@ -1662,10 +1661,10 @@ async function initIdent() {
   applyIdent();
   if (IDENT) { loadMy().catch(console.error); initEvents(); }
   if (IDENT && IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
-  // 登录后若仍停在空/#overview，普通用户跳到「我的」
+  // 登录后若仍无落地 hash，普通用户默认进「我的」（不抢显式 #overview）
   if (IDENT && IDENT.role !== 'admin') {
     const h = (location.hash || '').replace(/^#/, '');
-    if (!h || h === 'overview') location.hash = '#my';
+    if (!h) location.hash = '#my';
   }
 }
 
