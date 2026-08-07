@@ -353,6 +353,10 @@ class TestEngineSkillhubPool:
             mean_tensor=q,
             used_skills=[],
         )
+        entry = eng.skillhub.index()[0]
+        # /sync 只读预计算推荐表（重活进程写入），不再请求内 KNN。
+        from xskill.recommend.recommend_store import save_recommend_slots
+        save_recommend_slots("client-one", [entry["skill_id"]])
         set_recommend_engine(eng)
         try:
             resp = build_manifest(
@@ -368,7 +372,6 @@ class TestEngineSkillhubPool:
 
         assert len(resp.slots) == 1
         slot = resp.slots[0]
-        entry = eng.skillhub.index()[0]
         assert slot.source == "skillhub"
         assert slot.skill_name == entry["skill_id"]
         assert slot.display_name == "foo"
@@ -417,6 +420,10 @@ class TestEngineSkillhubPool:
                 hub_dir, "hub-a/foo", "django migration helper", name="foo",
             )
             eng.skillhub._scan_snapshot_expires_at = 0.0  # 模拟 TTL 到期：增删最迟 5s 后被扫到
+            # 重活进程写入推荐表后，下一轮 /sync 才能看到 skillhub 槽位
+            from xskill.recommend.recommend_store import save_recommend_slots
+            entry = eng.skillhub.index()[0]
+            save_recommend_slots("client-one", [entry["skill_id"]])
             second = build_manifest(
                 client_id="client-one",
                 skill_dir=skill_dir,

@@ -52,6 +52,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 嵌入式向量索引（Milvus Lite）。非必需：缺省走 numpy / 内存 fallback，
+# 大库上会更慢。team server 建议：pip install 'xskill[milvus]'。
+# 不进主依赖——pymilvus 体积大、部分环境装不上，曾阻断 client 自动更新。
+milvus = [
+    "pymilvus>=2.4.2",
+]
 dev = [
     "pytest>=7",
     "pytest-timeout>=2",

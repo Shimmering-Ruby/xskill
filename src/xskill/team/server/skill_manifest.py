@@ -346,6 +346,7 @@ def build_manifest(
         persist_recommendations=False,
     )
 
+    side_overrides = prefs.get("side") or {}
     slots: list[SkillSlot] = []
     for idx, skill in enumerate(chosen):
         if idx < len(pinned):
@@ -358,6 +359,26 @@ def build_manifest(
             skill, client_id, probability, bucket, refs=catalog.refs,
         )
         if slot is not None:
+            ov = side_overrides.get(slot.skill_name)
+            if ov in ("main", "staging") and not (
+                    isinstance(skill, dict) and skill.get("source") == "skillhub"):
+                cached_main, cached_staging = (
+                    catalog.refs[skill.name] if skill.name in catalog.refs else
+                    (main_sha(skill.path) or "", staging_sha(skill.path))
+                )
+                if ov == "staging" and not cached_staging:
+                    ov = "main"
+                new_sha = cached_staging if ov == "staging" else cached_main
+                if new_sha:
+                    slot = SkillSlot(
+                        skill_name=slot.skill_name,
+                        side=ov,
+                        sha=new_sha,
+                        bucket=slot.bucket,
+                        source=slot.source,
+                        display_name=slot.display_name,
+                        source_path=slot.source_path,
+                    )
             slots.append(slot)
     # 埋点：只记画像推荐位(recommended bucket)。team server 将写入提交给
     # 独立的有界单线程 executor，避免 SQLite 写锁进入 /sync 响应路径；直接
@@ -403,6 +424,25 @@ def _record_recommendation_telemetry(
         _logger.debug("recommendation exposure telemetry skipped", exc_info=True)
 
 
+def _recommend_user_key(client_id: str) -> str:
+    """推荐结果表键：有名用 user_name，匿名用 client_id。"""
+    if _engine is not None and getattr(_engine, "client_registry", None) is not None:
+        try:
+            name = _engine.client_registry.user_name_for(client_id)
+            if name:
+                return name
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+    try:
+        from xskill.team.server.api import team_context
+        name = team_context().client_registry.user_name_for(client_id)
+        if name:
+            return name
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    return client_id
+
+
 def _pick_recommended(
     *,
     client_id: str,
@@ -418,11 +458,11 @@ def _pick_recommended(
 ) -> list[Skill]:
     """选 ``recommended`` bucket 的 skill。
 
-    候选 = distributable 里不在 ranked-80 的（``recommend`` 内部再排除该
-    client 已用过的）。有画像 → 按质心 cosine 最近邻；无画像 / 非 team
-    server 调用 → 退回 ux 排序往下接着取。
+    team server 路径：只读重活进程预写的 ``client_recommend_slots``，
+    **禁止**请求内 ``get_skill_for_client`` / numpy 全库乘。过期或缺失时
+    返回上一份成功结果；无行则 ux 尾部补齐（与冷启动语义一致）。
     """
-    del ranked  # Preserve the established helper signature.
+    del ranked, skill_dir, candidate_refs, persist_recommendations
     if reco_slots <= 0:
         return []
 
@@ -430,55 +470,44 @@ def _pick_recommended(
     if traj_root is None:
         return ux_tail[:reco_slots]  # 非 team server：无 traj_root，按 ux 取
 
-    # §5 优先走 SkillRecommendEngine（注入时）；否则退回既有 RECOMMENDER 画像路径。
-    if _engine is not None:
-        # 索引缺失时（rebuild --force 后到 /reindex 前的窗口）不能进引擎——
-        # _combined_relevance 会 raise。退回 ux_tail（与既有 RECOMMENDER 守卫一致）。
-        if not (skill_dir / ".skill_index.pkl").is_file() and not _engine._skillhub_entries():
-            return ux_tail[:reco_slots]
-        user = _engine.load_client_user(client_id, include_recommended=False)
-        if user.client_interest is not None and user.client_interest.feature_tensor is not None:
-            picked = _engine.get_skill_for_client(
-                user, reco_slots, exclude_names=ranked_names,
-                candidate_pool=candidate_pool, candidate_refs=candidate_refs,
-                persist_recommendations=persist_recommendations,
-                candidate_pool_quality_ordered=True,
-            )
-            # get_skill_for_client 已记录推荐 + resolve side；只取 reco_slots 个
-            return picked[:reco_slots]
-        # 冷启动（无画像）→ ux_tail（与既有 RECOMMENDER 冷启动语义一致）
-        # team server 的 /sync 必须保持纯缓存路径，不得再落到下方会
-        # 扫描 atom store 的旧 RECOMMENDER。
-        return ux_tail[:reco_slots]
+    # 预计算推荐表（重活进程写入）；stale 也返回上一份。
+    try:
+        from xskill.recommend.recommend_store import load_recommend_slots
 
-    # 延迟 import：profile_reco 依赖 numpy + atom store，非 team 路径不付代价。
-    from xskill.team.server.profile_reco import RECOMMENDER
+        reco_names = load_recommend_slots(_recommend_user_key(client_id))
+    except Exception:  # pylint: disable=broad-exception-caught
+        _logger.debug("recommend slots load failed", exc_info=True)
+        reco_names = None
 
-    skill_index_path = skill_dir / ".skill_index.pkl"
-    if not skill_index_path.is_file():
-        # 没建 skill 向量索引 → 算不出质心。退回 ux 排序。
-        return ux_tail[:reco_slots]
-
-    candidate_names = [s.name for s in ux_tail]
-    reco_names = RECOMMENDER.recommend(
-        client_id=client_id,
-        traj_root=Path(traj_root),
-        skill_index_path=skill_index_path,
-        candidate_names=candidate_names,
-        limit=reco_slots,
-    )
-    if reco_names is None:
-        return ux_tail[:reco_slots]  # 冷启动：无画像，退回 ux 排序
-
-    by_name = {s.name: s for s in ux_tail}
-    picked = [by_name[n] for n in reco_names if n in by_name]
-    if len(picked) < reco_slots:
-        # 画像推荐出的候选不足 reco_slots（候选池本身就小）→ 用 ux 排序补齐。
-        # 不是 error-masking：候选池耗尽是真实情况，补齐保证 slot 数稳定。
-        picked_names = {s.name for s in picked}
-        for s in ux_tail:
+    if reco_names:
+        by_name = {s.name: s for s in ux_tail}
+        for s in candidate_pool or []:
+            by_name.setdefault(s.name, s)
+        picked: list = []
+        picked_names: set[str] = set()
+        for n in reco_names:
+            if n in ranked_names or n in picked_names:
+                continue
+            item = by_name.get(n)
+            if item is None and _engine is not None:
+                try:
+                    item = _engine.skillhub.entry(n)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    item = None
+            if item is None:
+                continue
+            picked.append(item)
+            picked_names.add(n)
             if len(picked) >= reco_slots:
                 break
-            if s.name not in picked_names:
-                picked.append(s)
-    return picked[:reco_slots]
+        if len(picked) < reco_slots:
+            for s in ux_tail:
+                if len(picked) >= reco_slots:
+                    break
+                if s.name not in picked_names and s.name not in ranked_names:
+                    picked.append(s)
+                    picked_names.add(s.name)
+        return picked[:reco_slots]
+
+    # 无预计算结果（冷启动 / 尚未跑重活）→ ux_tail，绝不现算 KNN。
+    return ux_tail[:reco_slots]

@@ -22,14 +22,17 @@ from xskill.pipeline.registry import (
     GLOBAL_PREF_KEY,
     PinQuotaExceeded,
     clear_skill_pref,
+    clear_skill_pref_side,
     dashboard_visible_trajectory_sql,
     effective_prefs,
+    get_client_take_n,
     manifest_control_plane_snapshot,
     pooled_connection,
     prefs_for,
     purge_skill_records,
     retire_skill,
     retired_skills,
+    set_client_take_n,
     set_skill_pref,
     unretire_skill,
 )
@@ -43,6 +46,18 @@ logger = logging.getLogger("xskill.dashboard.console")
 _RECO_TRIGGER_TTL_SECONDS = 5.0
 _reco_trigger_cache = SingleFlightTtlCache(
     ttl_seconds=_RECO_TRIGGER_TTL_SECONDS, max_entries=32)
+
+# skill 详情「当前推送对象」：按注册 client 现算 manifest，短 TTL + 单飞
+_ROUTING_TTL_SECONDS = 5.0
+_routing_cache = SingleFlightTtlCache(
+    ttl_seconds=_ROUTING_TTL_SECONDS, max_entries=64)
+_routing_epoch = 0
+
+
+def _bump_routing_epoch() -> None:
+    """prefs / 分发变更后使 routing 缓存失效。"""
+    global _routing_epoch
+    _routing_epoch += 1
 
 
 def _team_ctx():
@@ -248,22 +263,252 @@ def _emit_pin_event(db_path: Optional[Path], *, actor: str, skill: str,
         logger.debug("pin event emit skipped", exc_info=True)
 
 
+def _settings_payload(user: str, *, server_slots: int, server_pushed: int,
+                      db_path: Optional[Path]) -> dict:
+    take = get_client_take_n(user, default=server_slots, db_path=db_path)
+    take = max(0, min(int(server_slots), int(take)))
+    return {
+        "user": user,
+        "take_n": take,
+        "push_count": take,
+        "server_slots": server_slots,
+        "server_default": server_slots,
+        "max": server_slots,
+        "server_pushed": server_pushed,
+    }
+
+
+def _pack_manifest_slots(resp_slots, *, user: str, prefs: dict,
+                         skill_dir: Path, db_path: Optional[Path],
+                         registry) -> list[dict]:
+    """把 SyncResponse.slots 打成看板行（含 source / pin / my_triggers）。"""
+    from xskill.canary import staging_sha
+    from xskill.events import skill_main_producers
+    trigger_by_skill = {
+        r["skill"]: int(r.get("triggers") or 0)
+        for r in reco_trigger_for_users(
+            db_path=db_path, skill_dir=Path(skill_dir),
+            registry=registry).get(user, [])
+    }
+    native_names = []
+    slot_srcs = []
+    for s in resp_slots:
+        src = _slot_source_fields(s)
+        slot_srcs.append(src)
+        if src["source"] == "native":
+            native_names.append(s.skill_name)
+    producers = skill_main_producers(native_names, db_path=db_path)
+    has_stg: dict[str, bool] = {}
+    root = Path(skill_dir)
+
+    def _side_mutable(name: str, source: str) -> bool:
+        if source != "native":
+            return False
+        if name not in has_stg:
+            path = root / name
+            has_stg[name] = bool(path.is_dir() and staging_sha(path))
+        return has_stg[name]
+
+    slots = []
+    for i, (s, src) in enumerate(zip(resp_slots, slot_srcs), start=1):
+        meta = prefs["pin_meta"].get(s.skill_name, {})
+        side_ov = (prefs.get("side") or {}).get(s.skill_name)
+        row = {
+            "skill_name": s.skill_name, "side": s.side, "sha": s.sha,
+            "bucket": s.bucket,
+            "source": src["source"],
+            "source_path": src["source_path"],
+            "my_triggers": trigger_by_skill.get(s.skill_name, 0),
+            "pin_scope": meta.get("scope", ""),
+            "pin_set_by": meta.get("set_by", ""),
+            "overridden": bool(side_ov),
+            "side_mutable": _side_mutable(s.skill_name, src["source"]),
+            "user_removable": (
+                s.bucket != "pinned" or meta.get("set_by") == user),
+            "rank": i,
+            "installed": True,
+        }
+        if src["source"] == "native":
+            prod = producers.get(s.skill_name)
+            if prod:
+                row["producer"] = prod["user"]
+                row["producer_trajs"] = prod["traj_count"]
+        slots.append(row)
+    return slots
+
+
+def _manifest_slots_for_user(ctx, *, user: str,
+                             db_path: Optional[Path]) -> list[dict]:
+    """为任意 user 现算并打包当前推送槽位（与 /my/manifest 同源）。"""
+    from xskill.team.server.api import live_manifest_tuning
+    from xskill.team.server.skill_manifest import build_manifest
+    prefs = effective_prefs(user, db_path=db_path)
+    client_id = ctx.client_registry.find_by_user_name(user) or user
+    total_slots, ranked_slots, probability = live_manifest_tuning()
+    resp = build_manifest(
+        client_id=client_id,
+        skill_dir=ctx.skill_dir,
+        probability=probability,
+        ranked_slots=ranked_slots,
+        total_slots=total_slots,
+        traj_root=ctx.traj_root,
+        prefs=prefs,
+        retired=retired_skills(db_path=db_path),
+    )
+    return _pack_manifest_slots(
+        resp.slots, user=user, prefs=prefs, skill_dir=ctx.skill_dir,
+        db_path=db_path, registry=ctx.client_registry)
+
+
+def _user_upload_dirs(user: str, ctx) -> list[tuple[str, Path]]:
+    """列出 ``user_skill_hub/<owner>/`` 下我上传的 skill 目录。"""
+    hub = getattr(ctx, "skillhub", None)
+    hub_dir = Path(getattr(hub, "dir", "") or "")
+    if not hub or not getattr(hub, "enabled", False) or not hub_dir.is_dir():
+        return []
+    from xskill.team.server.client_registry import safe_dir_name
+    client_id = ctx.client_registry.find_by_user_name(user) or user
+    try:
+        owner = safe_dir_name(user, client_id)
+    except ValueError:
+        owner = client_id
+    root = hub_dir / "user_skill_hub" / owner
+    if not root.is_dir():
+        return []
+    out: list[tuple[str, Path]] = []
+    for d in sorted(root.iterdir()):
+        if d.is_dir() and not d.name.startswith(".") and (d / "SKILL.md").is_file():
+            name = d.name
+            try:
+                from xskill.skill.frontmatter import parse_strict
+                fm, _ = parse_strict(
+                    (d / "SKILL.md").read_text(encoding="utf-8", errors="replace"))
+                name = str(fm.get("name") or d.name).strip() or d.name
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            out.append((name, d))
+    return out
+
+
+def _usage_summary_for_skill(skill_names: set[str], *, skill_dir: Path,
+                             db_path: Optional[Path],
+                             days: int = 30) -> dict:
+    """按 skill 名集合聚合近 ``days`` 天使用摘要。"""
+    from datetime import datetime, timedelta, timezone
+    from xskill.dashboard.metrics import load_usage_records
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%S")
+    traj_user = _traj_user_map(db_path)
+    users: dict[str, int] = {}
+    scores: list[float] = []
+    uses = 0
+    for rec in load_usage_records(skill_dir):
+        if (rec.get("skill") or "") not in skill_names:
+            continue
+        ts = rec.get("scored_at") or ""
+        if ts and ts < cutoff:
+            continue
+        uses += 1
+        u = traj_user.get(rec.get("traj_id") or "", "") or "(unknown)"
+        users[u] = users.get(u, 0) + 1
+        if rec.get("score") is not None:
+            try:
+                scores.append(float(rec["score"]))
+            except (TypeError, ValueError):
+                pass
+    return {
+        "uses_30d": uses,
+        "users_30d": len(users),
+        "avg_ux": round(sum(scores) / len(scores), 2) if scores else None,
+    }
+
+
+def _commit_status_for_push(ev: dict, *, skill_dir: Path,
+                            later_canaries: list[dict]) -> dict:
+    """把 push_edit 事件映射为 live / canary / absorbed。"""
+    import json as _json
+    payload = ev.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = _json.loads(payload)
+        except Exception:  # pylint: disable=broad-exception-caught
+            payload = {}
+    sha = str(payload.get("ref_sha") or "")
+    branch = str(payload.get("branch") or "")
+    skill = ev.get("skill") or ""
+    side = "staging" if "staging" in branch else "main"
+    # 后续 canary 晋升 → 被吸收
+    for c in later_canaries:
+        if (c.get("skill") or "") != skill:
+            continue
+        cp = c.get("payload") or {}
+        if isinstance(cp, str):
+            try:
+                cp = _json.loads(cp)
+            except Exception:  # pylint: disable=broad-exception-caught
+                cp = {}
+        if cp.get("action") == "promoted":
+            label = f"main@{sha[:7]}" if sha else "main"
+            return {
+                "status": "absorbed",
+                "status_label": f"被吸收到 {label}",
+                "absorbed_into": {"side": "main", "label": label},
+                "side": "main",
+                "sha": sha,
+                "subject": f"本地改后提交（{branch or 'branch'}）",
+            }
+    # 仓内仍有 staging / 分支名含 staging → 灰测中
+    repo = Path(skill_dir) / skill if skill else None
+    has_staging = False
+    if repo and (repo / ".git").is_dir():
+        try:
+            from xskill.dashboard.metrics import _branches
+            has_staging = "staging" in _branches(repo)
+        except Exception:  # pylint: disable=broad-exception-caught
+            has_staging = False
+    if side == "staging" or has_staging:
+        return {
+            "status": "canary",
+            "status_label": "灰测中",
+            "absorbed_into": None,
+            "side": "staging",
+            "sha": sha,
+            "subject": f"本地改后提交灰测（{branch or 'staging'}）",
+        }
+    return {
+        "status": "live",
+        "status_label": "已上线",
+        "absorbed_into": None,
+        "side": "main",
+        "sha": sha,
+        "subject": f"本地改后提交（{branch or 'main'}）",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 请求模型
 # ---------------------------------------------------------------------------
 
-PrefAction = Literal["pin", "block", "clear"]
+PrefAction = Literal["pin", "block", "clear", "clear_side"]
 
 
 class MyPrefRequest(BaseModel):
     skill_name: str
     action: PrefAction
+    side: Optional[str] = None  # pin 时可钉 main|staging
+
+
+class MySettingsRequest(BaseModel):
+    """client 截取安装数。``push_count`` 为旧字段别名。"""
+    take_n: Optional[int] = None
+    push_count: Optional[int] = None
 
 
 class AdminPrefRequest(BaseModel):
     user_key: str          # user_name 或 '*global*'
     skill_name: str
     action: PrefAction
+    side: Optional[str] = None  # pin 时可钉 main|staging
 
 
 class DeleteSkillRequest(BaseModel):
@@ -338,6 +583,126 @@ def _team_change_is_hot_only(old_cfg: dict, new_cfg: dict) -> bool:
     return old_server == new_server
 
 
+def _normalize_pref_side(side: Optional[str]) -> Optional[str]:
+    """校验 prefs.side；``None`` 原样返回（表示不改）。"""
+    if side is None:
+        return None
+    s = str(side).strip()
+    if s not in ("", "main", "staging"):
+        raise HTTPException(
+            status_code=400, detail="side 必须是 main|staging 或空串")
+    return s
+
+
+def _skill_routing_table(ctx, *, skill_name: str, db_path: Optional[Path]) -> dict:
+    """现算某 skill 对所有已注册 client 的推送路由（与 /sync 同源 build_manifest）。"""
+    from xskill.canary import main_sha, pick_side, staging_sha
+    from xskill.team.server.api import live_manifest_tuning
+    from xskill.team.server.skill_manifest import build_manifest
+
+    skill_path = Path(ctx.skill_dir) / skill_name
+    if not skill_path.is_dir():
+        raise HTTPException(status_code=404, detail="skill not found")
+    m_sha = main_sha(skill_path) or ""
+    s_sha = staging_sha(skill_path)
+    has_staging = bool(s_sha)
+    total_slots, ranked_slots, probability = live_manifest_tuning()
+    retired = retired_skills(db_path=db_path)
+    users: list[dict] = []
+    for client in ctx.client_registry.list():
+        client_id = client["client_id"]
+        user = (client.get("user_name") or "").strip() or client_id
+        prefs = effective_prefs(user, db_path=db_path)
+        resp = build_manifest(
+            client_id=client_id,
+            skill_dir=ctx.skill_dir,
+            probability=probability,
+            ranked_slots=ranked_slots,
+            total_slots=total_slots,
+            traj_root=ctx.traj_root,
+            prefs=prefs,
+            retired=retired,
+        )
+        hit = next(
+            (s for s in resp.slots if s.skill_name == skill_name), None)
+        side_ov = (prefs.get("side") or {}).get(skill_name)
+        pinned = skill_name in (prefs.get("pin_meta") or {})
+        if hit is not None:
+            users.append({
+                "user": user,
+                "client_id": client_id,
+                "in_manifest": True,
+                "bucket": hit.bucket,
+                "side": hit.side or "main",
+                "sha": hit.sha or "",
+                "overridden": bool(side_ov),
+                "pinned": pinned or hit.bucket == "pinned",
+            })
+            continue
+        would = "main"
+        if has_staging:
+            would = side_ov if side_ov in ("main", "staging") else pick_side(
+                client_id, skill_name, probability)
+        sha = (s_sha if would == "staging" and s_sha else m_sha) or ""
+        users.append({
+            "user": user,
+            "client_id": client_id,
+            "in_manifest": False,
+            "bucket": None,
+            "side": would,
+            "sha": sha,
+            "overridden": bool(side_ov),
+            "pinned": pinned,
+        })
+    staging_n = sum(
+        1 for u in users if u["in_manifest"] and u["side"] == "staging")
+    main_n = sum(
+        1 for u in users if u["in_manifest"] and u["side"] != "staging")
+    out_n = sum(1 for u in users if not u["in_manifest"])
+    return {
+        "skill": skill_name,
+        "has_staging": has_staging,
+        "counts": {
+            "staging": staging_n,
+            "main": main_n,
+            "out": out_n,
+            "in_manifest": staging_n + main_n,
+            "users": len(users),
+        },
+        "page_size_default": 8,
+        "users": users,
+    }
+
+
+def _cached_skill_routing(ctx, *, skill_name: str,
+                          db_path: Optional[Path]) -> dict:
+    key = (str(db_path or ""), str(ctx.skill_dir), skill_name,
+           len(ctx.client_registry.list()), _routing_epoch)
+    return _routing_cache.get_or_build(
+        key,
+        lambda: _skill_routing_table(
+            ctx, skill_name=skill_name, db_path=db_path),
+    )
+
+
+def _filter_routing_users(users: list[dict], *, filter_name: str,
+                          q: str) -> list[dict]:
+    qn = (q or "").strip().lower()
+    if qn:
+        return [u for u in users if qn in (u.get("user") or "").lower()]
+    if filter_name == "staging":
+        return [u for u in users
+                if u.get("in_manifest") and u.get("side") == "staging"]
+    if filter_name == "main":
+        return [u for u in users
+                if u.get("in_manifest") and u.get("side") != "staging"]
+    if filter_name == "out":
+        return [u for u in users if not u.get("in_manifest")]
+    if filter_name == "all":
+        return list(users)
+    return [u for u in users if u.get("in_manifest")]
+
+
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
@@ -349,7 +714,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
 
     @router.get("/my/manifest")
     def my_manifest(ident=Depends(require_user)):
-        """登录用户视角的 slot 清单 + 已屏蔽组。槽位 chip 标注注入类型。"""
+        """登录用户视角：服务器推送队列 + client take_n 截取后的已安装列表。"""
         ctx = _require_team_ctx()
         from xskill.team.server.api import live_manifest_tuning
         from xskill.team.server.skill_manifest import build_manifest
@@ -368,49 +733,78 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             prefs=prefs,
             retired=retired_skills(db_path=db_path),
         )
-        slots = []
-        trigger_by_skill = {
-            r["skill"]: int(r.get("triggers") or 0)
-            for r in reco_trigger_for_users(
-                db_path=db_path, skill_dir=Path(ctx.skill_dir),
-                registry=ctx.client_registry).get(user, [])
-        }
-        from xskill.events import skill_main_producers
-        native_names = []
-        slot_srcs = []
-        for s in resp.slots:
-            src = _slot_source_fields(s)
-            slot_srcs.append(src)
-            if src["source"] == "native":
-                native_names.append(s.skill_name)
-        producers = skill_main_producers(native_names, db_path=db_path)
-        for s, src in zip(resp.slots, slot_srcs):
-            meta = prefs["pin_meta"].get(s.skill_name, {})
-            row = {
-                "skill_name": s.skill_name, "side": s.side, "sha": s.sha,
-                "bucket": s.bucket,
-                "source": src["source"],
-                "source_path": src["source_path"],
-                "my_triggers": trigger_by_skill.get(s.skill_name, 0),
-                # pinned 细分:自己 pin / admin 代 pin / 全局 pin——前端置灰依据
-                "pin_scope": meta.get("scope", ""),
-                "pin_set_by": meta.get("set_by", ""),
-                "user_removable": (
-                    s.bucket != "pinned" or meta.get("set_by") == user),
-            }
-            if src["source"] == "native":
-                prod = producers.get(s.skill_name)
-                if prod:
-                    row["producer"] = prod["user"]
-                    row["producer_trajs"] = prod["traj_count"]
-            slots.append(row)
+        server_push = _pack_manifest_slots(
+            resp.slots, user=user, prefs=prefs, skill_dir=ctx.skill_dir,
+            db_path=db_path, registry=ctx.client_registry)
+        take_n = get_client_take_n(user, default=total_slots, db_path=db_path)
+        take_n = max(0, min(int(total_slots), int(take_n)))
+        for i, row in enumerate(server_push):
+            row["installed"] = i < take_n
+            row["rank"] = i + 1
+        slots = [dict(r, installed=True) for r in server_push[:take_n]]
         blocked_rows = [r for r in prefs_for(user, db_path=db_path)
                         if r["pref"] == "blocked"]
-        return {"user": user, "slots": slots,
-                "blocked": [{"skill_name": r["skill_name"],
-                             "set_by": r["set_by"], "ts": r["ts"]}
-                            for r in blocked_rows],
-                "total_slots": total_slots}
+        settings = _settings_payload(
+            user, server_slots=total_slots, server_pushed=len(server_push),
+            db_path=db_path)
+        return {
+            "user": user,
+            "slots": slots,
+            "server_push": server_push,
+            "blocked": [{"skill_name": r["skill_name"],
+                         "set_by": r["set_by"], "ts": r["ts"]}
+                        for r in blocked_rows],
+            "total_slots": take_n,
+            "server_slots": total_slots,
+            "server_pushed": len(server_push),
+            "installed": len(slots),
+            "settings": settings,
+        }
+
+    @router.get("/my/settings")
+    def my_settings_get(ident=Depends(require_user)):
+        """读 client take_n（截取安装数）。"""
+        ctx = _require_team_ctx()
+        from xskill.team.server.api import live_manifest_tuning
+        from xskill.team.server.skill_manifest import build_manifest
+        user = ident["user"]
+        total_slots, ranked_slots, probability = live_manifest_tuning()
+        client_id = ctx.client_registry.find_by_user_name(user) or user
+        prefs = effective_prefs(user, db_path=db_path)
+        resp = build_manifest(
+            client_id=client_id, skill_dir=ctx.skill_dir,
+            probability=probability, ranked_slots=ranked_slots,
+            total_slots=total_slots, traj_root=ctx.traj_root,
+            prefs=prefs, retired=retired_skills(db_path=db_path),
+        )
+        return _settings_payload(
+            user, server_slots=total_slots, server_pushed=len(resp.slots),
+            db_path=db_path)
+
+    @router.post("/my/settings")
+    def my_settings_set(req: MySettingsRequest, ident=Depends(require_user)):
+        """写 client take_n；夹取到 ``[0, skill_slots]``。"""
+        _require_team_ctx()
+        user = ident["user"]
+        raw = req.take_n if req.take_n is not None else req.push_count
+        if raw is None:
+            raise HTTPException(status_code=400, detail="缺少 take_n")
+        try:
+            n = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="安装个数须为 ≥0 的整数") from exc
+        if n < 0:
+            raise HTTPException(status_code=400, detail="安装个数须为 ≥0 的整数")
+        max_n = _total_slots()
+        take = set_client_take_n(user, n, max_n=max_n, db_path=db_path)
+        return {
+            "ok": True,
+            **_settings_payload(
+                user, server_slots=max_n, server_pushed=max_n, db_path=db_path),
+            "take_n": take,
+            "push_count": take,
+        }
 
     @router.post("/my/prefs")
     def my_prefs(req: MyPrefRequest, ident=Depends(require_user)):
@@ -426,26 +820,163 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         gprefs = {r["skill_name"]: r for r in
                   prefs_for(GLOBAL_PREF_KEY, db_path=db_path)}
         if req.skill_name in gprefs and gprefs[req.skill_name]["pref"] == "pinned" \
-                and req.action in ("block", "clear"):
+                and req.action in ("block", "clear", "clear_side"):
             raise HTTPException(
                 status_code=403, detail="全局 pin 的条目普通用户不可取消/屏蔽")
         if req.action == "clear":
             if not clear_skill_pref(user_key=user, skill_name=req.skill_name,
                                     db_path=db_path):
                 raise HTTPException(status_code=404, detail="没有这条偏好")
+            _bump_routing_epoch()
             return {"ok": True}
+        if req.action == "clear_side":
+            if not clear_skill_pref_side(
+                    user_key=user, skill_name=req.skill_name, db_path=db_path):
+                raise HTTPException(status_code=404, detail="没有这条偏好")
+            _bump_routing_epoch()
+            return {"ok": True}
+        side = _normalize_pref_side(req.side)
         pref = "pinned" if req.action == "pin" else "blocked"
         try:
             set_skill_pref(user_key=user, skill_name=req.skill_name, pref=pref,
-                           set_by=user,
+                           set_by=user, side=side,
                            max_pinned=_total_slots(), db_path=db_path)
         except PinQuotaExceeded as e:
             # D8/2.4d:超量在写入侧拒绝——409 冲突,永不进 sync 路径
             raise HTTPException(status_code=409, detail=str(e)) from e
+        _bump_routing_epoch()
         if req.action == "pin":
             _emit_pin_event(db_path, actor=user, skill=req.skill_name,
                             target_user=user, scope="user")
         return {"ok": True}
+
+    @router.get("/my/uploads")
+    def my_uploads(ident=Depends(require_user)):
+        """我上传到 SkillHub 的 skill 列表 + 近 30 天使用摘要。"""
+        ctx = _require_team_ctx()
+        user = ident["user"]
+        skills = []
+        for name, path in _user_upload_dirs(user, ctx):
+            aliases = {name, path.name}
+            summary = _usage_summary_for_skill(
+                aliases, skill_dir=Path(ctx.skill_dir), db_path=db_path)
+            uploaded_at = None
+            try:
+                from datetime import datetime, timezone
+                uploaded_at = datetime.fromtimestamp(
+                    path.stat().st_mtime, tz=timezone.utc,
+                ).strftime("%Y-%m-%dT%H:%M:%S")
+            except OSError:
+                pass
+            skills.append({
+                "name": name,
+                "dir_name": path.name,
+                "uploaded_at": uploaded_at,
+                **summary,
+            })
+        return {"user": user, "skills": skills, "total": len(skills)}
+
+    @router.get("/my/uploads/{name}/usage")
+    def my_upload_usage(name: str, ident=Depends(require_user)):
+        """某上传 skill 的使用明细：用户 × 评分原子。"""
+        ctx = _require_team_ctx()
+        from xskill.dashboard.metrics import load_usage_records
+        user = ident["user"]
+        uploads = {n: p for n, p in _user_upload_dirs(user, ctx)}
+        path = uploads.get(name)
+        if path is None:
+            # 也允许用目录名查
+            for n, p in uploads.items():
+                if p.name == name:
+                    path = p
+                    name = n
+                    break
+        if path is None:
+            raise HTTPException(status_code=404, detail="not found")
+        aliases = {name, path.name}
+        traj_user = _traj_user_map(db_path)
+        by_user: dict[str, dict] = {}
+        for rec in load_usage_records(Path(ctx.skill_dir)):
+            if (rec.get("skill") or "") not in aliases:
+                continue
+            u = traj_user.get(rec.get("traj_id") or "", "") or "(unknown)"
+            entry = by_user.setdefault(
+                u, {"user": u, "uses": 0, "scores": [], "atoms": [],
+                    "last_used": ""})
+            entry["uses"] += 1
+            ts = rec.get("scored_at") or ""
+            if ts > (entry["last_used"] or ""):
+                entry["last_used"] = ts
+            score = rec.get("score")
+            if score is not None:
+                try:
+                    entry["scores"].append(float(score))
+                except (TypeError, ValueError):
+                    pass
+            if rec.get("atom_id"):
+                entry["atoms"].append({
+                    "atom_id": rec.get("atom_id"),
+                    "traj_id": rec.get("traj_id") or "",
+                    "score": rec.get("score"),
+                    "intent": "",
+                    "scored_at": ts,
+                })
+        recent = []
+        for e in by_user.values():
+            scores = e.pop("scores")
+            e["avg_ux"] = round(sum(scores) / len(scores), 2) if scores else None
+            e["atoms"].sort(key=lambda a: a.get("scored_at") or "", reverse=True)
+            recent.append(e)
+        recent.sort(key=lambda r: r["uses"], reverse=True)
+        uses = sum(r["uses"] for r in recent)
+        avg = None
+        if uses:
+            weighted = [r["avg_ux"] for r in recent
+                        if r["avg_ux"] is not None]
+            if weighted:
+                # 近似：用户均分再平均（与 mock 展示一致即可）
+                avg = round(sum(weighted) / len(weighted), 2)
+        return {
+            "skill": name,
+            "summary": {"uses": uses, "users": len(recent),
+                        "avg_ux": avg, "days": 30},
+            "recent": recent,
+        }
+
+    @router.get("/my/commits")
+    def my_commits(ident=Depends(require_user)):
+        """我贡献的 skill commit（本地改 → 线上 push_edit）及状态 pill。"""
+        ctx = _require_team_ctx()
+        user = ident["user"]
+        with pooled_connection(db_path) as conn:
+            push_rows = [dict(r) for r in conn.execute(
+                "SELECT id, ts, actor, skill, payload FROM events"
+                " WHERE kind='push_edit' AND actor=?"
+                " ORDER BY id DESC LIMIT 100",
+                (user,),
+            ).fetchall()]
+            canary_rows = [dict(r) for r in conn.execute(
+                "SELECT id, ts, skill, payload FROM events"
+                " WHERE kind='canary' ORDER BY id DESC LIMIT 500",
+            ).fetchall()]
+        import json as _json
+        for row in push_rows + canary_rows:
+            try:
+                row["payload"] = _json.loads(row.get("payload") or "{}")
+            except Exception:  # pylint: disable=broad-exception-caught
+                row["payload"] = {}
+        commits = []
+        for ev in push_rows:
+            later = [c for c in canary_rows if c["id"] > ev["id"]]
+            st = _commit_status_for_push(
+                ev, skill_dir=Path(ctx.skill_dir), later_canaries=later)
+            commits.append({
+                "skill": ev.get("skill") or "",
+                "ts": ev.get("ts") or "",
+                "event_id": ev.get("id"),
+                **st,
+            })
+        return {"user": user, "commits": commits, "total": len(commits)}
 
     @router.get("/my/contributions")
     def my_contributions(ident=Depends(require_user)):
@@ -606,11 +1137,12 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
 
     @router.get("/admin/users-matrix")
     def admin_users_matrix(_=Depends(require_admin)):
-        """用户 × 推送/配置矩阵：被推荐数/pinned·blocked 计数/触发率。
+        """用户 × 推送/配置矩阵：当前推送槽 / 灰度槽 / pinned·blocked / 触发率。
 
         偏好走 ``manifest_control_plane_snapshot`` 一次性取全表再按 user_key 分组
         （口径同 ``prefs_for``：只算该用户自己的行，全局行单独出 global_pinned），
-        不再每个用户各查一次库（N+1）。
+        不再每个用户各查一次库（N+1）。``current_slots`` / ``staging_slots`` 与
+        /sync 同源现算。
         """
         ctx = _require_team_ctx()
         table = reco_trigger_for_users(
@@ -628,6 +1160,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             rt = table.get(user, [])
             n_exp = sum(r["exposures"] for r in rt)
             n_trig = sum(r["triggers"] for r in rt)
+            slots = _manifest_slots_for_user(ctx, user=user, db_path=db_path)
             rows.append({
                 "client_id": client["client_id"],
                 "user": user,
@@ -639,6 +1172,9 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
                 "ingest_pause_reason": client.get("ingest_pause_reason") or "",
                 "exposures": n_exp,
                 "triggers": n_trig,
+                "current_slots": len(slots),
+                "staging_slots": sum(
+                    1 for s in slots if (s.get("side") or "main") == "staging"),
                 "rate": round(n_trig / n_exp, 3) if n_exp else None,
                 "pinned": sum(1 for p in prefs.values() if p == "pinned"),
                 "blocked": sum(1 for p in prefs.values() if p == "blocked"),
@@ -649,7 +1185,20 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         global_pins = [pref_row["skill_name"] for pref_row in snapshot["prefs"]
                        if pref_row["user_key"] == GLOBAL_PREF_KEY
                        and pref_row["pref"] == "pinned"]
-        return {"users": rows, "global_pinned": global_pins}
+        return {
+            "users": rows,
+            "global_pinned": global_pins,
+            "total_users": len(rows),
+        }
+
+    @router.get("/admin/user/{user_key}/assignment")
+    def admin_user_assignment(user_key: str, _=Depends(require_admin)):
+        """管理抽屉：某用户当前推送槽位（与 /my/manifest 同源现算）。"""
+        ctx = _require_team_ctx()
+        if not user_key:
+            raise HTTPException(status_code=400, detail="user_key required")
+        slots = _manifest_slots_for_user(ctx, user=user_key, db_path=db_path)
+        return {"user": user_key, "slots": slots}
 
     @router.put("/admin/client/{client_id}/ingest")
     def admin_client_ingest(
@@ -719,20 +1268,86 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             if not clear_skill_pref(user_key=req.user_key,
                                     skill_name=req.skill_name, db_path=db_path):
                 raise HTTPException(status_code=404, detail="没有这条偏好")
+            _bump_routing_epoch()
             return {"ok": True}
+        if req.action == "clear_side":
+            if not clear_skill_pref_side(
+                    user_key=req.user_key, skill_name=req.skill_name,
+                    db_path=db_path):
+                raise HTTPException(status_code=404, detail="没有这条偏好")
+            _bump_routing_epoch()
+            return {"ok": True}
+        side = _normalize_pref_side(req.side)
         pref = "pinned" if req.action == "pin" else "blocked"
         try:
             set_skill_pref(user_key=req.user_key, skill_name=req.skill_name,
-                           pref=pref, set_by=ident["user"],
+                           pref=pref, set_by=ident["user"], side=side,
                            max_pinned=_total_slots(), db_path=db_path)
         except PinQuotaExceeded as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+        _bump_routing_epoch()
         if req.action == "pin":
             _emit_pin_event(
                 db_path, actor=ident["user"], skill=req.skill_name,
                 target_user=req.user_key,
                 scope="global" if req.user_key == GLOBAL_PREF_KEY else "admin")
         return {"ok": True}
+
+    @router.get("/skill/{name}/routing")
+    def skill_routing(name: str, _=Depends(require_user)):
+        """技能详情「当前推送对象」元信息：counts + has_staging（不含全量用户）。"""
+        ctx = _require_team_ctx()
+        table = _cached_skill_routing(ctx, skill_name=name, db_path=db_path)
+        return {
+            "skill": table["skill"],
+            "has_staging": table["has_staging"],
+            "counts": table["counts"],
+            "page_size_default": table["page_size_default"],
+        }
+
+    @router.get("/skill/{name}/routing/users")
+    def skill_routing_users(
+        name: str,
+        q: str = "",
+        filter: str = "in",
+        limit: int = 8,
+        offset: int = 0,
+        _=Depends(require_user),
+    ):
+        """分页 / typeahead 检索某 skill 的推送用户。"""
+        ctx = _require_team_ctx()
+        table = _cached_skill_routing(ctx, skill_name=name, db_path=db_path)
+        lim = max(1, min(50, int(limit or 8)))
+        off = max(0, int(offset or 0))
+        qn = (q or "").strip()
+        filtered = _filter_routing_users(
+            table["users"], filter_name=filter or "in", q=qn)
+        if qn:
+            hits = filtered[:lim]
+            return {
+                "skill": name, "q": qn, "users": hits,
+                "total": len(hits), "truncated": True,
+            }
+        page = filtered[off:off + lim]
+        return {
+            "skill": name,
+            "filter": filter or "in",
+            "users": page,
+            "total": len(filtered),
+            "offset": off,
+            "limit": lim,
+            "has_more": off + lim < len(filtered),
+        }
+
+    @router.get("/skill/{name}/routing/user/{user}")
+    def skill_routing_user(name: str, user: str, _=Depends(require_user)):
+        """单用户对该 skill 的路由行。"""
+        ctx = _require_team_ctx()
+        table = _cached_skill_routing(ctx, skill_name=name, db_path=db_path)
+        for row in table["users"]:
+            if row.get("user") == user:
+                return {"skill": name, **row}
+        raise HTTPException(status_code=404, detail="user not found")
 
     @router.get("/admin/cluster-graph")
     def admin_cluster_graph(_=Depends(require_admin)):

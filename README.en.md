@@ -185,6 +185,8 @@ xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md)
 
 ## 📰 News
 
+- **2026-08-03** `v0.6.29a6`: Make `pymilvus` optional (`xskill[milvus]`) with numpy/in-memory fallback and hourly warnings, unblocking client auto-update; My page adds client `take_n` install caps, uploaded-skill usage, and skill-commit status pills; SkillHub exact name/id matches rank Top1; dashboard shows recommend-version assignment / current push targets.
+- **2026-08-03** `v0.6.29a5`: Isolate recommend heavy work from the web process; add Milvus Lite vector reconcile and dirty-user recommend precompute.
 - **2026-07-30** `v0.6.29a4`: Dashboard adds a personal My page as the default landing for regular users with paginated contributions and world feed; the install ledger now heals orphaned installs left by a failed migration and reclaims out of manifest copies, fixing the metadata validation storm that froze reverse sync on Windows clients.
 - **2026-07-30** `v0.6.29a3`: Recommendation engine switches to pure relevance round robin across interest centers, UX scores persist in registry.db; install ledger moves to SQLite with transactional supersede based uninstall.
 - **2026-07-07** — `v0.6.2a2`: Fix "Access Denied" on Windows when Group Policy blocks schtasks; auto-fallback to Startup folder so `connect` backgrounds itself without admin rights.

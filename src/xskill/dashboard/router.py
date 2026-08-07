@@ -142,7 +142,8 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         return {"tags": tag_rows}
 
     @router.get("/api/v1/dashboard/skills")
-    def skills(limit: int = 0, offset: int = 0, name: str = "") -> dict:
+    def skills(limit: int = 0, offset: int = 0, name: str = "",
+               q: str = "") -> dict:
         """skill 库存清单(分析式：读 skill 目录,不依赖埋点)。
 
         自产 git 技能标 ``source="native"``；skillhub 三方技能（启用时）合入
@@ -151,13 +152,14 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
 
         **分页**(海量 skill,如 1 万条,别让前端一次性拉全量炸锅):``limit``>0 时只返回
         ``skills[offset:offset+limit]`` 这一页;``limit``=0(默认)返回全部,向后兼容。
-        ``total`` / ``by_state`` 始终按**全量**统计(概览计数准确),``skills`` 只含当前页。
+        ``by_state`` 始终按**全量**统计(概览计数准确)；有 ``q``/``name`` 时
+        ``total`` 为过滤后条数，``skills`` 只含当前页。
         列表读 ``skills_catalog`` 投影表（写出口 UPSERT；冷启动对该 root 一次性
         backfill），翻页不再扫盘。
         """
         page = skills_catalog_page(
             skill_dir, skillhub=_build_skillhub(),
-            limit=limit, offset=offset, name=name, db_path=db_path)
+            limit=limit, offset=offset, name=name, q=q, db_path=db_path)
         if expose_sensitive:
             return page
         for index, row in enumerate(page["skills"]):

@@ -1,13 +1,13 @@
 """内部子进程 worker(**非用户 CLI**)。
 
-agent-worker 是常驻子进程；画像重计算仍是短命子进程。web 进程的
+agent-worker 是常驻子进程；``recommend-heavy``（含画像刷新 + Milvus 对账 +
+脏用户推荐预计算）是定时短命子进程。web 进程的
 ``IntervalSubprocessScheduler`` 用
 ``[sys.executable, "-m", "xskill._workers", <kind>]`` 启动它们，重计算与 web
 事件循环保持 GIL 隔离。
 
 这些是**内部管道**,刻意不注册进 ``xskill`` 用户 CLI(``cli.build_parser``)——用户
-``xskill --help`` 看不到它们。调度器直接调本模块的 SDK 函数
-(``run_agent_worker_forever`` / ``run_profile_refresh_once``),或经
+``xskill --help`` 看不到它们。调度器直接调本模块的 SDK 函数，或经
 ``python -m xskill._workers`` 入口。
 """
 from __future__ import annotations
@@ -301,7 +301,7 @@ def run_ecosystem_ingest_loop(
         wait_event.wait(interval)
 
 
-def run_profile_refresh_once() -> int:
+def run_profile_refresh_once(*, engine=None) -> int:
     """遍历所有 client 重算画像落库即退,状态落 profile_refresh_status.json。
 
     复用 ProfileRefreshService(短命形态:批量提交所有 client → wait_idle → stop),
@@ -318,7 +318,8 @@ def run_profile_refresh_once() -> int:
     status_path = XSKILL_HOME / PROFILE_STATUS_FILE
     service = None
     try:
-        engine = build_recommend_engine(config)
+        if engine is None:
+            engine = build_recommend_engine(config)
         client_ids = [row["client_id"] for row in engine.client_registry.list()]
         # 批量任务:settle_delay=0 立即算(settle 是给在线 sync 突发让路用的,批量无此需求)。
         service = ProfileRefreshService(
@@ -339,6 +340,37 @@ def run_profile_refresh_once() -> int:
     finally:
         if service is not None:
             service.stop(timeout=pr_cfg["shutdown_timeout"])
+
+
+def run_recommend_heavy_once() -> int:
+    """合并重活：画像刷新 → Milvus 对账 → 脏用户推荐预计算。
+
+    替代原先仅跑 profile-refresh 的短命子进程；Web /sync 只读
+    ``client_recommend_slots``，不再请求内 ``get_skill_for_client``。
+    """
+    from xskill.config import XSKILL_HOME, load_config
+    from xskill.recommend.heavy_worker import run_recommend_heavy_once as _heavy_tick
+    from xskill.team.server.engine_factory import build_recommend_engine
+    from xskill.utils.status_file import PROFILE_STATUS_FILE, write_status_file
+
+    status_path = XSKILL_HOME / PROFILE_STATUS_FILE
+    try:
+        config = load_config()
+        engine = build_recommend_engine(config)
+        profile_rc = run_profile_refresh_once(engine=engine)
+        heavy = _heavy_tick(engine=engine)
+        metrics = {
+            "profile_rc": profile_rc,
+            "vector_upserted": heavy.get("vector", {}).get("upserted", 0),
+            "vector_deleted": heavy.get("vector", {}).get("deleted", 0),
+            "recommends": heavy.get("recommends", 0),
+        }
+        write_status_file(status_path, metrics, ok=profile_rc == 0)
+        return 0 if profile_rc == 0 else profile_rc
+    except Exception as exc:  # noqa: BLE001 — 顶层任务边界
+        logger.exception("recommend heavy once failed")
+        write_status_file(status_path, {}, ok=False, error=str(exc))
+        return 1
 
 
 def run_ux_scores_sync_once() -> int:
@@ -381,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest.add_argument("--loop", action="store_true")
     p_ingest.add_argument("--interval", type=float, default=0.5)
     sub.add_parser("profile-refresh")
+    sub.add_parser("recommend-heavy")
     sub.add_parser("ux-scores-sync")
     args = parser.parse_args(argv)
 
@@ -396,7 +429,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_ecosystem_ingest_once(home=args.home)
     if args.kind == "ux-scores-sync":
         return run_ux_scores_sync_once()
-    return run_profile_refresh_once()
+    if args.kind in ("recommend-heavy", "profile-refresh"):
+        # profile-refresh 入口保留兼容，实际走合并重活（画像+向量+推荐）。
+        return run_recommend_heavy_once()
+    return run_recommend_heavy_once()
 
 
 if __name__ == "__main__":

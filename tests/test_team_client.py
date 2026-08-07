@@ -220,6 +220,23 @@ def test_reconcile_downloaded_skills_refreshes_changed_version(
     }, b"archive", ["codex", "cursor"])]
 
 
+def test_apply_client_take_truncates_manifest_slots():
+    from xskill.team.shared.protocol import SkillSlot, SyncResponse
+
+    slots = [
+        SkillSlot(skill_name="a", side="main", sha="1" * 40, bucket="ranked"),
+        SkillSlot(skill_name="b", side="main", sha="2" * 40, bucket="ranked"),
+        SkillSlot(skill_name="c", side="main", sha="3" * 40, bucket="ranked"),
+    ]
+    full = SyncResponse(slots=list(slots), server_time=1.0)
+    assert len(TeamClient.apply_client_take(full).slots) == 3
+    cut = SyncResponse(slots=list(slots), server_time=1.0, take_n=1)
+    out = TeamClient.apply_client_take(cut)
+    assert [s.skill_name for s in out.slots] == ["a"]
+    zero = SyncResponse(slots=list(slots), server_time=1.0, take_n=0)
+    assert TeamClient.apply_client_take(zero).slots == []
+
+
 def test_cleanup_removes_skill_not_in_manifest(server_app, tmp_path):
     tc = _client(server_app, tmp_path)
     # 本地有个 manifest 里没有的 stale skill

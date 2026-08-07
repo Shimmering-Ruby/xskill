@@ -244,13 +244,14 @@ def test_team_server_schedules_only_server_watcher(
         record.name: record for record in scheduler_records
     }
     assert set(records_by_name) == {
-        "profile-refresh", "agent-worker", "ux-scores-sync",
+        "recommend-heavy", "agent-worker", "ux-scores-sync",
     }
     watcher_command = records_by_name["agent-worker"].command
     assert watcher_command[-1] == "--server"
     assert "--home" not in watcher_command
     assert records_by_name["agent-worker"].keyword_arguments["persistent"] is True
-    assert "persistent" not in records_by_name["profile-refresh"].keyword_arguments
+    assert "persistent" not in records_by_name["recommend-heavy"].keyword_arguments
+    assert records_by_name["recommend-heavy"].command[-1] == "recommend-heavy"
     assert "persistent" not in records_by_name["ux-scores-sync"].keyword_arguments
     assert records_by_name["ux-scores-sync"].command[-1] == "ux-scores-sync"
     assert "ecosystem-ingest" not in records_by_name

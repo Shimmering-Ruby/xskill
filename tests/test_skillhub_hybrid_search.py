@@ -116,6 +116,30 @@ def test_bm25_orders_matches_and_name_outranks_description(tmp_path):
     assert all(result["semantic_rank"] is None for result in results)
 
 
+def test_exact_display_name_promoted_to_top1_over_hot_token_crowd(tmp_path):
+    """精确 name 命中必须 Top1，即使热词 bootstrap 让其它 skill RRF 更靠前。"""
+    hub_dir = tmp_path / "hub"
+    # 一堆只吃 bootstrap 热词的干扰项
+    for i in range(8):
+        _write_hub_skill(
+            hub_dir, f"noise-{i}", f"Workspace Bootstrap {i}",
+            "bootstrap workspace helper tools",
+        )
+    _write_hub_skill(
+        hub_dir, "user_skill_hub/u1/repo-doc-governance-bootstrap",
+        "repo-doc-governance-bootstrap",
+        "文档治理 DOCUMENT_MAP 闭环",
+    )
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    results = hub.search("repo-doc-governance-bootstrap", limit=5)
+    assert results, "expected search hits"
+    assert results[0]["display_name"] == "repo-doc-governance-bootstrap"
+    # skill_id 去 hash 精确命中同样置顶
+    skill_id = results[0]["skill_id"]
+    by_id = hub.search(skill_id, limit=3)
+    assert by_id[0]["skill_id"] == skill_id
+
+
 def test_supplemental_repo_and_skillhub_share_global_bm25_rank(tmp_path):
     hub_dir = tmp_path / "hub"
     _write_hub_skill(hub_dir, "hub-alpha", "alpha", "shared")

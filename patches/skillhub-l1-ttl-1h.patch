@@ -1,0 +1,101 @@
+diff --git a/src/xskill/config.py b/src/xskill/config.py
+index 5c37b59..afffbab 100644
+--- a/src/xskill/config.py
++++ b/src/xskill/config.py
+@@ -262,6 +262,7 @@ recommend:
+ skillhub:
+   enabled: false                      # 缺省关；true 才扫描
+   dir:     ~/.xskill/skillhub_skills  # 三方 skill 目录；启用时缺失会抛错（不静默跳过）
++  scan_ttl_seconds: 3600              # L1 快照 TTL；过期后下一次访问才惰性扫盘（非定时）
+ 
+ # ===== Dashboard (the built-in web console served by `xskill serve`) =====
+ dashboard:
+@@ -694,7 +695,8 @@ def recommend_config(cfg: Optional[dict] = None) -> dict:
+ def skillhub_config(cfg: Optional[dict] = None) -> dict:
+     """读 config 的 ``skillhub`` 段，显式默认。
+ 
+-    返回 ``{enabled: bool, dir: Path}``。``dir`` 缺省 ``~/.xskill/skillhub_skills``。
++    返回 ``{enabled: bool, dir: Path, scan_ttl_seconds: float}``。
++    ``dir`` 缺省 ``~/.xskill/skillhub_skills``；``scan_ttl_seconds`` 缺省 3600。
+     目录是否存在不在此校验——由 ``SkillHub`` 初始化时按 no-fallback 抛错。
+     """
+     section = (cfg or {}).get("skillhub") or {}
+@@ -708,7 +710,21 @@ def skillhub_config(cfg: Optional[dict] = None) -> dict:
+         raise ValueError(
+             f"skillhub.dir 必须是字符串路径，got {type(raw_dir).__name__}"
+         )
+-    return {"enabled": enabled, "dir": Path(raw_dir).expanduser()}
++    scan_ttl_seconds = section.get("scan_ttl_seconds", 3600.0)
++    if (
++        not isinstance(scan_ttl_seconds, (int, float))
++        or isinstance(scan_ttl_seconds, bool)
++        or not math.isfinite(scan_ttl_seconds)
++        or scan_ttl_seconds < 0
++    ):
++        raise ValueError(
++            f"skillhub.scan_ttl_seconds 必须是非负有限数，got {scan_ttl_seconds!r}"
++        )
++    return {
++        "enabled": enabled,
++        "dir": Path(raw_dir).expanduser(),
++        "scan_ttl_seconds": float(scan_ttl_seconds),
++    }
+ 
+ 
+ def embedding_search_config(cfg: Optional[dict] = None) -> dict:
+diff --git a/src/xskill/recommend/skillhub.py b/src/xskill/recommend/skillhub.py
+index a06dab6..0984d42 100644
+--- a/src/xskill/recommend/skillhub.py
++++ b/src/xskill/recommend/skillhub.py
+@@ -93,7 +93,7 @@ class SkillHub:
+     """三方 skill 扫描器 + ux 查询。``enabled=False``（缺省）时为 no-op。"""
+ 
+     def __init__(self, *, enabled: bool, hub_dir: Path | str, embed_client,
+-                 scan_ttl_seconds: float = 5.0,
++                 scan_ttl_seconds: float = 3600.0,
+                  search_max_embed: int = 2, search_timeout_s: float = 3.0):
+         self.enabled = bool(enabled)
+         self.dir = Path(hub_dir)
+@@ -153,6 +153,7 @@ class SkillHub:
+         search_cfg = embedding_search_config(config)
+         return cls(
+             enabled=cfg["enabled"], hub_dir=cfg["dir"], embed_client=embed_client,
++            scan_ttl_seconds=cfg["scan_ttl_seconds"],
+             search_max_embed=search_cfg["max_embed"],
+             search_timeout_s=search_cfg["search_timeout_s"],
+         )
+diff --git a/tests/test_recommend_config.py b/tests/test_recommend_config.py
+index 3d3fdc2..c903148 100644
+--- a/tests/test_recommend_config.py
++++ b/tests/test_recommend_config.py
+@@ -137,20 +137,29 @@ class TestSkillhubConfig:
+         cfg = skillhub_config({})
+         assert cfg["enabled"] is False
+         assert cfg["dir"] == Path.home() / ".xskill" / "skillhub_skills"
++        assert cfg["scan_ttl_seconds"] == 3600.0
+ 
+     def test_reads_overrides_from_dict(self, tmp_path):
+         d = tmp_path / "hub"
+-        cfg = skillhub_config({"skillhub": {"enabled": True, "dir": str(d)}})
++        cfg = skillhub_config({
++            "skillhub": {"enabled": True, "dir": str(d), "scan_ttl_seconds": 120},
++        })
+         assert cfg["enabled"] is True
+         assert cfg["dir"] == d
++        assert cfg["scan_ttl_seconds"] == 120.0
+ 
+     def test_bad_enabled_fails_loud(self):
+         with pytest.raises(ValueError, match="enabled"):
+             skillhub_config({"skillhub": {"enabled": "yes"}})
+ 
++    def test_bad_scan_ttl_fails_loud(self):
++        with pytest.raises(ValueError, match="scan_ttl_seconds"):
++            skillhub_config({"skillhub": {"scan_ttl_seconds": -1}})
++
+     def test_template_contains_skillhub_section(self):
+         assert "skillhub:" in CONFIG_TEMPLATE
+         assert "skillhub_skills" in CONFIG_TEMPLATE
++        assert "scan_ttl_seconds" in CONFIG_TEMPLATE
+ 
+ 
+ # ── allow_anonymous_user ─────────────────────────────────────────

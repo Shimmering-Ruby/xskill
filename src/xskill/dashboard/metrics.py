@@ -467,10 +467,11 @@ def skills_catalog(skill_dir: Path, skillhub=None, *, db_path=None) -> list[dict
 
 def skills_catalog_page(skill_dir: Path, skillhub=None, *,
                         limit: int = 0, offset: int = 0,
-                        name: str = "", db_path=None) -> dict:
+                        name: str = "", q: str = "", db_path=None) -> dict:
     """分页读取技能清单（查投影表，不扫盘）。
 
     - ``name`` 非空：精确匹配该名字。
+    - ``q`` 非空：name/description 子串模糊。
     - ``limit`` > 0：返回 ``[offset:offset+limit]``。
     - 否则：返回 ``[offset:]``（``limit=0`` 向后兼容）。
 
@@ -479,7 +480,7 @@ def skills_catalog_page(skill_dir: Path, skillhub=None, *,
     from xskill.skill.catalog_store import page_skills_catalog
     return page_skills_catalog(
         skill_dir, skillhub=skillhub,
-        limit=limit, offset=offset, name=name, db_path=db_path,
+        limit=limit, offset=offset, name=name, q=q, db_path=db_path,
     )
 
 
