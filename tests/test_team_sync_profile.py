@@ -167,7 +167,9 @@ def test_sync_returns_before_uncached_embedding_finishes(team_runtime):
     response = client.get("/api/v1/team/sync", headers=_headers(client_id))
 
     assert response.status_code == 200
-    assert set(response.json()) == {"slots", "server_time"}
+    assert set(response.json()) == {
+        "slots", "server_time", "server_slots", "take_n",
+    }
     assert embed.started.wait(2)
     assert engine.profile_store.load(client_id) is None
     assert service.metrics["running"] == 1
@@ -368,8 +370,10 @@ def test_thirty_clients_return_while_embedding_is_bounded(tmp_path, monkeypatch)
         done, not_done = wait(futures, timeout=5)
         assert not not_done, f"{len(not_done)} sync calls did not return"
         responses = [future.result() for future in done]
-        assert all(set(response) == {"slots", "server_time"}
-                   for response in responses)
+        assert all(
+            set(response) == {"slots", "server_time", "server_slots", "take_n"}
+            for response in responses
+        )
         assert embed.started.wait(2)
         assert service.metrics["running"] <= 4
         assert embed.max_active <= 4

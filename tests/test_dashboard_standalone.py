@@ -74,6 +74,7 @@ _BUILTIN_ONLY_OPERATIONS = {
     ("get", "/api/v1/dashboard/admin/users-matrix"),
     ("put", "/api/v1/dashboard/admin/client/{client_id}/ingest"),
     ("get", "/api/v1/dashboard/admin/user/{user_key}/prefs"),
+    ("get", "/api/v1/dashboard/admin/user/{user_key}/assignment"),
     ("post", "/api/v1/dashboard/admin/prefs"),
     ("get", "/api/v1/dashboard/admin/cluster-graph"),
     ("get", "/api/v1/dashboard/admin/skills"),
@@ -83,6 +84,10 @@ _BUILTIN_ONLY_OPERATIONS = {
     ("get", "/api/v1/dashboard/admin/config"),
     ("post", "/api/v1/dashboard/admin/config/validate"),
     ("post", "/api/v1/dashboard/admin/config/reload"),
+    # 技能推送对象 / 路由（#193）
+    ("get", "/api/v1/dashboard/skill/{name}/routing"),
+    ("get", "/api/v1/dashboard/skill/{name}/routing/users"),
+    ("get", "/api/v1/dashboard/skill/{name}/routing/user/{user}"),
 }
 
 
