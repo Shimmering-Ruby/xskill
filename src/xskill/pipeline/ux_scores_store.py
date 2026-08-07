@@ -1,12 +1,12 @@
 """ux_scores_store — registry.db 中 UX 体验分的读写与盘→库同步。
 
 盘上 ``<skill>/.ux_scores.jsonl`` 仍是 append 落点；本模块把记录写入
-``ux_scores`` 表，供 ranked / canary 读路径使用。定时任务调用
-``sync_ux_scores_from_skill_dir`` 按文件 mtime 增量把盘同步进库。
+``ux_scores`` 表，供 ranked / canary 读路径使用。定时合扫入口见
+``skill_dir_sync.sync_skill_disk_projections``（同轮处理 pending 等投影）；
+``sync_ux_scores_from_skill_dir`` 为其兼容包装，只返回 UX 统计。
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -246,69 +246,12 @@ def sync_ux_scores_from_skill_dir(
 ) -> dict:
     """扫 ``skill_dir`` 下各 skill 的 ``.ux_scores.jsonl`` → 入库。
 
-    按文件 mtime 跳过未变文件；每个有变更的 skill 在**一个事务**里
-    ``executemany`` 写入。返回 ``{skills, lines, inserted, skipped}``。
+    实现已并入 ``skill_dir_sync.sync_skill_disk_projections``（与 pending
+    等同轮 ``iterdir``）。本函数只返回 UX 统计，保持旧调用方兼容。
     """
-    root = Path(skill_dir)
-    skills = 0
-    lines = 0
-    inserted = 0
-    skipped = 0
-    if not root.is_dir():
-        return {"skills": 0, "lines": 0, "inserted": 0, "skipped": 0}
-    for d in sorted(root.iterdir()):
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        path = d / UX_SCORES_FILENAME
-        if not path.is_file():
-            continue
-        skills += 1
-        try:
-            mtime = path.stat().st_mtime
-        except OSError as exc:
-            logger.warning("ux sync stat failed %s: %s", path, exc)
-            continue
-        meta_key = f"{META_FILE_MTIME_PREFIX}{d.name}"
-        prev = get_meta(meta_key, db_path=db_path)
-        if prev is not None:
-            try:
-                if float(prev) >= mtime:
-                    skipped += 1
-                    continue
-            except ValueError:
-                pass
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning("ux sync read failed %s: %s", path, exc)
-            continue
-        batch: list[dict] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            lines += 1
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError as exc:
-                logger.warning("ux sync bad json in %s: %s", path, exc)
-                continue
-            if not rec.get("skill_name"):
-                rec["skill_name"] = d.name
-            batch.append(rec)
-        inserted += insert_ux_scores_many(batch, db_path=db_path)
-        _set_meta(meta_key, str(mtime), db_path=db_path)
-    _set_meta(
-        META_LAST_SYNC,
-        datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        db_path=db_path,
-    )
-    return {
-        "skills": skills,
-        "lines": lines,
-        "inserted": inserted,
-        "skipped": skipped,
-    }
+    from xskill.pipeline.skill_dir_sync import sync_skill_disk_projections
+
+    return sync_skill_disk_projections(skill_dir, db_path=db_path)["ux"]
 
 
 def _set_meta(key: str, value: str, *, db_path: Optional[Path] = None) -> None:

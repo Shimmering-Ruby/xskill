@@ -1618,8 +1618,9 @@ document.getElementById('traj-input').addEventListener('keydown', e => {
 });
 
 // ═════════════ P2:登录/角色 + 我的/管理/设置 ═════════════
-// IDENT 必须在 route()/启动加载之前声明：route() 会同步读 IDENT 决定默认页，
-// 若 let 还在暂时性死区会抛错，后面的 loadSkills 等整段启动逻辑都不会跑。
+// IDENT 必须在首次 route() 之前完成初始化：route() 会读它决定默认落地页
+// （普通用户 → 我的）。若放在 route() 之后，开机即 ReferenceError，后续
+// load* 与 initIdent 全部中断，表现为未登录空骨架，仅流水线页仍可用。
 let IDENT = null;   // {user, role} | null
 
 // ── 启动：各端点独立加载，单个失败不拖垮整页 ───────────────────
@@ -1709,6 +1710,7 @@ let _contribOpen = true;
 let _trajPage = 0;
 let _contribTraj = null;
 let _contribPayload = null; // {total, trajs, skill_meta}
+let _contribPayloadOffset = null; // 与 _contribPayload 对应的 offset；同页切换不重请求
 let _feedPages = []; // cached pages of events
 let _feedPage = 0;
 let _feedBefore = null;
@@ -1810,13 +1812,18 @@ async function renderContribDetail() {
   if (!listEl || !_contribOpen) return;
   const offset = _trajPage * TRAJ_PAGE;
   let d;
-  try {
-    d = await j(`/api/v1/dashboard/my/contributions/trajs?offset=${offset}&limit=${TRAJ_PAGE}`);
-  } catch (e) {
-    listEl.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`;
-    return;
+  if (_contribPayload && _contribPayloadOffset === offset) {
+    d = _contribPayload;
+  } else {
+    try {
+      d = await j(`/api/v1/dashboard/my/contributions/trajs?offset=${offset}&limit=${TRAJ_PAGE}`);
+    } catch (e) {
+      listEl.innerHTML = `<span class="text-[11px] text-rose-600">${esc(e.message)}</span>`;
+      return;
+    }
+    _contribPayload = d;
+    _contribPayloadOffset = offset;
   }
-  _contribPayload = d;
   const total = d.total || 0;
   const pages = Math.max(1, Math.ceil(total / TRAJ_PAGE));
   if (_trajPage >= pages) _trajPage = pages - 1;
@@ -2247,6 +2254,8 @@ async function loadMy() {
   setRtOpen(false);
   _trajPage = 0;
   _contribTraj = null;
+  _contribPayload = null;
+  _contribPayloadOffset = null;
   setContribOpen(true);
 }
 document.addEventListener('click', async e => {

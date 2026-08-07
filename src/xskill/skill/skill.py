@@ -586,6 +586,8 @@ def delete_skill(skill_dir: Path, name: str, *, db_path: Path | None = None) -> 
         logger.info(f"deleted: {name}")
         from xskill.skill.catalog_store import notify_native_delete
         notify_native_delete(name, db_path=db_path)
+        from xskill.pipeline.registry import notify_atom_pending_delete
+        notify_atom_pending_delete(name, db_path=db_path)
     return committed
 
 
