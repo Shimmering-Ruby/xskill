@@ -685,16 +685,18 @@ def page_skills_catalog(
     limit: int = 0,
     offset: int = 0,
     name: str = "",
+    q: str = "",
     db_path: Optional[Path] = None,
 ) -> dict:
-    """分页读投影表；形状与旧 skills_catalog_page 一致。"""
+    """分页读投影表；形状与旧 skills_catalog_page 一致。
+
+    ``name`` 精确匹配；``q`` 对 name/description 做子串模糊（忽略大小写）。
+    ``by_state`` 始终按全库统计；``total`` 在有 ``q``/``name`` 时为过滤后条数。
+    """
     ensure_skills_catalog(skill_dir, skillhub=skillhub, db_path=db_path)
     root = _root_key(skill_dir)
+    qn = (q or "").strip()
     with pooled_connection(db_path) as conn:
-        total = conn.execute(
-            "SELECT COUNT(*) AS n FROM skills_catalog WHERE root_key=?",
-            (root,),
-        ).fetchone()["n"]
         by_state_rows = conn.execute(
             """
             SELECT state, COUNT(*) AS n FROM skills_catalog
@@ -716,7 +718,44 @@ def page_skills_catalog(
                 """,
                 (root, name),
             ).fetchall()
+            total = len(selected)
+        elif qn:
+            like = f"%{qn}%"
+            total = conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM skills_catalog
+                WHERE root_key=? AND (
+                    name LIKE ? COLLATE NOCASE
+                    OR IFNULL(description, '') LIKE ? COLLATE NOCASE
+                )
+                """,
+                (root, like, like),
+            ).fetchone()["n"]
+            query = f"""
+                SELECT name, state, source, description, version, candidates_count,
+                       hub, skill_id, search_id, use_count
+                FROM skills_catalog
+                WHERE root_key=? AND (
+                    name LIKE ? COLLATE NOCASE
+                    OR IFNULL(description, '') LIKE ? COLLATE NOCASE
+                )
+                ORDER BY {_STATE_ORDER_SQL},
+                         CASE WHEN source='skillhub' THEN hub ELSE '' END,
+                         name
+            """
+            params: list = [root, like, like]
+            if limit > 0:
+                query += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            elif offset > 0:
+                query += " LIMIT -1 OFFSET ?"
+                params.append(offset)
+            selected = conn.execute(query, params).fetchall()
         else:
+            total = conn.execute(
+                "SELECT COUNT(*) AS n FROM skills_catalog WHERE root_key=?",
+                (root,),
+            ).fetchone()["n"]
             query = f"""
                 SELECT name, state, source, description, version, candidates_count,
                        hub, skill_id, search_id, use_count
@@ -726,7 +765,7 @@ def page_skills_catalog(
                          CASE WHEN source='skillhub' THEN hub ELSE '' END,
                          name
             """
-            params: list = [root]
+            params = [root]
             if limit > 0:
                 query += " LIMIT ? OFFSET ?"
                 params.extend([limit, offset])
@@ -741,10 +780,13 @@ def page_skills_catalog(
         if not stored.get("skill_id"):
             stored["skill_id"] = stored.get("search_id") or ""
         skills.append(catalog_api_row(stored))
-    return {
+    out = {
         "total": int(total),
         "by_state": by_state,
         "offset": offset,
         "limit": limit,
         "skills": skills,
     }
+    if qn:
+        out["q"] = qn
+    return out

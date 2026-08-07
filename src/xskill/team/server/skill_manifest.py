@@ -346,6 +346,7 @@ def build_manifest(
         persist_recommendations=False,
     )
 
+    side_overrides = prefs.get("side") or {}
     slots: list[SkillSlot] = []
     for idx, skill in enumerate(chosen):
         if idx < len(pinned):
@@ -358,6 +359,26 @@ def build_manifest(
             skill, client_id, probability, bucket, refs=catalog.refs,
         )
         if slot is not None:
+            ov = side_overrides.get(slot.skill_name)
+            if ov in ("main", "staging") and not (
+                    isinstance(skill, dict) and skill.get("source") == "skillhub"):
+                cached_main, cached_staging = (
+                    catalog.refs[skill.name] if skill.name in catalog.refs else
+                    (main_sha(skill.path) or "", staging_sha(skill.path))
+                )
+                if ov == "staging" and not cached_staging:
+                    ov = "main"
+                new_sha = cached_staging if ov == "staging" else cached_main
+                if new_sha:
+                    slot = SkillSlot(
+                        skill_name=slot.skill_name,
+                        side=ov,
+                        sha=new_sha,
+                        bucket=slot.bucket,
+                        source=slot.source,
+                        display_name=slot.display_name,
+                        source_path=slot.source_path,
+                    )
             slots.append(slot)
     # 埋点：只记画像推荐位(recommended bucket)。team server 将写入提交给
     # 独立的有界单线程 executor，避免 SQLite 写锁进入 /sync 响应路径；直接

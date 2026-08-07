@@ -185,14 +185,24 @@ const sourceBadge = s => s.source === 'skillhub'
 
 // 海量 skill(如 1 万条)分页:一次只拉/渲一页,别让前端一次性渲 1 万行 DOM 炸锅。
 let skillsPage = 0;
-const SKILLS_PAGE_SIZE = 100;
+let skillsQ = '';
+let _skillsQTimer = null;
+const SKILLS_PAGE_SIZE = 10;
 
 async function loadSkills() {
   const off = skillsPage * SKILLS_PAGE_SIZE;
-  const d = await jc(`api/v1/dashboard/skills?limit=${SKILLS_PAGE_SIZE}&offset=${off}`);
+  const qEl = document.getElementById('skills-q');
+  if (qEl && qEl.value !== skillsQ) skillsQ = qEl.value;
+  const q = (skillsQ || '').trim();
+  const sp = new URLSearchParams({
+    limit: String(SKILLS_PAGE_SIZE),
+    offset: String(off),
+  });
+  if (q) sp.set('q', q);
+  const d = await jc(`api/v1/dashboard/skills?${sp}`);
   const bs = d.by_state || {};
   const parts = Object.keys(bs).sort().map(k => `${k} ${bs[k]}`).join(' · ');
-  put('skills.summary', `共 ${d.total} 个${parts ? ' · ' + parts : ''}`);
+  put('skills.summary', `${q ? '匹配' : '共'} ${d.total} 个${parts ? ' · ' + parts : ''}`);
   rows('skills-body', (d.skills || []).map(s =>
     `<tr class="hover:bg-slate-50 cursor-pointer" data-skill-row="${esc(s.name)}">`
     + `<td class="py-2.5 font-medium text-teal-700">${esc(s.name)}${sourceBadge(s)}</td>`
@@ -200,7 +210,7 @@ async function loadSkills() {
     + `<td class="text-slate-500 max-w-[480px] truncate" title="${esc(s.description)}">${esc(s.description) || '—'}</td>`
     + `<td class="text-right tabular-nums">v${esc(s.version)}</td>`
     + `<td class="text-right tabular-nums">${s.candidates || 0}</td></tr>`).join(''),
-    '技能库还是空的');
+    q ? '无匹配技能' : '技能库还是空的');
   renderSkillsPager(d.total || 0);
 }
 
@@ -280,9 +290,9 @@ function renderGraph(g) {
     }
     const rej = (n.lanes || []).includes('rejected') && n.decision !== 'rejected'
       ? ' <span class="px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 text-[10px]">rejected</span>' : '';
-    return `<div class="h-12 flex items-center justify-between gap-2 rounded-lg px-2 -mx-2 cursor-pointer hover:bg-slate-50 ${rowCls}" data-gnode="${esc(n.sha)}">
+    return `<div class="h-12 flex items-center justify-between gap-2 rounded-lg px-2 -mx-2 cursor-pointer hover:bg-slate-50 ${rowCls}" data-gnode="${esc(n.sha)}" data-gside="${n.is_head_staging ? 'staging' : (n.is_head_main ? 'main' : '')}">
       <div class="min-w-0"><div class="font-medium truncate">${esc(n.subject) || '(无提交说明)'}${rej}</div>
-        <div class="text-[11px] ${subCls}">${esc(sub)}</div></div>
+        <div class="text-[11px] ${subCls}">${esc(sub)}${n.is_head_staging ? ' · 点击看推送给谁' : (n.is_head_main ? ' · 点击看推送给谁' : '')}</div></div>
       <code class="text-[11px] text-slate-400 shrink-0">${esc(n.sha.slice(0, 7))}</code></div>`;
   }).join('');
   const unloc = (g.decisions_unlocated || []).length;
@@ -290,7 +300,7 @@ function renderGraph(g) {
     <div class="flex gap-4 mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-500 flex-wrap">
       <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>晋升</span>
       <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>回滚</span>
-      <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>观察中</span>
+      <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>观察中（点黄点看推送对象）</span>
       <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-white ring-2 ring-slate-300"></span>普通提交</span>
       ${(g.nodes || []).length > 30 ? '<span class="text-slate-400">仅显示最近 30 个节点</span>' : ''}
     </div>
@@ -481,17 +491,16 @@ async function openSkill(name) {
       <div class="flex gap-2">${headChips}</div>
     </div>
 
-    <div id="skill-routing" class="mt-4 hidden"></div>
-
     <div class="grid grid-cols-12 gap-4 mt-4">
       <div class="col-span-12 lg:col-span-5 rounded-2xl ring-1 ring-slate-200 p-5">
         <div class="flex items-baseline justify-between">
           <h3 class="font-semibold text-sm">进化路径</h3>
-          <span class="text-[11px] text-slate-400">点击节点查看该版本 diff</span>
+          <span class="text-[11px] text-slate-400">点黄点 / main HEAD 看推送给谁；其它节点看 diff</span>
         </div>
         ${g ? renderGraph(g) : '<div class="text-slate-400 text-xs mt-3">非 git 仓，暂无进化路径</div>'}
       </div>
       <div class="col-span-12 lg:col-span-7 space-y-4">
+        <div id="skill-routing" class="hidden"></div>
         <div class="rounded-2xl ring-1 ring-slate-200 p-5">
           <h3 class="font-semibold text-sm">得分趋势 <span class="font-normal text-[11px] text-slate-400 ml-2">ux 日均 · 悬停节点看当日样本数</span></h3>
           ${renderDual(daily)}
@@ -545,63 +554,310 @@ async function openSkill(name) {
   loadSkillRouting(name).catch(console.error);
 }
 
-async function loadSkillRouting(name) {
+const ROUTE_PAGE_SIZE = 6;
+function _routeColState() {
+  return { page: 0, users: [], total: 0, seq: 0 };
+}
+let _routeState = {
+  skill: null, meta: null, focusSide: null,
+  cols: { staging: _routeColState(), main: _routeColState() },
+  q: '', suggest: [], suggestSeq: 0,
+};
+let _routeSuggestTimer = null;
+
+function _routeUsersUrl(extra) {
+  const sp = new URLSearchParams(extra);
+  return 'api/v1/dashboard/skill/' + encodeURIComponent(_routeState.skill) + '/routing/users?' + sp.toString();
+}
+
+function _routePushPill(u) {
+  return u.in_manifest
+    ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100 shrink-0">推送</span>`
+    : `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 ring-1 ring-slate-200 shrink-0">未推送</span>`;
+}
+
+function _routeCanEdit(user) {
+  if (!IDENT) return false;
+  if (IDENT.role === 'admin') return true;
+  return IDENT.user === user;
+}
+
+function _routeUserRowHtml(u) {
+  const skill = _routeState.skill || '';
+  const hasStaging = !!(_routeState.meta && _routeState.meta.has_staging);
+  const curSide = u.side || 'main';
+  const canEdit = _routeCanEdit(u.user);
+  let sideCtl;
+  if (hasStaging && canEdit) {
+    const sideBtn = (side, label) => {
+      const on = curSide === side;
+      return `<button type="button" class="route-row-side px-1.5 py-0.5 ${on ? (side === 'staging' ? 'bg-amber-400 text-white' : 'bg-teal-600 text-white') : 'bg-white text-slate-500 hover:bg-slate-50'}"
+        data-user="${esc(u.user)}" data-side="${side}" data-skill="${esc(skill)}" title="pin 到 ${label}">${label}</button>`;
+    };
+    sideCtl = `<div class="inline-flex rounded-md ring-1 ring-slate-200 overflow-hidden text-[10px]">${sideBtn('main', 'main')}${sideBtn('staging', 'staging')}</div>`;
+  } else if (hasStaging) {
+    sideCtl = `<span class="text-[10px] px-1.5 py-0.5 rounded-md ${curSide === 'staging' ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200' : 'bg-slate-100 text-slate-500'}">${esc(curSide)}</span>`;
+  } else {
+    sideCtl = `<span class="text-[10px] text-slate-400 px-1">main</span>`;
+  }
+  const starCls = !u.pinned
+    ? 'text-slate-300' + (canEdit ? ' hover:text-amber-300' : '')
+    : (u.overridden ? 'text-violet-500' + (canEdit ? ' hover:text-violet-600' : '') : 'text-amber-400' + (canEdit ? ' hover:text-amber-500' : ''));
+  const starSvg = u.pinned
+    ? `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.2l1.76 3.56 3.93.57-2.84 2.77.67 3.91L8 10.16l-3.52 1.85.67-3.91L2.3 5.33l3.93-.57L8 1.2z"/></svg>`
+    : `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 1.2l1.76 3.56 3.93.57-2.84 2.77.67 3.91L8 10.16l-3.52 1.85.67-3.91L2.3 5.33l3.93-.57L8 1.2z"/></svg>`;
+  let starBtn;
+  if (!canEdit) {
+    starBtn = `<span class="inline-flex items-center justify-center w-7 h-7 ${starCls} opacity-70" title="${u.pinned ? '已 pin（只读）' : '未 pin（只读）'}">${starSvg}</span>`;
+  } else if (u.pinned) {
+    starBtn = `<button type="button" class="route-row-unpin inline-flex items-center justify-center w-7 h-7 rounded-md hover:bg-slate-50 ${starCls}"
+        data-user="${esc(u.user)}" data-skill="${esc(skill)}" title="已 pin · 点击取消" aria-label="取消 pin">${starSvg}</button>`;
+  } else {
+    starBtn = `<button type="button" class="route-row-pin inline-flex items-center justify-center w-7 h-7 rounded-md hover:bg-slate-50 ${starCls}"
+        data-user="${esc(u.user)}" data-side="${esc(curSide)}" data-skill="${esc(skill)}" title="未 pin · 点击 pin 到当前 side" aria-label="pin">${starSvg}</button>`;
+  }
+  return `<div class="route-user-row flex items-center gap-2 py-2 border-b border-slate-50 last:border-0" data-user="${esc(u.user)}">
+    ${avatar(u.user, 'sm')}
+    <div class="min-w-0 flex-1">
+      <div class="text-[12.5px] font-medium flex items-center gap-1.5 flex-wrap">
+        <span>${esc(u.user)}</span>
+        ${_routePushPill(u)}
+        ${u.overridden ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">pinned</span>' : ''}
+      </div>
+      <div class="text-[10.5px] text-slate-400 mt-0.5 flex items-center gap-1.5">
+        ${u.sha ? `<code>${esc(String(u.sha).slice(0, 7))}</code>` : '<span>—</span>'}
+        ${u.in_manifest ? '' : '<span>不在 manifest</span>'}
+      </div>
+    </div>
+    <div class="shrink-0 flex items-center gap-1.5">
+      ${sideCtl}
+      ${starBtn}
+    </div>
+  </div>`;
+}
+
+async function _routePref(user, action, side) {
+  const skill = _routeState.skill;
+  if (!skill || !user) return;
+  if (!_routeCanEdit(user)) {
+    throw new Error('无权配置其他用户：仅管理员可代操作，普通用户只能改自己');
+  }
+  const body = { user_key: user, skill_name: skill, action };
+  if (side) body.side = side;
+  if (IDENT && IDENT.role === 'admin') {
+    await jpost('/api/v1/dashboard/admin/prefs', body);
+  } else {
+    await jpost('/api/v1/dashboard/my/prefs', body);
+  }
+  const sg = document.getElementById('route-suggest');
+  if (sg) { sg.classList.add('hidden'); sg.innerHTML = ''; }
+  await loadSkillRouting(skill, _routeState.focusSide);
+  if (IDENT && IDENT.role === 'admin' && typeof loadAdmin === 'function') {
+    await loadAdmin().catch(() => {});
+  }
+}
+
+function _paintColPager(col) {
+  const st = _routeState.cols[col];
+  if (!st) return;
+  const pages = Math.max(1, Math.ceil(st.total / ROUTE_PAGE_SIZE));
+  const atFirst = st.page <= 0;
+  const atLast = st.page >= pages - 1;
+  const box = document.getElementById('route-pager-' + col);
+  if (!box) return;
+  const mk = (dir, label, disabled, title) =>
+    `<button type="button" data-route-col="${col}" data-route-page="${dir}" title="${title}" ${disabled ? 'disabled' : ''}
+      class="route-page-btn w-6 h-6 inline-flex items-center justify-center rounded-md ring-1 ring-slate-200 text-[11px] leading-none
+      ${disabled ? 'text-slate-300 cursor-not-allowed' : 'text-slate-700 hover:bg-white'}">${label}</button>`;
+  box.innerHTML = `
+    ${mk('up', '▲', atFirst, '上一页')}
+    <span class="text-[10.5px] text-slate-500 tabular-nums px-1">${st.page + 1}/${pages}</span>
+    ${mk('down', '▼', atLast, '下一页')}
+    <span class="text-[10px] text-slate-400 ml-1">${st.total} 人</span>`;
+  box.querySelectorAll('.route-page-btn').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (btn.disabled) return;
+      _routeGoColPage(col, btn.dataset.routePage === 'up' ? -1 : 1);
+    };
+  });
+}
+
+function _paintColList(col) {
+  const st = _routeState.cols[col];
+  const body = document.getElementById('route-list-' + col);
+  if (!body || !st) return;
+  body.innerHTML = (st.users || []).map(_routeUserRowHtml).join('')
+    || `<div class="text-[11px] text-slate-400 py-3">当前无人被推送此${col === 'staging' ? '灰度' : '主干'}版本</div>`;
+  _paintColPager(col);
+}
+
+function _routeGoColPage(col, delta) {
+  const st = _routeState.cols[col];
+  if (!st) return;
+  const pages = Math.max(1, Math.ceil(st.total / ROUTE_PAGE_SIZE));
+  const next = Math.max(0, Math.min(pages - 1, st.page + delta));
+  if (next === st.page) return;
+  st.page = next;
+  _fetchRouteCol(col).catch(console.error);
+}
+
+async function _fetchRouteCol(col) {
+  if (!_routeState.skill || !_routeState.cols[col]) return;
+  const st = _routeState.cols[col];
+  const seq = ++st.seq;
+  const body = document.getElementById('route-list-' + col);
+  if (body) body.innerHTML = `<div class="text-[11px] text-slate-400 py-3">加载中…</div>`;
+  try {
+    const d = await j(_routeUsersUrl({
+      filter: col,
+      offset: String(st.page * ROUTE_PAGE_SIZE),
+      limit: String(ROUTE_PAGE_SIZE),
+    }));
+    if (seq !== st.seq) return;
+    st.users = d.users || [];
+    st.total = d.total || 0;
+    const pages = Math.max(1, Math.ceil(st.total / ROUTE_PAGE_SIZE));
+    if (st.page >= pages) {
+      st.page = pages - 1;
+      return _fetchRouteCol(col);
+    }
+    _paintColList(col);
+  } catch (err) {
+    if (seq !== st.seq) return;
+    if (body) body.innerHTML = `<div class="text-[11px] text-rose-600 py-3">${esc(err.message)}</div>`;
+  }
+}
+
+async function _fetchRouteCols() {
+  const jobs = [_fetchRouteCol('main')];
+  if (_routeState.meta && _routeState.meta.has_staging) jobs.unshift(_fetchRouteCol('staging'));
+  await Promise.all(jobs);
+}
+
+async function _fetchRouteSuggest(q) {
+  const box = document.getElementById('route-suggest');
+  if (!box || !_routeState.skill) return;
+  q = (q || '').trim();
+  if (q.length < 1) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    _routeState.suggest = [];
+    return;
+  }
+  const seq = ++_routeState.suggestSeq;
+  box.classList.remove('hidden');
+  box.innerHTML = `<div class="px-3 py-2 text-[11px] text-slate-400">检索中…</div>`;
+  try {
+    const d = await j(_routeUsersUrl({ q, limit: '8' }));
+    if (seq !== _routeState.suggestSeq) return;
+    _routeState.suggest = d.users || [];
+    if (!_routeState.suggest.length) {
+      box.innerHTML = `<div class="px-3 py-2 text-[11px] text-slate-400">无匹配（最多返回 8 条）</div>`;
+      return;
+    }
+    box.innerHTML = `<div class="px-2">${_routeState.suggest.map(_routeUserRowHtml).join('')}</div>`;
+  } catch (err) {
+    if (seq !== _routeState.suggestSeq) return;
+    box.innerHTML = `<div class="px-3 py-2 text-[11px] text-rose-600">${esc(err.message)}</div>`;
+  }
+}
+
+async function loadSkillRouting(name, focusSide) {
   const box = document.getElementById('skill-routing');
   if (!box) return;
-  let d;
+  let meta;
   try {
-    d = await j('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/routing');
+    meta = await j('api/v1/dashboard/skill/' + encodeURIComponent(name) + '/routing');
   } catch (_e) {
     box.classList.add('hidden');
     box.innerHTML = '';
     return;
   }
-  const stg = d.staging || [];
-  const main = d.main || [];
-  if (!d.has_staging && !stg.length && !main.length) {
-    box.classList.add('hidden');
-    return;
+  const keep = _routeState.skill === name;
+  _routeState.skill = name;
+  _routeState.meta = meta;
+  _routeState.suggest = [];
+  _routeState.focusSide = (focusSide === 'staging' || focusSide === 'main') ? focusSide : null;
+  if (!keep) {
+    _routeState.q = '';
+    _routeState.cols = { staging: _routeColState(), main: _routeColState() };
   }
+  const c = meta.counts || {};
+  const focusCls = (side) => (_routeState.focusSide === side
+    ? (side === 'staging' ? 'ring-2 ring-amber-200 bg-amber-50' : 'ring-2 ring-slate-300 bg-slate-50')
+    : '');
   box.classList.remove('hidden');
-  const row = (u) => `
-    <div class="flex items-center gap-2 py-2 border-b border-slate-50 last:border-0">
-      ${avatar(u.user, 'sm')}
-      <div class="min-w-0 flex-1">
-        <div class="text-[12.5px] font-medium">${esc(u.user)}</div>
-        <div class="text-[10.5px] text-slate-400 flex items-center gap-1.5">
-          <span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP[u.bucket] || 'bg-slate-100 text-slate-500'}">${esc(u.bucket || '')}</span>
-          ${u.sha ? `<code>${esc(String(u.sha).slice(0, 7))}</code>` : ''}
-          ${u.overridden ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">pin 覆盖</span>' : '<span>pick_side</span>'}
-        </div>
-      </div>
-    </div>`;
   box.innerHTML = `
-    <div class="rounded-2xl ring-1 ring-slate-200 p-5">
+    <div class="rounded-2xl ring-1 ring-slate-200 p-5" id="skill-routing-card" data-skill="${esc(name)}">
       <div class="flex items-baseline justify-between flex-wrap gap-2">
-        <h3 class="font-semibold text-sm">灰度路由</h3>
-        <span class="text-[11px] text-slate-400">${d.has_staging ? 'staging ' + stg.length + ' · main ' + main.length : '无 staging'}</span>
+        <h3 class="font-semibold text-sm">当前推送对象</h3>
+        <span class="text-[11px] text-slate-400">${meta.has_staging
+          ? `staging ${c.staging || 0} · main ${c.main || 0} · manifest ${c.in_manifest || 0}/${c.users || 0}`
+          : `无 staging · 仅 main ${c.main || 0}`}</span>
       </div>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
-        <div>
-          <div class="text-[11px] text-amber-700 font-medium mb-1">staging</div>
-          <div class="rounded-xl ring-1 ring-amber-100 bg-amber-50/40 px-3 max-h-56 overflow-y-auto">${stg.map(row).join('') || '<div class="text-[11px] text-slate-400 py-2">无人</div>'}</div>
-        </div>
-        <div>
-          <div class="text-[11px] text-slate-500 font-medium mb-1">main</div>
-          <div class="rounded-xl ring-1 ring-slate-100 px-3 max-h-56 overflow-y-auto">${main.map(row).join('') || '<div class="text-[11px] text-slate-400 py-2">无人</div>'}</div>
+
+      <div class="mt-3 relative max-w-md">
+        <div class="text-[11px] text-slate-400 mb-1">检索用户 <span class="text-slate-300">· ${
+          IDENT && IDENT.role === 'admin'
+            ? '管理员可代 pin / 配 side · ≤8'
+            : '仅可配置自己 · 他人只读 · ≤8'
+        }</span></div>
+        <input id="route-user-q" value="${esc(_routeState.q)}" autocomplete="off" placeholder="输入关键字，如 alice / user-0"
+          class="w-full ring-1 ring-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] outline-none focus:ring-teal-500 bg-white">
+        <div id="route-suggest" class="hidden absolute z-20 left-0 right-0 mt-1 bg-white rounded-xl ring-1 ring-slate-200 shadow-lg max-h-72 overflow-y-auto"></div>
+      </div>
+
+      <div class="grid grid-cols-1 ${meta.has_staging ? 'md:grid-cols-2' : ''} gap-4 mt-4">
+        ${meta.has_staging ? `<div id="route-panel-staging" class="rounded-xl p-1 ${focusCls('staging')}">
+          <div class="flex items-center justify-between gap-2 px-2 mb-1">
+            <div class="text-[11px] font-medium text-slate-600 flex items-center gap-1.5">
+              <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-50 text-amber-700 ring-1 ring-amber-200">
+                <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>staging
+              </span>
+              <span>灰度版推送给</span>
+            </div>
+            <div id="route-pager-staging" class="flex items-center"></div>
+          </div>
+          <div id="route-list-staging" class="rounded-xl ring-1 ring-amber-200 bg-amber-50 px-3 min-h-[8rem]"></div>
+        </div>` : ''}
+        <div id="route-panel-main" class="rounded-xl p-1 ${focusCls('main')}">
+          <div class="flex items-center justify-between gap-2 px-2 mb-1">
+            <div class="text-[11px] font-medium text-slate-600 flex items-center gap-1.5">
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 ring-1 ring-slate-200">main</span>
+              <span>主干版推送给</span>
+            </div>
+            <div id="route-pager-main" class="flex items-center"></div>
+          </div>
+          <div id="route-list-main" class="rounded-xl ring-1 ring-slate-200 bg-white px-3 min-h-[8rem]"></div>
         </div>
       </div>
-      ${d.has_staging ? `<div class="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-end gap-2">
-        <div><div class="text-[11px] text-slate-400 mb-1">强制路由</div>
-          <select id="route-user" class="ring-1 ring-slate-200 rounded-lg px-2 py-1 text-[12px] outline-none focus:ring-teal-500">${[...stg, ...main].map(u => `<option value="${esc(u.user)}">${esc(u.user)}</option>`).join('')}</select></div>
-        <div class="inline-flex rounded-lg ring-1 ring-slate-200 overflow-hidden text-[11px]" id="route-side">
-          <button type="button" data-side="main" class="route-side-btn px-2.5 py-1 bg-teal-600 text-white">main</button>
-          <button type="button" data-side="staging" class="route-side-btn px-2.5 py-1 bg-white text-slate-500 hover:bg-slate-50">staging</button>
-        </div>
-        <button id="route-pin" class="px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-[11px]" data-skill="${esc(name)}">pin 到该版本</button>
-        <button id="route-clear" class="px-2.5 py-1 rounded-lg ring-1 ring-slate-200 hover:bg-slate-50 text-[11px]" data-skill="${esc(name)}">清除覆盖</button>
-      </div>` : ''}
     </div>`;
+  await _fetchRouteCols();
+  if (_routeState.focusSide) {
+    const panel = document.getElementById('route-panel-' + _routeState.focusSide);
+    if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  const qEl = document.getElementById('route-user-q');
+  if (qEl) {
+    qEl.oninput = () => {
+      _routeState.q = qEl.value;
+      clearTimeout(_routeSuggestTimer);
+      _routeSuggestTimer = setTimeout(() => _fetchRouteSuggest(_routeState.q), 180);
+    };
+    qEl.onkeydown = (ev) => {
+      if (ev.key === 'Escape') {
+        const sg = document.getElementById('route-suggest');
+        if (sg) { sg.classList.add('hidden'); sg.innerHTML = ''; }
+      }
+    };
+  }
+}
+
+function focusSkillRouting(side) {
+  if (!_curSkill) return;
+  loadSkillRouting(_curSkill, side).catch(console.error);
 }
 
 // 三方(skillhub)技能详情：无 git / 无灰度 staging / 无进化路径，只有按
@@ -1264,11 +1520,10 @@ function route() {
     openSkill(parts[1]).catch(console.error);
     return;
   }
-  // #174：普通用户默认进「我的」；admin 保持总览
+  // #174：仅「无 hash」时普通用户默认进「我的」；显式 #overview / 点总览应可打开，不得再劫持
   let pg = parts[0] || '';
-  if (!pg || pg === 'overview') {
-    if (IDENT && IDENT.role !== 'admin') pg = 'my';
-    else pg = pg || 'overview';
+  if (!pg) {
+    pg = (IDENT && IDENT.role !== 'admin') ? 'my' : 'overview';
   }
   showPage(pg);
 }
@@ -1294,6 +1549,10 @@ document.addEventListener('click', async e => {
   if (step && _curTraj) { openAtom(_curTraj, step.dataset.atom).catch(console.error); return; }
   const gn = e.target.closest('[data-gnode]');
   if (gn && _curSkill) {
+    const side = gn.dataset.gside;
+    if (side === 'staging' || side === 'main') {
+      focusSkillRouting(side);
+    }
     const pv = document.getElementById('skill-preview');
     if (pv) {
       pv.innerHTML = '<span class="text-slate-400 text-xs">加载 diff…</span>';
@@ -1301,7 +1560,9 @@ document.addEventListener('click', async e => {
         const r = await j('api/v1/dashboard/skill/' + encodeURIComponent(_curSkill) + '/diff?sha=' + encodeURIComponent(gn.dataset.gnode));
         pv.innerHTML = renderDiff(r.diff);
       } catch (err) { pv.innerHTML = `<span class="text-rose-600 text-xs">${esc(err.message)}</span>`; }
-      pv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      if (!(side === 'staging' || side === 'main')) {
+        pv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
     }
     return;
   }
@@ -1356,15 +1617,17 @@ document.getElementById('traj-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('traj-open').click();
 });
 
+// ═════════════ P2:登录/角色 + 我的/管理/设置 ═════════════
+// IDENT 必须在 route()/启动加载之前声明：route() 会同步读 IDENT 决定默认页，
+// 若 let 还在暂时性死区会抛错，后面的 loadSkills 等整段启动逻辑都不会跑。
+let IDENT = null;   // {user, role} | null
+
 // ── 启动：各端点独立加载，单个失败不拖垮整页 ───────────────────
 route();
 for (const f of [loadOverview, loadRates, loadPipeline, loadDomain, loadCost,
   loadSkills, loadDirs, loadUsersStatus, loadTags, loadCanary]) {
   f().catch(e => console.error(e));
 }
-
-// ═════════════ P2:登录/角色 + 我的/管理/设置 ═════════════
-let IDENT = null;   // {user, role} | null
 
 async function jpost(u, body, method) {
   const r = await fetch(u, { method: method || 'POST',
@@ -1398,10 +1661,10 @@ async function initIdent() {
   applyIdent();
   if (IDENT) { loadMy().catch(console.error); initEvents(); }
   if (IDENT && IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
-  // 登录后若仍停在空/#overview，普通用户跳到「我的」
+  // 登录后若仍无落地 hash，普通用户默认进「我的」（不抢显式 #overview）
   if (IDENT && IDENT.role !== 'admin') {
     const h = (location.hash || '').replace(/^#/, '');
-    if (!h || h === 'overview') location.hash = '#my';
+    if (!h) location.hash = '#my';
   }
 }
 
@@ -1777,29 +2040,57 @@ let _myServerPushDefault = 100;
 let _myPrefSaving = false;
 let _myPrefSaveTimer = null;
 
+function _myStarSvg(filled) {
+  return filled
+    ? `<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1.2l1.76 3.56 3.93.57-2.84 2.77.67 3.91L8 10.16l-3.52 1.85.67-3.91L2.3 5.33l3.93-.57L8 1.2z"/></svg>`
+    : `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 1.2l1.76 3.56 3.93.57-2.84 2.77.67 3.91L8 10.16l-3.52 1.85.67-3.91L2.3 5.33l3.93-.57L8 1.2z"/></svg>`;
+}
+
 function _mySlotRowHtml(s) {
+  const curSide = s.side || 'main';
   const pinned = s.bucket === 'pinned';
   const locked = pinned && !s.user_removable;
+  const mutable = !!s.side_mutable;
+  let sideCtl;
+  if (mutable && !locked) {
+    const sideBtn = (side, label) => {
+      const on = curSide === side;
+      return `<button type="button" class="my-row-side px-1.5 py-0.5 ${on ? (side === 'staging' ? 'bg-amber-400 text-white' : 'bg-teal-600 text-white') : 'bg-white text-slate-500 hover:bg-slate-50'}"
+        data-skill="${esc(s.skill_name)}" data-side="${side}" title="pin 到 ${label}">${label}</button>`;
+    };
+    sideCtl = `<div class="inline-flex rounded-md ring-1 ring-slate-200 overflow-hidden text-[10px]">${sideBtn('main', 'main')}${sideBtn('staging', 'staging')}</div>`;
+  } else {
+    sideCtl = `<span class="text-[10px] px-1.5 py-0.5 rounded-md ${curSide === 'staging' ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200' : 'bg-slate-100 text-slate-500'}">${esc(curSide)}</span>`;
+  }
+  let starBtn;
+  if (locked) {
+    starBtn = `<span class="inline-flex items-center justify-center w-7 h-7 text-amber-400 opacity-70" title="admin/全局 pin，不可取消">${_myStarSvg(true)}</span>`;
+  } else if (pinned) {
+    starBtn = `<button type="button" class="my-row-unpin inline-flex items-center justify-center w-7 h-7 rounded-md text-amber-400 hover:text-amber-500 hover:bg-slate-50"
+      data-skill="${esc(s.skill_name)}" title="已 pin · 点击取消" aria-label="取消 pin">${_myStarSvg(true)}</button>`;
+  } else {
+    starBtn = `<button type="button" class="my-row-pin inline-flex items-center justify-center w-7 h-7 rounded-md text-slate-300 hover:text-amber-300 hover:bg-slate-50"
+      data-skill="${esc(s.skill_name)}" data-side="${esc(curSide)}" title="未 pin · 点击 pin 到当前 side" aria-label="pin">${_myStarSvg(false)}</button>`;
+  }
+  const rank = s.rank != null
+    ? `<span class="text-[10px] text-slate-400 tabular-nums shrink-0">#${s.rank}</span>`
+    : '';
   return `<div class="flex items-center gap-2.5 px-3 py-2.5 rounded-xl ring-1 ring-slate-100 hover:bg-slate-50">
-    ${s.rank != null ? `<span class="text-[10px] text-slate-400 tabular-nums shrink-0">#${s.rank}</span>` : ''}
+    ${rank}
     <div class="min-w-0 flex-1">
       <div class="flex items-center gap-2 flex-wrap">
         <span class="skill-jump cursor-pointer font-medium text-teal-700 underline decoration-teal-200 underline-offset-2" data-skill="${esc(s.skill_name)}">${esc(s.skill_name)}</span>
         <span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP[s.bucket] || 'bg-slate-100 text-slate-500'}">${bucketLabel(s)}</span>
-        <span class="text-[10px] px-1.5 py-0.5 rounded ${s.side === 'staging' ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-100' : 'bg-slate-100 text-slate-500'}">${esc(s.side || 'main')}</span>
         ${s.sha ? `<code class="text-[10px] text-slate-400">${esc(String(s.sha).slice(0, 7))}</code>` : ''}
       </div>
       <div class="mt-1 flex items-center gap-1.5 flex-wrap">${mySourceBadge(s, true)}</div>
     </div>
     <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 tabular-nums">我触发 ${s.my_triggers ?? 0} 次</span>
-    ${pinned
-      ? (locked
-        ? `<span class="shrink-0 text-[10px] text-slate-300 cursor-not-allowed" title="admin/全局 pin,不可取消">锁定</span>`
-        : `<button class="my-pref shrink-0 text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="clear">取消 pin</button>`)
-      : `<div class="shrink-0 flex gap-1.5">
-           <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50" data-skill="${esc(s.skill_name)}" data-act="pin">pin</button>
-           <button class="my-pref text-[11px] px-2 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50 text-rose-600" data-skill="${esc(s.skill_name)}" data-act="block" title="不再推送">✕</button>
-         </div>`}
+    <div class="shrink-0 flex items-center gap-1.5">
+      ${sideCtl}
+      ${starBtn}
+      ${!pinned ? `<button type="button" class="my-pref text-[11px] px-1.5 py-0.5 rounded ring-1 ring-slate-200 hover:bg-slate-50 text-rose-600" data-skill="${esc(s.skill_name)}" data-act="block" title="不再推送">✕</button>` : ''}
+    </div>
   </div>`;
 }
 
@@ -1959,12 +2250,57 @@ async function loadMy() {
   setContribOpen(true);
 }
 document.addEventListener('click', async e => {
+  const side = e.target.closest('.my-row-side');
+  if (side) {
+    try {
+      await jpost('/api/v1/dashboard/my/prefs', {
+        skill_name: side.dataset.skill, action: 'pin', side: side.dataset.side || 'main',
+      });
+      await loadMy();
+    } catch (err) { alert(err.message); }
+    return;
+  }
+  const pin = e.target.closest('.my-row-pin');
+  if (pin) {
+    try {
+      await jpost('/api/v1/dashboard/my/prefs', {
+        skill_name: pin.dataset.skill, action: 'pin', side: pin.dataset.side || 'main',
+      });
+      await loadMy();
+    } catch (err) { alert(err.message); }
+    return;
+  }
+  const unpin = e.target.closest('.my-row-unpin');
+  if (unpin) {
+    try {
+      await jpost('/api/v1/dashboard/my/prefs', { skill_name: unpin.dataset.skill, action: 'clear' });
+      await loadMy();
+    } catch (err) { alert(err.message); }
+    return;
+  }
   const b = e.target.closest('.my-pref');
   if (!b) return;
   try { await jpost('/api/v1/dashboard/my/prefs', { skill_name: b.dataset.skill, action: b.dataset.act }); await loadMy(); }
   catch (err) { alert(err.message); }
 });
 document.getElementById('contrib-toggle')?.addEventListener('click', () => setContribOpen(!_contribOpen));
+document.getElementById('trigger-rate-toggle')?.addEventListener('click', () => {
+  const body = document.getElementById('trigger-rate-body');
+  const chev = document.getElementById('trigger-rate-chevron');
+  const btn = document.getElementById('trigger-rate-toggle');
+  if (!body) return;
+  const open = body.classList.toggle('hidden') === false;
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (chev) chev.textContent = open ? '▼ 收起' : '▶ 展开';
+});
+document.getElementById('skills-q')?.addEventListener('input', e => {
+  skillsQ = e.target.value;
+  clearTimeout(_skillsQTimer);
+  _skillsQTimer = setTimeout(() => {
+    skillsPage = 0;
+    loadSkills().catch(console.error);
+  }, 180);
+});
 document.getElementById('contrib-traj-list')?.addEventListener('click', e => {
   const a = e.target.closest('.contrib-traj');
   if (!a) return;
@@ -1988,6 +2324,7 @@ function bumpPushCount(delta) {
 document.getElementById('my-push-up')?.addEventListener('click', () => bumpPushCount(1));
 document.getElementById('my-push-down')?.addEventListener('click', () => bumpPushCount(-1));
 document.getElementById('my-push-val')?.addEventListener('change', () => commitPushValEdit());
+document.getElementById('my-push-val')?.addEventListener('focus', e => e.target.select());
 document.getElementById('my-push-val')?.addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
   if (e.key === 'Escape') {
@@ -2157,37 +2494,22 @@ document.addEventListener('click', async e => {
     } catch (err) { alert(err.message); }
     return;
   }
-  const rsb = e.target.closest('.route-side-btn');
-  if (rsb) {
-    const wrap = document.getElementById('route-side');
-    if (wrap) wrap.querySelectorAll('.route-side-btn').forEach(b => {
-      const on = b.dataset.side === rsb.dataset.side;
-      b.className = 'route-side-btn px-2.5 py-1 ' + (on ? 'bg-teal-600 text-white' : 'bg-white text-slate-500 hover:bg-slate-50');
-    });
-    wrap && (wrap.dataset.side = rsb.dataset.side);
+  const rside = e.target.closest('.route-row-side');
+  if (rside) {
+    try { await _routePref(rside.dataset.user, 'pin', rside.dataset.side || 'main'); }
+    catch (err) { alert(err.message); }
     return;
   }
-  if (e.target.id === 'route-pin') {
-    const user = (document.getElementById('route-user') || {}).value;
-    const side = (document.getElementById('route-side') || {}).dataset.side || 'main';
-    if (!user) return;
-    try {
-      await jpost('/api/v1/dashboard/admin/prefs', {
-        user_key: user, skill_name: e.target.dataset.skill, action: 'pin', side,
-      });
-      await loadSkillRouting(e.target.dataset.skill); await loadAdmin();
-    } catch (err) { alert(err.message); }
+  const rpin = e.target.closest('.route-row-pin');
+  if (rpin) {
+    try { await _routePref(rpin.dataset.user, 'pin', rpin.dataset.side || 'main'); }
+    catch (err) { alert(err.message); }
     return;
   }
-  if (e.target.id === 'route-clear') {
-    const user = (document.getElementById('route-user') || {}).value;
-    if (!user) return;
-    try {
-      await jpost('/api/v1/dashboard/admin/prefs', {
-        user_key: user, skill_name: e.target.dataset.skill, action: 'clear_side',
-      });
-      await loadSkillRouting(e.target.dataset.skill); await loadAdmin();
-    } catch (err) { alert(err.message); }
+  const runpin = e.target.closest('.route-row-unpin');
+  if (runpin) {
+    try { await _routePref(runpin.dataset.user, 'clear'); }
+    catch (err) { alert(err.message); }
     return;
   }
   const gd = e.target.closest('.gpin-del');

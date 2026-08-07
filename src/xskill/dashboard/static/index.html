@@ -227,9 +227,13 @@
     <!-- ══ 技能库 ══ -->
     <div class="sec-page" id="pg-skills">
       <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5">
-        <div class="flex items-baseline justify-between">
+        <div class="flex items-baseline justify-between gap-3 flex-wrap">
           <h2 class="font-semibold text-sm">技能库</h2>
-          <span class="text-[11px] text-slate-400" data-m="skills.summary">—</span>
+          <div class="flex items-center gap-2">
+            <input id="skills-q" autocomplete="off" placeholder="检索技能名 / 描述"
+              class="ring-1 ring-slate-200 rounded-lg px-2.5 py-1 text-[12px] outline-none focus:ring-teal-500 w-52 bg-white">
+            <span class="text-[11px] text-slate-400" data-m="skills.summary">—</span>
+          </div>
         </div>
         <div class="overflow-x-auto">
         <table class="w-full mt-2 text-[12.5px]">
@@ -242,12 +246,13 @@
         </div>
       </div>
 
-      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4">
-        <div class="flex items-baseline justify-between">
+      <div class="bg-white rounded-2xl ring-1 ring-slate-200 p-5 mt-4" id="trigger-rate-card">
+        <button type="button" id="trigger-rate-toggle" class="w-full flex items-center justify-between gap-2 text-left" aria-expanded="false">
           <h2 class="font-semibold text-sm">单 skill 触发率 <span class="font-normal text-[11px] text-slate-400 ml-2">去重 (client, skill) 推荐对 → 之后被采用</span></h2>
-        </div>
-        <div class="overflow-x-auto">
-        <table class="w-full mt-2 text-[12.5px]">
+          <span id="trigger-rate-chevron" class="text-[11px] text-slate-400 shrink-0">▶ 展开</span>
+        </button>
+        <div id="trigger-rate-body" class="hidden overflow-x-auto mt-2">
+        <table class="w-full text-[12.5px]">
           <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100">
             <th class="text-left font-medium py-2">技能</th><th class="text-right font-medium">曝光对</th><th class="text-right font-medium">采用对</th><th class="text-right font-medium">触发率</th></tr></thead>
           <tbody id="trigger-body" class="divide-y divide-slate-50"><tr><td colspan="4" class="py-2 text-slate-400">加载中…</td></tr></tbody></table>
@@ -498,7 +503,7 @@
           </div>
           <div class="overflow-x-auto"><table class="w-full mt-2 text-[12.5px]">
             <thead><tr class="text-[11px] text-slate-400 border-b border-slate-100"><th class="text-left font-medium py-2">用户</th><th class="text-left font-medium">版本</th><th class="text-right font-medium">当前推送</th><th class="text-right font-medium">灰度</th><th class="text-right font-medium">触发率</th><th class="text-right font-medium">pinned·blocked</th><th class="text-left font-medium pl-6">轨迹处理</th><th class="text-left font-medium pl-6">停推建议</th><th class="text-right font-medium">操作</th></tr></thead>
-            <tbody id="admin-users-body" class="divide-y divide-slate-50"><tr><td colspan="8" class="py-2 text-slate-400">加载中…</td></tr></tbody></table></div>
+            <tbody id="admin-users-body" class="divide-y divide-slate-50"><tr><td colspan="9" class="py-2 text-slate-400">加载中…</td></tr></tbody></table></div>
           <div id="admin-drawer" class="hidden mt-3 rounded-xl ring-1 ring-slate-200 bg-slate-50 p-4"></div>
         </div>
         <!-- P3 画像聚类 graph -->
