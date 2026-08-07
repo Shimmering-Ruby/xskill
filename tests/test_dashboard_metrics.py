@@ -662,7 +662,7 @@ def test_skills_catalog_page_backfills_once_across_requests(tmp_path, monkeypatc
 
 
 def test_skills_catalog_page_name_filter_returns_matches(tmp_path, monkeypatch):
-    """name 定向查返回匹配条目，total/by_state 仍按全量。"""
+    """name 定向查返回匹配条目；total 为过滤后条数，by_state 仍按全量。"""
     root = tmp_path / "skills"
     root.mkdir()
 
@@ -672,7 +672,7 @@ def test_skills_catalog_page_name_filter_returns_matches(tmp_path, monkeypatch):
     monkeypatch.setattr(catalog_store, "scan_skills_catalog", build_thousand)
     page = skills_catalog_page(root, name="s0512")
     assert [entry["name"] for entry in page["skills"]] == ["s0512"]
-    assert page["total"] == 1000
+    assert page["total"] == 1
     assert page["by_state"] == {"main": 500, "staging": 500}
 
 

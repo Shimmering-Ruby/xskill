@@ -90,7 +90,7 @@ def test_name_filter_returns_single_skill(tmp_path, monkeypatch):
         "/api/v1/dashboard/skills?name=s4242").json()
     assert len(body["skills"]) == 1  # 1 万 skill 里定向查一条,不返回全量
     assert body["skills"][0]["name"] == "s4242"
-    assert body["total"] == 10000
+    assert body["total"] == 1  # name 过滤时 total 为命中条数
 
 
 def test_standalone_projects_10000_skills_for_all_page_and_name(
@@ -139,7 +139,7 @@ def test_standalone_projects_10000_skills_for_all_page_and_name(
     assert page["limit"] == 100
 
     named = skills_endpoint(name="s4242")
-    assert named["total"] == 10000
+    assert named["total"] == 1  # name 过滤时 total 为命中条数
     assert named["skills"] == [{
         "name": "s4242",
         "state": "staging",
