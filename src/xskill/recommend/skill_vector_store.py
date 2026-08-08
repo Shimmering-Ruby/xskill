@@ -20,9 +20,11 @@ logger = logging.getLogger("xskill.skill_vector_store")
 COLLECTION = "skill_vectors"
 DEFAULT_DIM = 8  # fake/tests；生产由首条真实向量决定或配置
 
-# 未装 / 打不开 Milvus 时的节流警告（写进 xskill.log）
+# 未装 / 打不开 Milvus 时的节流警告（写进 xskill.log）。
+# ``None`` = 从未 warn；勿用 0.0——``time.monotonic()`` 从开机起算，
+# CI / 短寿命机器 uptime < 1h 时会把「首次」误判成仍在节流窗口内。
 _MILVUS_WARN_INTERVAL_S = 3600.0
-_milvus_last_warn_mono = 0.0
+_milvus_last_warn_mono: Optional[float] = None
 _pymilvus_import_ok: Optional[bool] = None
 
 
@@ -330,7 +332,10 @@ def warn_milvus_unavailable_hourly(reason: str) -> None:
     """服务器侧无 Milvus 时每小时最多一条 WARNING（进 ``xskill.log``）。"""
     global _milvus_last_warn_mono
     now = time.monotonic()
-    if (now - _milvus_last_warn_mono) < _MILVUS_WARN_INTERVAL_S:
+    if (
+        _milvus_last_warn_mono is not None
+        and (now - _milvus_last_warn_mono) < _MILVUS_WARN_INTERVAL_S
+    ):
         return
     _milvus_last_warn_mono = now
     logger.warning(
