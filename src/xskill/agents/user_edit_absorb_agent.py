@@ -1377,8 +1377,12 @@ def reverse_sync_copy_dest(
                 )
                 if dest_hash == baseline_hash:
                     continue
+                # 基线缺该路径：视为 dest 单边新增/改动，允许回流（不再把
+                # ``baseline is None`` 误判成三方冲突——Windows 孤儿领养曾
+                # 因空基线在此处 100% FAILED）。
                 if (
-                    source_hash != baseline_hash
+                    baseline_hash is not None
+                    and source_hash != baseline_hash
                     and source_hash != dest_hash
                 ):
                     _log_reverse_sync_failure(
