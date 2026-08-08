@@ -334,13 +334,29 @@ def read_install_metadata(dest: Path) -> dict | None:
 
 
 _GIT_COMMIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+# git tree 入口的 mode 高位（与 POSIX S_IFMT 同形）；勿只靠平台 S_IS*，
+# 个别环境下对原始 git mode 的宏判断会漏掉普通文件。
+_GIT_MODE_MASK = 0o160000
+_GIT_MODE_FILE = 0o100000
+_GIT_MODE_DIR = 0o040000
+
+
+def _git_mode_is_dir(mode: int) -> bool:
+    return (mode & _GIT_MODE_MASK) == _GIT_MODE_DIR or stat.S_ISDIR(mode)
+
+
+def _git_mode_is_file(mode: int) -> bool:
+    return (mode & _GIT_MODE_MASK) == _GIT_MODE_FILE or stat.S_ISREG(mode)
 
 
 def _git_tree_fingerprints(source: Path, sha: str) -> dict[str, str] | None:
     """按 commit 的 git tree 重建逐文件内容指纹。
 
-    口径与 ``_safe_copy_file_fingerprints`` 一致：文件字节 sha256、POSIX
-    相对路径。任何一步读不到对象都返回 None（调用方按不可领养处理）。
+    口径与 ``_safe_copy_file_fingerprints`` / reverse_sync 一致：文件字节
+    sha256、POSIX 相对路径。当 HEAD 仍停在该 install commit 时，优先用
+    **工作区**字节——reverse_sync 比对的是 worktree；Windows 上 blob 与
+    工作区可能因换行/checkout 口径不一致，用 blob 做基线会误报
+    ``REVERSE_SYNC_CONTENT_CONFLICT``。任何一步读不到对象都返回 None。
     """
     try:
         repo = Repo(str(source))
@@ -367,9 +383,9 @@ def _git_tree_fingerprints(source: Path, sha: str) -> dict[str, str] | None:
                 except UnicodeDecodeError:
                     return None
                 relative = prefix / name
-                if stat.S_ISDIR(mode):
+                if _git_mode_is_dir(mode):
                     stack.append((entry_id, relative))
-                elif stat.S_ISREG(mode):
+                elif _git_mode_is_file(mode):
                     try:
                         blob = repo[entry_id]
                     except KeyError:
@@ -377,6 +393,34 @@ def _git_tree_fingerprints(source: Path, sha: str) -> dict[str, str] | None:
                     fingerprints[relative.as_posix()] = hashlib.sha256(
                         blob.data,
                     ).hexdigest()
+        try:
+            head_raw = repo.refs[b"HEAD"]
+            head_hex = (
+                head_raw.decode("ascii")
+                if isinstance(head_raw, (bytes, bytearray))
+                else None
+            )
+        except (KeyError, UnicodeDecodeError, TypeError):
+            head_hex = None
+        if head_hex == sha:
+            source_root = Path(source)
+            for relative_name in list(fingerprints):
+                worktree_path = source_root.joinpath(*relative_name.split("/"))
+                try:
+                    path_stat = worktree_path.lstat()
+                except OSError:
+                    continue
+                if (
+                    not stat.S_ISREG(path_stat.st_mode)
+                    or _stat_is_reparse_point(path_stat)
+                ):
+                    continue
+                try:
+                    fingerprints[relative_name] = hashlib.sha256(
+                        worktree_path.read_bytes(),
+                    ).hexdigest()
+                except OSError:
+                    continue
         return fingerprints
     except (OSError, ValueError, KeyError):
         return None
