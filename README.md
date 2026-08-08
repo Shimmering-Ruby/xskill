@@ -95,35 +95,39 @@ xskill是一套无监督的skill蒸馏方案，其不需要构建数据集就可
       <th></th>
       <th align="right">Spreadsheet</th>
       <th align="right">ALFWorld</th>
+      <th align="right">OfficeQA</th>
       <th align="right">Mean¹</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <th align="left">XSkill</th>
-      <td align="right">81.40</td>
-      <td align="right"><strong>84.32</strong></td>
-      <td align="right"><strong>82.86</strong></td>
+      <td align="right"><strong>88.57</strong></td>
+      <td align="right"><strong>84.33</strong></td>
+      <td align="right"><strong>60.47</strong></td>
+      <td align="right"><strong>77.79</strong></td>
     </tr>
     <tr>
       <th align="left">SkillOpt</th>
-      <td align="right"><strong>82.80</strong></td>
-      <td align="right">77.60</td>
-      <td align="right">80.20</td>
+      <td align="right">87.86</td>
+      <td align="right">77.61</td>
+      <td align="right">51.16</td>
+      <td align="right">72.21</td>
     </tr>
     <tr>
       <th align="left">Delta</th>
-      <td align="right">−1.40</td>
+      <td align="right"><strong>+0.71</strong></td>
       <td align="right"><strong>+6.72</strong></td>
-      <td align="right"><strong>+2.66</strong></td>
+      <td align="right"><strong>+9.30</strong></td>
+      <td align="right"><strong>+5.58</strong></td>
     </tr>
   </tbody>
 </table>
 
-<p align="center"><sub>¹ 当前平均分仅包含 Spreadsheet 和 ALFWorld，OfficeQA 仍在评测中。</sub></p>
+<p align="center"><sub>¹ 表内数值为测试集通过率(%)，Mean 为三项基准的算术平均。测试规模：Spreadsheet 官方 test280(248/280 对 246/280)、ALFWorld 官方 test134(113/134 对 104/134)、OfficeQA 官方划分的 1/4 子集 test43(26/43 对 22/43)。</sub></p>
 
 
-在目前已完成的评测中，其整体精度与 SkillOpt 相当，并取得了更高的平均分。
+在目前已完成的三项评测中，xskill 均高于 SkillOpt，平均分领先 5.58。OfficeQA 的全量评测仍在排队。
 
 ### Evaluation Setup
 
