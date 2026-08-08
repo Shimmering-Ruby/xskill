@@ -124,10 +124,10 @@ xskill是一套无监督的skill蒸馏方案，其不需要构建数据集就可
   </tbody>
 </table>
 
-<p align="center"><sub>¹ 表内数值为测试集通过率(%)，Mean 为三项基准的算术平均。测试规模：Spreadsheet 官方 test280(248/280 对 246/280)、ALFWorld 官方 test134(113/134 对 104/134)、OfficeQA 官方划分的 1/4 子集 test43(26/43 对 22/43)。</sub></p>
+<p align="center"><sub>¹ 表内数值为测试集通过率(%)，Mean 为三项基准的算术平均。Spreadsheet 与 ALFWorld 使用官方全量测试集，OfficeQA 使用官方划分的 1/4 子集。</sub></p>
 
 
-在目前已完成的三项评测中，xskill 均高于 SkillOpt，平均分领先 5.58。OfficeQA 的全量评测仍在排队。
+在目前已完成的三项评测中，xskill 均高于 SkillOpt，平均分领先 5.58。
 
 ### Evaluation Setup
 
