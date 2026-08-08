@@ -194,6 +194,35 @@ def test_revsync_orphan_backports_user_edit(tmp_path):
     assert read_install_metadata(dest) is not None
 
 
+def test_git_tree_fingerprints_prefer_worktree_when_head_matches(tmp_path):
+    """HEAD==install sha 时基线跟 worktree（模拟 Windows CRLF 工作区）。"""
+    import hashlib
+
+    from xskill.ecosystems.installation import _git_tree_fingerprints
+
+    src, sha = _git_source(tmp_path, {"SKILL.md": "v1\n"})
+    (src / "SKILL.md").write_bytes(b"v1\r\n")
+    fingerprints = _git_tree_fingerprints(src, sha)
+    assert fingerprints is not None
+    assert fingerprints["SKILL.md"] == hashlib.sha256(b"v1\r\n").hexdigest()
+
+
+def test_revsync_orphan_backports_when_worktree_has_crlf(tmp_path):
+    """源仓 worktree 为 CRLF、与 blob LF 不一致时，孤儿编辑仍应回流。"""
+    src, sha = _git_source(tmp_path, {"SKILL.md": "v1\n"})
+    (src / "SKILL.md").write_bytes(b"v1\r\n")
+    dest = _orphan_dest(tmp_path, {"SKILL.md": "v1\r\n"}, sha)
+    (dest / "SKILL.md").write_bytes(b"v2-user-edit\r\n")
+
+    status = reverse_sync_copy_dest(
+        dest, src,
+        exclude=_REVSYNC_EXCLUDE,
+        quiet_seconds=0,
+    )
+    assert status == ReverseSyncStatus.SYNCED
+    assert (src / "SKILL.md").read_bytes() == b"v2-user-edit\r\n"
+
+
 def test_revsync_orphan_unedited_is_no_edit(tmp_path):
     src, sha = _git_source(tmp_path, {"SKILL.md": "v1\n"})
     dest = _orphan_dest(tmp_path, {"SKILL.md": "v1\n"}, sha)
