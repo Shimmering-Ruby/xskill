@@ -89,6 +89,10 @@ class XSkill:
     def search_skills(self, query: str, top_k: int = 5) -> list[SkillHit]:
         """跨 skill_repo 搜索 skill。"""
         from xskill.skill.repo import search_skill_index
+        # 参数求值会触发 ``self.embed`` → create_embed_client；索引未建时
+        # 先返回空，避免首次安装未配 embedding 就炸。
+        if not (self.skill_repo.root / ".skill_index.pkl").exists():
+            return []
         items = search_skill_index(
             skill_dir=self.skill_repo.root,
             query=query,

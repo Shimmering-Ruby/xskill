@@ -506,8 +506,11 @@ def api_search_skills(req: SkillSearchRequest):
     """Search existing skills by semantic similarity.
 
     同步 def：embed 是同步网络调用，见 api_search_trajectories 的说明。
+    索引尚未建成时直接返回空列表，避免首次安装因未配 embedding 而 500。
     """
     try:
+        if not (_skill_dir / ".skill_index.pkl").exists():
+            return []
         embedding_client = create_embed_client(_config)
         return search_skill_index(
             skill_dir=_skill_dir,
@@ -535,6 +538,8 @@ def api_resolve_skill(req: SkillResolveRequest):
     import time
 
     try:
+        if not (_skill_dir / ".skill_index.pkl").exists():
+            return {"skill_name": None, "path": None, "side": "none", "sha": ""}
         embedding_client = create_embed_client(_config)
         hits = search_skill_index(
             skill_dir=_skill_dir,
