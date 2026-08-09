@@ -706,6 +706,22 @@ def _write_search_output(text: str, *, to_stderr: bool = False) -> None:
         stream.write("\n")
 
 
+def _emit_skillhub_search_meta_warnings(
+    search_meta: dict, *, has_results: bool,
+) -> None:
+    """根据 skill_hub/search 的 meta 向 stderr 提示空库 / BM25 降级。"""
+    if search_meta.get("corpus_empty") and not has_results:
+        _write_search_output(
+            "warning: skillhub 暂无可搜索的 skill（库为空）",
+            to_stderr=True,
+        )
+    if search_meta.get("degraded_to_bm25"):
+        _write_search_output(
+            "warning: 语义检索不可用，已降级为 BM25 关键词搜索",
+            to_stderr=True,
+        )
+
+
 _DOWNLOAD_AGENT_OPTIONS = (
     ("claude_code", "claude-code", "Claude Code"),
     ("codex", "codex", "Codex"),
@@ -1097,12 +1113,18 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
                     "\n".join(error_lines), to_stderr=True,
                 )
             return 1
-        results = resp.json().get("results", [])
+        payload = resp.json()
+        results = payload.get("results", [])
+        search_meta = payload.get("meta") or {}
+        _emit_skillhub_search_meta_warnings(search_meta, has_results=bool(results))
         if not results:
             if args.json:
                 _write_search_output("[]")
             else:
-                _write_search_output("skillhub 无匹配 skill")
+                if search_meta.get("corpus_empty"):
+                    _write_search_output("skillhub 暂无可搜索的 skill")
+                else:
+                    _write_search_output("skillhub 无匹配 skill")
             return 0
         if getattr(args, "download", False):
             from xskill.config import XSKILL_HOME

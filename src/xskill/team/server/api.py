@@ -1049,14 +1049,17 @@ async def team_skill_hub_search(
                 engine, query, bounded_limit, client_id, probability,
             )
 
-        matches = hub.cached_search(query, bounded_limit)
-        hot_cache_hit = matches is not None
+        packed = hub.cached_search_with_meta(query, bounded_limit)
+        hot_cache_hit = packed is not None
         if hot_cache_hit:
             await asyncio.sleep(0)
+            matches, search_meta = packed
         else:
-            matches = await run_in_threadpool(hub.search, query, bounded_limit)
+            matches, search_meta = await run_in_threadpool(
+                hub.search_with_meta, query, bounded_limit,
+            )
         payload = _format_team_search_results(
-            matches, None, client_id, probability,
+            matches, None, client_id, probability, meta=search_meta,
         )
         if hot_cache_hit:
             await asyncio.sleep(0)
@@ -1113,14 +1116,18 @@ def _search_and_format_team_skills(
         and not getattr(engine.skillhub, "enabled", False)
     ):
         raise HTTPException(status_code=503, detail="no searchable skill source")
-    matches = engine.search_team_skills(query, limit, catalog)
+    matches, search_meta = engine.search_team_skills_with_meta(
+        query, limit, catalog,
+    )
     return _format_team_search_results(
-        matches, catalog, client_id, probability,
+        matches, catalog, client_id, probability, meta=search_meta,
     )
 
 
 def _format_team_search_results(
     matches: list[dict], catalog, client_id: str, probability: float,
+    *,
+    meta: dict | None = None,
 ) -> dict:
     """把统一排名命中投影为既有 search/install 响应契约。"""
     results: list[dict] = []
@@ -1165,7 +1172,13 @@ def _format_team_search_results(
                 "staging_assigned": side == "staging",
             })
         results.append(result)
-    return {"results": results}
+    payload = {"results": results}
+    if meta is not None:
+        payload["meta"] = {
+            "corpus_empty": bool(meta.get("corpus_empty")),
+            "degraded_to_bm25": bool(meta.get("degraded_to_bm25")),
+        }
+    return payload
 
 
 def _pin_repo_search_grant(

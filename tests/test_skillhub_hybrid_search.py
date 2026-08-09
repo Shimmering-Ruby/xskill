@@ -596,10 +596,41 @@ def test_endpoint_adds_source_ux_and_match_fields(tmp_path):
     response = http.get("/api/v1/team/skill_hub/search",
                         params={"query": "docker"}, headers=headers)
     assert response.status_code == 200
-    top = response.json()["results"][0]
+    payload = response.json()
+    top = payload["results"][0]
     assert top["source"] == "skillhub"
     assert top["ux_avg"] is None
     assert top["match"] == {"bm25_rank": 1, "semantic_rank": None}
+    assert payload["meta"] == {
+        "corpus_empty": False,
+        "degraded_to_bm25": True,
+    }
+
+
+def test_endpoint_meta_marks_empty_corpus(tmp_path):
+    hub_dir = tmp_path / "hub"
+    hub_dir.mkdir()
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    http = _make_team_client(tmp_path, skillhub=hub)
+    _cid, headers = _register(http)
+    response = http.get("/api/v1/team/skill_hub/search",
+                        params={"query": "docker"}, headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["results"] == []
+    assert payload["meta"] == {
+        "corpus_empty": True,
+        "degraded_to_bm25": False,
+    }
+
+
+def test_search_with_meta_reports_bm25_degradation(tmp_path):
+    hub_dir = tmp_path / "hub"
+    _write_hub_skill(hub_dir, "a", "alpha", "alpha docs")
+    hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=None)
+    results, meta = hub.search_with_meta("alpha", limit=3)
+    assert results
+    assert meta == {"corpus_empty": False, "degraded_to_bm25": True}
 
 
 def test_endpoint_serves_hot_result_without_anyio_worker(tmp_path, monkeypatch):

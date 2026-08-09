@@ -32,7 +32,13 @@ class _FailingSearchHub:
     def cached_search(self, _query: str, _limit: int):
         return None
 
+    def cached_search_with_meta(self, _query: str, _limit: int):
+        return None
+
     def search(self, _query: str, _limit: int):
+        raise self.error
+
+    def search_with_meta(self, _query: str, _limit: int):
         raise self.error
 
 
@@ -42,7 +48,16 @@ class _CombinedSearchEngine:
         self.ranked = ranked
 
     def search_team_skills(self, _query: str, limit: int, _catalog):
-        return self.ranked[:limit]
+        results, _meta = self.search_team_skills_with_meta(
+            _query, limit, _catalog,
+        )
+        return results
+
+    def search_team_skills_with_meta(self, _query: str, limit: int, _catalog):
+        return self.ranked[:limit], {
+            "corpus_empty": False,
+            "degraded_to_bm25": False,
+        }
 
 
 def _write_hub_skill(hub_dir: Path, folder: str, name: str, description: str) -> Path:
