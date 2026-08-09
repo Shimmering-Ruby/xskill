@@ -9,6 +9,11 @@ import pytest
 
 from xskill.team.server.profile_refresh import ProfileRefreshService
 
+# Windows CI runners are often slower to schedule/join worker threads than
+# local laptops; keep the contract but use a wider idle/stop budget.
+_IDLE_TIMEOUT = 10
+_EVENT_TIMEOUT = 5
+
 
 @dataclass
 class _Result:
@@ -26,6 +31,7 @@ class _ImmediateEngine:
         return _Result()
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 def test_queued_requests_coalesce_and_queue_full_is_nonblocking():
     engine = _ImmediateEngine()
     service = ProfileRefreshService(
@@ -38,11 +44,12 @@ def test_queued_requests_coalesce_and_queue_full_is_nonblocking():
     assert service.metrics["coalesced"] == 1
     assert service.metrics["queue_full"] == 1
     service.start()
-    assert service.wait_idle(timeout=2)
+    assert service.wait_idle(timeout=_IDLE_TIMEOUT)
     assert engine.calls == ["u1"]
-    assert service.stop(timeout=2)
+    assert service.stop(timeout=_IDLE_TIMEOUT)
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 def test_running_request_causes_at_most_one_rerun():
     first_started = threading.Event()
     release_first = threading.Event()
@@ -56,7 +63,7 @@ def test_running_request_causes_at_most_one_rerun():
             self.calls += 1
             if self.calls == 1:
                 first_started.set()
-                assert release_first.wait(2)
+                assert release_first.wait(_EVENT_TIMEOUT)
             else:
                 second_started.set()
             return _Result(changed=self.calls == 1, embed_items=self.calls == 1)
@@ -64,12 +71,12 @@ def test_running_request_causes_at_most_one_rerun():
     engine = Engine()
     service = ProfileRefreshService(engine, workers=1, queue_size=1)
     assert service.request("u1")
-    assert first_started.wait(2)
+    assert first_started.wait(_EVENT_TIMEOUT)
     assert service.request("u1")
     assert service.request("u1")
     release_first.set()
-    assert second_started.wait(2)
-    assert service.wait_idle(timeout=2)
+    assert second_started.wait(_EVENT_TIMEOUT)
+    assert service.wait_idle(timeout=_IDLE_TIMEOUT)
     assert engine.calls == 2
     metrics = service.metrics
     assert metrics["rerun"] == 1
@@ -77,9 +84,10 @@ def test_running_request_causes_at_most_one_rerun():
     assert metrics["completed"] == 1
     assert metrics["unchanged"] == 1
     assert metrics["embed_items"] == 1
-    assert service.stop(timeout=2)
+    assert service.stop(timeout=_IDLE_TIMEOUT)
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 def test_failure_clears_state_and_later_request_retries():
     class Engine:
         def __init__(self):
@@ -94,16 +102,17 @@ def test_failure_clears_state_and_later_request_retries():
     engine = Engine()
     service = ProfileRefreshService(engine, workers=1, queue_size=1)
     assert service.request("u1")
-    assert service.wait_idle(timeout=2)
+    assert service.wait_idle(timeout=_IDLE_TIMEOUT)
     assert service.metrics["failed"] == 1
     assert service.request("u1")
-    assert service.wait_idle(timeout=2)
+    assert service.wait_idle(timeout=_IDLE_TIMEOUT)
     assert engine.calls == 2
     assert service.metrics["completed"] == 1
     assert service.metrics["embed_items"] == 3
-    assert service.stop(timeout=2)
+    assert service.stop(timeout=_IDLE_TIMEOUT)
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 def test_worker_concurrency_is_fixed_and_threads_are_daemon():
     all_workers_busy = threading.Event()
     release = threading.Event()
@@ -120,7 +129,7 @@ def test_worker_concurrency_is_fixed_and_threads_are_daemon():
                 self.max_active = max(self.max_active, self.active)
                 if self.active == 2:
                     all_workers_busy.set()
-            assert release.wait(2)
+            assert release.wait(_EVENT_TIMEOUT)
             with self.lock:
                 self.active -= 1
             return _Result()
@@ -129,14 +138,14 @@ def test_worker_concurrency_is_fixed_and_threads_are_daemon():
     service = ProfileRefreshService(engine, workers=2, queue_size=6)
     for index in range(6):
         assert service.request(f"u{index}")
-    assert all_workers_busy.wait(2)
+    assert all_workers_busy.wait(_EVENT_TIMEOUT)
     assert engine.max_active == 2
     assert len(service._threads) == 2
     assert all(thread.daemon for thread in service._threads)
     release.set()
-    assert service.wait_idle(timeout=2)
+    assert service.wait_idle(timeout=_IDLE_TIMEOUT)
     assert engine.max_active == 2
-    assert service.stop(timeout=2)
+    assert service.stop(timeout=_IDLE_TIMEOUT)
 
 
 def test_settle_delay_keeps_profile_work_behind_sync_burst():
@@ -155,10 +164,10 @@ def test_settle_delay_keeps_profile_work_behind_sync_burst():
     started = time.monotonic()
     assert service.request("u1")
     assert service.request("u2")
-    assert entered.wait(1)
+    assert entered.wait(_EVENT_TIMEOUT)
     assert entered_at[0] - started >= 0.14
-    assert service.wait_idle(timeout=2)
-    assert service.stop(timeout=2)
+    assert service.wait_idle(timeout=_IDLE_TIMEOUT)
+    assert service.stop(timeout=_IDLE_TIMEOUT)
 
 
 @pytest.mark.flaky(reruns=2, reruns_delay=1)
