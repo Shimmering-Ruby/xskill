@@ -7,6 +7,7 @@ xskill.py — XSkill 顶层门面
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +16,8 @@ from xskill.pipeline.registry import Registry
 from xskill.skill.repo import SkillRepo
 from xskill.pipeline.trajectory import Trajectory
 from xskill.types import SkillHit, TrajectoryHit, UxScoreResult
+
+logger = logging.getLogger("xskill")
 
 
 class XSkill:
@@ -89,9 +92,20 @@ class XSkill:
     def search_skills(self, query: str, top_k: int = 5) -> list[SkillHit]:
         """跨 skill_repo 搜索 skill。"""
         from xskill.skill.repo import search_skill_index
-        # 参数求值会触发 ``self.embed`` → create_embed_client；索引未建时
-        # 先返回空，避免首次安装未配 embedding 就炸。
-        if not (self.skill_repo.root / ".skill_index.pkl").exists():
+        # 参数求值会触发 ``self.embed`` → create_embed_client；索引未建或
+        # embedding 未配时先返回空，避免首次安装就炸。
+        index_path = self.skill_repo.root / ".skill_index.pkl"
+        if not index_path.exists():
+            logger.warning(
+                "skill search skipped: missing .skill_index.pkl under %s",
+                self.skill_repo.root,
+            )
+            return []
+        embed_cfg = (self.config.get("embedding") or {})
+        if not embed_cfg.get("base_url") or not embed_cfg.get("model"):
+            logger.warning(
+                "skill search skipped: embedding.base_url/model unset",
+            )
             return []
         items = search_skill_index(
             skill_dir=self.skill_repo.root,

@@ -501,15 +501,27 @@ async def api_import_skill(req: ImportSkillRequest):
 
 # ---- Skill Search --------------------------------------------------------
 
+def _local_skill_search_skip_reason(skill_dir: Path, config: dict) -> str | None:
+    """本地 skill 语义搜索前置检查；不可搜时返回原因，否则 None。"""
+    if not (skill_dir / ".skill_index.pkl").exists():
+        return f"missing .skill_index.pkl under {skill_dir}"
+    embed_cfg = (config or {}).get("embedding") or {}
+    if not embed_cfg.get("base_url") or not embed_cfg.get("model"):
+        return "embedding.base_url/model unset"
+    return None
+
+
 @router.post("/skills/search")
 def api_search_skills(req: SkillSearchRequest):
     """Search existing skills by semantic similarity.
 
     同步 def：embed 是同步网络调用，见 api_search_trajectories 的说明。
-    索引尚未建成时直接返回空列表，避免首次安装因未配 embedding 而 500。
+    索引尚未建成或 embedding 未配时直接返回空列表，避免首次安装 500。
     """
     try:
-        if not (_skill_dir / ".skill_index.pkl").exists():
+        skip = _local_skill_search_skip_reason(_skill_dir, _config)
+        if skip is not None:
+            logger.warning("skill search skipped: %s", skip)
             return []
         embedding_client = create_embed_client(_config)
         return search_skill_index(
@@ -538,7 +550,9 @@ def api_resolve_skill(req: SkillResolveRequest):
     import time
 
     try:
-        if not (_skill_dir / ".skill_index.pkl").exists():
+        skip = _local_skill_search_skip_reason(_skill_dir, _config)
+        if skip is not None:
+            logger.warning("skill resolve skipped: %s", skip)
             return {"skill_name": None, "path": None, "side": "none", "sha": ""}
         embedding_client = create_embed_client(_config)
         hits = search_skill_index(
