@@ -100,6 +100,10 @@ mutmut run --max-children 8 \
   未 git init 的 skill 目录 `/status` 仍 200。
 - `reindex_empty_description.feature`：Issue #200 / 空或非法 description 时
   `rebuild_skill_index` 局部跳过，不把空串发给 embedding、不拖死整轮。
+- `baby_stub_frontmatter.feature`：Issue #200 根治侧 /
+  `init_skill_repo_on_baby` 用 `yaml.safe_dump`（`frontmatter.serialize`）写
+  stub frontmatter；多行、含冒号/引号/井号的敌意 description 产出的 baby
+  初版仍是合法 YAML、description 逐字保留、无需止血跳过即可进索引。
 
 ```bash
 pytest tests/bdd/test_standalone_resilience.py -v

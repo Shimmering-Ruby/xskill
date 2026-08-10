@@ -97,6 +97,32 @@ def test_reindex_does_not_send_empty_strings_to_embed() -> None:
     """Embed client must never see empty description texts."""
 
 
+# ── scenarios: #200 root cure — baby stub YAML-safe frontmatter ───────
+
+@scenario(
+    "features/standalone/baby_stub_frontmatter.feature",
+    "多行 description 创建 baby stub 后 frontmatter 仍严格可解析",
+)
+def test_baby_stub_multiline_description_is_valid_yaml() -> None:
+    """Multiline descriptions must serialize into strictly parseable YAML."""
+
+
+@scenario(
+    "features/standalone/baby_stub_frontmatter.feature",
+    "含冒号引号井号的 description 创建 baby stub 后 frontmatter 仍严格可解析",
+)
+def test_baby_stub_special_chars_description_is_valid_yaml() -> None:
+    """YAML-special characters must not corrupt the stub frontmatter."""
+
+
+@scenario(
+    "features/standalone/baby_stub_frontmatter.feature",
+    "敌意 description 的 baby stub 无需止血即可进入索引",
+)
+def test_baby_stub_hostile_description_is_indexable() -> None:
+    """A freshly created hostile-description stub indexes without the skip path."""
+
+
 # ── fakes / world ─────────────────────────────────────────────────────
 
 class _RecordingEmbed:
@@ -379,3 +405,46 @@ def then_embed_no_empty(world: _World) -> None:
 def then_embed_saw_text(world: _World, text: str) -> None:
     assert world.embed is not None
     assert text in world.embed.texts
+
+
+# ── given/then: #200 root cure — baby stub YAML-safe frontmatter ──────
+
+_HOSTILE_DESCRIPTIONS = {
+    "hostile-multiline": (
+        "服务于登录页 V4 版本的 UI 对齐与全英文（i18n）适配任务。\n"
+        "典型操作包括 Apple 登录按钮置顶、文案本地化替换、CSS 样式对齐。\n"
+        "常在 worktree 并行开发模式下执行，需跨组件/语言包协同修改。"
+    ),
+    "hostile-specials": (
+        'contains: a colon, "double quotes", #hash, [brackets] and {braces}'
+    ),
+}
+
+
+@given(parsers.parse('用敌意 description 创建 baby skill "{name}"'))
+def given_hostile_baby_stub(world: _World, name: str) -> None:
+    from xskill.skill.git import init_skill_repo_on_baby
+
+    init_skill_repo_on_baby(
+        str(world.skill_dir / name), name, _HOSTILE_DESCRIPTIONS[name],
+    )
+
+
+@then(parsers.parse('skill "{name}" 的 SKILL.md frontmatter 严格可解析'))
+def then_stub_frontmatter_strict(world: _World, name: str) -> None:
+    from xskill.skill.frontmatter import parse_strict
+
+    fm, _body = parse_strict(
+        (world.skill_dir / name / "SKILL.md").read_text(encoding="utf-8"),
+    )
+    assert fm["name"] == name
+
+
+@then(parsers.parse('skill "{name}" 的 description 与输入逐字一致'))
+def then_stub_description_verbatim(world: _World, name: str) -> None:
+    from xskill.skill.frontmatter import parse_strict
+
+    fm, _body = parse_strict(
+        (world.skill_dir / name / "SKILL.md").read_text(encoding="utf-8"),
+    )
+    assert fm["description"] == _HOSTILE_DESCRIPTIONS[name]
