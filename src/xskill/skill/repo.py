@@ -209,6 +209,14 @@ def rebuild_skill_index(
         if not frontmatter:
             continue
         description = (frontmatter.get("description") or "").strip()
+        # 空 description（含宽松 frontmatter 恢复失败后的空串）发给 embedding
+        # 端点会 400 并拖死整轮 reindex（#200）。跳过并告警，局部降级。
+        if not description:
+            logger.warning(
+                "rebuild_skill_index: skip skill %s with empty description",
+                skill_path.name,
+            )
+            continue
         entries.append((skill_path.name, description))
 
     if not entries:
