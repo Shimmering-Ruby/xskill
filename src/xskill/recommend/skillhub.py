@@ -514,6 +514,13 @@ class SkillHub:
         with open(self.index_cache_path, "wb") as index_file:
             pickle.dump(data, index_file)
 
+    @staticmethod
+    def _search_meta(*, corpus_empty: bool, degraded_to_bm25: bool) -> dict:
+        return {
+            "corpus_empty": bool(corpus_empty),
+            "degraded_to_bm25": bool(degraded_to_bm25),
+        }
+
     def search(
         self,
         query: str,
@@ -527,23 +534,44 @@ class SkillHub:
         已缓存向量、绝不现算 corpus；query embed 受并发信号量 + 短超时 + LRU 三护栏
         约束，慢/挂的 embed API 最多让语义位失效，请求自然退化为纯 BM25。
         """
+        results, _meta = self.search_with_meta(
+            query, limit, supplemental=supplemental,
+        )
+        return results
+
+    def search_with_meta(
+        self,
+        query: str,
+        limit: int = 5,
+        *,
+        supplemental: SearchCorpus | None = None,
+    ) -> tuple[list[dict], dict]:
+        """同 ``search``，额外返回 ``corpus_empty`` / ``degraded_to_bm25`` 元信息。"""
         normalized_query = query.strip().lower()
         if not normalized_query:
-            return []
+            return [], self._search_meta(
+                corpus_empty=False, degraded_to_bm25=False,
+            )
         index_bundle = self._search_index_bundle(supplemental=supplemental)
         return self._search_bundle(normalized_query, int(limit), index_bundle)
 
     def _search_bundle(
         self, normalized_query: str, limit: int, index_bundle: dict,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict]:
         """在已构建的统一索引上复用 BM25、semantic、RRF 与结果缓存。"""
         entries = index_bundle["entries"]
         if not entries:
-            return []
+            return [], self._search_meta(
+                corpus_empty=True, degraded_to_bm25=False,
+            )
         query_tokens = _tokenize(normalized_query)
         bm25_rank_by_index = self._bm25_ranks(index_bundle, query_tokens)
         semantic_rank_by_index = self._semantic_ranks(
             index_bundle, normalized_query,
+        )
+        degraded_to_bm25 = not bool(semantic_rank_by_index)
+        meta = self._search_meta(
+            corpus_empty=False, degraded_to_bm25=degraded_to_bm25,
         )
         result_cache_key = (
             normalized_query, int(limit), bool(semantic_rank_by_index),
@@ -552,7 +580,7 @@ class SkillHub:
             index_bundle, result_cache_key,
         )
         if cached_results is not None:
-            return cached_results
+            return cached_results, meta
         score_groups = self._fusion_score_groups(
             index_bundle, normalized_query,
             bm25_rank_by_index, semantic_rank_by_index,
@@ -573,7 +601,7 @@ class SkillHub:
             result_entry["ux_avg"] = self._ux_avg_for_entry(result_entry)
             results.append(result_entry)
         self._cache_search_results(index_bundle, result_cache_key, results)
-        return results
+        return results, meta
 
     @staticmethod
     def _entry_exact_keys(entry: dict) -> set[str]:
@@ -625,9 +653,20 @@ class SkillHub:
         stale snapshot or cache miss returns ``None`` so the caller can offload
         :meth:`search` to a worker thread.
         """
+        packed = self.cached_search_with_meta(query, limit)
+        if packed is None:
+            return None
+        return packed[0]
+
+    def cached_search_with_meta(
+        self, query: str, limit: int = 5,
+    ) -> tuple[list[dict], dict] | None:
+        """同 ``cached_search``，命中时附带 ``search_with_meta`` 同构元信息。"""
         normalized_query = query.strip().lower()
         if not normalized_query:
-            return []
+            return [], self._search_meta(
+                corpus_empty=False, degraded_to_bm25=False,
+            )
         now = time.monotonic()
         index_bundle = self._search_index
         if (
@@ -645,7 +684,11 @@ class SkillHub:
                 (normalized_query, int(limit), has_semantic_rank),
             )
             if cached_results is not None:
-                return cached_results
+                corpus_empty = not bool(index_bundle.get("entries"))
+                return cached_results, self._search_meta(
+                    corpus_empty=corpus_empty,
+                    degraded_to_bm25=not has_semantic_rank,
+                )
         return None
 
     @staticmethod

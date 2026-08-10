@@ -303,8 +303,17 @@ class SkillRecommendEngine:
 
     def search_team_skills(self, query: str, limit: int, catalog) -> list[dict]:
         """在自产 + SkillHub 的统一 BM25/semantic/RRF corpus 中搜索。"""
+        results, _meta = self.search_team_skills_with_meta(query, limit, catalog)
+        return results
+
+    def search_team_skills_with_meta(
+        self, query: str, limit: int, catalog,
+    ) -> tuple[list[dict], dict]:
+        """同 ``search_team_skills``，附带 SkillHub 检索元信息。"""
         corpus = self.repo_search_corpus(catalog)
-        return self.skillhub.search(query, limit, supplemental=corpus)
+        return self.skillhub.search_with_meta(
+            query, limit, supplemental=corpus,
+        )
 
     def _skill_index(self) -> dict:
         if self._skill_index_cache is None:

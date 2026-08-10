@@ -136,6 +136,46 @@ def test_search_plain_output_is_compact_and_read_only(capsys):
     assert "已安装到" not in output
 
 
+def test_search_warns_on_bm25_degradation(capsys):
+    class _MetaHttp:
+        def get(self, *_args, **_kwargs):
+            return _Response(200, json_data={
+                "results": [_result("bm25-only")],
+                "meta": {"corpus_empty": False, "degraded_to_bm25": True},
+            })
+
+    return_code = cli.cmd_search_hub(
+        SimpleNamespace(
+            terms=["bm25"], top_k=5, json=False, download=False,
+        ),
+        http=_MetaHttp(), headers={},
+    )
+    captured = capsys.readouterr()
+    assert return_code == 0
+    assert "bm25-only" in captured.out
+    assert "降级为 BM25" in captured.err
+
+
+def test_search_warns_on_empty_corpus(capsys):
+    class _EmptyHttp:
+        def get(self, *_args, **_kwargs):
+            return _Response(200, json_data={
+                "results": [],
+                "meta": {"corpus_empty": True, "degraded_to_bm25": False},
+            })
+
+    return_code = cli.cmd_search_hub(
+        SimpleNamespace(
+            terms=["anything"], top_k=5, json=False, download=False,
+        ),
+        http=_EmptyHttp(), headers={},
+    )
+    captured = capsys.readouterr()
+    assert return_code == 0
+    assert "暂无可搜索" in captured.out
+    assert "库为空" in captured.err
+
+
 def test_search_download_uses_legacy_search_slots(
     tmp_path, monkeypatch, capsys,
 ):
