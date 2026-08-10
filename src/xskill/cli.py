@@ -1182,6 +1182,206 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
     return 0
 
 
+def cmd_search(args) -> int:
+    """`xskill search` 部署模式自适应入口（#201）。
+
+    解析顺序：``--team`` / ``--local`` 显式覆盖 > team client 状态文件
+    （已 connect → SkillHub 路径）> 本地技能库路径。standalone 用户不再
+    被 "未连接 team server" 直接挡在门外（#46 的前向修复）。
+    """
+    if getattr(args, "team", False):
+        return cmd_search_hub(args)
+    if getattr(args, "local", False):
+        return _cmd_search_local(args)
+    from xskill.runtime import role
+    if role() == "client":
+        return cmd_search_hub(args)
+    return _cmd_search_local(args)
+
+
+def _cmd_search_local(args, *, post=None) -> int:
+    """本地技能库搜索：优先本机 daemon 语义检索，不可用时回退 BM25。
+
+    降级必须对用户可见（stderr 警告），不静默空结果也不 traceback——
+    与 server 端 skill_hub「语义不可用退化 BM25」同一契约。
+    ``post`` 参数仅测试注入用。
+    """
+    import json as _json
+
+    from xskill.runtime import read_status
+
+    query = " ".join(args.terms).strip()
+    if getattr(args, "download", False):
+        _write_search_output(
+            "warning: --download 仅 team 模式有效，本地技能已在本机，忽略",
+            to_stderr=True,
+        )
+
+    st = read_status()
+    hits: list[dict] = []
+    semantic_ok = False
+    if st.get("running") and st.get("port"):
+        if post is None:
+            import httpx
+
+            def post(url, **kw):
+                return httpx.post(url, trust_env=False, timeout=15.0, **kw)
+        try:
+            resp = post(
+                f"http://127.0.0.1:{st['port']}/api/v1/skills/search",
+                json={"query": query, "top_k": args.top_k},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # 兼容历史空索引 dict 包络（#46 Bug A 的形状）：统一成 list
+                if isinstance(data, dict):
+                    data = data.get("results", [])
+                if isinstance(data, list):
+                    semantic_ok = True
+                    hits = [h for h in data if isinstance(h, dict)]
+        except Exception as search_error:  # noqa: BLE001 — 降级路径必须兜住
+            logger.debug("local semantic search failed: %s", search_error)
+
+    used_bm25 = False
+    if not hits:
+        if not st.get("running"):
+            _write_search_output(
+                "⚠ 本地 daemon 未运行（先 `xskill serve`），"
+                "本次搜索回退 BM25 关键词检索",
+                to_stderr=True,
+            )
+        elif not semantic_ok:
+            _write_search_output(
+                "⚠ 本地语义搜索不可用（embedding 未配置或索引缺失），"
+                "本次搜索回退 BM25 关键词检索",
+                to_stderr=True,
+            )
+        bm25_hits = _local_bm25_hits(query, top_k=args.top_k)
+        if bm25_hits and semantic_ok:
+            _write_search_output(
+                "⚠ 语义索引无命中（索引未建或 embedding 未配置），"
+                "以下为 BM25 关键词匹配结果",
+                to_stderr=True,
+            )
+        hits = bm25_hits
+        used_bm25 = True
+
+    if getattr(args, "json", False):
+        _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
+        return 0
+    if not hits:
+        _write_search_output("本地技能库无匹配 skill")
+        return 0
+    _render_local_search_results(hits, query, keyword_only=used_bm25)
+    return 0
+
+
+def _local_bm25_hits(query: str, *, top_k: int) -> list[dict]:
+    """对本地 skill 的 name+description+tags 做 BM25 关键词检索。
+
+    分词复用 skillhub 的 ``_tokenize``（ASCII 切词 + 中文 bigram），打分
+    复用 skillhub 的 Lucene 风格公式 ``log(1 + (N-df+0.5)/(df+0.5))``
+    （k1=1.2, b=0.75）——IDF 恒正，本地小语料（几个 skill）不会像
+    BM25Okapi 那样把全部分数压成 0。"""
+    import math
+
+    from xskill.config import XSKILL_HOME, get_skill_dir
+    from xskill.recommend.skillhub import BM25_B, BM25_K1, _tokenize
+    from xskill.skill.skill import _load_skill
+
+    try:
+        skill_dir = get_skill_dir()
+    except FileNotFoundError:
+        # 首装还没有 config.yaml：关键词回退不应依赖配置，用默认 skill 目录
+        skill_dir = XSKILL_HOME / "skill"
+    entries: list[dict] = []
+    if skill_dir.exists():
+        for d in sorted(skill_dir.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            fm, _body, _path = _load_skill(d)
+            if not fm:
+                continue
+            meta = fm.get("metadata", {}) or {}
+            description = (fm.get("description") or "").strip()
+            tags = [str(t) for t in (meta.get("tags", []) or [])]
+            entries.append({
+                "skill_name": d.name,
+                "description": description,
+                "tags": tags,
+                "version": int(meta.get("version", 0) or 0),
+                "text": " ".join([d.name, description, *tags]),
+            })
+
+    query_tokens = set(_tokenize(query))
+    if not entries or not query_tokens:
+        return []
+    corpus = [_tokenize(e["text"]) for e in entries]
+    doc_count = len(corpus)
+    avg_doc_len = sum(len(doc) for doc in corpus) / doc_count
+    if avg_doc_len == 0:
+        return []
+    doc_freq = {
+        token: sum(1 for doc in corpus if token in doc)
+        for token in query_tokens
+    }
+    scores: list[float] = []
+    for doc in corpus:
+        score = 0.0
+        for token in query_tokens:
+            tf = doc.count(token)
+            if tf == 0 or doc_freq[token] == 0:
+                continue
+            idf = math.log(
+                1 + (doc_count - doc_freq[token] + 0.5)
+                / (doc_freq[token] + 0.5)
+            )
+            denominator = tf + BM25_K1 * (
+                1 - BM25_B + BM25_B * len(doc) / avg_doc_len
+            )
+            score += idf * tf * (BM25_K1 + 1) / denominator
+        scores.append(score)
+    ranked = sorted(
+        zip(entries, scores), key=lambda pair: pair[1], reverse=True,
+    )
+    out: list[dict] = []
+    for entry, score in ranked[:top_k]:
+        if score <= 0:
+            continue
+        hit = {k: v for k, v in entry.items() if k != "text"}
+        hit["bm25_score"] = float(score)
+        out.append(hit)
+    return out
+
+
+def _render_local_search_results(
+    hits: list[dict], query: str, *, keyword_only: bool,
+) -> None:
+    """渲染本地技能库搜索结果（本机 skill，无下载步骤）。"""
+    mode_label = "BM25 关键词" if keyword_only else "语义"
+    output_lines = [
+        f"搜索：{query}（本地技能库，{mode_label}）",
+        f"找到 {len(hits)} 个 skill",
+        "=" * 64,
+    ]
+    for index, row in enumerate(hits, start=1):
+        if index > 1:
+            output_lines.append("-" * 64)
+        output_lines.append(
+            f"[{index}/{len(hits)}] {row.get('skill_name') or '(unnamed)'}"
+        )
+        description = " ".join(str(row.get("description") or "").split())
+        if len(description) > 180:
+            description = f"{description[:177].rstrip()}..."
+        output_lines.append(f"描述：{description or '（无描述）'}")
+        if row.get("similarity") is not None:
+            output_lines.append(f"匹配：语义相似度 {row['similarity']:.4f}")
+        elif row.get("bm25_score") is not None:
+            output_lines.append(f"匹配：BM25 {row['bm25_score']:.2f}")
+    output_lines.append("=" * 64)
+    _write_search_output("\n".join(output_lines))
+
+
 def cmd_download(args, http=None, headers=None) -> int:
     """`xskill download <skill-id>` —— 显式下载并持久安装一个搜索结果。"""
     import json as _json
@@ -1486,11 +1686,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_search = sub.add_parser(
         "search",
-        help="搜索 team server 的 skill 元信息（不下载）",
+        help="搜索 skill（自动适配：已连 team 走 SkillHub，否则本地技能库）",
     )
     p_search.add_argument(
         "terms", nargs="+", metavar="QUERY",
-        help="搜索词（可多个，拼成一个 skillhub 查询）",
+        help="搜索词（可多个，拼成一个查询）",
     )
     p_search.add_argument("--top-k", "-k", type=int, default=5,
                           help="返回条数（skillhub 搜索最多 10）")
@@ -1499,6 +1699,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="兼容旧 search：下载命中到 10 槽 LRU 并安装到已检测 harness",
     )
     p_search.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_search_mode = p_search.add_mutually_exclusive_group()
+    p_search_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team SkillHub 搜索（需先 xskill connect）",
+    )
+    p_search_mode.add_argument(
+        "--local", action="store_true",
+        help="强制搜本地技能库（daemon 语义检索，不可用回退 BM25）",
+    )
 
     p_download = sub.add_parser(
         "download", help="按 search 返回的 skill ID 显式下载并持久安装",
@@ -1713,7 +1922,7 @@ def main() -> int:
 
     # skillhub 搜索/下载/上传是瘦客户端侧（走 team server），不碰 config.yaml。
     if args.command == "search":
-        return cmd_search_hub(args)
+        return cmd_search(args)
     if args.command == "download":
         return cmd_download(args)
     if args.command == "upload":
