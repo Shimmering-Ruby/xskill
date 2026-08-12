@@ -597,6 +597,7 @@ def test_jam_merge_fires_above_threshold_and_discards_staging(tmp_path):
     agent = SkillEditAgent(
         skill_dir=sd, store=None, agno_agent_factory=_JamMergeStubAgno,
         llm_cfg={}, traj_root=tmp_path, jam_threshold=50,
+        min_jam_age_sec=0, jam_plateau_sec=0,
     )
     assert agent.maybe_run() is True
     assert _JamMergeStubAgno.invoked is True
@@ -620,6 +621,7 @@ def test_no_jam_below_threshold_keeps_staging(tmp_path):
     agent = SkillEditAgent(
         skill_dir=sd, store=None, agno_agent_factory=_JamMergeStubAgno,
         llm_cfg={}, traj_root=tmp_path, jam_threshold=50,
+        min_jam_age_sec=0, jam_plateau_sec=0,
     )
     assert agent.maybe_run() is False          # 维持 hold
     assert _JamMergeStubAgno.invoked is False
@@ -640,6 +642,7 @@ def test_jam_merge_without_main_commit_keeps_candidates_and_staging(tmp_path):
     agent = SkillEditAgent(
         skill_dir=sd, store=None, agno_agent_factory=_JamNoCommitStubAgno,
         llm_cfg={}, traj_root=tmp_path, jam_threshold=50,
+        min_jam_age_sec=0, jam_plateau_sec=0,
     )
 
     assert agent.maybe_run() is False
@@ -712,6 +715,7 @@ def test_jam_merge_rematerializes_missing_staging_body(tmp_path):
         skill_dir=sd, store=None,
         agno_agent_factory=lambda **kw: _JamMergeRematerializeStubAgno(**kw),
         llm_cfg={}, traj_root=tmp_path, jam_threshold=50,
+        min_jam_age_sec=0, jam_plateau_sec=0,
     )
     result = agent.maybe_run()
     assert result is True, "jam-merge with re-materialization should succeed"

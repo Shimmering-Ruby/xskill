@@ -382,3 +382,120 @@ def test_jam_threshold_default_is_50():
 
 def test_jam_threshold_read_from_dict():
     assert canary.CanaryConfig.from_dict({"jam_threshold": 30}).jam_threshold == 30
+
+
+def test_jam_gate_defaults_include_age_and_plateau():
+    cfg = canary.CanaryConfig.from_dict({})
+    assert cfg.min_jam_age_sec == 1800.0
+    assert cfg.jam_plateau_sec == 600.0
+
+
+def test_evaluate_jam_gates_requires_age_plateau_and_ws(tmp_path):
+    """仅 ws 达标但 age/plateau 未达标 → ok=False；三闸都开 → ok=True。"""
+    sd = _init_repo(tmp_path / "skill")
+    initial = canary.main_sha(sd)
+    _commit(sd, "staging body", "staging cand")
+    assert canary.route_main_history_to_staging(sd, initial)
+
+    cfg_hold = canary.CanaryConfig(
+        jam_threshold=50, min_jam_age_sec=1800.0, jam_plateau_sec=600.0,
+    )
+    hold = canary.evaluate_jam_gates(sd, total_ws=60, config=cfg_hold)
+    assert hold["ok"] is False
+    assert "age<" in hold["reason"] or "plateau<" in hold["reason"]
+
+    cfg_ok = canary.CanaryConfig(
+        jam_threshold=50, min_jam_age_sec=0.0, jam_plateau_sec=0.0,
+    )
+    ok = canary.evaluate_jam_gates(sd, total_ws=60, config=cfg_ok)
+    assert ok["ok"] is True
+    assert ok["reason"] == "jam_gates_ok"
+
+    still_hold = canary.evaluate_jam_gates(sd, total_ws=10, config=cfg_ok)
+    assert still_hold["ok"] is False
+    assert "ws<" in still_hold["reason"]
+
+
+# ──────────────────────────────────────────────────────
+# CanaryRouter —— 有状态均衡 + pick_side hash 种子/破平
+# ──────────────────────────────────────────────────────
+
+def test_canary_router_locks_client_side():
+    """同 client 同 (staging_sha, probability) → 永远同一 side。"""
+    r = canary.CanaryRouter()
+    sides = {r.assign(client_id="c1", skill_name="s", probability=0.5,
+                      staging_sha="sha-X") for _ in range(10)}
+    assert len(sides) == 1
+
+
+def test_canary_router_probability_zero_all_main():
+    r = canary.CanaryRouter()
+    for i in range(10):
+        assert r.assign(client_id=f"c{i}", skill_name="s", probability=0.0,
+                        staging_sha="sha") == "main"
+
+
+def test_canary_router_probability_one_all_staging():
+    r = canary.CanaryRouter()
+    for i in range(10):
+        assert r.assign(client_id=f"c{i}", skill_name="s", probability=1.0,
+                        staging_sha="sha") == "staging"
+
+
+def test_canary_router_guarantees_staging_share_p05():
+    """p=0.5 + 3 client：staging 必拿到 1~2 个，永远不会被饿死到 0。"""
+    for _ in range(200):
+        r = canary.CanaryRouter()
+        sides = [r.assign(client_id=f"c{i}", skill_name="s", probability=0.5,
+                          staging_sha="sha") for i in range(3)]
+        n_staging = sides.count("staging")
+        assert 1 <= n_staging <= 2
+
+
+def test_canary_router_guarantees_staging_share_p02():
+    """p=0.2 + 5 client：恰好 1 个 staging。"""
+    for _ in range(200):
+        r = canary.CanaryRouter()
+        sides = [r.assign(client_id=f"c{i}", skill_name="s", probability=0.2,
+                          staging_sha="sha") for i in range(5)]
+        assert sides.count("staging") == 1
+
+
+def test_canary_router_ratio_tracks_probability_many_clients():
+    """100 client 下运行比例贴近 probability（误差 ≤ 2%）。"""
+    for p in (0.2, 0.3, 0.5, 0.7):
+        r = canary.CanaryRouter()
+        sides = [r.assign(client_id=f"c{i}", skill_name="s", probability=p,
+                          staging_sha="sha") for i in range(100)]
+        ratio = sides.count("staging") / 100
+        assert abs(ratio - p) <= 0.02
+
+
+def test_canary_router_resets_on_staging_sha_change():
+    r = canary.CanaryRouter()
+    first = r.assign(client_id="c1", skill_name="s", probability=1.0,
+                     staging_sha="sha-OLD")
+    assert first == "staging"
+    second = r.assign(client_id="c1", skill_name="s", probability=0.0,
+                      staging_sha="sha-NEW")
+    assert second == "main"
+
+
+def test_canary_router_resets_on_probability_change():
+    r = canary.CanaryRouter()
+    r.assign(client_id="c1", skill_name="s", probability=0.0, staging_sha="sha")
+    forced = r.assign(client_id="c1", skill_name="s", probability=1.0,
+                      staging_sha="sha")
+    assert forced == "staging"
+
+
+def test_canary_router_seed_equals_pick_side():
+    for cid in ("w0", "alpha", "client-deadbeef"):
+        for skill in ("s", "openpyxl-excel-automation"):
+            for p in (0.2, 0.5, 0.7):
+                r = canary.CanaryRouter()
+                got = r.assign(
+                    client_id=cid, skill_name=skill,
+                    probability=p, staging_sha="sha-seed",
+                )
+                assert got == canary.pick_side(cid, skill, p)

@@ -520,7 +520,7 @@ class DirectoryWatcher:
         # 被并发跑两个 maybe_run（第二个进来时前一个多半仍在改 candidates/git）。
         from xskill.skill import candidates as candidate_buffer
         from xskill.skill.git import current_branch, run_git
-        from xskill.canary import load_ux_scores
+        from xskill.canary import evaluate_jam_gates, load_ux_scores
 
         skill_dirs = [
             d for d in self.skill_dir.iterdir()
@@ -529,8 +529,7 @@ class DirectoryWatcher:
         if not skill_dirs:
             return
 
-        jam_threshold = CanaryConfig.from_dict(
-            self.config.get("canary", {})).jam_threshold
+        jam_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
         edit_threshold = (
             int(threshold)
             if threshold is not None
@@ -577,9 +576,15 @@ class DirectoryWatcher:
                     ["rev-parse", "--verify", "staging"],
                     cwd=str(skill_path),
                 )[0] == 0
-                jam = staging_exists and total_ws >= jam_threshold
-                if staging_exists and not jam:
-                    return False
+                # jam：age ∧ plateau ∧ ws 三条件合取（见 evaluate_jam_gates）
+                jam = False
+                if staging_exists:
+                    gates = evaluate_jam_gates(
+                        skill_path, total_ws=total_ws, config=jam_cfg,
+                    )
+                    jam = bool(gates.get("ok"))
+                    if not jam:
+                        return False
                 if jam:
                     return True
                 ready = bool(
@@ -659,7 +664,9 @@ class DirectoryWatcher:
                     llm_cfg=skill_llm_cfg,
                     traj_root=traj_root,
                     logs_dir=self.logs_dir,
-                    jam_threshold=jam_threshold,
+                    jam_threshold=jam_cfg.jam_threshold,
+                    min_jam_age_sec=jam_cfg.min_jam_age_sec,
+                    jam_plateau_sec=jam_cfg.jam_plateau_sec,
                     batch_size=self.skill_edit_batch_size,
                     retry_batch_size=self._skill_edit_retry_batch_sizes.get(d),
                     **({} if threshold is None else {"threshold": threshold}),
@@ -705,7 +712,7 @@ class DirectoryWatcher:
         ``main_staging``（产灰度候选）、``staging_main``（Jam 强砍回 main）。
         读失败不拖垮真任务——退回 submit 时的静态元数据（仅 skill 名）。
         """
-        from xskill.canary import CanaryConfig
+        from xskill.canary import CanaryConfig, evaluate_jam_gates
         from xskill.skill import candidates as candidate_buffer
         from xskill.skill.git import current_branch, run_git
 
@@ -723,12 +730,12 @@ class DirectoryWatcher:
         staging_exists = run_git(
             ["rev-parse", "--verify", "staging"], cwd=str(d),
         )[0] == 0
-        jam_threshold = CanaryConfig.from_dict(
-            self.config.get("canary", {}),
-        ).jam_threshold
+        jam_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
         branch = current_branch(str(d)) or ""
         meta["branch"] = branch
-        if staging_exists and total_ws >= jam_threshold:
+        if staging_exists and evaluate_jam_gates(
+            d, total_ws=total_ws, config=jam_cfg,
+        ).get("ok"):
             meta["xfer"] = "staging_main"
         elif branch == "main":
             meta["xfer"] = "main_staging"

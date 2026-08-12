@@ -149,12 +149,14 @@ def _make_watcher_with_config(tmp_path, skill_root, factory, config):
 
 
 def test_runner_passes_jam_threshold(monkeypatch, tmp_path):
-    """runner 构造 SkillEditAgent 时，把 config.canary.jam_threshold 注入。"""
+    """runner 构造 SkillEditAgent 时，把 config.canary jam 三闸参数注入。"""
     import xskill.agents.skill_edit_agent as SEA
     captured = {}
     real_init = SEA.SkillEditAgent.__init__
     def spy_init(self, *a, **kw):
         captured["jam_threshold"] = kw.get("jam_threshold")
+        captured["min_jam_age_sec"] = kw.get("min_jam_age_sec")
+        captured["jam_plateau_sec"] = kw.get("jam_plateau_sec")
         return real_init(self, *a, **kw)
     monkeypatch.setattr(SEA.SkillEditAgent, "__init__", spy_init)
 
@@ -167,7 +169,11 @@ def test_runner_passes_jam_threshold(monkeypatch, tmp_path):
     factory = _make_barrier_agno(1, noop_barrier)
     config = {
         "llm": {"base_url": "x", "model": "y", "api_key": "z"},
-        "canary": {"jam_threshold": 33},
+        "canary": {
+            "jam_threshold": 33,
+            "min_jam_age_sec": 12,
+            "jam_plateau_sec": 34,
+        },
     }
     w = _make_watcher_with_config(tmp_path, skill_root, factory, config)
     w._check_pending_skill_edits()
@@ -176,6 +182,8 @@ def test_runner_passes_jam_threshold(monkeypatch, tmp_path):
     assert captured.get("jam_threshold") == 33, (
         f"jam_threshold was not wired from config; captured={captured!r}"
     )
+    assert captured.get("min_jam_age_sec") == 12
+    assert captured.get("jam_plateau_sec") == 34
 
 
 def test_runner_remembers_n1_retry_until_a_checkpoint_succeeds(tmp_path):

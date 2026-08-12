@@ -330,7 +330,9 @@ class SkillEditAgent:
     llm_cfg: dict
     traj_root: Path
     threshold: int = C.ATOM_PROMOTION_THRESHOLD
-    jam_threshold: int = 50
+    jam_threshold: int = 50  # candidates Σws 地板（与 age/plateau 合取）
+    min_jam_age_sec: float = 1800.0
+    jam_plateau_sec: float = 600.0
     batch_size: int = 5
     retry_batch_size: int | None = None
     logs_dir: Path | None = None
@@ -382,8 +384,8 @@ class SkillEditAgent:
 
         守门顺序（任一失败即 return False）：
           1. 该 skill 有 staging 分支 → 灰度中：
-             - 候选累计 ws ≥ jam_threshold → 越过灰度强砍（jam 路径）
-             - 否则维持 hold
+             - age≥min_jam_age ∧ plateau≥jam_plateau ∧ ws≥jam_threshold → jam
+             - 否则维持 hold（并打门控日志）
           2. 无 staging 时：candidates 累计 weightscore < threshold → 没攒够
           3. 触发场景是 "create staging"（main 已存在）：
              - .ux_scores.jsonl 必须至少有 1 条 side=main → 证明 main 真有人用
@@ -393,11 +395,11 @@ class SkillEditAgent:
         main/jam 全过 → 保留旧渐进分支链，终态成功后摘除入口快照 atom_id。
         """
         from xskill.skill.git import current_branch, run_git
+        from xskill.canary import CanaryConfig, evaluate_jam_gates
 
         self._recover_crashed_turns()
 
-        # 守门 1（改）：staging 存在时，候选累计 ws ≥ jam_threshold 则越过灰度强砍；
-        # 未达到阈值时维持原先 hold 行为。
+        # 守门 1：staging 存在时——三条件合取才 jam；否则 hold。
         staging_exists = run_git(
             ["rev-parse", "--verify", "staging"], cwd=str(self.skill_dir),
         )[0] == 0
@@ -406,9 +408,31 @@ class SkillEditAgent:
             int(c.get("weightscore", 0))
             for c in (data.get("candidates", []) or [])
         )
-        jam = staging_exists and total_ws >= self.jam_threshold
-        if staging_exists and not jam:
-            return False
+        jam = False
+        if staging_exists:
+            jam_cfg = CanaryConfig(
+                jam_threshold=self.jam_threshold,
+                min_jam_age_sec=self.min_jam_age_sec,
+                jam_plateau_sec=self.jam_plateau_sec,
+            )
+            gates = evaluate_jam_gates(
+                self.skill_dir, total_ws=total_ws, config=jam_cfg,
+            )
+            logger.info(
+                "jam_gate %s: ok=%s age=%.1f plateau_s=%.1f "
+                "main_n=%s/%s staging_n=%s/%s ws=%s/%s "
+                "main_sha=%s staging_sha=%s reason=%s",
+                self.skill_dir.name, gates.get("ok"), gates.get("age"),
+                gates.get("plateau_s"),
+                gates.get("main_n"), gates.get("need"),
+                gates.get("staging_n"), gates.get("need"),
+                gates.get("ws"), gates.get("jam_threshold"),
+                gates.get("main_sha"), gates.get("staging_sha"),
+                gates.get("reason"),
+            )
+            jam = bool(gates.get("ok"))
+            if not jam:
+                return False
 
         if not staging_exists:
             cur = current_branch(str(self.skill_dir))
