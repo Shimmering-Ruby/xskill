@@ -89,3 +89,22 @@ mutmut run --max-children 8 \
 - 不会开 LLM 的 git skill（main 无 ux、瘦 baby）不得 `submit` 进 edit 池；
 - 单 skill 的 actionable 检查失败只 skip，不得中断整轮扫描；
 - 无 `.git` 目录不崩扫描；排序 empty-last，避免空目录饿死 READY baby。
+
+## standalone 韧性（本地 search / reindex）
+
+`features/standalone/` + `test_standalone_resilience.py` 是进程内 `@state_machine`
+场景，不启 aimock：
+
+- `first_use_local_search.feature`：Issue #46 / 缺索引或未配 embedding 时
+  `/skills/search`、`/skills/resolve`、SDK `search_skills` 返回空且不 500；
+  未 git init 的 skill 目录 `/status` 仍 200。
+- `reindex_empty_description.feature`：Issue #200 / 空或非法 description 时
+  `rebuild_skill_index` 局部跳过，不把空串发给 embedding、不拖死整轮。
+- `baby_stub_frontmatter.feature`：Issue #200 根治侧 /
+  `init_skill_repo_on_baby` 用 `yaml.safe_dump`（`frontmatter.serialize`）写
+  stub frontmatter；多行、含冒号/引号/井号的敌意 description 产出的 baby
+  初版仍是合法 YAML、description 逐字保留、无需止血跳过即可进索引。
+
+```bash
+pytest tests/bdd/test_standalone_resilience.py -v
+```

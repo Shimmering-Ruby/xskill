@@ -1788,23 +1788,26 @@ def init_skill_repo_on_baby(skill_dir: str, name: str, description: str) -> None
             (p / ".gitignore").write_text(SKILL_GITIGNORE, encoding="utf-8")
 
             today = _date.today().isoformat()
-            stub_md = (
-                f"---\n"
-                f"name: {name}\n"
-                f"description: {description}\n"
-                f"metadata:\n"
-                f"  version: 0\n"
-                f"  state: baby\n"
-                f"  created: \"{today}\"\n"
-                f"  last_updated: \"{today}\"\n"
-                f"  source_atoms: []\n"
-                f"---\n"
-                f"\n"
-                f"# {name}\n"
-                f"\n"
-                f"{BABY_STUB_BODY_MARKER}\n"
+            # frontmatter 必须走 yaml.safe_dump（fm_serialize）而非 f-string
+            # 裸拼：cluster/LLM 给的 description 可能多行或含 YAML 特殊字符，
+            # 裸拼会让 baby 初版从出生就是非法 YAML——宽松 loader 恢复出空
+            # description，进而在 reindex 时被 embedding 端点 400 拒掉（#200）。
+            from xskill.skill.frontmatter import serialize as _fm_serialize
+            stub_fm = {
+                "name": name,
+                "description": description,
+                "metadata": {
+                    "version": 0,
+                    "state": "baby",
+                    "created": today,
+                    "last_updated": today,
+                    "source_atoms": [],
+                },
+            }
+            stub_body = f"\n# {name}\n\n{BABY_STUB_BODY_MARKER}\n"
+            (p / "SKILL.md").write_text(
+                _fm_serialize(stub_fm, stub_body), encoding="utf-8",
             )
-            (p / "SKILL.md").write_text(stub_md, encoding="utf-8")
 
             (p / "scripts").mkdir(exist_ok=True)
             (p / "references").mkdir(exist_ok=True)
