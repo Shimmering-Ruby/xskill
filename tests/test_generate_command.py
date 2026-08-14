@@ -18,7 +18,9 @@ from xskill.skill.git import (
 )
 from xskill.team.server import api as server_api
 from xskill.team.server.client_registry import ClientRegistry
-from xskill.team.server.generate_jobs import pin_generated_skills
+from xskill.team.server.generate_jobs import (
+    create_job, iter_job_events, pin_generated_skills,
+)
 
 
 def _call_tool(tool, *args, **kwargs):
@@ -138,6 +140,27 @@ def test_pin_generated_skills(tmp_path: Path):
     assert pinned == ["invoice-check"]
     rows = prefs_for("alice", db_path=db)
     assert any(r["skill_name"] == "invoice-check" and r["pref"] == "pinned" for r in rows)
+
+
+def test_iter_job_events_pings_while_running(tmp_path: Path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    job = create_job(
+        client_id="c1",
+        user_id="alice",
+        instruction="x",
+        preferred_names=[],
+        logs_dir=logs,
+    )
+    seen = []
+    for event in iter_job_events(
+        job["job_id"], poll_seconds=0.01, ping_every=0.02,
+    ):
+        seen.append(event["type"])
+        if event["type"] == "ping":
+            break
+    assert "ping" in seen
+    assert "done" not in seen
 
 
 @pytest.fixture

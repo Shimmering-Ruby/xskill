@@ -1621,6 +1621,8 @@ def cmd_generate(args, http=None, headers=None) -> int:
                             if chunk:
                                 sys.stdout.write(chunk)
                                 sys.stdout.flush()
+                        elif event.get("type") == "ping":
+                            continue
                         elif event.get("type") == "done":
                             final = event
                 if final is None and buffer.strip():

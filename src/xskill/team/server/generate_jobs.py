@@ -253,16 +253,20 @@ def iter_job_events(
     job_id: str,
     *,
     poll_seconds: float = 0.2,
-    idle_timeout: float = 3600.0,
+    ping_every: float = 15.0,
 ) -> Iterator[dict[str, Any]]:
-    """Yield log chunks then a terminal event. Blocking generator."""
+    """Yield log chunks then a terminal event. Blocking generator.
+
+    Stays open until the job leaves ``running``. Quiet periods emit ping
+    events so proxies and the CLI do not treat a long model call as death.
+    """
     job = get_job(job_id)
     if job is None:
         yield {"type": "done", "ok": False, "error": "unknown job_id"}
         return
     log_path = Path(job["log_path"])
     offset = 0
-    started = time.time()
+    last_emit = time.time()
     while True:
         try:
             data = log_path.read_bytes()
@@ -272,7 +276,7 @@ def iter_job_events(
             chunk = data[offset:].decode("utf-8", errors="replace")
             offset = len(data)
             yield {"type": "log", "chunk": chunk}
-            started = time.time()
+            last_emit = time.time()
         current = get_job(job_id) or job
         if current.get("status") != "running":
             try:
@@ -290,13 +294,7 @@ def iter_job_events(
                 "error": current.get("error") or "",
             }
             return
-        if time.time() - started > idle_timeout:
-            yield {
-                "type": "done",
-                "ok": False,
-                "error": "generate 等待日志超时",
-                "skill_names": [],
-                "pinned": [],
-            }
-            return
+        if time.time() - last_emit >= ping_every:
+            yield {"type": "ping"}
+            last_emit = time.time()
         time.sleep(poll_seconds)
