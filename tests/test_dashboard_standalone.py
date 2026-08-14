@@ -48,6 +48,7 @@ _BUILTIN_ONLY_OPERATIONS = {
     ("get", "/api/v1/dashboard/skillhub/{name}/ux/atoms"),
     ("get", "/api/v1/dashboard/skill/{name}/trigger/cases"),
     ("post", "/api/v1/dashboard/skill/{name}/trigger/rerun"),
+    ("post", "/api/v1/dashboard/skill/{name}/scripting"),
     ("get", "/api/v1/dashboard/traj/{traj_id}"),
     ("get", "/api/v1/dashboard/traj/{traj_id}/atoms"),
     ("get", "/api/v1/dashboard/traj/{traj_id}/atom/{atom_id}"),
@@ -217,6 +218,9 @@ def test_standalone_hides_sensitive_and_write_routes(tmp_path, monkeypatch):
     ).status_code == 404
     assert client.post(
         "/api/v1/dashboard/skill/demo/trigger/rerun",
+    ).status_code == 404
+    assert client.post(
+        "/api/v1/dashboard/skill/demo/scripting",
     ).status_code == 404
     assert client.post("/api/v1/dashboard/login", json={}).status_code == 404
     assert client.post("/api/v1/dashboard/my/prefs", json={}).status_code == 404

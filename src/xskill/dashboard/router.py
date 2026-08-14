@@ -9,10 +9,11 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
 from xskill.dashboard.metrics import DashboardMetrics, skills_catalog_page
+from xskill.dashboard.auth import require_admin
 from xskill.pipeline.registry import (
     harness_share,
     list_watch_dirs,
@@ -180,9 +181,22 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
     @sensitive_router.get("/api/v1/dashboard/skill/{name}/detail")
     def skill_detail(name: str) -> dict:
         """该 skill 真实总触发 + 每版本统计(触发/UX/工具/token) + 按用户 + 趋势。"""
+        root = _skill_path(skill_dir, name)
         d = metrics.skill_detail(name)
-        d["versions_git"] = _git_versions(_skill_path(skill_dir, name))
+        d["versions_git"] = _git_versions(root)
+        from xskill.skill.scripting import scripting_status
+        d["scripting"] = scripting_status(root)
         return d
+
+    @sensitive_router.post("/api/v1/dashboard/skill/{name}/scripting")
+    def skill_scripting(name: str, _ident=Depends(require_admin)) -> dict:
+        """写 ``.scripting_requested``，由 agent-worker 扫到后脚本化主干。"""
+        from xskill.skill.scripting import request_scripting
+        root = _skill_path(skill_dir, name)
+        try:
+            return request_scripting(root)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @sensitive_router.get("/api/v1/dashboard/skill/{name}/graph")
     def skill_graph(name: str) -> dict:

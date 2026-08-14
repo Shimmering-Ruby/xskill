@@ -1652,6 +1652,188 @@ def cmd_generate(args, http=None, headers=None) -> int:
     return 0
 
 
+def _is_thin_team_client() -> bool:
+    """已 connect 且本机没有 standalone/server 的 watch_dirs → 瘦客户端。"""
+    from xskill.config import get_team_client_state_path
+    return (
+        get_team_client_state_path().is_file()
+        and _standalone_watch_dir_count() == 0
+    )
+
+
+def _local_import_skill_dir():
+    from xskill.config import CONFIG_PATH, XSKILL_HOME, get_skill_dir
+    if CONFIG_PATH.is_file():
+        try:
+            return get_skill_dir()
+        except Exception:
+            pass
+    return XSKILL_HOME / "skill"
+
+
+def _print_import_result(imported, *, json_mode: bool) -> None:
+    import json as _json
+    if json_mode:
+        print(_json.dumps({
+            "name": imported.name,
+            "sha": imported.sha,
+            "existed": imported.existed,
+            "baby_overwritten": imported.baby_overwritten,
+            "staging_kept": imported.staging_kept,
+            "main_round_scores_cleared": imported.main_round_scores_cleared,
+            "stash_path": imported.stash_path,
+            "warnings": imported.warnings,
+        }, ensure_ascii=False, indent=2))
+        return
+    verb = "更新" if imported.existed else "纳入"
+    print(f"imported: {imported.name}  ({verb} 主干 {imported.sha[:8]})")
+    if imported.baby_overwritten:
+        print("  原来停在预备分支 baby 的草稿已被这次导入覆盖")
+    if imported.staging_kept:
+        print("  灰度分支 staging 仍在，继续和新主干对比"
+              f"（清了当前轮主干体验分 {imported.main_round_scores_cleared} 条）")
+    if imported.stash_path:
+        print(f"  未提交内容已拷到 {imported.stash_path}，本机已换成这次导入的版本")
+    for warning in imported.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
+
+def cmd_import(args, http=None, headers=None) -> int:
+    """`xskill import <路径>` —— 把已有技能目录纳入自有仓，不是 upload。"""
+    from pathlib import Path
+    from xskill.config import XSKILL_HOME
+    from xskill.skill.importer import discover_import_sources, import_skill_path
+
+    source = Path(args.path).expanduser()
+    try:
+        sources = discover_import_sources(source)
+    except FileNotFoundError as missing:
+        print(f"error: {missing}", file=sys.stderr)
+        return 2
+
+    if _is_thin_team_client():
+        return _cmd_import_team(
+            args, sources, http=http, headers=headers,
+        )
+
+    home = Path.home()
+    skill_dir = _local_import_skill_dir()
+    try:
+        results = import_skill_path(
+            skill_dir, source, install=True, home_root=home,
+            stash_home=XSKILL_HOME,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as failed:
+        print(f"error: {failed}", file=sys.stderr)
+        return 1
+    for imported in results:
+        _print_import_result(imported, json_mode=args.json)
+    return 0
+
+
+def _cmd_import_team(args, sources, *, http=None, headers=None) -> int:
+    import httpx
+    from pathlib import Path
+    from xskill.config import (
+        XSKILL_HOME,
+        get_team_client_history_path,
+        get_team_client_state_path,
+    )
+    from xskill.skill.importer import (
+        HARNESS_IMPORT_WARNING,
+        ImportResult,
+        is_harness_skill_path,
+        maybe_stash_overwrite_dir,
+        pack_import_zip,
+    )
+    from xskill.team.client.import_follow import follow_imported_skill
+    from xskill.team.client.state import load_client_state
+
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+        http.timeout = 120.0
+
+    skill_dir = XSKILL_HOME / "skill"
+    home = Path.home()
+    state = load_client_state(get_team_client_state_path())
+    history_path = get_team_client_history_path(state.server_url)
+
+    for source in sources:
+        name = source.name
+        if is_harness_skill_path(source, home_root=home):
+            print(f"warning: {HARNESS_IMPORT_WARNING}", file=sys.stderr)
+        stash = maybe_stash_overwrite_dir(
+            source, name, home_root=XSKILL_HOME,
+        )
+        working = skill_dir / name
+        if working.exists() and working.resolve() != source.resolve():
+            extra = maybe_stash_overwrite_dir(
+                working, name, home_root=XSKILL_HOME,
+            )
+            stash = stash or extra
+        payload = pack_import_zip(source, include_git=True)
+        if len(payload) > 50 * 1024 * 1024:
+            print(f"error: {name} 打包后超过 50MB", file=sys.stderr)
+            return 2
+        try:
+            resp = http.post(
+                "/api/v1/team/skills/import",
+                files={"file": (f"{name}.zip", payload, "application/zip")},
+                data={"name": name},
+                headers=headers,
+            )
+        except (httpx.HTTPError, OSError) as network_error:
+            print(f"error: 无法连接 team server（{type(network_error).__name__}: "
+                  f"{network_error}）", file=sys.stderr)
+            return 1
+        if resp.status_code == 404:
+            print("error: server 版本过旧，不支持技能纳入（需含 /skills/import）",
+                  file=sys.stderr)
+            return 1
+        if resp.status_code != 200:
+            print(f"error: 纳入失败 HTTP {resp.status_code}: {resp.text[:300]}",
+                  file=sys.stderr)
+            return 1
+        body = resp.json()
+        imported = ImportResult(
+            name=body.get("name") or name,
+            existed=bool(body.get("existed")),
+            sha=str(body.get("sha") or ""),
+            baby_overwritten=bool(body.get("baby_overwritten")),
+            staging_kept=bool(body.get("staging_kept")),
+            main_round_scores_cleared=int(
+                body.get("main_round_scores_cleared") or 0
+            ),
+            stash_path=str(stash) if stash else "",
+        )
+        if is_harness_skill_path(source, home_root=home):
+            imported.warnings.append(HARNESS_IMPORT_WARNING)
+        try:
+            follow_imported_skill(
+                http=http,
+                headers=headers,
+                skill_dir=skill_dir,
+                name=imported.name,
+                sha=imported.sha,
+                home_root=home,
+                history_path=history_path,
+            )
+        except RuntimeError as follow_error:
+            print(f"error: 本机跟上这次主干失败: {follow_error}", file=sys.stderr)
+            return 1
+        _print_import_result(imported, json_mode=args.json)
+    return 0
+
+
+def cmd_read(args, xskill) -> int:
+    """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
+    del xskill  # CLI handler signature compatibility.
+    from xskill.pipeline.db_ingest import read_db_files
+    try:
+
+
 def cmd_read(args, xskill) -> int:
     """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
     del xskill  # CLI handler signature compatibility.
@@ -1863,6 +2045,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="优先阅读的工号，逗号分隔；不传则提示词里写可看全量",
     )
 
+    p_import = sub.add_parser(
+        "import", help="把已有技能目录纳入自有仓（不是 upload）",
+    )
+    p_import.add_argument("path", type=str, help="技能目录，或含多个技能的父目录")
+    p_import.add_argument("--json", action="store_true", help="机读 JSON 输出")
+
     p_init = sub.add_parser(
         "init",
         help="一站式引导：装 xskill 使用指南 skill 到各 agent + 连上 team server",
@@ -2060,6 +2248,8 @@ def main() -> int:
         return cmd_upload(args)
     if args.command == "generate":
         return cmd_generate(args)
+    if args.command == "import":
+        return cmd_import(args)
 
     # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
     if args.command == "stats":

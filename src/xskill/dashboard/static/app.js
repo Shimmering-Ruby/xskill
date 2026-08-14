@@ -456,6 +456,13 @@ async function openSkill(name) {
     heads.main ? `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white ring-1 ring-slate-200 text-xs font-medium text-slate-600">main <code class="text-slate-400">${esc(heads.main.slice(0, 7))}</code></span>` : '',
     heads.staging ? `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 ring-1 ring-amber-200 text-xs font-medium text-amber-700"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>staging 灰度中 <code class="opacity-60">${esc(heads.staging.slice(0, 7))}</code></span>` : '',
   ].join(' ');
+  const sc = d.scripting || {};
+  let scriptBtn = '';
+  if (typeof IDENT !== 'undefined' && IDENT && IDENT.role === 'admin') {
+    const disabled = !sc.enabled;
+    const title = sc.reason || '把当前主干技能改得更偏可执行脚本';
+    scriptBtn = `<button type="button" class="px-2.5 py-1 rounded-lg text-xs ring-1 ${disabled ? 'bg-slate-50 text-slate-400 ring-slate-200 cursor-not-allowed' : 'bg-white text-teal-800 ring-teal-200 hover:bg-teal-50'}" data-skill-scripting="${esc(name)}" ${disabled ? 'disabled' : ''} title="${esc(title)}">脚本化（实验性）</button>`;
+  }
 
   const vrows = (d.versions || []).map(v =>
     `<tr><td class="py-2"><code class="text-[11px]">${esc((v.sha || '').slice(0, 8))}</code></td>`
@@ -488,7 +495,7 @@ async function openSkill(name) {
           · 贡献原子 <b class="text-slate-800 tabular-nums">${(lin.atoms || []).length}</b> 个
           ${lin.avg_ux != null ? `· 血缘平均 ux <b class="text-slate-800 tabular-nums">${lin.avg_ux}</b>` : ''}</div>
       </div>
-      <div class="flex gap-2">${headChips}</div>
+      <div class="flex gap-2 items-center flex-wrap">${headChips}${scriptBtn}</div>
     </div>
 
     <div class="grid grid-cols-12 gap-4 mt-4">
@@ -1209,6 +1216,7 @@ const PM_XFER = {
   baby_main: { from: 'baby', to: 'main', tip: '冷启动消化后 graduate' },
   main_staging: { from: 'main', to: 'staging', tip: '产灰度候选' },
   staging_main: { from: 'staging', to: 'main', tip: 'Jam 强砍回 main' },
+  main_scripting: { from: 'main', to: 'scripting', tip: '把主干技能脚本化（实验性）', label: 'main scripting' },
 };
 const PM_POLL_MS = 3000, PM_LOG_MS = 2500;
 let pmState = null;      // 最近一次 live 响应
@@ -1274,9 +1282,14 @@ function pmTaskCard(task, poolKey, selKey) {
   const style = queued ? ' style="cursor:default"' : '';
   if (task.kind === 'skill') {
     const x = PM_XFER[task.xfer];
+    const xferHtml = x
+      ? (x.label
+        ? `<div class="pm-xfer pm-xfer-${task.xfer}">${esc(x.label)}</div>`
+        : `<div class="pm-xfer pm-xfer-${task.xfer}">${x.from} <span class="arrow">→</span> ${x.to}</div>`)
+      : '';
     return `<div class="pm-card${sel}"${open}${style}>
       <div class="nm font-mono">${esc(task.skill_name)}</div>
-      ${x ? `<div class="pm-xfer pm-xfer-${task.xfer}">${x.from} <span class="arrow">→</span> ${x.to}</div>` : ''}
+      ${xferHtml}
       <div class="inf">${task.candidates != null ? `cand <b>${esc(task.candidates)}</b> · ` : ''}${task.weightscore != null ? `ws <b>${esc(task.weightscore)}</b> · ` : ''}${task._age != null ? pmAgeText(task._age) : '排队中'}</div>
     </div>`;
   }
@@ -1389,9 +1402,14 @@ function pmRenderDrawer() {
   let head = '', logHtml = '';
   if (task.kind === 'skill') {
     const x = PM_XFER[task.xfer];
+    const xferHead = x
+      ? (x.label
+        ? `<span class="pm-xfer pm-xfer-${task.xfer}" style="margin-top:0">${esc(x.label)}</span>`
+        : `<span class="pm-xfer pm-xfer-${task.xfer}" style="margin-top:0">${x.from} <span class="arrow">→</span> ${x.to}</span>`)
+      : '';
     head = `<h2 class="font-mono text-sm font-semibold break-all">${esc(task.skill_name)}</h2>
       <div class="text-[11px] text-slate-400 mt-0.5">${def.title} · 席位 ${pmSelected.seat + 1} · 已跑 ${age}</div>
-      ${x ? `<div class="flex items-center gap-2 flex-wrap mt-1"><span class="pm-xfer pm-xfer-${task.xfer}" style="margin-top:0">${x.from} <span class="arrow">→</span> ${x.to}</span><span class="text-xs text-slate-500">${x.tip}</span>
+      ${x ? `<div class="flex items-center gap-2 flex-wrap mt-1">${xferHead}<span class="text-xs text-slate-500">${x.tip}</span>
       <span class="text-[11px] text-slate-400">${task.candidates != null ? `cand ${esc(task.candidates)} · ` : ''}${task.weightscore != null ? `ws ${esc(task.weightscore)}` : ''}</span></div>` : ''}`;
     logHtml = logPane;
   } else if (task.kind === 'traj') {
@@ -1612,6 +1630,19 @@ document.addEventListener('click', async e => {
       rb.title = '诱饵清单: ' + ((data.catalog || []).join(', ') || '空');
     } catch (err) { rb.textContent = '错误'; }
     rb.disabled = false;
+    return;
+  }
+  const scriptBtn = e.target.closest('[data-skill-scripting]');
+  if (scriptBtn && !scriptBtn.disabled) {
+    scriptBtn.disabled = true;
+    scriptBtn.textContent = '已排队…';
+    jpost('api/v1/dashboard/skill/' + encodeURIComponent(scriptBtn.dataset.skillScripting) + '/scripting', {})
+      .then(() => { scriptBtn.textContent = '脚本化进行中'; })
+      .catch(err => {
+        scriptBtn.disabled = false;
+        scriptBtn.textContent = '脚本化（实验性）';
+        scriptBtn.title = String(err && err.message ? err.message : err);
+      });
     return;
   }
   const pinTr = e.target.closest('#ustatus-body tr[data-uid]');
