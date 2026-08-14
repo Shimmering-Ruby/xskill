@@ -185,6 +185,7 @@ xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md)
 
 ## 📰 News
 
+- **2026-08-14** `v0.6.30`: Team `xskill import` pins the skill onto the initiator's recommendation list; the skills library shows a hollow star to pin into your feed, plus whether a skill is already pushed or pinned; imported skills appear in the library list immediately.
 - **2026-08-14** `v0.6.30a3`: Team `xskill generate` prints queue/running status on the CLI instead of a blank wait; mixed legacy install history no longer blocks import from installing into harnesses.
 - **2026-08-14** `v0.6.30a2`: After context compaction, team `xskill generate` keeps executed tool work instead of emptying the agent memory.
 - **2026-08-14** `v0.6.30a1`: Team mode adds `xskill generate` to write skills onto main from a user instruction, and `xskill import` to bring existing skills into the native repo.

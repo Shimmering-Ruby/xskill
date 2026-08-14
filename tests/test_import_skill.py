@@ -384,6 +384,7 @@ def test_team_import_new_skill_keeps_history_not_skillhub(
     subjects = _log_subjects(dest)
     assert "source first" in subjects
     assert "foo" in _catalog_names(tmp_path / "skill", _isolate_import_registry)
+    assert body.get("pinned") == []
     upload = client.post(
         "/api/v1/team/skill_hub/upload",
         files={"file": ("foo.zip", payload, "application/zip")},
@@ -471,3 +472,52 @@ def test_scripting_button_gates(tmp_path):
     (staged / "SKILL.md").write_text(_skill_md("stg", "# s"), encoding="utf-8")
     assert commit_to_staging_branch(str(staged), "cand")
     assert "灰度" in scripting_gate_reason(staged)
+
+
+def _register_named(client: TestClient, user_name: str) -> dict:
+    r = client.post("/api/v1/team/register", json={
+        "token": TOKEN, "client_label": "t", "hostname": "h",
+        "user_name": user_name,
+    })
+    assert r.status_code == 200, r.text
+    return {"X-Xskill-Token": TOKEN, "X-Xskill-Client": r.json()["client_id"]}
+
+
+def test_team_import_pins_named_initiator(
+    tmp_path, _isolate_import_registry, monkeypatch,
+):
+    from xskill.api import app as app_mod
+    from xskill.pipeline.registry import prefs_for
+
+    monkeypatch.setattr(
+        app_mod, "_config",
+        {"team": {"server": {"skill_slots": 10, "ranked_slots": 8}}},
+    )
+    client = _team_client(tmp_path)
+    hdr = _register_named(client, "alice")
+    source = _write_skill(tmp_path / "incoming" / "foo", "foo", "# v1")
+    r = client.post(
+        "/api/v1/team/skills/import",
+        files={"file": ("foo.zip", pack_import_zip(source), "application/zip")},
+        data={"name": "foo"},
+        headers=hdr,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pinned"] == ["foo"]
+    rows = prefs_for("alice", db_path=_isolate_import_registry)
+    assert any(p["skill_name"] == "foo" and p["pref"] == "pinned" for p in rows)
+
+
+def test_team_import_anonymous_does_not_pin(tmp_path, _isolate_import_registry):
+    client = _team_client(tmp_path)
+    hdr = _register(client)
+    source = _write_skill(tmp_path / "incoming" / "bar", "bar", "# v1")
+    r = client.post(
+        "/api/v1/team/skills/import",
+        files={"file": ("bar.zip", pack_import_zip(source), "application/zip")},
+        data={"name": "bar"},
+        headers=hdr,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["pinned"] == []

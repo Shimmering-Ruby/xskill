@@ -281,6 +281,7 @@ skillhub:
 
 
 ## 📰 动态
+- **2026-08-14** `v0.6.30`：team `xskill import` 后钉到发起人推荐列表；技能库登录后可点空心星 pin 进自己的推荐流，并标出推给我、已钉状态；import 后技能立即出现在技能库清单。
 - **2026-08-14** `v0.6.30a3`：`xskill generate` 排队和执行时 CLI 及时打出状态，不再干等；旧安装账本混入倒退序号时仍能 import 并装回 harness。
 - **2026-08-14** `v0.6.30a2`：修复 team `xskill generate` 上下文压缩后代理忘掉已执行工作。
 - **2026-08-14** `v0.6.30a1`：team 模式新增 `xskill generate` 按指令写技能到主干；新增 `xskill import` 纳入已有技能。

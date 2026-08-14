@@ -65,6 +65,7 @@ class ImportResult:
     main_round_scores_cleared: int = 0
     warnings: list[str] = field(default_factory=list)
     stash_path: str = ""
+    pinned: list[str] = field(default_factory=list)
 
 
 def is_skill_source_dir(path: Path) -> bool:

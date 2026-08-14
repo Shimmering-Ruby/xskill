@@ -337,6 +337,47 @@ def _pack_manifest_slots(resp_slots, *, user: str, prefs: dict,
     return slots
 
 
+def annotate_library_skills(page: dict, *, user: str,
+                            db_path: Optional[Path]) -> None:
+    """给技能库当前页补 pinned / in_push。无 team 上下文则不动。"""
+    ctx = _team_ctx()
+    if getattr(ctx, "client_registry", None) is None or not user:
+        return
+    prefs = effective_prefs(user, db_path=db_path)
+    pinned_set = set(prefs.get("pinned") or [])
+    pin_meta = prefs.get("pin_meta") or {}
+    push_bucket: dict[str, str] = {}
+    try:
+        from xskill.team.server.api import live_manifest_tuning
+        from xskill.team.server.skill_manifest import build_manifest
+        client_id = ctx.client_registry.find_by_user_name(user) or user
+        total_slots, ranked_slots, probability = live_manifest_tuning()
+        resp = build_manifest(
+            client_id=client_id,
+            skill_dir=ctx.skill_dir,
+            probability=probability,
+            ranked_slots=ranked_slots,
+            total_slots=total_slots,
+            traj_root=ctx.traj_root,
+            prefs=prefs,
+            retired=retired_skills(db_path=db_path),
+        )
+        push_bucket = {slot.skill_name: slot.bucket for slot in resp.slots}
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("skills library in_push annotate skipped", exc_info=True)
+    for row in page.get("skills") or []:
+        name = row.get("name") or ""
+        meta = pin_meta.get(name) or {}
+        is_pinned = name in pinned_set
+        bucket = push_bucket.get(name) or ("pinned" if is_pinned else "")
+        row["pinned"] = is_pinned
+        row["in_push"] = name in push_bucket
+        row["bucket"] = bucket
+        row["pin_scope"] = meta.get("scope") or ""
+        row["user_removable"] = (not is_pinned) or meta.get("set_by") == user
+    page["viewer"] = {"can_pin": True}
+
+
 def _manifest_slots_for_user(ctx, *, user: str,
                              db_path: Optional[Path]) -> list[dict]:
     """为任意 user 现算并打包当前推送槽位（与 /my/manifest 同源）。"""

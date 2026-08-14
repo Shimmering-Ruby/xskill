@@ -16,6 +16,10 @@ from xskill.dashboard.router import build_dashboard_router
 from xskill.pipeline.registry import get_connection
 
 
+class _AnonRequest:
+    cookies = {}
+
+
 def _fake_catalog_rows(skill_dir, n):
     root_key = catalog_store.catalog_root_key(skill_dir)
     rows = []
@@ -125,20 +129,20 @@ def test_standalone_projects_10000_skills_for_all_page_and_name(
         if route.path == "/api/v1/dashboard/skills"
     )
 
-    all_skills = skills_endpoint()
+    all_skills = skills_endpoint(request=_AnonRequest())
     assert all_skills["total"] == 10000
     assert len(all_skills["skills"]) == 10000
     assert set(all_skills["skills"][0]) == {
         "name", "state", "source", "version", "candidates",
     }
 
-    page = skills_endpoint(limit=100, offset=4200)
+    page = skills_endpoint(request=_AnonRequest(), limit=100, offset=4200)
     assert len(page["skills"]) == 100
     assert page["skills"][0]["name"] == "s4200"
     assert page["offset"] == 4200
     assert page["limit"] == 100
 
-    named = skills_endpoint(name="s4242")
+    named = skills_endpoint(request=_AnonRequest(), name="s4242")
     assert named["total"] == 1  # name 过滤时 total 为命中条数
     assert named["skills"] == [{
         "name": "s4242",
@@ -191,7 +195,7 @@ def test_standalone_projection_reuses_catalog_page_list(tmp_path, monkeypatch):
         for route in router.routes
         if route.path == "/api/v1/dashboard/skills"
     )
-    body = skills_endpoint()
+    body = skills_endpoint(request=_AnonRequest())
     assert body is page
     assert body["skills"] is original_list
     assert body["skills"][0] is not original_first_row

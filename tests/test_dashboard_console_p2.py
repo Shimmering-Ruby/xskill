@@ -177,6 +177,45 @@ def test_retired_not_distributed_even_if_pinned(console_env):
     assert all(s.skill_name != "gamma" for s in resp.slots)
 
 
+def test_annotate_library_skills_pin_and_push(console_env):
+    from xskill.dashboard.console import annotate_library_skills
+
+    db = console_env["db"]
+    R.set_skill_pref(user_key="alice", skill_name="gamma", pref="pinned",
+                     set_by="alice", db_path=db)
+    R.set_skill_pref(user_key="alice", skill_name="alpha", pref="blocked",
+                     set_by="alice", db_path=db)
+    page = {"skills": [
+        {"name": "alpha"}, {"name": "beta"}, {"name": "gamma"},
+    ]}
+    annotate_library_skills(page, user="alice", db_path=db)
+    assert page["viewer"]["can_pin"] is True
+    by_name = {row["name"]: row for row in page["skills"]}
+    assert by_name["gamma"]["pinned"] is True
+    assert by_name["gamma"]["in_push"] is True
+    assert by_name["gamma"]["bucket"] == "pinned"
+    assert by_name["gamma"]["user_removable"] is True
+    assert by_name["alpha"]["pinned"] is False
+    assert by_name["alpha"]["in_push"] is False
+    assert by_name["beta"]["pinned"] is False
+    assert by_name["beta"]["in_push"] is True
+    assert by_name["beta"]["bucket"] in ("ranked", "recommended")
+
+
+def test_annotate_library_skills_admin_pin_not_user_removable(console_env):
+    from xskill.dashboard.console import annotate_library_skills
+
+    db = console_env["db"]
+    R.set_skill_pref(user_key=R.GLOBAL_PREF_KEY, skill_name="gamma",
+                     pref="pinned", set_by="boss", db_path=db)
+    page = {"skills": [{"name": "gamma"}]}
+    annotate_library_skills(page, user="alice", db_path=db)
+    row = page["skills"][0]
+    assert row["pinned"] is True
+    assert row["pin_scope"] == "global"
+    assert row["user_removable"] is False
+
+
 # ── 2.4d 写入侧超量拒绝 ───────────────────────────────────────────────
 
 def test_pin_quota_rejected_at_write_side(console_env):
