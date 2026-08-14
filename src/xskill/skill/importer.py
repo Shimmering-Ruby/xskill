@@ -24,6 +24,11 @@ from xskill.skill.git import (
 
 logger = logging.getLogger("xskill.skill.importer")
 
+# rebuild --force 认这个文件和 ``import:`` 提交，避免清掉用户纳入的技能。
+ORIGIN_FILENAME = ".xskill-origin"
+ORIGIN_IMPORT = "import"
+_KEEP_COMMIT_PREFIXES = ("import:",)
+
 RUNTIME_SIDECARS = frozenset({
     ".candidates.yml",
     ".ux_scores.jsonl",
@@ -200,6 +205,30 @@ def _target_has_git(target: Path) -> bool:
     return (target / ".git").is_dir()
 
 
+def mark_skill_imported(target: Path) -> None:
+    """写入纳入标记。须在 ``_replace_skill_files`` 之后，随 import 那次提交进仓。"""
+    (Path(target) / ORIGIN_FILENAME).write_text(
+        f"{ORIGIN_IMPORT}\n", encoding="utf-8",
+    )
+
+
+def skill_kept_on_rebuild(path: Path) -> bool:
+    """用户 ``xskill import`` 纳入的技能，全量 rebuild --force 不得删。"""
+    path = Path(path)
+    marker = path / ORIGIN_FILENAME
+    if marker.is_file():
+        try:
+            line = marker.read_text(encoding="utf-8").strip().splitlines()
+        except OSError:
+            line = []
+        if line and line[0].strip() == ORIGIN_IMPORT:
+            return True
+    if not (path / ".git").is_dir():
+        return False
+    from xskill.skill.git import commit_history_has_subject_prefix
+    return commit_history_has_subject_prefix(path, _KEEP_COMMIT_PREFIXES)
+
+
 def _notify_imported_catalog(
     target: Path,
     catalog_db_path: Path | str | None,
@@ -263,8 +292,10 @@ def import_one_skill(
             if not gi.is_file():
                 gi.write_text(SKILL_GITIGNORE, encoding="utf-8")
             _replace_skill_files(source, target)
+            mark_skill_imported(target)
             commit_update_main_branch(str(target), message)
         else:
+            mark_skill_imported(target)
             init_imported_repo_on_main(target, message)
         code, sha, _ = run_git(["rev-parse", "HEAD"], cwd=str(target))
         result.sha = sha.strip() if code == 0 else ""
@@ -288,6 +319,7 @@ def import_one_skill(
 
         ensure_head_on_main(target)
         _replace_skill_files(source, target)
+        mark_skill_imported(target)
         committed = commit_update_main_branch(str(target), message)
         if not committed:
             logger.info("import %s: worktree already matched, nothing to commit", name)
