@@ -21,6 +21,7 @@
 
 ## 动态
 
+- **2026-08-14** — `v0.6.31`：`xskill rebuild --force` 不再因 `.git/objects` 非空中断；全量 rebuild 会留下 `xskill import` 纳入的技能。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.31)。
 - **2026-08-14** — `v0.6.30`：team `xskill import` 后钉到发起人推荐列表；技能库登录后可点空心星 pin 进自己的推荐流，并标出推给我、已钉状态。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.30)。
 - **2026-08-03** — `v0.6.29a6`：`pymilvus` 改为可选（`xskill[milvus]`），修复 client 自动更新；「我的」页支持推给我 N 个 SKILL / 上传使用去向 / skill commit 状态。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.29a6)。
 - **2026-07-07** — `v0.6.2a2`：修复 Windows Group Policy 环境下 `schtasks` 拒绝访问的问题，自动降级到开机启动文件夹，`connect` 无需管理员权限即可后台常驻。
