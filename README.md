@@ -281,6 +281,8 @@ skillhub:
 
 
 ## 📰 动态
+- **2026-08-14** `v0.6.30a2`：修复 team `xskill generate` 上下文压缩后代理忘掉已执行工作。
+- **2026-08-14** `v0.6.30a1`：team 模式新增 `xskill generate` 按指令写技能到主干；新增 `xskill import` 纳入已有技能。
 - **2026-08-07** `v0.6.29`：修复推荐回填问题。
 - **2026-08-03** `v0.6.29a6`：milvus变更为可选VDB；支持 DashBoard选择skill推送个数，支持Dashboard查询Skill的用户灰度情况；
 - **2026-08-03** `v0.6.29a5`：引入 Milvus Lite 向量索引。
