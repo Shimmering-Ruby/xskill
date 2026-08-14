@@ -1,4 +1,4 @@
-"""team server 上的 generate 任务：落盘日志、后台跑代理、流式给客户端。"""
+"""team server 上的 generate 任务：入队到 agent-worker 的 SkillEdit 池，流式给客户端。"""
 from __future__ import annotations
 
 import json
@@ -13,12 +13,46 @@ logger = logging.getLogger("xskill.team.generate")
 
 _JOBS: dict[str, dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
+_ACTIVE_STATUSES = ("queued", "running")
 
 
 def _job_dir(logs_dir: Path, user_id: str) -> Path:
     path = logs_dir / "agents" / "generate_agents" / user_id
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def jobs_root(logs_dir: Path) -> Path:
+    """web 进程与 agent-worker 共用的入队目录（与 logs 同级）。"""
+    return Path(logs_dir).expanduser().resolve().parent / "generate_jobs"
+
+
+def _pending_dir(logs_dir: Path) -> Path:
+    path = jobs_root(logs_dir) / "pending"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _claimed_dir(logs_dir: Path) -> Path:
+    path = jobs_root(logs_dir) / "claimed"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _status_path(log_path: Path) -> Path:
+    return log_path.with_suffix(".status.json")
+
+
+def _instruction_preview(text: str) -> str:
+    one = " ".join((text or "").split())
+    return one[:80]
 
 
 def create_job(
@@ -38,7 +72,7 @@ def create_job(
         "user_id": user_id,
         "instruction": instruction,
         "preferred_names": list(preferred_names),
-        "status": "running",
+        "status": "queued",
         "log_path": str(log_path),
         "skill_names": [],
         "pinned": [],
@@ -51,10 +85,175 @@ def create_job(
     return dict(job)
 
 
+def enqueue_generate_job(job: dict[str, Any], *, logs_dir: Path) -> None:
+    """把任务写进 pending，供 agent-worker 的 edit 池领取。"""
+    payload = {
+        "job_id": job["job_id"],
+        "client_id": job["client_id"],
+        "user_id": job["user_id"],
+        "instruction": job["instruction"],
+        "preferred_names": list(job.get("preferred_names") or []),
+        "log_path": job["log_path"],
+        "created_at": job.get("created_at") or time.time(),
+        "status": "queued",
+    }
+    path = _pending_dir(logs_dir) / f"{job['job_id']}.json"
+    _atomic_write_json(path, payload)
+
+
+def list_pending_paths(logs_dir: Path) -> list[Path]:
+    pending = jobs_root(logs_dir) / "pending"
+    if not pending.is_dir():
+        return []
+    return sorted(
+        (p for p in pending.glob("*.json") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+    )
+
+
+def try_claim(logs_dir: Path, pending_path: Path) -> dict[str, Any] | None:
+    claimed = _claimed_dir(logs_dir) / pending_path.name
+    try:
+        pending_path.replace(claimed)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.warning("generate claim failed for %s", pending_path, exc_info=True)
+        return None
+    try:
+        return json.loads(claimed.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("generate claimed file unreadable %s", claimed, exc_info=True)
+        return None
+
+
+def release_claim(logs_dir: Path, job_id: str) -> None:
+    claimed = _claimed_dir(logs_dir) / f"{job_id}.json"
+    if not claimed.is_file():
+        return
+    pending = _pending_dir(logs_dir) / claimed.name
+    try:
+        claimed.replace(pending)
+    except OSError:
+        logger.warning("generate release claim failed for %s", job_id, exc_info=True)
+
+
+def finish_claim(logs_dir: Path, job_id: str) -> None:
+    claimed = _claimed_dir(logs_dir) / f"{job_id}.json"
+    try:
+        claimed.unlink(missing_ok=True)
+    except TypeError:
+        # Python 3.9: Path.unlink 无 missing_ok
+        try:
+            claimed.unlink()
+        except FileNotFoundError:
+            pass
+    except OSError:
+        logger.warning("generate finish claim failed for %s", job_id, exc_info=True)
+
+
+def reclaim_orphans(logs_dir: Path, inflight_ids: set[str]) -> None:
+    """进程重启后：已结束的 claimed 丢掉，未结束的退回 pending。"""
+    claimed_dir = jobs_root(logs_dir) / "claimed"
+    if not claimed_dir.is_dir():
+        return
+    for path in list(claimed_dir.glob("*.json")):
+        job_id = path.stem
+        if job_id in inflight_ids:
+            continue
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        status = ""
+        log_path = job.get("log_path")
+        if log_path:
+            disk = _read_status_file(Path(log_path))
+            status = str((disk or {}).get("status") or "")
+        if status in ("succeeded", "failed"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        try:
+            path.replace(_pending_dir(logs_dir) / path.name)
+        except OSError:
+            logger.warning("generate reclaim failed for %s", job_id, exc_info=True)
+
+
+def monitor_task(job: dict[str, Any]) -> dict[str, Any]:
+    """流水线席位元数据（给 BoundedExecutor 的 task=）。"""
+    return {
+        "kind": "generate",
+        "job_id": job["job_id"],
+        "user_id": job.get("user_id") or "",
+        "instruction": _instruction_preview(str(job.get("instruction") or "")),
+    }
+
+
 def get_job(job_id: str) -> dict[str, Any] | None:
     with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
-        return dict(job) if job is not None else None
+        cached = _JOBS.get(job_id)
+        job = dict(cached) if cached is not None else None
+    if job is None:
+        job = _find_job_on_disk(job_id)
+    if job is None:
+        return None
+    return _refresh_from_status(job)
+
+
+def _find_job_on_disk(job_id: str) -> dict[str, Any] | None:
+    from xskill.config import get_logs_dir
+
+    logs_dir = get_logs_dir()
+    root = logs_dir / "agents" / "generate_agents"
+    if root.is_dir():
+        matches = list(root.glob(f"*/{job_id}.status.json"))
+        if matches:
+            try:
+                payload = json.loads(matches[0].read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            payload.setdefault("job_id", job_id)
+            payload["log_path"] = str(matches[0].with_name(f"{job_id}.log"))
+            return payload
+    for sub in ("pending", "claimed"):
+        path = jobs_root(logs_dir) / sub / f"{job_id}.json"
+        if not path.is_file():
+            continue
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+    return None
+
+
+def _read_status_file(log_path: Path) -> dict[str, Any] | None:
+    status_path = _status_path(Path(log_path))
+    try:
+        return json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _refresh_from_status(job: dict[str, Any]) -> dict[str, Any]:
+    log_path = job.get("log_path")
+    if not log_path:
+        return job
+    disk = _read_status_file(Path(log_path))
+    if not disk:
+        return job
+    for key in ("status", "skill_names", "pinned", "error", "client_id", "user_id"):
+        if key in disk:
+            job[key] = disk[key]
+    with _JOBS_LOCK:
+        cached = _JOBS.get(job["job_id"])
+        if cached is not None:
+            for key in ("status", "skill_names", "pinned", "error"):
+                if key in disk:
+                    cached[key] = disk[key]
+    return job
 
 
 def _update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
@@ -70,7 +269,6 @@ def _update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
 
 def _write_status(job: dict[str, Any]) -> None:
     log_path = Path(job["log_path"])
-    status_path = log_path.with_suffix(".status.json")
     payload = {
         key: job[key]
         for key in (
@@ -80,15 +278,16 @@ def _write_status(job: dict[str, Any]) -> None:
         if key in job
     }
     try:
-        status_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _atomic_write_json(_status_path(log_path), payload)
     except OSError:
-        logger.warning("failed to write generate status %s", status_path, exc_info=True)
+        logger.warning("failed to write generate status %s", log_path, exc_info=True)
 
 
-def collect_read_roots(skill_dir: Path, traj_root: Path | None) -> list[Path]:
+def collect_read_roots(
+    skill_dir: Path,
+    traj_root: Path | None,
+    db_path: Path | None = None,
+) -> list[Path]:
     roots: list[Path] = [Path(skill_dir)]
     if traj_root is not None:
         roots.append(Path(traj_root))
@@ -97,7 +296,8 @@ def collect_read_roots(skill_dir: Path, traj_root: Path | None) -> list[Path]:
             roots.append(clients)
     try:
         from xskill.pipeline.registry import list_watch_dirs
-        for row in list_watch_dirs():
+        kw = {"db_path": db_path} if db_path is not None else {}
+        for row in list_watch_dirs(**kw):
             path = Path(row["path"])
             if path.is_dir():
                 roots.append(path)
@@ -154,27 +354,73 @@ def run_generate_job(job_id: str, *, ctx: Any, config: dict | None) -> None:
     if job is None:
         return
     try:
-        _run_generate_job_body(job, ctx=ctx, config=config or {})
+        traj_root = Path(ctx.traj_root) if getattr(ctx, "traj_root", None) is not None else None
+        _run_generate_job_body(
+            job,
+            skill_dir=Path(ctx.skill_dir),
+            traj_root=traj_root,
+            config=config or {},
+        )
     except Exception as error:  # noqa: BLE001 — job must end in failed, not crash thread
         logger.exception("generate job %s failed", job_id)
         _update_job(job_id, status="failed", error=str(error))
 
 
-def _run_generate_job_body(job: dict[str, Any], *, ctx: Any, config: dict) -> None:
+def run_claimed_generate_job(
+    job: dict[str, Any],
+    *,
+    skill_dir: Path,
+    config: dict | None,
+    db_path: Path | None = None,
+    logs_dir: Path | None = None,
+    traj_root: Path | None = None,
+) -> None:
+    """agent-worker edit 池线程入口：认领后的 payload 跑完并写 status 文件。"""
+    job_id = job["job_id"]
+    with _JOBS_LOCK:
+        stored = dict(job)
+        stored.setdefault("status", "running")
+        stored.setdefault("skill_names", [])
+        stored.setdefault("pinned", [])
+        stored.setdefault("error", "")
+        _JOBS[job_id] = stored
+    _update_job(job_id, status="running")
+    try:
+        _run_generate_job_body(
+            get_job(job_id) or stored,
+            skill_dir=Path(skill_dir),
+            traj_root=Path(traj_root) if traj_root is not None else None,
+            config=config or {},
+            db_path=db_path,
+            logs_dir=logs_dir,
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.exception("generate job %s failed", job_id)
+        _update_job(job_id, status="failed", error=str(error))
+
+
+def _run_generate_job_body(
+    job: dict[str, Any],
+    *,
+    skill_dir: Path,
+    traj_root: Path | None,
+    config: dict,
+    db_path: Path | None = None,
+    logs_dir: Path | None = None,
+) -> None:
     from xskill.agents import agent_tools
     from xskill.agents.agno_factory import make_default_factory
     from xskill.agents.generate_agent import GenerateAgent
     from xskill.config import get_logs_dir, get_registry_db_path
 
-    skill_dir = Path(ctx.skill_dir)
-    traj_root = Path(ctx.traj_root) if ctx.traj_root is not None else None
-    extra_roots = collect_read_roots(skill_dir, traj_root)
-    logs_dir = get_logs_dir()
+    skill_dir = Path(skill_dir)
+    extra_roots = collect_read_roots(skill_dir, traj_root, db_path=db_path)
+    logs_dir = Path(logs_dir) if logs_dir is not None else get_logs_dir()
     spill_root = (
         logs_dir / "agents" / "generate_agents" / job["user_id"] / "spill" / job["job_id"]
     )
     spill_root.mkdir(parents=True, exist_ok=True)
-    db_path = get_registry_db_path()
+    resolved_db = Path(db_path) if db_path is not None else get_registry_db_path()
     agent_tools.reset_generate_session()
     tool_context = agent_tools.create_agent_tool_context(
         skill_dir=skill_dir,
@@ -185,7 +431,7 @@ def _run_generate_job_body(job: dict[str, Any], *, ctx: Any, config: dict) -> No
         spill_root=spill_root,
         extra_read_roots=tuple(extra_roots),
         generate_user_id=job["user_id"],
-        registry_db_path=db_path,
+        registry_db_path=resolved_db,
     )
     llm_cfg = {**(config.get("llm") or {}), **(config.get("llm_skill") or {})}
     factory = make_default_factory(
@@ -226,7 +472,7 @@ def _run_generate_job_body(job: dict[str, Any], *, ctx: Any, config: dict) -> No
     pinned = pin_generated_skills(
         user_id=job["user_id"],
         skill_names=skill_names,
-        db_path=db_path,
+        db_path=resolved_db,
         max_pinned=max_pinned,
     )
     _update_job(
@@ -238,17 +484,6 @@ def _run_generate_job_body(job: dict[str, Any], *, ctx: Any, config: dict) -> No
     )
 
 
-def start_generate_job_thread(job_id: str, *, ctx: Any, config: dict | None) -> None:
-    thread = threading.Thread(
-        target=run_generate_job,
-        args=(job_id,),
-        kwargs={"ctx": ctx, "config": config},
-        name=f"xskill-generate-{job_id[:8]}",
-        daemon=True,
-    )
-    thread.start()
-
-
 def iter_job_events(
     job_id: str,
     *,
@@ -257,8 +492,10 @@ def iter_job_events(
 ) -> Iterator[dict[str, Any]]:
     """Yield log chunks then a terminal event. Blocking generator.
 
-    Stays open until the job leaves ``running``. Quiet periods emit ping
-    events so proxies and the CLI do not treat a long model call as death.
+    Stays open until the job leaves ``queued`` / ``running``. Quiet periods
+    emit ping events so proxies and the CLI do not treat a long model call
+    as death. Status is re-read from the status file so the web process can
+    see the terminal state written by agent-worker.
     """
     job = get_job(job_id)
     if job is None:
@@ -278,7 +515,7 @@ def iter_job_events(
             yield {"type": "log", "chunk": chunk}
             last_emit = time.time()
         current = get_job(job_id) or job
-        if current.get("status") != "running":
+        if current.get("status") not in _ACTIVE_STATUSES:
             try:
                 data = log_path.read_bytes()
             except OSError:

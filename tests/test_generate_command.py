@@ -19,7 +19,7 @@ from xskill.skill.git import (
 from xskill.team.server import api as server_api
 from xskill.team.server.client_registry import ClientRegistry
 from xskill.team.server.generate_jobs import (
-    create_job, iter_job_events, pin_generated_skills,
+    create_job, enqueue_generate_job, iter_job_events, pin_generated_skills,
 )
 
 
@@ -161,6 +161,58 @@ def test_iter_job_events_pings_while_running(tmp_path: Path):
             break
     assert "ping" in seen
     assert "done" not in seen
+    assert job["status"] == "queued"
+
+
+def test_enqueue_writes_pending_file(tmp_path: Path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    job = create_job(
+        client_id="c1",
+        user_id="alice",
+        instruction="写一个发票技能",
+        preferred_names=["alice"],
+        logs_dir=logs,
+    )
+    enqueue_generate_job(job, logs_dir=logs)
+    pending = tmp_path / "generate_jobs" / "pending" / f"{job['job_id']}.json"
+    assert pending.is_file()
+    payload = json.loads(pending.read_text(encoding="utf-8"))
+    assert payload["instruction"] == "写一个发票技能"
+    assert payload["user_id"] == "alice"
+
+
+def test_iter_job_events_follows_status_file(tmp_path: Path):
+    import threading
+    import time
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    job = create_job(
+        client_id="c1",
+        user_id="alice",
+        instruction="x",
+        preferred_names=[],
+        logs_dir=logs,
+    )
+    status_path = Path(job["log_path"]).with_suffix(".status.json")
+
+    def flip():
+        time.sleep(0.04)
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+        payload["status"] = "succeeded"
+        payload["skill_names"] = ["invoice-check"]
+        payload["pinned"] = ["invoice-check"]
+        status_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    threading.Thread(target=flip, daemon=True).start()
+    events = list(iter_job_events(
+        job["job_id"], poll_seconds=0.01, ping_every=1.0,
+    ))
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["ok"] is True
+    assert done["skill_names"] == ["invoice-check"]
 
 
 @pytest.fixture
@@ -180,12 +232,11 @@ def team_client(tmp_path, monkeypatch):
         register_dir=lambda path, label: None,
     )
 
-    def fake_start(job_id, *, ctx, config):
-        from xskill.team.server.generate_jobs import _update_job, get_job
-        job = get_job(job_id)
+    def fake_enqueue(job, *, logs_dir):
+        from xskill.team.server.generate_jobs import _update_job
         Path(job["log_path"]).write_text("round 1 thinking\n", encoding="utf-8")
         _update_job(
-            job_id,
+            job["job_id"],
             status="succeeded",
             skill_names=["invoice-check"],
             pinned=["invoice-check"],
@@ -193,8 +244,8 @@ def team_client(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        "xskill.team.server.generate_jobs.start_generate_job_thread",
-        fake_start,
+        "xskill.team.server.generate_jobs.enqueue_generate_job",
+        fake_enqueue,
     )
     app = FastAPI()
     app.include_router(server_api.router)
@@ -301,3 +352,64 @@ def test_generate_cli_parser_and_stream(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "thinking" in out
     assert "invoice-check" in out
+
+
+def test_generate_jobs_submit_to_edit_pool(tmp_path, monkeypatch):
+    import time
+
+    from xskill.pipeline.runner import DirectoryWatcher
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    job = create_job(
+        client_id="c1",
+        user_id="alice",
+        instruction="写一个发票技能",
+        preferred_names=[],
+        logs_dir=logs,
+    )
+    enqueue_generate_job(job, logs_dir=logs)
+    held = []
+
+    def fake_run(claimed, **kwargs):
+        held.append(claimed["job_id"])
+        time.sleep(0.25)
+
+    monkeypatch.setattr(
+        "xskill.team.server.generate_jobs.run_claimed_generate_job",
+        fake_run,
+    )
+    watcher = DirectoryWatcher(
+        llm=None, embed_client=None, config={},
+        skill_dir=skill_dir, poll_interval=1,
+        logs_dir=logs, xskill_home=tmp_path, home_root=tmp_path,
+        pool_config={
+            "split": {"workers": 1, "llm_weight": 1},
+            "cluster": {"workers": 1, "batch_size": 1, "llm_weight": 1},
+            "edit": {"workers": 2, "batch_size": 1, "llm_weight": 1},
+            "embed": {"workers": 1},
+        },
+    )
+    watcher._submit_generate_jobs()
+    deadline = time.time() + 2
+    generate_seats = []
+    while time.time() < deadline:
+        generate_seats = [
+            seat for seat in watcher._pools["edit"].status["seats"]
+            if seat and (seat.get("task") or {}).get("kind") == "generate"
+        ]
+        if generate_seats:
+            break
+        time.sleep(0.02)
+    assert generate_seats
+    assert generate_seats[0]["task"]["job_id"] == job["job_id"]
+    assert generate_seats[0]["task"]["user_id"] == "alice"
+    for fut in list(watcher._futures):
+        fut.result(timeout=2)
+    watcher._harvest()
+    assert held == [job["job_id"]]
+    assert watcher._generate_completed == 1
+    claimed = tmp_path / "generate_jobs" / "claimed" / f"{job['job_id']}.json"
+    assert not claimed.exists()

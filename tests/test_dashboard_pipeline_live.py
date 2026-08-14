@@ -89,7 +89,7 @@ def test_full_status_shapes_three_monitored_pools(tmp_path):
     assert body["pid"] == 1234
     assert body["pending_atoms"] == 6
     assert body["llm"]["inflight"] == 2
-    assert set(body["pools"]) == {"split", "cluster", "edit"}
+    assert set(body["pools"]) == {"split", "cluster", "edit", "generate"}
 
     split = body["pools"]["split"]
     assert split["workers"] == 2
@@ -107,6 +107,12 @@ def test_full_status_shapes_three_monitored_pools(tmp_path):
     edit = body["pools"]["edit"]
     assert edit["seats"][0]["task"]["xfer"] == "baby_main"
     assert edit["failed"] == 0
+
+    generate = body["pools"]["generate"]
+    assert generate["workers"] == 3
+    assert generate["shared_pool"] == "edit"
+    assert generate["seats"] == [None, None, None]
+    assert generate["llm_weight"] == 1
 
 
 def test_legacy_worker_without_seat_bookkeeping_gets_explicit_empty_seats(tmp_path):
@@ -129,7 +135,39 @@ def test_empty_stats_means_worker_not_reporting(tmp_path):
     assert body["error"] == "boom"
 
 
-# ── tail_task_log ─────────────────────────────────────────────────
+def test_generate_seats_are_projected_out_of_edit_pool(tmp_path):
+    stats = _full_stats()
+    now = stats["heartbeat_at"]
+    stats["pools"]["edit"]["seats"][1] = {
+        "seat": 1, "started_at": now - 3,
+        "task": {"kind": "generate", "job_id": "abc123", "user_id": "alice",
+                 "instruction": "写一个发票技能"},
+    }
+    stats["pools"]["edit"]["queue"] = [
+        {"kind": "generate", "job_id": "def456", "user_id": "bob",
+         "instruction": "改现有 skill"},
+    ]
+    stats["generate"] = {"completed": 4, "failed": 1}
+    _write_status(tmp_path, stats)
+    body = pipeline_live(tmp_path / "r.db")
+    edit = body["pools"]["edit"]
+    generate = body["pools"]["generate"]
+    assert edit["seats"][0]["task"]["skill_name"] == "alpha"
+    assert edit["seats"][1] is None
+    assert generate["seats"][1]["task"]["job_id"] == "abc123"
+    assert generate["seats"][0] is None
+    assert generate["queue"][0]["job_id"] == "def456"
+    assert generate["completed"] == 4
+    assert generate["failed"] == 1
+
+
+def test_tail_log_reads_generate_job(tmp_path):
+    log_dir = tmp_path / "logs" / "agents" / "generate_agents" / "alice"
+    log_dir.mkdir(parents=True)
+    (log_dir / "jobdeadbeef.log").write_text("TURN 1\nthinking\n", encoding="utf-8")
+    body = tail_task_log(tmp_path / "r.db", kind="generate", name="jobdeadbeef")
+    assert body["exists"] is True
+    assert body["lines"] == ["TURN 1", "thinking"]
 
 def test_tail_log_missing_file_is_explicit_empty_state(tmp_path):
     body = tail_task_log(tmp_path / "r.db", kind="skill", name="nope")

@@ -218,7 +218,7 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
 
     @router.get("/api/v1/dashboard/pipeline/live")
     def pipeline_live_ep() -> dict:
-        """三池实时监看：固定席位 + 排队预览（agent-worker 状态文件只读整形）。
+        """四栏实时监看：split / cluster / SkillEdit / Generate（后两栏共用 edit 池）。
 
         公网只读实例剥掉任务级身份（skill/traj/atom 名），只留席位占用与
         计时——与 ``dirs``/``tags`` 的白名单裁剪同一套；日志尾巴属内容级，

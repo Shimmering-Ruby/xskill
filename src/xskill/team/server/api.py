@@ -1444,23 +1444,18 @@ def team_generate(
     names = [n.strip() for n in (req.names or []) if str(n).strip()]
     from xskill.config import get_logs_dir
     from xskill.team.server.generate_jobs import (
-        create_job, start_generate_job_thread,
+        create_job, enqueue_generate_job,
     )
 
+    logs_dir = get_logs_dir()
     job = create_job(
         client_id=client_id,
         user_id=user_id,
         instruction=instruction,
         preferred_names=names,
-        logs_dir=get_logs_dir(),
+        logs_dir=logs_dir,
     )
-    config = {}
-    try:
-        from xskill.api import app as app_mod
-        config = app_mod._config or {}
-    except Exception:
-        logger.debug("generate using empty config snapshot", exc_info=True)
-    start_generate_job_thread(job["job_id"], ctx=_ctx, config=config)
+    enqueue_generate_job(job, logs_dir=logs_dir)
     return GenerateAccepted(job_id=job["job_id"])
 
 
