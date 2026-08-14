@@ -8,7 +8,6 @@ import pytest
 
 from xskill.skill import candidates as C
 from xskill.agents.skill_edit_agent import (
-    GUIDANCE_ENV,
     SkillEditAgent,
     SYSTEM_PROMPT_TEMPLATE,
 )
@@ -534,7 +533,6 @@ class TestWritingDisciplineInPrompt:
         assert "commit_to_staging" in SYSTEM_PROMPT_TEMPLATE
         assert "隐私守护" in SYSTEM_PROMPT_TEMPLATE
         assert "AtomTaskRead" in SYSTEM_PROMPT_TEMPLATE
-        assert GUIDANCE_ENV == "XSKILL_SKILLEDIT_GUIDANCE_FILE"
 
 
 # ────────────────────────────────────────────────────────────────────

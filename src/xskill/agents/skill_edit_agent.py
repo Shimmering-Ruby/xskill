@@ -44,12 +44,9 @@ def _candidate_weight(candidate: dict) -> int:
 
 # ---------------------------------------------------------------------------
 # 写作指导段（GUIDANCE）—— 写什么 / 方法硬闸 / 验证硬闸 / 证据杆秤 /
-# 结构 / 长度预算 / 失败挖掘。这一段是**可切换**的：
-#   - 默认（环境变量 XSKILL_SKILLEDIT_GUIDANCE_FILE 未设）：用下方 committed 文本。
-#   - 若 XSKILL_SKILLEDIT_GUIDANCE_FILE 指向一个文件：用该文件内容**整体替换**本段，
-#     管线契约段（场景块、SKILL.md schema、commit 工具协议、隐私守护、frontmatter
-#     schema、工具清单、硬禁止）保持不动。
-# 见 build_system_prompt() / _resolve_guidance()。
+# 结构 / 长度预算 / 失败挖掘。默认就是下方 committed 文本（v7）。
+# 管线契约段（场景块、SKILL.md schema、commit 工具协议、隐私守护、frontmatter
+# schema、工具清单、硬禁止）与这段分开，见 build_system_prompt()。
 # ---------------------------------------------------------------------------
 DEFAULT_GUIDANCE_BLOCK = """## 写什么
 
@@ -359,49 +356,11 @@ SYSTEM_PROMPT_TEMPLATE = _SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE.format(
 )
 
 
-GUIDANCE_ENV = "XSKILL_SKILLEDIT_GUIDANCE_FILE"
-
-
-def _resolve_guidance() -> tuple[str, str]:
-    """返回 (guidance_block, guidance_block_2)。
-
-    默认（env 未设）：committed 文本，行为零改变。
-    若 XSKILL_SKILLEDIT_GUIDANCE_FILE 指向可读文件：用该文件内容整体替换写作
-    指导段（block_1），block_2 置空（外部 guidance 文件自含全部结构/证据/长度规则）。
-    env 指向不存在/读不了的文件 → 记 warning 并退回默认，绝不静默用空指导。
-    """
-    import os
-
-    path = os.environ.get(GUIDANCE_ENV, "").strip()
-    if not path:
-        return DEFAULT_GUIDANCE_BLOCK, DEFAULT_GUIDANCE_BLOCK_2
-    p = Path(path)
-    try:
-        text = p.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        logger.warning(
-            "%s=%r 读不了（%s）——退回默认 committed 写作指导段",
-            GUIDANCE_ENV, path, e,
-        )
-        return DEFAULT_GUIDANCE_BLOCK, DEFAULT_GUIDANCE_BLOCK_2
-    if not text:
-        logger.warning(
-            "%s=%r 内容为空——退回默认 committed 写作指导段", GUIDANCE_ENV, path
-        )
-        return DEFAULT_GUIDANCE_BLOCK, DEFAULT_GUIDANCE_BLOCK_2
-    logger.info("SkillEdit 写作指导段由 %s 替换为 %s（%d 字符）",
-                GUIDANCE_ENV, path, len(text))
-    return text, ""
-
-
 def build_system_prompt(scenario_block: str, branch_now: str) -> str:
-    """组装 SkillEdit system prompt：管线契约段固定，写作指导段按 env 可切换。"""
-    guidance, guidance2 = _resolve_guidance()
-    return _SYSTEM_PROMPT_TEMPLATE_WITH_GUIDANCE.format(
+    """组装 SkillEdit system prompt：写作指导段用仓库内默认 v7 文本。"""
+    return SYSTEM_PROMPT_TEMPLATE.format(
         scenario_block=scenario_block,
         branch_now=branch_now,
-        guidance_block=guidance,
-        guidance_block_2=guidance2,
     )
 
 
