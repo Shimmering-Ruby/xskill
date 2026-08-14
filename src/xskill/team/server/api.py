@@ -1240,6 +1240,62 @@ def _skillhub_result_source(source_path: str) -> str:
     return "skillhub"
 
 
+@router.post("/skills/import")
+async def team_skills_import(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+) -> dict:
+    """把技能目录纳入 server 自有仓。不要和 skill_hub/upload 混用。"""
+    client_id = _auth(x_xskill_token, x_xskill_client)
+    if _ctx.skill_dir is None:
+        raise HTTPException(status_code=503, detail="skill_dir not configured")
+    from xskill.recommend.skillhub import safe_id_part
+    skill_name = safe_id_part(name)
+    if not skill_name:
+        raise HTTPException(status_code=400, detail="invalid skill name")
+    payload = await file.read()
+    if len(payload) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="import archive exceeds 50MB")
+    result = await run_in_threadpool(_import_skill_archive, payload, skill_name)
+    logger.info("native import from %s: %s sha=%s existed=%s",
+                client_id, result["name"], result.get("sha", "")[:8],
+                result.get("existed"))
+    return result
+
+
+_IMPORT_ARCHIVE_MAX_FILES = 20000
+
+
+def _import_skill_archive(payload: bytes, skill_name: str) -> dict:
+    from xskill.skill.importer import extract_import_zip, import_one_skill
+    from xskill.team.server.skill_manifest import invalidate_manifest_cache
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="xskill-import."))
+    try:
+        source = tmp_dir / skill_name
+        extract_import_zip(payload, source, max_files=_IMPORT_ARCHIVE_MAX_FILES)
+        imported = import_one_skill(_ctx.skill_dir, source)
+        invalidate_manifest_cache(_ctx.skill_dir)
+        return {
+            "name": imported.name,
+            "sha": imported.sha,
+            "existed": imported.existed,
+            "baby_overwritten": imported.baby_overwritten,
+            "staging_kept": imported.staging_kept,
+            "main_round_scores_cleared": imported.main_round_scores_cleared,
+        }
+    except HTTPException:
+        raise
+    except FileNotFoundError as missing:
+        raise HTTPException(status_code=400, detail=str(missing)) from missing
+    except ValueError as bad:
+        raise HTTPException(status_code=400, detail=str(bad)) from bad
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 @router.post("/skill_hub/upload")
 async def team_skill_hub_upload(
     file: UploadFile = File(...),

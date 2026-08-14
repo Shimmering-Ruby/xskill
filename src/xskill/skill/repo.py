@@ -371,18 +371,12 @@ def search_skill_index(*, skill_dir: Path, query: str, embed_client, top_k: int 
     return results
 
 
+from xskill.skill.importer import import_skill_path
+
+
 def import_skill(skill_dir: Path, source_path: Path) -> str:
-    """Copy a skill directory into ./skill/ and commit."""
-    source = Path(source_path)
-    if not source.is_dir():
-        raise FileNotFoundError(f"source not found: {source}")
-
-    name = source.name
-    target = skill_dir / name
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(source, target)
-
-    commit_changes(str(skill_dir), f"import skill: {name}")
-    logger.info(f"imported: {name}")
-    return name
+    """把源目录纳入自有仓。返回第一个纳入的技能名（兼容旧 API）。"""
+    results = import_skill_path(skill_dir, source_path, install=False)
+    if not results:
+        raise FileNotFoundError(f"no skill imported from {source_path}")
+    return results[0].name

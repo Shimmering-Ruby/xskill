@@ -79,6 +79,37 @@ def insert_ux_score(
         return cur.rowcount > 0
 
 
+def delete_ux_scores_for_sha(
+    skill_name: str,
+    *,
+    side: str,
+    commit_sha: str,
+    scored_at_values: list[str] | None = None,
+    db_path: Optional[Path] = None,
+) -> int:
+    """删掉某技能某一侧、某一提交上的体验分（import 换主干时清当前轮）。"""
+    if not skill_name or not commit_sha:
+        return 0
+    with pooled_connection(db_path) as conn:
+        if scored_at_values:
+            deleted = 0
+            for scored_at in scored_at_values:
+                cur = conn.execute(
+                    "DELETE FROM ux_scores WHERE skill_name = ? AND side = ? "
+                    "AND commit_sha = ? AND scored_at = ?",
+                    (skill_name, side, commit_sha, scored_at),
+                )
+                deleted += cur.rowcount
+            conn.commit()
+            return deleted
+        cur = conn.execute(
+            "DELETE FROM ux_scores WHERE skill_name = ? AND side = ? AND commit_sha = ?",
+            (skill_name, side, commit_sha),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
 def insert_ux_scores_many(
     records: list[dict],
     *,

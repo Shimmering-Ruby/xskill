@@ -390,6 +390,7 @@ class DirectoryWatcher:
         # 不放在 _scan_dir 内是因为 skill_dir 不是 watch_dir，跟 wd 循环
         # 无关——每个 watcher 只有一个全局 skill_dir。
         self._run_skill_edit_step()
+        self._check_scripting_requests()
 
         # ── Step 6: 灰度判定独立轮询 ──
         # 对每个 staging 分支存在的 skill 跑 AtomCanary.check_and_decide：
@@ -752,7 +753,7 @@ class DirectoryWatcher:
 
         skill_edit_in_flight = {
             info.get("skill_dir") for info in self._futures.values()
-            if info.get("stage") == "skill_edit"
+            if info.get("stage") in ("skill_edit", "skill_scripting")
         }
         for d in skill_dirs:
             if d in skill_edit_in_flight:
@@ -846,6 +847,127 @@ class DirectoryWatcher:
             self._install_skill_to_all_detected(d)
         except Exception:
             logger.exception("install after SkillEdit failed: %s", d.name)
+
+    def _check_scripting_requests(self) -> None:
+        """扫 ``.scripting_requested``，丢进和编辑代理同一个 worker 池。"""
+        if self.skill_dir is None or not self.skill_dir.is_dir():
+            return
+        from xskill.skill.scripting import has_scripting_request
+
+        requested = [
+            skill_path for skill_path in sorted(self.skill_dir.iterdir())
+            if skill_path.is_dir()
+            and not skill_path.name.startswith(".")
+            and has_scripting_request(skill_path)
+        ]
+        if not requested:
+            return
+        from xskill.agents import agent_tools
+        from xskill.agents.skill_scripting_agent import SkillScriptingAgent
+        from xskill.skill.scripting import (
+            clear_scripting_request,
+            scripting_gate_reason,
+        )
+
+        factory = self._factory()
+        base_llm_cfg = self.config.get("llm", {}) or {}
+        skill_llm_override = self.config.get("llm_skill", {}) or {}
+        skill_llm_cfg = {
+            **base_llm_cfg,
+            **{
+                key: value
+                for key, value in skill_llm_override.items()
+                if value not in (None, "")
+            },
+        }
+        stores = []
+        for wd in list_watch_dirs(**self._db_kw()):
+            try:
+                stores.append(self._store_for(Path(wd["path"])))
+            except Exception:
+                logger.warning(
+                    "failed to open atom store for scripting: %s",
+                    wd.get("path"),
+                    exc_info=True,
+                )
+        store = stores[0] if stores else None
+        traj_root = Path(stores[0].root) if stores else self.skill_dir
+        tool_context = agent_tools.create_agent_tool_context(
+            skill_dir=self.skill_dir,
+            data_dir=self.skill_dir,
+            config=self.config,
+            atom_skill_dir=self.skill_dir,
+            atom_store=store,
+            default_traj_root=traj_root,
+            spill_root=self.spill_root,
+            usage_ledger=self.usage_ledger,
+            registry_db_path=self.db_path,
+        )
+        busy = {
+            info.get("skill_dir") for info in self._futures.values()
+            if info.get("stage") in ("skill_edit", "skill_scripting")
+        }
+
+        def _run_scripting(skill_path: Path):
+            with agent_tools.use_agent_tool_context(tool_context):
+                agent = SkillScriptingAgent(
+                    skill_dir=skill_path,
+                    agno_agent_factory=factory,
+                    llm_cfg=skill_llm_cfg,
+                    logs_dir=self.logs_dir,
+                )
+                try:
+                    return skill_path, bool(agent.run())
+                except Exception:
+                    logger.exception("SkillScriptingAgent failed: %s", skill_path.name)
+                    return skill_path, False
+
+        for skill_path in requested:
+            if skill_path in busy:
+                continue
+            gate = scripting_gate_reason(skill_path)
+            if gate:
+                logger.info(
+                    "scripting request dropped for %s: %s",
+                    skill_path.name, gate,
+                )
+                clear_scripting_request(skill_path)
+                continue
+            fut = self._pools["edit"].submit(
+                _run_scripting,
+                skill_path,
+                task={"kind": "skill", "skill_name": skill_path.name,
+                      "xfer": "main_scripting"},
+                task_factory=lambda d=skill_path: {
+                    "kind": "skill",
+                    "skill_name": d.name,
+                    "xfer": "main_scripting",
+                },
+            )
+            if fut is None:
+                break
+            self._futures[fut] = {"stage": "skill_scripting", "skill_dir": skill_path}
+            busy.add(skill_path)
+
+    def _on_skill_scripting_done(self, result) -> None:
+        from xskill.skill.scripting import clear_scripting_request
+
+        skill_path, ok = result
+        clear_scripting_request(skill_path)
+        if not ok:
+            logger.warning("scripting did not update main: %s", skill_path.name)
+            return
+        logger.info("SkillScriptingAgent updated main: %s", skill_path.name)
+        try:
+            from xskill.team.server.skill_manifest import invalidate_manifest_cache
+            if self.skill_dir is not None:
+                invalidate_manifest_cache(self.skill_dir)
+        except Exception:
+            logger.debug("invalidate manifest after scripting failed", exc_info=True)
+        try:
+            self._install_skill_to_all_detected(skill_path)
+        except Exception:
+            logger.exception("install after scripting failed: %s", skill_path.name)
 
     def _drain_futures(self, stage: str | None = None, timeout: float = 30.0) -> None:
         """阻塞等到 ``self._futures`` 里指定 stage（``None`` = 全部）的 future
@@ -2178,6 +2300,16 @@ class DirectoryWatcher:
                     self._stats["errors"] += 1
                     logger.exception(
                         "skill_edit future failed: %s",
+                        info.get("skill_dir"),
+                    )
+                continue
+            if stage == "skill_scripting":
+                try:
+                    self._on_skill_scripting_done(fut.result(timeout=0))
+                except Exception:
+                    self._stats["errors"] += 1
+                    logger.exception(
+                        "skill_scripting future failed: %s",
                         info.get("skill_dir"),
                     )
                 continue

@@ -304,6 +304,9 @@ SKILL_GITIGNORE = """# xskill v2 skill 仓库的 ignore 规则
 
 # 旧锁文件
 .lock
+
+# 详情页「脚本化」请求标记（watcher 消费，不进版本库）
+.scripting_requested
 """
 
 
@@ -525,6 +528,8 @@ def _stage_all(repo: Repo, root: Path) -> bool:
         # （.gitignore 可能没这条）这里硬编码兜底跳过，绝不版本化高频写入的
         # 优化实验数据。
         if ".description_optimization" in parts:
+            continue
+        if rel.name == ".scripting_requested" or parts[0] == ".scripting_requested":
             continue
         rel_str = str(rel).replace(os.sep, "/")
         if _is_ignored(rel_str, ignore_patterns):
@@ -1994,6 +1999,75 @@ def commit_update_main_branch(skill_dir: str, message: str) -> bool:
     from xskill.skill.catalog_store import notify_native_upsert
     notify_native_upsert(skill_dir)
     return True
+
+
+def ensure_head_on_main(skill_dir: str | Path) -> None:
+    """让 HEAD 落在 main。没有 main 时从 master 或最新分支建出 main。
+
+    工作区在「从已有分支切过去」时会 hard reset 到该分支树；调用方若已经
+    把工作区换成导入正文，应先保证目标 main 的树就是当前工作区（例如
+    刚 copytree 进来的仓，checkout main 只是对齐 HEAD）。
+    """
+    skill_dir = Path(skill_dir)
+    with skill_repo_lock(skill_dir):
+        with _open_repo(skill_dir) as repo:
+            if _has_branch(repo, "main"):
+                code, err = _checkout_branch(repo, "main")
+                if code != 0:
+                    raise RuntimeError(f"checkout main failed: {err}")
+                return
+            source = None
+            if _has_branch(repo, "master"):
+                source = "master"
+            else:
+                newest_name = None
+                newest_time = None
+                for name in _list_branches(repo):
+                    sha = repo.refs[_ref_for_branch(name)]
+                    try:
+                        commit = repo[sha]
+                    except KeyError:
+                        continue
+                    if not isinstance(commit, Commit):
+                        continue
+                    ts = int(getattr(commit, "commit_time", 0) or 0)
+                    if newest_time is None or ts >= newest_time:
+                        newest_name, newest_time = name, ts
+                source = newest_name
+            if source is None:
+                repo.refs.set_symbolic_ref(b"HEAD", _ref_for_branch("main"))
+                return
+            repo.refs[_ref_for_branch("main")] = repo.refs[_ref_for_branch(source)]
+            code, err = _checkout_branch(repo, "main")
+            if code != 0:
+                raise RuntimeError(f"checkout new main failed: {err}")
+
+
+def init_imported_repo_on_main(skill_dir: str | Path, message: str) -> None:
+    """把已有工作区初始化成 per-skill git，第一笔提交落在 main（不走 baby）。"""
+    skill_dir = Path(skill_dir)
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    with skill_repo_lock(skill_dir):
+        repo = porcelain.init(str(skill_dir), bare=False)
+        try:
+            _write_repo_identity(repo)
+            gi = skill_dir / ".gitignore"
+            if not gi.is_file():
+                gi.write_text(SKILL_GITIGNORE, encoding="utf-8")
+            repo.refs.set_symbolic_ref(b"HEAD", _ref_for_branch("main"))
+            _stage_all(repo, skill_dir)
+            sha, err = _do_commit(repo, message)
+            if sha is None:
+                raise RuntimeError(f"init imported repo commit failed: {err}")
+            cur = _current_branch_name(repo)
+            if cur and cur != "main":
+                repo.refs[_ref_for_branch("main")] = repo.refs[_ref_for_branch(cur)]
+                del repo.refs[_ref_for_branch(cur)]
+                repo.refs.set_symbolic_ref(b"HEAD", _ref_for_branch("main"))
+        finally:
+            repo.close()
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(skill_dir)
 
 
 def commit_progressive_turn(skill_dir: str, turn_branch: str, message: str) -> bool:

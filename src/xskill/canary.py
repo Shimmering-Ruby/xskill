@@ -716,6 +716,50 @@ def append_ux_score(
     return True
 
 
+def clear_current_main_round_scores(
+    skill_dir: Path,
+    *,
+    commit_sha: str,
+    limit: int = 5,
+) -> int:
+    """删掉当前这一轮挂在旧主干 sha 上的体验分（最多 ``limit`` 条，默认 5）。
+
+    只动这一侧、这一次 sha 的最近几条。更早提交上的分全部留着。灰度侧不动。
+    """
+    if not commit_sha:
+        return 0
+    skill_dir = Path(skill_dir)
+    rows = load_ux_scores(skill_dir)
+    matching = [
+        (i, row) for i, row in enumerate(rows)
+        if row.get("side") == "main" and row.get("commit_sha") == commit_sha
+    ]
+    matching.sort(key=lambda item: str(item[1].get("scored_at") or ""), reverse=True)
+    drop_idx = {i for i, _ in matching[: max(0, int(limit))]}
+    if not drop_idx:
+        return 0
+    kept = [row for i, row in enumerate(rows) if i not in drop_idx]
+    p = _ux_scores_path(skill_dir)
+    text = "".join(
+        json.dumps(row, ensure_ascii=False) + "\n" for row in kept
+    )
+    p.write_text(text, encoding="utf-8")
+    dropped = [row for i, row in matching if i in drop_idx]
+    try:
+        from xskill.pipeline.ux_scores_store import delete_ux_scores_for_sha
+        delete_ux_scores_for_sha(
+            Path(skill_dir).name, side="main", commit_sha=commit_sha,
+            scored_at_values=[str(r.get("scored_at") or "") for r in dropped],
+        )
+    except Exception:
+        logger.debug("ux_scores db delete after import failed", exc_info=True)
+    logger.info(
+        "cleared %d current-round main ux scores for %s sha=%s",
+        len(drop_idx), skill_dir.name, commit_sha[:8],
+    )
+    return len(drop_idx)
+
+
 def _mirror_ux_score_to_db(record: dict) -> None:
     """写盘成功后旁路入库；失败只打日志，由定时盘→库任务兜底。"""
     try:
