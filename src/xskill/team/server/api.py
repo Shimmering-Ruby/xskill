@@ -30,7 +30,7 @@ import zipfile
 
 from dulwich.errors import NotGitRepository, ObjectMissing
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from xskill import __version__ as XSKILL_VERSION
@@ -48,7 +48,7 @@ from xskill.team.server.skill_manifest import (
     repo_search_id,
 )
 from xskill.team.shared.protocol import (
-    PushEditResponse, RegisterRequest, RegisterResponse,
+    GenerateAccepted, GenerateRequest, PushEditResponse, RegisterRequest, RegisterResponse,
     UploadRejection, UploadRequest, UploadResponse,
 )
 from xskill.utils.sanitize import sanitize_trajectory_text
@@ -1426,3 +1426,62 @@ async def team_push_edit(
     except Exception:  # pylint: disable=broad-exception-caught
         logger.debug("push-edit event emit skipped", exc_info=True)
     return PushEditResponse(branch=f"user-staging/{client_id}", ref_sha=sha)
+
+
+@router.post("/generate", response_model=GenerateAccepted)
+def team_generate(
+    req: GenerateRequest,
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> GenerateAccepted:
+    client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    instruction = (req.instruction or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction 不能为空")
+    row = (_ctx.client_registry.get(client_id) or {}) if _ctx.client_registry else {}
+    user_id = (row.get("user_name") or "").strip() or client_id
+    names = [n.strip() for n in (req.names or []) if str(n).strip()]
+    from xskill.config import get_logs_dir
+    from xskill.team.server.generate_jobs import (
+        create_job, start_generate_job_thread,
+    )
+
+    job = create_job(
+        client_id=client_id,
+        user_id=user_id,
+        instruction=instruction,
+        preferred_names=names,
+        logs_dir=get_logs_dir(),
+    )
+    config = {}
+    try:
+        from xskill.api import app as app_mod
+        config = app_mod._config or {}
+    except Exception:
+        logger.debug("generate using empty config snapshot", exc_info=True)
+    start_generate_job_thread(job["job_id"], ctx=_ctx, config=config)
+    return GenerateAccepted(job_id=job["job_id"])
+
+
+@router.get("/generate/{job_id}/events")
+def team_generate_events(
+    job_id: str,
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+):
+    client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    from xskill.team.server.generate_jobs import get_job, iter_job_events
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown generate job")
+    if job.get("client_id") != client_id:
+        raise HTTPException(status_code=403, detail="job belongs to another client")
+
+    def event_stream():
+        for event in iter_job_events(job_id):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -7,6 +7,8 @@ C 与 S 之间所有 HTTP body 的单一事实源。端点：
   GET  /api/v1/team/sync              (query)          -> SyncResponse
   GET  /api/v1/team/skill/{n}/bundle  (query)          -> application/octet-stream
   POST /api/v1/team/push-edit         (multipart)      -> PushEditResponse
+  POST /api/v1/team/generate          GenerateRequest  -> {job_id}
+  GET  /api/v1/team/generate/{id}/events  SSE 日志流
 
 鉴权（除 register 外所有端点）：HTTP header
   X-Xskill-Token   = server join token
@@ -95,3 +97,13 @@ class SyncResponse(BaseModel):
 class PushEditResponse(BaseModel):
     branch: str            # user-staging/<client_id>
     ref_sha: str
+
+
+class GenerateRequest(BaseModel):
+    instruction: str
+    names: list[str] = Field(default_factory=list)
+
+
+class GenerateAccepted(BaseModel):
+    job_id: str
+

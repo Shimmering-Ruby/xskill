@@ -5,6 +5,7 @@
 - ``task_agent``            轨迹按用户意图切分为 AtomTask
 - ``task_cluster_agent``    把 AtomTask 路由到匹配的 skill
 - ``skill_edit_agent``      从攒够的候选合成 / 更新 SKILL.md
+- ``generate_agent``        用户点名即时生成或改写 skill（直接提交 main）
 - ``user_edit_absorb_agent``  吸收用户手改为 ground truth
 - ``agno_factory``          创建 agno.Agent 的共享工厂（模型路由 / SSL）
 - ``agent_tools``           agent 工具和运行时依赖
