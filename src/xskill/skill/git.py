@@ -477,6 +477,51 @@ def _commit_subject(repo: Repo, commit_sha: bytes) -> str:
     return msg.split("\n", 1)[0]
 
 
+def commit_history_has_subject_prefix(
+    skill_dir: str | Path, prefixes: tuple[str, ...],
+) -> bool:
+    """任一分支历史上出现过给定前缀的 commit subject。"""
+    if not prefixes:
+        return False
+    cwd = str(skill_dir)
+    try:
+        with skill_repo_lock(cwd, use_git_write_limit=False):
+            with _open_repo(cwd) as repo:
+                starts: list[bytes] = []
+                for ref in repo.refs.keys():
+                    if ref != b"HEAD" and not ref.startswith(b"refs/heads/"):
+                        continue
+                    try:
+                        sha = repo.refs[ref] if ref != b"HEAD" else _resolve_rev(
+                            repo, "HEAD")
+                    except KeyError:
+                        continue
+                    if sha:
+                        starts.append(sha)
+                seen: set[bytes] = set()
+                stack = list(starts)
+                while stack:
+                    sha = stack.pop()
+                    if sha in seen:
+                        continue
+                    seen.add(sha)
+                    try:
+                        commit = repo[sha]
+                    except KeyError:
+                        continue
+                    if not isinstance(commit, Commit):
+                        continue
+                    subject = _commit_subject(repo, sha)
+                    if any(subject.startswith(prefix) for prefix in prefixes):
+                        return True
+                    stack.extend(commit.parents)
+                    if len(seen) > 2000:
+                        break
+    except (NotGitRepository, OSError, KeyError):
+        return False
+    return False
+
+
 def _is_ancestor(repo: Repo, ancestor: bytes, descendant: bytes) -> bool:
     """check ancestor is reachable from descendant via parent chain."""
     if ancestor == descendant:

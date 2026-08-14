@@ -227,12 +227,146 @@ def test_wipe_all_skills_removes_skill_dirs_keeps_references(tmp_path):
     (references_directory / "x.md").write_text("keep me", encoding="utf-8")
     (skill_root / ".skill_index.pkl").write_bytes(b"stale-skill-index")
 
-    removed_count = SkillRepo(skill_root).wipe_all_skills()
+    removed_count, kept_names = SkillRepo(skill_root).wipe_all_skills()
 
     assert removed_count == 2
+    assert kept_names == []
     assert not first_skill_path.exists() and not second_skill_path.exists()
     assert references_directory.exists(), "references 不应被删"
     assert not (skill_root / ".skill_index.pkl").exists()
+
+
+def test_wipe_all_skills_retries_enotempty_on_git_objects(tmp_path, monkeypatch):
+    """serve/git 还在写 .git/objects 时 rmtree 会 ENOTEMPTY；应重试删干净。"""
+    import errno
+    import shutil
+    import xskill.skill.skill as skill_mod
+
+    skill_root = tmp_path / "skill"
+    skill_path = skill_root / "foo"
+    objects = skill_path / ".git" / "objects" / "ab"
+    objects.mkdir(parents=True)
+    blob = objects / ("c" * 38)
+    blob.write_bytes(b"git-obj")
+    blob.chmod(0o444)
+    (skill_path / "SKILL.md").write_text(
+        "---\nname: foo\ndescription: d\n---\n",
+        encoding="utf-8",
+    )
+
+    real_rmtree = shutil.rmtree
+    calls = {"n": 0}
+
+    def flaky(path, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", "objects")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(skill_mod.shutil, "rmtree", flaky)
+    monkeypatch.setattr(skill_mod.time, "sleep", lambda _s: None)
+
+    removed_count, kept_names = SkillRepo(skill_root).wipe_all_skills()
+
+    assert removed_count == 1
+    assert kept_names == []
+    assert not skill_path.exists()
+    leftovers = [p for p in skill_root.iterdir() if p.name.startswith(".wipe-")]
+    assert leftovers == []
+    assert calls["n"] >= 2
+
+
+def test_wipe_all_skills_cleans_leftover_wipe_dir(tmp_path):
+    skill_root = tmp_path / "skill"
+    leftover = skill_root / ".wipe-foo-1"
+    (leftover / ".git").mkdir(parents=True)
+    (leftover / "SKILL.md").write_text("# leftover\n", encoding="utf-8")
+
+    removed_count, kept_names = SkillRepo(skill_root).wipe_all_skills()
+
+    assert removed_count == 1
+    assert kept_names == []
+    assert not leftover.exists()
+
+
+def test_wipe_all_skills_deletes_readonly_git_objects(tmp_path):
+    skill_root = tmp_path / "skill"
+    skill_path = skill_root / "packed"
+    objects = skill_path / ".git" / "objects" / "de"
+    objects.mkdir(parents=True)
+    blob = objects / ("f" * 38)
+    blob.write_bytes(b"packed")
+    blob.chmod(0o444)
+    (skill_path / "SKILL.md").write_text(
+        "---\nname: packed\ndescription: d\n---\n",
+        encoding="utf-8",
+    )
+
+    assert SkillRepo(skill_root).wipe_all_skills() == (1, [])
+    assert not skill_path.exists()
+
+
+def test_wipe_all_skills_keeps_imported_skill(tmp_path, monkeypatch):
+    from xskill.skill.importer import import_one_skill
+
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path", lambda: tmp_path / "r.db")
+    skill_root = tmp_path / "skill"
+    distilled = skill_root / "distilled"
+    distilled.mkdir(parents=True)
+    (distilled / "SKILL.md").write_text(
+        "---\nname: distilled\ndescription: d\n---\n",
+        encoding="utf-8",
+    )
+    incoming = tmp_path / "incoming" / "kept-import"
+    incoming.mkdir(parents=True)
+    (incoming / "SKILL.md").write_text(
+        "---\nname: kept-import\ndescription: user brought this\n---\nbody\n",
+        encoding="utf-8",
+    )
+    imported = import_one_skill(skill_root, incoming)
+    assert imported.name == "kept-import"
+
+    removed_count, kept_names = SkillRepo(skill_root).wipe_all_skills(
+        db_path=tmp_path / "r.db",
+    )
+
+    assert removed_count == 1
+    assert kept_names == ["kept-import"]
+    assert not distilled.exists()
+    assert (skill_root / "kept-import" / "SKILL.md").is_file()
+    assert (skill_root / "kept-import" / ".xskill-origin").read_text(
+        encoding="utf-8",
+    ).strip() == "import"
+
+
+def test_wipe_all_skills_keeps_legacy_import_commit_without_marker(tmp_path, monkeypatch):
+    """0.6.30a1 纳入时还没有 .xskill-origin，靠 import: 提交认出来。"""
+    from xskill.skill.git import init_imported_repo_on_main
+
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path", lambda: tmp_path / "r.db")
+    skill_root = tmp_path / "skill"
+    legacy = skill_root / "legacy-import"
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text(
+        "---\nname: legacy-import\ndescription: old import\n---\n",
+        encoding="utf-8",
+    )
+    init_imported_repo_on_main(legacy, "import: legacy-import from /tmp/old")
+    distilled = skill_root / "baby-only"
+    distilled.mkdir(parents=True)
+    (distilled / ".git").mkdir()
+    (distilled / "SKILL.md").write_text("# baby\n", encoding="utf-8")
+
+    removed_count, kept_names = SkillRepo(skill_root).wipe_all_skills(
+        db_path=tmp_path / "r.db",
+    )
+
+    assert removed_count == 1
+    assert kept_names == ["legacy-import"]
+    assert (legacy / "SKILL.md").is_file()
+    assert not distilled.exists()
 
 
 def test_rebuild_force_clears_derived_state_and_install_history(

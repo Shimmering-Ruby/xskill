@@ -13,13 +13,12 @@ from __future__ import annotations
 import logging
 import operator
 import pickle
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Optional
 
 import numpy
 
-from xskill.skill.skill import Skill, _load_skill
+from xskill.skill.skill import Skill, _load_skill, _remove_tree
 from xskill.skill.git import commit_changes
 
 if TYPE_CHECKING:
@@ -99,17 +98,23 @@ class SkillRepo:
         )
 
     # ─── 清空（rebuild --force 用）──────────────────────────────
-    def wipe_all_skills(self, *, db_path: Path | None = None) -> int:
-        """删除仓里所有 skill 子目录（含各自 ``.git`` 子仓），返回删除个数。
+    def wipe_all_skills(self, *, db_path: Path | None = None) -> tuple[int, list[str]]:
+        """删除仓里蒸馏所得 skill 子目录（含各自 ``.git`` 子仓）。
 
-        ``xskill rebuild --force`` 用：换强模型从零重建前先清空旧 skill。
-        只删 skill 子目录（每个有 ``SKILL.md`` 或 ``.git`` 的子目录），保留
+        ``xskill rebuild --force`` 用：换强模型从零重建前先清空旧蒸馏产物。
+        用户 ``xskill import`` 纳入的技能留下。``xskill upload`` 落在 skillhub
+        目录，本来就不在这个仓里。
+        只扫 skill 子目录（每个有 ``SKILL.md`` 或 ``.git`` 的子目录），保留
         仓根与 ``references`` / ``.skill_index.pkl`` 等非 skill 工件由 watcher
-        后续自行重建。删完一并清掉过期索引。
+        后续自行重建。删完清掉过期索引，并只删被去掉的那些 catalog 行。
+        返回 ``(删除个数, 留下的名字)``。
         """
         n = 0
+        kept: list[str] = []
+        removed: list[str] = []
         if not self.root.is_dir():
-            return 0
+            return 0, kept
+        from xskill.skill.importer import skill_kept_on_rebuild
         for sub in sorted(self.root.iterdir()):
             if not sub.is_dir():
                 continue
@@ -117,20 +122,27 @@ class SkillRepo:
                 continue
             # 一个 skill 目录的判据：有 SKILL.md 或 .git 子仓（baby 态可能
             # 只有 .git 还没写 SKILL.md）。
-            if (sub / "SKILL.md").is_file() or (sub / ".git").is_dir():
-                shutil.rmtree(sub)
-                n += 1
+            if not ((sub / "SKILL.md").is_file() or (sub / ".git").is_dir()):
+                continue
+            if skill_kept_on_rebuild(sub):
+                kept.append(sub.name)
+                continue
+            _remove_tree(sub)
+            removed.append(sub.name)
+            n += 1
         # 索引已失效，删掉避免指向不存在的 skill
         idx = self.root / ".skill_index.pkl"
         if idx.is_file():
             idx.unlink()
-        logger.info("wipe_all_skills: removed %d skill(s) under %s", n, self.root)
-        if n:
-            from xskill.skill.catalog_store import catalog_root_key, notify_native_wipe
-            notify_native_wipe(
-                root_key=catalog_root_key(self.root), db_path=db_path,
-            )
-        return n
+        logger.info(
+            "wipe_all_skills: removed %d skill(s), kept %d under %s",
+            n, len(kept), self.root,
+        )
+        if removed:
+            from xskill.skill.catalog_store import notify_native_delete
+            for name in removed:
+                notify_native_delete(name, db_path=db_path)
+        return n, kept
 
     def __repr__(self) -> str:
         return f"SkillRepo({self.root}, n={len(self)})"

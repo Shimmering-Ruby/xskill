@@ -1864,7 +1864,8 @@ def cmd_rebuild(args, _xskill) -> int:
 
     默认：删除已拆 atom + index.pkl、轨迹状态翻回 discovered，让运行中的 watcher
     从头重拆重聚（删 atom 是真正触发重拆的动作——splitter 续接点取自 atom 文件，
-    不读 DB offset）。``--force``：额外先清空 skill 仓、看板派生埋点和安装历史。
+    不读 DB offset）。``--force``：额外先清空蒸馏所得 skill（``xskill import``
+    纳入的留下）、看板派生埋点和安装历史。
 
     换模型护栏：rebuild 的重跑是交给**正在运行的 daemon**，而 daemon 的模型是
     启动时缓存的（改 config 不重启不生效）。若 daemon 在跑且其模型 ≠ 当前 config
@@ -1899,10 +1900,15 @@ def cmd_rebuild(args, _xskill) -> int:
         from xskill.config import get_registry_db_path, get_skill_dir
         from xskill.pipeline.registry import clear_rebuild_derived_state
         from xskill.skill.repo import SkillRepo
-        skill_count = SkillRepo(get_skill_dir()).wipe_all_skills(
+        skill_count, kept_names = SkillRepo(get_skill_dir()).wipe_all_skills(
             db_path=get_registry_db_path(),
         )
-        print(f"--force: 清空 skill 仓（删 {skill_count} 个 skill）")
+        print(f"--force: 清空蒸馏 skill（删 {skill_count} 个）")
+        if kept_names:
+            print(
+                "--force: 保留 "
+                f"{len(kept_names)} 个 import 纳入的技能"
+            )
         deleted_counts = clear_rebuild_derived_state()
         print(
             "--force: 清空看板派生数据（"
@@ -2161,7 +2167,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_rebuild.add_argument(
         "--force", action="store_true",
-        help="先清空 skill 仓 + 已拆原子再全量重跑（删除重建）",
+        help="先清空蒸馏所得 skill（import 纳入的留下）和已拆原子再全量重跑",
     )
     p_rebuild.add_argument("--eco", default=None,
                            help="只重跑某生态的轨迹（默认全部）")
