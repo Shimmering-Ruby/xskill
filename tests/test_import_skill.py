@@ -20,6 +20,7 @@ from xskill.skill.git import (
     init_skill_repo_on_baby,
     run_git,
 )
+from xskill.skill import catalog_store
 from xskill.skill.importer import (
     HARNESS_IMPORT_WARNING,
     discover_import_sources,
@@ -41,6 +42,24 @@ from xskill.team.server.client_registry import ClientRegistry
 
 
 TOKEN = "secret-token"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_import_registry(tmp_path, monkeypatch):
+    """import 会按 get_registry_db_path() 写投影表，测试不得碰到本机 registry。"""
+    registry = tmp_path / "registry.db"
+    monkeypatch.setattr(
+        "xskill.config.get_registry_db_path",
+        lambda: registry,
+    )
+    return registry
+
+
+def _catalog_names(skill_dir: Path, registry: Path) -> list[str]:
+    return [
+        row["name"]
+        for row in catalog_store.list_skills_catalog(skill_dir, db_path=registry)
+    ]
 
 
 def _skill_md(name: str, body: str) -> str:
@@ -114,6 +133,52 @@ def test_standalone_new_skill_without_git_starts_on_main(tmp_path):
     assert current_branch(str(dest)) == "main"
     assert (dest / "scripts" / "run.sh").is_file()
     assert (dest / ".git").is_dir()
+
+
+def test_import_new_skill_appears_in_catalog_after_backfill(
+    tmp_path, _isolate_import_registry,
+):
+    """灌过投影表之后再 import：磁盘已有，看板列表仍应出现新名字。"""
+    registry = _isolate_import_registry
+    skill_dir = tmp_path / "skill"
+    old = _write_skill(skill_dir / "old", "old", "# already there")
+    init_imported_repo_on_main(old, "seed")
+    catalog_store.ensure_skills_catalog(skill_dir, db_path=registry)
+    assert _catalog_names(skill_dir, registry) == ["old"]
+
+    source = _write_skill(tmp_path / "src" / "fresh", "fresh", "# brand new")
+    imported = import_one_skill(skill_dir, source)
+    assert imported.existed is False
+    page = catalog_store.page_skills_catalog(
+        skill_dir, db_path=registry, name="fresh",
+    )
+    assert page["total"] == 1
+    assert page["skills"][0]["name"] == "fresh"
+    assert page["skills"][0]["state"] == "main"
+    assert "fresh helper" in page["skills"][0]["description"]
+    assert _catalog_names(skill_dir, registry) == ["fresh", "old"]
+
+
+def test_import_nothing_to_commit_still_upserts_catalog(
+    tmp_path, _isolate_import_registry,
+):
+    """同名同内容、git 无新提交时，漏掉的投影行也要补上。"""
+    registry = _isolate_import_registry
+    skill_dir = tmp_path / "skill"
+    dest = _write_skill(skill_dir / "foo", "foo", "# same")
+    init_imported_repo_on_main(dest, "already")
+    catalog_store.ensure_skills_catalog(skill_dir, db_path=registry)
+    catalog_store.delete_native_skill("foo", db_path=registry)
+    assert _catalog_names(skill_dir, registry) == []
+
+    source = _write_skill(tmp_path / "incoming" / "foo", "foo", "# same")
+    imported = import_one_skill(skill_dir, source)
+    assert imported.existed is True
+    page = catalog_store.page_skills_catalog(
+        skill_dir, db_path=registry, name="foo",
+    )
+    assert page["total"] == 1
+    assert page["skills"][0]["name"] == "foo"
 
 
 def test_standalone_existing_replaces_files_keeps_history_and_sidecars(tmp_path):
@@ -295,7 +360,9 @@ def _register(client: TestClient) -> dict:
     return {"X-Xskill-Token": TOKEN, "X-Xskill-Client": r.json()["client_id"]}
 
 
-def test_team_import_new_skill_keeps_history_not_skillhub(tmp_path):
+def test_team_import_new_skill_keeps_history_not_skillhub(
+    tmp_path, _isolate_import_registry,
+):
     client = _team_client(tmp_path)
     hdr = _register(client)
     source = _write_skill(tmp_path / "incoming" / "foo", "foo", "# v1")
@@ -316,6 +383,8 @@ def test_team_import_new_skill_keeps_history_not_skillhub(tmp_path):
     assert (dest / "SKILL.md").is_file()
     subjects = _log_subjects(dest)
     assert "source first" in subjects
+    assert "foo" in _catalog_names(tmp_path / "skill", _isolate_import_registry)
+    assert body.get("pinned") == []
     upload = client.post(
         "/api/v1/team/skill_hub/upload",
         files={"file": ("foo.zip", payload, "application/zip")},
@@ -403,3 +472,52 @@ def test_scripting_button_gates(tmp_path):
     (staged / "SKILL.md").write_text(_skill_md("stg", "# s"), encoding="utf-8")
     assert commit_to_staging_branch(str(staged), "cand")
     assert "灰度" in scripting_gate_reason(staged)
+
+
+def _register_named(client: TestClient, user_name: str) -> dict:
+    r = client.post("/api/v1/team/register", json={
+        "token": TOKEN, "client_label": "t", "hostname": "h",
+        "user_name": user_name,
+    })
+    assert r.status_code == 200, r.text
+    return {"X-Xskill-Token": TOKEN, "X-Xskill-Client": r.json()["client_id"]}
+
+
+def test_team_import_pins_named_initiator(
+    tmp_path, _isolate_import_registry, monkeypatch,
+):
+    from xskill.api import app as app_mod
+    from xskill.pipeline.registry import prefs_for
+
+    monkeypatch.setattr(
+        app_mod, "_config",
+        {"team": {"server": {"skill_slots": 10, "ranked_slots": 8}}},
+    )
+    client = _team_client(tmp_path)
+    hdr = _register_named(client, "alice")
+    source = _write_skill(tmp_path / "incoming" / "foo", "foo", "# v1")
+    r = client.post(
+        "/api/v1/team/skills/import",
+        files={"file": ("foo.zip", pack_import_zip(source), "application/zip")},
+        data={"name": "foo"},
+        headers=hdr,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pinned"] == ["foo"]
+    rows = prefs_for("alice", db_path=_isolate_import_registry)
+    assert any(p["skill_name"] == "foo" and p["pref"] == "pinned" for p in rows)
+
+
+def test_team_import_anonymous_does_not_pin(tmp_path, _isolate_import_registry):
+    client = _team_client(tmp_path)
+    hdr = _register(client)
+    source = _write_skill(tmp_path / "incoming" / "bar", "bar", "# v1")
+    r = client.post(
+        "/api/v1/team/skills/import",
+        files={"file": ("bar.zip", pack_import_zip(source), "application/zip")},
+        data={"name": "bar"},
+        headers=hdr,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["pinned"] == []

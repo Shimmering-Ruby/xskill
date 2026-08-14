@@ -9,11 +9,11 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 
 from xskill.dashboard.metrics import DashboardMetrics, skills_catalog_page
-from xskill.dashboard.auth import require_admin
+from xskill.dashboard.auth import _identity_from_request, require_admin
 from xskill.pipeline.registry import (
     harness_share,
     list_watch_dirs,
@@ -143,7 +143,7 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         return {"tags": tag_rows}
 
     @router.get("/api/v1/dashboard/skills")
-    def skills(limit: int = 0, offset: int = 0, name: str = "",
+    def skills(request: Request, limit: int = 0, offset: int = 0, name: str = "",
                q: str = "") -> dict:
         """skill 库存清单(分析式：读 skill 目录,不依赖埋点)。
 
@@ -157,11 +157,17 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
         ``total`` 为过滤后条数，``skills`` 只含当前页。
         列表读 ``skills_catalog`` 投影表（写出口 UPSERT；冷启动对该 root 一次性
         backfill），翻页不再扫盘。
+        登录用户（team）会带上 pinned / in_push，供技能库空心星 pin。
         """
         page = skills_catalog_page(
             skill_dir, skillhub=_build_skillhub(),
             limit=limit, offset=offset, name=name, q=q, db_path=db_path)
         if expose_sensitive:
+            ident = _identity_from_request(request)
+            if ident and ident.get("user"):
+                from xskill.dashboard.console import annotate_library_skills
+                annotate_library_skills(
+                    page, user=ident["user"], db_path=db_path)
             return page
         for index, row in enumerate(page["skills"]):
             source = row["source"]

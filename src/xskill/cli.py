@@ -1688,10 +1688,13 @@ def _print_import_result(imported, *, json_mode: bool) -> None:
             "main_round_scores_cleared": imported.main_round_scores_cleared,
             "stash_path": imported.stash_path,
             "warnings": imported.warnings,
+            "pinned": imported.pinned,
         }, ensure_ascii=False, indent=2))
         return
     verb = "更新" if imported.existed else "纳入"
     print(f"imported: {imported.name}  ({verb} 主干 {imported.sha[:8]})")
+    if imported.pinned:
+        print("已钉到发起人推荐列表: " + "、".join(imported.pinned))
     if imported.baby_overwritten:
         print("  原来停在预备分支 baby 的草稿已被这次导入覆盖")
     if imported.staging_kept:
@@ -1812,6 +1815,7 @@ def _cmd_import_team(args, sources, *, http=None, headers=None) -> int:
                 body.get("main_round_scores_cleared") or 0
             ),
             stash_path=str(stash) if stash else "",
+            pinned=list(body.get("pinned") or []),
         )
         if is_harness_skill_path(source, home_root=home):
             imported.warnings.append(HARNESS_IMPORT_WARNING)

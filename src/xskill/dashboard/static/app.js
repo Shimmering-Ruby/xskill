@@ -189,6 +189,31 @@ let skillsQ = '';
 let _skillsQTimer = null;
 const SKILLS_PAGE_SIZE = 10;
 
+function libRelationHtml(s) {
+  if (s.pinned) {
+    return `<span class="text-[10px] px-1.5 py-0.5 rounded ${BUCKET_CHIP.pinned}">${esc(bucketLabel({
+      bucket: 'pinned', pin_scope: s.pin_scope, user_removable: s.user_removable,
+    }))}</span>`;
+  }
+  if (s.in_push) {
+    const cls = BUCKET_CHIP[s.bucket] || 'bg-slate-100 text-slate-500';
+    return `<span class="text-[10px] px-1.5 py-0.5 rounded ${cls}">推给我</span>`;
+  }
+  return '';
+}
+
+function libStarHtml(s) {
+  if (s.pinned && !s.user_removable) {
+    return `<span class="inline-flex items-center justify-center w-7 h-7 text-amber-400 opacity-70" title="admin/全局 pin，不可取消">${_myStarSvg(true)}</span>`;
+  }
+  if (s.pinned) {
+    return `<button type="button" class="lib-star inline-flex items-center justify-center w-7 h-7 rounded-md text-amber-400 hover:text-amber-500 hover:bg-slate-50"
+      data-skill="${esc(s.name)}" data-act="clear" title="已 pin · 点击取消" aria-label="取消 pin">${_myStarSvg(true)}</button>`;
+  }
+  return `<button type="button" class="lib-star inline-flex items-center justify-center w-7 h-7 rounded-md text-slate-300 hover:text-amber-300 hover:bg-slate-50"
+    data-skill="${esc(s.name)}" data-act="pin" title="未 pin · 点击加入推荐流" aria-label="pin">${_myStarSvg(false)}</button>`;
+}
+
 async function loadSkills() {
   const off = skillsPage * SKILLS_PAGE_SIZE;
   const qEl = document.getElementById('skills-q');
@@ -199,13 +224,15 @@ async function loadSkills() {
     offset: String(off),
   });
   if (q) sp.set('q', q);
-  const d = await jc(`api/v1/dashboard/skills?${sp}`);
+  const d = await j(`api/v1/dashboard/skills?${sp}`);
   const bs = d.by_state || {};
   const parts = Object.keys(bs).sort().map(k => `${k} ${bs[k]}`).join(' · ');
   put('skills.summary', `${q ? '匹配' : '共'} ${d.total} 个${parts ? ' · ' + parts : ''}`);
+  const canPin = !!(d.viewer && d.viewer.can_pin);
   rows('skills-body', (d.skills || []).map(s =>
     `<tr class="hover:bg-slate-50 cursor-pointer" data-skill-row="${esc(s.name)}">`
-    + `<td class="py-2.5 font-medium text-teal-700">${esc(s.name)}${sourceBadge(s)}</td>`
+    + (canPin ? `<td class="py-2.5 w-8">${libStarHtml(s)}</td>` : '<td class="py-2.5 w-8"></td>')
+    + `<td class="py-2.5 font-medium text-teal-700"><span class="inline-flex items-center gap-1.5 flex-wrap">${esc(s.name)}${sourceBadge(s)}${libRelationHtml(s)}</span></td>`
     + `<td>${stateBadge(s.state)}</td>`
     + `<td class="text-slate-500 max-w-[480px] truncate" title="${esc(s.description)}">${esc(s.description) || '—'}</td>`
     + `<td class="text-right tabular-nums">v${esc(s.version)}</td>`
@@ -1572,6 +1599,18 @@ document.addEventListener('click', async e => {
     if (aidx > 0) { location.hash = '#traj/' + abody.slice(0, aidx) + '/' + ajump.dataset.atom; }
     return;
   }
+  const libStar = e.target.closest('.lib-star');
+  if (libStar) {
+    const name = libStar.dataset.skill;
+    const act = libStar.dataset.act;
+    if (!name || (act !== 'pin' && act !== 'clear')) return;
+    try {
+      await jpost('/api/v1/dashboard/my/prefs', { skill_name: name, action: act });
+      await loadSkills();
+      if (IDENT) loadMy().catch(console.error);
+    } catch (err) { alert(err.message); }
+    return;
+  }
   const row = e.target.closest('[data-skill-row]');
   if (row) { _skillBackHash = null; location.hash = 'skill/' + encodeURIComponent(row.dataset.skillRow); return; }
   const sj = e.target.closest('.skill-jump');
@@ -1713,6 +1752,7 @@ async function initIdent() {
     const h = (location.hash || '').replace(/^#/, '');
     if (!h) location.hash = '#my';
   }
+  loadSkills().catch(console.error);
 }
 
 // 登录弹窗
@@ -1729,6 +1769,7 @@ document.getElementById('login-submit').addEventListener('click', async () => {
     _lm.classList.add('hidden');
     applyIdent();
     loadMy().catch(console.error);
+    loadSkills().catch(console.error);
     initEvents();
     if (IDENT.role === 'admin') { loadAdmin().catch(console.error); loadSettings().catch(console.error); }
     else location.hash = '#my';
@@ -1738,6 +1779,7 @@ document.getElementById('login-secret').addEventListener('keydown', e => { if (e
 document.getElementById('btn-logout').addEventListener('click', async () => {
   await jpost('/api/v1/dashboard/logout').catch(() => {});
   IDENT = null; applyIdent(); location.hash = '#overview';
+  loadSkills().catch(console.error);
 });
 
 // ── 我的 ────────────────────────────────────────────────────────

@@ -1259,13 +1259,43 @@ async def team_skills_import(
     if len(payload) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="import archive exceeds 50MB")
     result = await run_in_threadpool(_import_skill_archive, payload, skill_name)
-    logger.info("native import from %s: %s sha=%s existed=%s",
+    result["pinned"] = _pin_imported_skill(client_id, result["name"])
+    logger.info("native import from %s: %s sha=%s existed=%s pinned=%s",
                 client_id, result["name"], result.get("sha", "")[:8],
-                result.get("existed"))
+                result.get("existed"), result["pinned"])
     return result
 
 
 _IMPORT_ARCHIVE_MAX_FILES = 20000
+
+
+def _pin_imported_skill(client_id: str, skill_name: str) -> list[str]:
+    """纳入后钉到发起人，和 generate 一样只钉 user_name，不钉全员。"""
+    row = (_ctx.client_registry.get(client_id) or {}) if _ctx.client_registry else {}
+    user_id = (row.get("user_name") or "").strip()
+    if not user_id:
+        return []
+    from xskill.api import app as app_mod
+    from xskill.config import get_registry_db_path, team_server_slots_config
+    from xskill.team.server.generate_jobs import pin_generated_skills
+
+    max_pinned = None
+    try:
+        max_pinned = team_server_slots_config(app_mod._config or {})["skill_slots"]
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("skill_slots unavailable for import pin quota", exc_info=True)
+    pinned = pin_generated_skills(
+        user_id=user_id,
+        skill_names=[skill_name],
+        db_path=get_registry_db_path(),
+        max_pinned=max_pinned,
+    )
+    try:
+        from xskill.dashboard.console import _bump_routing_epoch
+        _bump_routing_epoch()
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("routing epoch bump after import pin skipped", exc_info=True)
+    return pinned
 
 
 def _import_skill_archive(payload: bytes, skill_name: str) -> dict:
