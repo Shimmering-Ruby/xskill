@@ -1832,13 +1832,6 @@ def cmd_read(args, xskill) -> int:
     del xskill  # CLI handler signature compatibility.
     from xskill.pipeline.db_ingest import read_db_files
     try:
-
-
-def cmd_read(args, xskill) -> int:
-    """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
-    del xskill  # CLI handler signature compatibility.
-    from xskill.pipeline.db_ingest import read_db_files
-    try:
         summary = read_db_files(
             args.path,
             eco=args.eco,
