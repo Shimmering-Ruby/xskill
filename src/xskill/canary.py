@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import threading
@@ -56,12 +57,17 @@ class CanaryConfig:
     # total_samples: 每侧（main/staging）判定所需的总样本数（跨所有参与模型）。
     scope_top_n: int = 2
     total_samples: int = 20
-    # ── 轨迹堰塞强砍阈值（jam_threshold）─────────────────────────────
-    # staging 存在期间闸门一本会无条件 hold 所有 SkillEdit；候选累计 weightscore
-    # 攒到 jam_threshold 仍未等到灰度裁决 → 判定堰塞（疑似灰度错位/无真实流量），
-    # 越过灰度合并 main+staging+候选出新 main 并删 staging。必须 > 正常毕业阈值
-    # (ATOM_PROMOTION_THRESHOLD=10)，否则正常增量就会被误判堰塞。默认 50。
+    # ── 轨迹堰塞强砍（jam）三条件合取 ────────────────────────────────
+    # staging 存在期间 hold 普通 SkillEdit；仅当同时满足：
+    #   1) age(staging) >= min_jam_age_sec
+    #   2) 当前 (main_sha, staging_sha) 上距最近一条 ux 分（没有则从 staging
+    #      创建起算）已超过 jam_plateau_sec
+    #   3) candidates Σweightscore >= jam_threshold
+    # 才越过灰度强砍合并。三者缺一不可——避免「候选堆满就砍」抢走 A/B。
+    # jam_threshold 必须 > 正常毕业阈值 (ATOM_PROMOTION_THRESHOLD=10)。
     jam_threshold: int = 50
+    min_jam_age_sec: float = 1800.0      # 30min：最短灰度观察窗
+    jam_plateau_sec: float = 600.0       # 10min：该 sha 对最近一条 ux 分过了多久
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "CanaryConfig":
@@ -74,7 +80,125 @@ class CanaryConfig:
             scope_top_n=int(d.get("scope_top_n", 2)),
             total_samples=int(d.get("total_samples", 20)),
             jam_threshold=int(d.get("jam_threshold", 50)),
+            min_jam_age_sec=float(d.get("min_jam_age_sec", 1800.0)),
+            jam_plateau_sec=float(d.get("jam_plateau_sec", 600.0)),
         )
+
+
+def _ux_rows_for_shas(
+    scores: list[dict], *, m_sha: str, s_sha: str,
+) -> tuple[int, int, datetime | None]:
+    """当前 main/staging sha 上的样本数，以及这些样本里最晚的 scored_at。"""
+    main_n = staging_n = 0
+    last: datetime | None = None
+    for row in scores:
+        side = row.get("side")
+        sha = row.get("commit_sha") or ""
+        if side == "main" and sha == m_sha:
+            main_n += 1
+        elif side == "staging" and sha == s_sha:
+            staging_n += 1
+        else:
+            continue
+        raw = row.get("scored_at") or ""
+        if not raw:
+            continue
+        try:
+            ts = _parse_git_iso(str(raw))
+        except ValueError:
+            continue
+        if last is None or ts > last:
+            last = ts
+    return main_n, staging_n, last
+
+
+def _jam_plateau_seconds(
+    skill_dir: Path,
+    *,
+    last_scored: datetime | None,
+) -> float:
+    """距该 sha 对最近一条 ux 分过了多久；没有分则从 staging 创建起算。"""
+    now = datetime.now(timezone.utc)
+    if last_scored is not None:
+        anchor = last_scored.astimezone(timezone.utc)
+    else:
+        created = staging_created_at(skill_dir)
+        if created is None:
+            return 0.0
+        anchor = created.astimezone(timezone.utc)
+    return max(0.0, (now - anchor).total_seconds())
+
+
+def _drop_legacy_jam_state(skill_dir: Path) -> None:
+    """旧版曾写过 sidecar；现在平台期从 jsonl 现算，碰到就删掉。"""
+    leftover = Path(skill_dir) / ".canary_jam_state.json"
+    try:
+        leftover.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("drop leftover jam state failed: %s", skill_dir, exc_info=True)
+
+
+def evaluate_jam_gates(
+    skill_dir: Path,
+    *,
+    total_ws: int,
+    config: "CanaryConfig | None" = None,
+) -> dict:
+    """三条件合取判定是否允许 jam-merge。
+
+    返回 dict：ok / reason / age / plateau_s / main_n / staging_n / need / ws /
+    jam_threshold / main_sha / staging_sha。无论 ok 与否都应打日志。
+    """
+    cfg = config or CanaryConfig()
+    skill_dir = Path(skill_dir)
+    _drop_legacy_jam_state(skill_dir)
+    need = cfg.min_samples
+    m_sha = main_sha(skill_dir) or ""
+    s_sha = staging_sha(skill_dir) or ""
+    created = staging_created_at(skill_dir)
+    age = 0.0
+    if created is not None:
+        age = (datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds()
+    scores = load_ux_scores(skill_dir) if (m_sha or s_sha) else []
+    main_n, staging_n, last_scored = _ux_rows_for_shas(
+        scores, m_sha=m_sha, s_sha=s_sha,
+    )
+    plateau_s = (
+        _jam_plateau_seconds(skill_dir, last_scored=last_scored)
+        if (m_sha and s_sha) else 0.0
+    )
+
+    age_ok = age >= cfg.min_jam_age_sec
+    plateau_ok = plateau_s >= cfg.jam_plateau_sec
+    ws_ok = total_ws >= cfg.jam_threshold
+    ok = bool(m_sha and s_sha and age_ok and plateau_ok and ws_ok)
+
+    missing = []
+    if not (m_sha and s_sha):
+        missing.append("no_sha_pair")
+    if not age_ok:
+        missing.append(f"age<{cfg.min_jam_age_sec:.0f}s")
+    if not plateau_ok:
+        missing.append(f"plateau<{cfg.jam_plateau_sec:.0f}s")
+    if not ws_ok:
+        missing.append(f"ws<{cfg.jam_threshold}")
+    reason = "jam_gates_ok" if ok else ("hold: " + ",".join(missing))
+
+    return {
+        "ok": ok,
+        "reason": reason,
+        "age": round(age, 1),
+        "plateau_s": round(plateau_s, 1),
+        "main_n": main_n,
+        "staging_n": staging_n,
+        "need": need,
+        "ws": total_ws,
+        "jam_threshold": cfg.jam_threshold,
+        "min_jam_age_sec": cfg.min_jam_age_sec,
+        "jam_plateau_sec": cfg.jam_plateau_sec,
+        "main_sha": m_sha[:8] if m_sha else "",
+        "staging_sha": s_sha[:8] if s_sha else "",
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -391,6 +515,99 @@ def pick_side_scoped(traj_id: str, skill_name: str, probability: float,
     if user_model not in eligible:
         return "main"
     return pick_side(traj_id, skill_name, probability)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 有状态分流：CanaryRouter —— 在线偏差最小化 + pick_side hash 随机
+# ═══════════════════════════════════════════════════════════════════
+# pick_side 是无状态哈希：client 很少时（team-CS 常少量 worker）可能全落 main，
+# staging 饿死。CanaryRouter 按 skill 记账，新 client 选「加入后 staging 比例
+# 最接近 probability」的一侧。
+#
+# 随机手段沿用 pick_side（sha256），不用 random.random()：
+#   - 首个 client（种子）→ pick_side(client_id, skill, p)
+#   - 误差打平（破平）→ pick_side(client_id, skill, 0.5)
+# 高基数路径（traj_id）仍直接用 pick_side。
+
+
+class CanaryRouter:
+    """有状态灰度分流：偏差最小化配额 + sticky；种子/破平用 pick_side hash。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # skill_name -> {"staging_sha", "probability", "sides": {client_id: side}}
+        self._skills: dict[str, dict] = {}
+
+    def assign(self, *, client_id: str, skill_name: str,
+               probability: float, staging_sha: str) -> str:
+        """返回 client 应走的 side；同 (client, skill, staging_sha, p) sticky。"""
+        with self._lock:
+            st = self._skills.get(skill_name)
+            if (st is None
+                    or st["staging_sha"] != staging_sha
+                    or st["probability"] != probability):
+                st = {
+                    "staging_sha": staging_sha,
+                    "probability": probability,
+                    "sides": {},
+                }
+                self._skills[skill_name] = st
+            sides = st["sides"]
+            cached = sides.get(client_id)
+            if cached is not None:
+                return cached
+            n_main = sum(1 for v in sides.values() if v == "main")
+            n_staging = sum(1 for v in sides.values() if v == "staging")
+            side = self._balanced_side(
+                n_main, n_staging, probability,
+                client_id=client_id, skill_name=skill_name,
+            )
+            sides[client_id] = side
+            logger.info(
+                "canary_assign skill=%s client=%s side=%s "
+                "main=%d staging=%d total=%d p=%.3f sha=%s",
+                skill_name, client_id, side,
+                n_main + (1 if side == "main" else 0),
+                n_staging + (1 if side == "staging" else 0),
+                n_main + n_staging + 1,
+                probability, (staging_sha or "")[:12],
+            )
+            return side
+
+    @staticmethod
+    def _balanced_side(n_main: int, n_staging: int, probability: float,
+                       *, client_id: str, skill_name: str) -> str:
+        if probability <= 0:
+            return "main"
+        if probability >= 1:
+            return "staging"
+        total = n_main + n_staging
+        if total == 0:
+            # 种子：沿用 pick_side 哈希伪随机（可复现）
+            return pick_side(client_id, skill_name, probability)
+        ratio_if_staging = (n_staging + 1) / (total + 1)
+        ratio_if_main = n_staging / (total + 1)
+        err_staging = abs(ratio_if_staging - probability)
+        err_main = abs(ratio_if_main - probability)
+        # 数学上对称时（如 p=0.5 且当前 1:1）浮点可能让一侧略小，
+        # 必须用 isclose 走 hash 破平，否则无法保证「破平=pick_side」。
+        if math.isclose(err_staging, err_main, rel_tol=0.0, abs_tol=1e-12):
+            return pick_side(client_id, skill_name, 0.5)
+        if err_staging < err_main:
+            return "staging"
+        return "main"
+
+    def counts(self, skill_name: str) -> dict[str, int]:
+        """当前账本人数：main / staging / total（观测用）。"""
+        with self._lock:
+            sides = (self._skills.get(skill_name) or {}).get("sides") or {}
+            n_main = sum(1 for v in sides.values() if v == "main")
+            n_staging = sum(1 for v in sides.values() if v == "staging")
+            return {"main": n_main, "staging": n_staging, "total": n_main + n_staging}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._skills.clear()
 
 
 def read_skill_on_branch(skill_dir: Path, branch: str) -> str | None:

@@ -1,7 +1,9 @@
 """skill_manifest.py — 给一个 client 现算它该持有的 ≤100 个 skill slot（SP1）
 
-server 端**不存"账本表"**。manifest = ``pick_side`` 纯函数 + skill git
-状态（has_staging / main_sha / staging_sha）的实时投影，每次 sync 现算。
+server 端的 skill 槽位投影不存表：ranked/recommended 排序 + skill git 状态
+（main_sha / staging_sha）每次 sync 现算。**唯一例外是灰度 side 决策**——由
+``CanaryRouter`` 有状态记账（在线偏差最小化），因为无状态 ``pick_side`` 在
+client 基数很小时会把 staging 饿死到 0。
 
 slot 结构 = 80 ranked + 20 recommended：
 - ranked      —— 按 ux_score（main 侧近 30 天均分）滑窗取高分。
@@ -9,8 +11,9 @@ slot 结构 = 80 ranked + 20 recommended：
                  从候选里取 cosine 最近邻（``profile_reco.py``）。无画像
                  （冷启动）或非 team server 调用 → 退回 ux 排序往下取。
 
-灰度归因：某 skill 有 staging 分支 → side = pick_side(client_id, name, p)，
-确定性伪随机，同 client 同 skill 在整轮灰度内 side 钉死。无 staging → main。
+灰度归因：某 skill 有 staging 分支 → side = CanaryRouter.assign(client_id,
+name, p, staging_sha)；同 client 同 staging 版本内 side 钉死。无 staging → main。
+种子/破平随机沿用 pick_side 的 hash（见 canary.CanaryRouter）。
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from functools import partial
 from pathlib import Path
 from typing import Callable
 
-from xskill.canary import main_sha, pick_side, staging_sha
+from xskill.canary import CanaryRouter, main_sha, staging_sha
 from xskill.skill.skill import Skill
 from xskill.skill.repo import SkillRepo
 from xskill.team.shared.protocol import SkillSlot, SyncResponse
@@ -31,8 +34,11 @@ from xskill.team.shared.protocol import SkillSlot, SyncResponse
 _logger = logging.getLogger("xskill.team.manifest")
 
 # §5 SkillRecommendEngine 单例（team server init 时 set_recommend_engine 注入）。
-# 为 None 时退回既有 pick_side + RECOMMENDER 画像路径（非 team / 测试场景）。
+# 为 None 时退回既有 RECOMMENDER 画像路径（非 team / 测试场景）。
 _engine = None
+
+# team-CS 有状态灰度分流；server 单进程单例，重启后账本清空可接受。
+_ROUTER = CanaryRouter()
 
 
 def repo_search_id(skill_name: str) -> str:
@@ -253,13 +259,15 @@ def _resolve_slot(
         (main_sha(skill.path) or "", staging_sha(skill.path))
     )
     if cached_staging:
-        if _engine is not None:
-            from xskill.recommend.client_user import ClientUser
-            side = _engine.resolve_side(
-                skill, ClientUser(client_id), refs=(cached_main, cached_staging),
-            )
-        else:
-            side = pick_side(client_id, skill.name, probability)
+        # team-CS：有状态 CanaryRouter（hash 种子/破平），避免小基数饿死 staging。
+        # SkillRecommendEngine.resolve_side 仍供推荐链路其它调用方使用；manifest
+        # 槽位 side 以 Router 账本为准（同 client / staging_sha / p sticky）。
+        side = _ROUTER.assign(
+            client_id=client_id,
+            skill_name=skill.name,
+            probability=probability,
+            staging_sha=cached_staging or "",
+        )
         sha = cached_staging if side == "staging" else cached_main
     else:
         side = "main"

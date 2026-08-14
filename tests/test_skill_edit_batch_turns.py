@@ -289,6 +289,7 @@ class TestFourTerminalScenariosMultiTurn:
             skill_dir=skill_dir, store=None,
             agno_agent_factory=_make_progressive_factory(observed),
             llm_cfg={}, traj_root=tmp_path, jam_threshold=50,
+            min_jam_age_sec=0, jam_plateau_sec=0,
         )
         assert agent.maybe_run() is True
         assert len(observed) == 3
