@@ -1,0 +1,120 @@
+diff --git a/src/xskill/agents/agent_trace.py b/src/xskill/agents/agent_trace.py
+index d47469a..1362e57 100644
+--- a/src/xskill/agents/agent_trace.py
++++ b/src/xskill/agents/agent_trace.py
+@@ -202,6 +202,7 @@ def _append(text: str) -> None:
+     try:
+         with open(sink, "a", encoding="utf-8") as trace_file:
+             trace_file.write(text)
++            trace_file.flush()
+     except OSError as exc:
+         _warn_io_failure(exc, sink)
+ 
+@@ -215,6 +216,7 @@ def append_to(path: Path | str | None, text: str) -> None:
+         sink.parent.mkdir(parents=True, exist_ok=True)
+         with sink.open("a", encoding="utf-8") as trace_file:
+             trace_file.write(text)
++            trace_file.flush()
+     except OSError as exc:
+         _warn_io_failure(exc, sink)
+ 
+diff --git a/src/xskill/cli.py b/src/xskill/cli.py
+index 59af288..f40ad54 100644
+--- a/src/xskill/cli.py
++++ b/src/xskill/cli.py
+@@ -1590,6 +1590,7 @@ def cmd_generate(args, http=None, headers=None) -> int:
+         if not job_id:
+             print("error: server 未返回 job_id", file=sys.stderr)
+             return 1
++        print(f"generate job {job_id}", flush=True)
+         stream_timeout = httpx.Timeout(None)
+         with httpx.Client(
+             base_url=str(http.base_url),
+@@ -1622,7 +1623,11 @@ def cmd_generate(args, http=None, headers=None) -> int:
+                                 sys.stdout.write(chunk)
+                                 sys.stdout.flush()
+                         elif event.get("type") == "ping":
+-                            continue
++                            status = event.get("status") or ""
++                            if status == "queued":
++                                print("仍在排队，等待席位…", flush=True)
++                            else:
++                                print("仍在执行…", flush=True)
+                         elif event.get("type") == "done":
+                             final = event
+                 if final is None and buffer.strip():
+diff --git a/src/xskill/team/server/api.py b/src/xskill/team/server/api.py
+index 7a0789e..be1dc4c 100644
+--- a/src/xskill/team/server/api.py
++++ b/src/xskill/team/server/api.py
+@@ -1535,4 +1535,12 @@ def team_generate_events(
+         for event in iter_job_events(job_id):
+             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+ 
+-    return StreamingResponse(event_stream(), media_type="text/event-stream")
++    return StreamingResponse(
++        event_stream(),
++        media_type="text/event-stream",
++        headers={
++            "Cache-Control": "no-cache, no-transform",
++            "X-Accel-Buffering": "no",
++            "Connection": "keep-alive",
++        },
++    )
+diff --git a/src/xskill/team/server/generate_jobs.py b/src/xskill/team/server/generate_jobs.py
+index 675ecfc..f0e0d5a 100644
+--- a/src/xskill/team/server/generate_jobs.py
++++ b/src/xskill/team/server/generate_jobs.py
+@@ -65,7 +65,11 @@ def create_job(
+ ) -> dict[str, Any]:
+     job_id = uuid.uuid4().hex
+     log_path = _job_dir(logs_dir, user_id) / f"{job_id}.log"
+-    log_path.write_text("", encoding="utf-8")
++    log_path.write_text(
++        f"generate queued job_id={job_id} user={user_id}\n"
++        "waiting for SkillEdit pool seat\n",
++        encoding="utf-8",
++    )
+     job = {
+         "job_id": job_id,
+         "client_id": client_id,
+@@ -267,6 +271,17 @@ def _update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
+     return snapshot
+ 
+ 
++def _append_generate_log(log_path: str | None, text: str) -> None:
++    if not log_path:
++        return
++    try:
++        with Path(log_path).open("a", encoding="utf-8") as handle:
++            handle.write(text)
++            handle.flush()
++    except OSError:
++        logger.debug("failed to append generate log %s", log_path, exc_info=True)
++
++
+ def _write_status(job: dict[str, Any]) -> None:
+     log_path = Path(job["log_path"])
+     payload = {
+@@ -385,6 +400,10 @@ def run_claimed_generate_job(
+         stored.setdefault("error", "")
+         _JOBS[job_id] = stored
+     _update_job(job_id, status="running")
++    _append_generate_log(
++        stored.get("log_path") or job.get("log_path"),
++        "generate running, starting agent\n",
++    )
+     try:
+         _run_generate_job_body(
+             get_job(job_id) or stored,
+@@ -532,6 +551,9 @@ def iter_job_events(
+             }
+             return
+         if time.time() - last_emit >= ping_every:
+-            yield {"type": "ping"}
++            yield {
++                "type": "ping",
++                "status": current.get("status") or "queued",
++            }
+             last_emit = time.time()
+         time.sleep(poll_seconds)

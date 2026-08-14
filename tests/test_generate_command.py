@@ -158,10 +158,14 @@ def test_iter_job_events_pings_while_running(tmp_path: Path):
     ):
         seen.append(event["type"])
         if event["type"] == "ping":
+            assert event.get("status") == "queued"
             break
     assert "ping" in seen
     assert "done" not in seen
     assert job["status"] == "queued"
+    assert "waiting for SkillEdit pool seat" in Path(job["log_path"]).read_text(
+        encoding="utf-8",
+    )
 
 
 def test_enqueue_writes_pending_file(tmp_path: Path):
@@ -273,6 +277,7 @@ def test_generate_api_streams_log_and_done(team_client):
         "GET", f"/api/v1/team/generate/{job_id}/events", headers=hdr,
     ) as stream:
         assert stream.status_code == 200
+        assert stream.headers.get("x-accel-buffering") == "no"
         body = "".join(stream.iter_text())
     assert "thinking" in body
     assert '"type": "done"' in body or '"type":"done"' in body
@@ -309,6 +314,7 @@ def test_generate_cli_parser_and_stream(monkeypatch, capsys):
         def iter_text(self):
             events = [
                 {"type": "log", "chunk": "thinking...\n"},
+                {"type": "ping", "status": "running"},
                 {"type": "done", "ok": True,
                  "skill_names": ["invoice-check"],
                  "pinned": ["invoice-check"], "error": ""},
@@ -352,6 +358,8 @@ def test_generate_cli_parser_and_stream(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "thinking" in out
     assert "invoice-check" in out
+    assert "generate job abc" in out
+    assert "仍在执行" in out
 
 
 def test_generate_jobs_submit_to_edit_pool(tmp_path, monkeypatch):

@@ -1590,6 +1590,7 @@ def cmd_generate(args, http=None, headers=None) -> int:
         if not job_id:
             print("error: server 未返回 job_id", file=sys.stderr)
             return 1
+        print(f"generate job {job_id}", flush=True)
         stream_timeout = httpx.Timeout(None)
         with httpx.Client(
             base_url=str(http.base_url),
@@ -1622,7 +1623,11 @@ def cmd_generate(args, http=None, headers=None) -> int:
                                 sys.stdout.write(chunk)
                                 sys.stdout.flush()
                         elif event.get("type") == "ping":
-                            continue
+                            status = event.get("status") or ""
+                            if status == "queued":
+                                print("仍在排队，等待席位…", flush=True)
+                            else:
+                                print("仍在执行…", flush=True)
                         elif event.get("type") == "done":
                             final = event
                 if final is None and buffer.strip():
