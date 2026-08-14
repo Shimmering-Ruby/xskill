@@ -414,6 +414,46 @@ def test_evaluate_jam_gates_requires_age_plateau_and_ws(tmp_path):
     still_hold = canary.evaluate_jam_gates(sd, total_ws=10, config=cfg_ok)
     assert still_hold["ok"] is False
     assert "ws<" in still_hold["reason"]
+    assert not (sd / ".canary_jam_state.json").exists()
+
+
+def test_jam_plateau_uses_ux_jsonl_not_sidecar(tmp_path):
+    """平台期从 .ux_scores.jsonl 的 scored_at 现算，不写 .canary_jam_state.json。"""
+    import json
+    from datetime import timedelta
+
+    sd = _init_repo(tmp_path / "skill")
+    initial = canary.main_sha(sd)
+    _commit(sd, "staging body", "staging cand")
+    assert canary.route_main_history_to_staging(sd, initial)
+    leftover = sd / ".canary_jam_state.json"
+    leftover.write_text("{}", encoding="utf-8")
+
+    cfg = canary.CanaryConfig(
+        jam_threshold=50, min_jam_age_sec=0.0, jam_plateau_sec=600.0,
+    )
+    fresh = canary.evaluate_jam_gates(sd, total_ws=60, config=cfg)
+    assert fresh["ok"] is False
+    assert "plateau<" in fresh["reason"]
+    assert not leftover.exists()
+
+    old = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    m_sha = canary.main_sha(sd)
+    s_sha = canary.staging_sha(sd)
+    (sd / ".ux_scores.jsonl").write_text(
+        json.dumps({
+            "traj_id": "t-old", "skill_name": "skill", "side": "main",
+            "commit_sha": m_sha, "score": 8, "reasons": "", "scored_at": old,
+        }) + "\n" + json.dumps({
+            "traj_id": "t-old-s", "skill_name": "skill", "side": "staging",
+            "commit_sha": s_sha, "score": 7, "reasons": "", "scored_at": old,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    aged = canary.evaluate_jam_gates(sd, total_ws=60, config=cfg)
+    assert aged["ok"] is True
+    assert aged["plateau_s"] >= 600.0
+    assert not (sd / ".canary_jam_state.json").exists()
 
 
 # ──────────────────────────────────────────────────────

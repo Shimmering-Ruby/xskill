@@ -39,7 +39,6 @@ logger = logging.getLogger("xskill.canary")
 
 STAGING_BRANCH = "staging"
 UX_SCORES_FILENAME = ".ux_scores.jsonl"
-JAM_STATE_FILENAME = ".canary_jam_state.json"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -61,13 +60,14 @@ class CanaryConfig:
     # ── 轨迹堰塞强砍（jam）三条件合取 ────────────────────────────────
     # staging 存在期间 hold 普通 SkillEdit；仅当同时满足：
     #   1) age(staging) >= min_jam_age_sec
-    #   2) 当前 (main_sha, staging_sha) 上 main_n/staging_n 平台期 >= jam_plateau_sec
+    #   2) 当前 (main_sha, staging_sha) 上距最近一条 ux 分（没有则从 staging
+    #      创建起算）已超过 jam_plateau_sec
     #   3) candidates Σweightscore >= jam_threshold
     # 才越过灰度强砍合并。三者缺一不可——避免「候选堆满就砍」抢走 A/B。
     # jam_threshold 必须 > 正常毕业阈值 (ATOM_PROMOTION_THRESHOLD=10)。
     jam_threshold: int = 50
     min_jam_age_sec: float = 1800.0      # 30min：最短灰度观察窗
-    jam_plateau_sec: float = 600.0       # 10min：当前 sha 对样本不涨
+    jam_plateau_sec: float = 600.0       # 10min：该 sha 对最近一条 ux 分过了多久
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "CanaryConfig":
@@ -85,74 +85,57 @@ class CanaryConfig:
         )
 
 
-def _ux_counts_for_shas(skill_dir: Path, *, m_sha: str, s_sha: str) -> tuple[int, int]:
-    """当前 main/staging sha 上各有多少条 ux 样本。"""
+def _ux_rows_for_shas(
+    scores: list[dict], *, m_sha: str, s_sha: str,
+) -> tuple[int, int, datetime | None]:
+    """当前 main/staging sha 上的样本数，以及这些样本里最晚的 scored_at。"""
     main_n = staging_n = 0
-    for s in load_ux_scores(skill_dir):
-        side = s.get("side")
-        sha = s.get("commit_sha") or ""
+    last: datetime | None = None
+    for row in scores:
+        side = row.get("side")
+        sha = row.get("commit_sha") or ""
         if side == "main" and sha == m_sha:
             main_n += 1
         elif side == "staging" and sha == s_sha:
             staging_n += 1
-    return main_n, staging_n
+        else:
+            continue
+        raw = row.get("scored_at") or ""
+        if not raw:
+            continue
+        try:
+            ts = _parse_git_iso(str(raw))
+        except ValueError:
+            continue
+        if last is None or ts > last:
+            last = ts
+    return main_n, staging_n, last
 
 
-def _load_jam_state(skill_dir: Path) -> dict:
-    p = Path(skill_dir) / JAM_STATE_FILENAME
-    if not p.is_file():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-
-
-def _save_jam_state(skill_dir: Path, state: dict) -> None:
-    p = Path(skill_dir) / JAM_STATE_FILENAME
-    try:
-        p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        logger.debug("save jam state failed: %s", skill_dir, exc_info=True)
-
-
-def update_jam_plateau(
+def _jam_plateau_seconds(
     skill_dir: Path,
     *,
-    main_sha: str,
-    staging_sha: str,
-    main_n: int,
-    staging_n: int,
+    last_scored: datetime | None,
 ) -> float:
-    """按当前 (main_sha, staging_sha) 维护平台期，返回 plateau_s（秒）。
-
-    sha 对变化或样本数上涨 → 重置/推进 last_progress_ts；返回 now - last_progress。
-    """
-    import time
-    now = time.time()
-    st = _load_jam_state(skill_dir)
-    same = (
-        st.get("main_sha") == main_sha
-        and st.get("staging_sha") == staging_sha
-    )
-    if not same:
-        st = {
-            "main_sha": main_sha,
-            "staging_sha": staging_sha,
-            "main_n": main_n,
-            "staging_n": staging_n,
-            "last_progress_ts": now,
-        }
+    """距该 sha 对最近一条 ux 分过了多久；没有分则从 staging 创建起算。"""
+    now = datetime.now(timezone.utc)
+    if last_scored is not None:
+        anchor = last_scored.astimezone(timezone.utc)
     else:
-        prev_m = int(st.get("main_n") or 0)
-        prev_s = int(st.get("staging_n") or 0)
-        if main_n > prev_m or staging_n > prev_s:
-            st["last_progress_ts"] = now
-        st["main_n"] = main_n
-        st["staging_n"] = staging_n
-        st.setdefault("last_progress_ts", now)
-    _save_jam_state(skill_dir, st)
-    return max(0.0, now - float(st.get("last_progress_ts") or now))
+        created = staging_created_at(skill_dir)
+        if created is None:
+            return 0.0
+        anchor = created.astimezone(timezone.utc)
+    return max(0.0, (now - anchor).total_seconds())
+
+
+def _drop_legacy_jam_state(skill_dir: Path) -> None:
+    """旧版曾写过 sidecar；现在平台期从 jsonl 现算，碰到就删掉。"""
+    leftover = Path(skill_dir) / ".canary_jam_state.json"
+    try:
+        leftover.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("drop leftover jam state failed: %s", skill_dir, exc_info=True)
 
 
 def evaluate_jam_gates(
@@ -168,6 +151,7 @@ def evaluate_jam_gates(
     """
     cfg = config or CanaryConfig()
     skill_dir = Path(skill_dir)
+    _drop_legacy_jam_state(skill_dir)
     need = cfg.min_samples
     m_sha = main_sha(skill_dir) or ""
     s_sha = staging_sha(skill_dir) or ""
@@ -175,11 +159,14 @@ def evaluate_jam_gates(
     age = 0.0
     if created is not None:
         age = (datetime.now(timezone.utc) - created.astimezone(timezone.utc)).total_seconds()
-    main_n, staging_n = _ux_counts_for_shas(skill_dir, m_sha=m_sha, s_sha=s_sha)
-    plateau_s = update_jam_plateau(
-        skill_dir, main_sha=m_sha, staging_sha=s_sha,
-        main_n=main_n, staging_n=staging_n,
-    ) if (m_sha and s_sha) else 0.0
+    scores = load_ux_scores(skill_dir) if (m_sha or s_sha) else []
+    main_n, staging_n, last_scored = _ux_rows_for_shas(
+        scores, m_sha=m_sha, s_sha=s_sha,
+    )
+    plateau_s = (
+        _jam_plateau_seconds(skill_dir, last_scored=last_scored)
+        if (m_sha and s_sha) else 0.0
+    )
 
     age_ok = age >= cfg.min_jam_age_sec
     plateau_ok = plateau_s >= cfg.jam_plateau_sec
