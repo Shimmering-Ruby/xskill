@@ -60,8 +60,12 @@ CJK_TOKENS_PER_CHAR_BY_FAMILY = {
 }
 _TRIMMABLE_TOOLS = (
     "look", "readfile", "read_file", "atom_task_read", "read_traj", "skill_read",
+    "grep_files", "list_files", "edit",
 )
-_SPILLABLE_TOOLS = ("readfile", "read_file", "atom_task_read", "read_traj", "skill_read")
+_SPILLABLE_TOOLS = (
+    "readfile", "read_file", "atom_task_read", "read_traj", "skill_read",
+    "grep_files", "edit",
+)
 _TRIM_MARK = "[…look 旧结果已剪裁,需要可重新 look…]"
 _COMPACT_MARK = "[compacted_skill_edit_agent_memory]"
 

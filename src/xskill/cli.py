@@ -1534,6 +1534,124 @@ def cmd_upload(args, http=None, headers=None) -> int:
     return 0
 
 
+def _parse_sse_block(block: str) -> dict | None:
+    import json as _json
+    for line in block.splitlines():
+        if line.startswith("data:"):
+            payload = line[5:].strip()
+            if not payload:
+                continue
+            try:
+                parsed = _json.loads(payload)
+            except _json.JSONDecodeError:
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+    return None
+
+
+def cmd_generate(args, http=None, headers=None) -> int:
+    """`xskill generate "指令"` —— 在 team server 上即时生成或改写 skill。"""
+    import httpx
+
+    instruction = " ".join(args.instruction).strip()
+    if not instruction:
+        print("error: instruction 不能为空", file=sys.stderr)
+        return 2
+    names = [
+        part.strip()
+        for part in str(getattr(args, "name", "") or "").split(",")
+        if part.strip()
+    ]
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+    try:
+        resp = http.post(
+            "/api/v1/team/generate",
+            json={"instruction": instruction, "names": names},
+            headers=headers,
+        )
+        if resp.status_code == 404:
+            print(
+                "error: server 版本过旧，不支持 generate，请管理员先升级 server",
+                file=sys.stderr,
+            )
+            return 1
+        if resp.status_code != 200:
+            print(
+                f"error: generate 提交失败 HTTP {resp.status_code}: "
+                f"{resp.text[:300]}",
+                file=sys.stderr,
+            )
+            return 1
+        job_id = resp.json().get("job_id")
+        if not job_id:
+            print("error: server 未返回 job_id", file=sys.stderr)
+            return 1
+        stream_timeout = httpx.Timeout(None)
+        with httpx.Client(
+            base_url=str(http.base_url),
+            timeout=stream_timeout,
+            trust_env=False,
+        ) as stream_http:
+            with stream_http.stream(
+                "GET",
+                f"/api/v1/team/generate/{job_id}/events",
+                headers=headers,
+            ) as stream:
+                if stream.status_code != 200:
+                    print(
+                        f"error: 无法读取 generate 日志 HTTP {stream.status_code}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                buffer = ""
+                final = None
+                for text in stream.iter_text():
+                    buffer += text
+                    while "\n\n" in buffer:
+                        block, buffer = buffer.split("\n\n", 1)
+                        event = _parse_sse_block(block)
+                        if event is None:
+                            continue
+                        if event.get("type") == "log":
+                            chunk = event.get("chunk") or ""
+                            if chunk:
+                                sys.stdout.write(chunk)
+                                sys.stdout.flush()
+                        elif event.get("type") == "ping":
+                            continue
+                        elif event.get("type") == "done":
+                            final = event
+                if final is None and buffer.strip():
+                    final = _parse_sse_block(buffer)
+    except (httpx.HTTPError, OSError) as network_error:
+        print(
+            f"error: 无法连接 team server（{type(network_error).__name__}），"
+            "server 可能未响应，请检查网络或联系管理员",
+            file=sys.stderr,
+        )
+        return 1
+    if not final:
+        print("error: generate 结束但没有收到完成事件", file=sys.stderr)
+        return 1
+    if not final.get("ok"):
+        err = final.get("error") or "generate 失败"
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    skills = final.get("skill_names") or []
+    pinned = final.get("pinned") or []
+    if skills:
+        print("generate 完成: " + "、".join(skills))
+    else:
+        print("generate 完成")
+    if pinned:
+        print("已钉到发起人推荐列表: " + "、".join(pinned))
+    return 0
+
+
 def cmd_read(args, xskill) -> int:
     """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
     del xskill  # CLI handler signature compatibility.
@@ -1732,6 +1850,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_upload.add_argument("path", type=str, help="包含 SKILL.md 的 skill 目录")
     p_upload.add_argument("--json", action="store_true", help="机读 JSON 输出")
 
+    p_gen = sub.add_parser(
+        "generate",
+        help="按指令在 team server 上即时生成或改写 skill（直接提交主干）",
+    )
+    p_gen.add_argument(
+        "instruction", nargs="+", metavar="PROMPT",
+        help="给生成代理的定向指令",
+    )
+    p_gen.add_argument(
+        "--name", default="",
+        help="优先阅读的工号，逗号分隔；不传则提示词里写可看全量",
+    )
+
     p_init = sub.add_parser(
         "init",
         help="一站式引导：装 xskill 使用指南 skill 到各 agent + 连上 team server",
@@ -1927,6 +2058,8 @@ def main() -> int:
         return cmd_download(args)
     if args.command == "upload":
         return cmd_upload(args)
+    if args.command == "generate":
+        return cmd_generate(args)
 
     # stats 只读 registry，不需要 config.yaml / llm.api_key / facade
     if args.command == "stats":

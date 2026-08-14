@@ -213,6 +213,9 @@ class DirectoryWatcher:
             "skills_edited": 0,      # v2: 触发的 SkillEdit 次数
             "scores": 0, "errors": 0, "retries": 0,
         }
+        # generate 与 SkillEdit 共用 edit 池；完成/失败单独记，给流水线第四栏。
+        self._generate_completed = 0
+        self._generate_failed = 0
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -277,6 +280,10 @@ class DirectoryWatcher:
             "pool_config": {
                 name: dict(self.pool_config.get(name) or {})
                 for name in ("split", "cluster", "edit")
+            },
+            "generate": {
+                "completed": self._generate_completed,
+                "failed": self._generate_failed,
             },
             "cluster": {
                 "pending_atoms": len(self.pending_atoms),
@@ -373,6 +380,10 @@ class DirectoryWatcher:
                         wd["id"], dir_path, consumed_index, **kw,
                     )
 
+        # ── Step 5a: 用户点名的 generate 入队到 SkillEdit 同一线程池 ──
+        # 先于自动 SkillEdit 提交，避免后台整理把用户任务挤到池外。
+        self._submit_generate_jobs()
+
         # ── Step 5: 独立扫所有 skill 目录的 candidates buffer ──
         # 这步与具体 atom 处理解耦：即便某些 atom cluster 失败，buffer
         # 已满阈值的 skill 仍能在每轮 scan 中被检出 + 触发 SkillEdit。
@@ -404,6 +415,59 @@ class DirectoryWatcher:
         # CS 模式的分桶在 client 的 reconcile_skill_sides 里按 client_id 做。
         if not self.server_mode:
             self._reconcile_skill_sides()
+
+    def _submit_generate_jobs(self):
+        """把 web 进程入队的 generate 任务提交到 SkillEdit 同一线程池。
+
+        不另开池：占 edit 席位、走 edit 的 llm_weight。pending 文件在
+        ``<home>/generate_jobs/pending/``，与 logs 同级，web 与 worker 都能见。
+        """
+        if self.skill_dir is None or not self.skill_dir.is_dir():
+            return
+        from xskill.team.server import generate_jobs as gen_jobs
+
+        inflight = {
+            info.get("job_id")
+            for info in self._futures.values()
+            if info.get("stage") == "generate" and info.get("job_id")
+        }
+        gen_jobs.reclaim_orphans(self.logs_dir, inflight)
+        for pending_path in gen_jobs.list_pending_paths(self.logs_dir):
+            job = gen_jobs.try_claim(self.logs_dir, pending_path)
+            if job is None:
+                continue
+            job_id = job.get("job_id") or pending_path.stem
+            if job_id in inflight:
+                gen_jobs.release_claim(self.logs_dir, job_id)
+                continue
+
+            def _run(claimed=job):
+                traj_root = None
+                if self.server_mode:
+                    from xskill.config import get_team_trajectories_dir
+                    try:
+                        traj_root = get_team_trajectories_dir()
+                    except Exception:
+                        logger.debug(
+                            "generate traj_root unavailable", exc_info=True,
+                        )
+                gen_jobs.run_claimed_generate_job(
+                    claimed,
+                    skill_dir=self.skill_dir,
+                    config=self.config,
+                    db_path=self.db_path,
+                    logs_dir=self.logs_dir,
+                    traj_root=traj_root,
+                )
+
+            fut = self._pools["edit"].submit(
+                _run,
+                task=gen_jobs.monitor_task(job),
+            )
+            if fut is None:
+                gen_jobs.release_claim(self.logs_dir, job_id)
+                break
+            self._futures[fut] = {"stage": "generate", "job_id": job_id}
 
     def _run_skill_edit_step(self):
         """Step 5 的冷启动感知封装：hold 只等 rebuild 快照内轨迹到终态。"""
@@ -2091,6 +2155,19 @@ class DirectoryWatcher:
                     # Successful writes now have durable ``clustered`` markers;
                     # failures and silent drops are eligible for the next scan.
                     self.claimed_atoms.difference_update(atom_ids)
+                continue
+            if stage == "generate":
+                job_id = info.get("job_id") or ""
+                try:
+                    fut.result(timeout=0)
+                    self._generate_completed += 1
+                except Exception:
+                    self._generate_failed += 1
+                    self._stats["errors"] += 1
+                    logger.exception("generate future failed: %s", job_id)
+                finally:
+                    from xskill.team.server import generate_jobs as gen_jobs
+                    gen_jobs.finish_claim(self.logs_dir, job_id)
                 continue
             if stage == "skill_edit":
                 # SkillEditAgent.maybe_run() 自己吞异常返回 (d, False)——正常

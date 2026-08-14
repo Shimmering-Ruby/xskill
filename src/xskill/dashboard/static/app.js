@@ -1195,7 +1195,7 @@ async function loadCanary() {
     '还没有灰度使用记录');
 }
 
-// ═════════════ 流水线 Monitor（三池固定席位实时事实板） ═════════════
+// ═════════════ 流水线 Monitor（四栏固定席位：后两栏共用 edit 池） ═════════════
 // 数据：pipeline/live（agent-worker 状态文件只读整形，~5s 粒度），3s 轮询；
 // 点选席位/任务后 pipeline/log 轮询日志尾巴。禁止 fallback：状态文件缺失、
 // 日志不存在、席位已腾空一律显式空态，绝不编造。
@@ -1203,6 +1203,7 @@ const PM_POOLS = [
   { key: 'split', title: 'Split', subtitle: '轨迹', weight: true, batch: false },
   { key: 'cluster', title: 'Cluster', subtitle: 'atom 批', weight: true, batch: true },
   { key: 'edit', title: 'SkillEditAgent', subtitle: 'A→B 转移', weight: true, batch: true },
+  { key: 'generate', title: 'GenerateAgent', subtitle: '与 SkillEdit 共用席位', weight: true, batch: false, shared: 'edit' },
 ];
 const PM_XFER = {
   baby_main: { from: 'baby', to: 'main', tip: '冷启动消化后 graduate' },
@@ -1248,7 +1249,8 @@ function pmRenderBubbles() {
   }
   const llm = d.llm || {};
   const quotaWait = (llm.rate_limit_waiting || 0) + (llm.retry_waiting || 0);
-  const failed = PM_POOLS.reduce((n, p) => n + ((d.pools[p.key] || {}).failed || 0), 0);
+  const failed = PM_POOLS.filter(p => !p.shared).reduce(
+    (n, p) => n + ((d.pools[p.key] || {}).failed || 0), 0);
   const hbAge = Math.max(0, Date.now() / 1000 - (d.heartbeat_at || 0));
   let html = `<div class="pm-bubble ${d.running && d.ok !== false ? '' : 'bad'} ring-1 ring-slate-200">`
     + `<span class="pm-dot"></span><span class="k">心跳</span>`
@@ -1285,6 +1287,13 @@ function pmTaskCard(task, poolKey, selKey) {
       <div class="nm">本批 ${ids.length} 个原子</div>
       <div class="inf">${task._age != null ? pmAgeText(task._age) : '排队中'}</div>
       <div class="mt-1 flex flex-wrap gap-1">${preview}${ids.length > 4 ? `<span class="inf">+${ids.length - 4}</span>` : ''}</div>
+    </div>`;
+  }
+  if (task.kind === 'generate') {
+    const preview = task.instruction || '';
+    return `<div class="pm-card${sel}"${open}${style}>
+      <div class="nm font-mono">${esc(task.user_id || task.job_id || '?')}</div>
+      <div class="inf">${preview ? esc(preview) + ' · ' : ''}${task._age != null ? pmAgeText(task._age) : '排队中'}</div>
     </div>`;
   }
   // traj（拆分代理没有任务名，只有轨迹 id）
@@ -1371,7 +1380,7 @@ function pmRenderDrawer() {
   const age = pmAgeText(pmSeatAge(seat));
   const def = PM_POOLS.find(p => p.key === pmSelected.pool);
   // 抽屉随 live 轮询重渲染：同一任务的日志内容与滚动位置要保住，否则每 3s 闪回/跳底
-  const hasStream = task.kind === 'skill' || task.kind === 'traj';
+  const hasStream = task.kind === 'skill' || task.kind === 'traj' || task.kind === 'generate';
   const existingEl = (hasStream && pmLogKey) ? document.getElementById('pm-log') : null;
   const existingLog = existingEl ? existingEl.innerHTML : '';
   const stickBottom = pmLogNearBottom(existingEl);
@@ -1389,6 +1398,11 @@ function pmRenderDrawer() {
     head = `<h2 class="font-mono text-sm font-semibold break-all">${esc(task.traj_id || '?')}</h2>
       <div class="text-[11px] text-slate-400 mt-0.5">${def.title} · ${esc(task.watch_dir || '')} · 席位 ${pmSelected.seat + 1} · 已跑 ${age}</div>`;
     logHtml = logPane;
+  } else if (task.kind === 'generate') {
+    head = `<h2 class="font-mono text-sm font-semibold break-all">${esc(task.user_id || task.job_id || '?')}</h2>
+      <div class="text-[11px] text-slate-400 mt-0.5">${def.title} · 席位 ${pmSelected.seat + 1} · 已跑 ${age}</div>
+      <div class="text-xs text-slate-600 mt-1">${esc(task.instruction || '')}</div>`;
+    logHtml = logPane;
   } else {  // atom_batch：Cluster 批没有独立日志，展示本批原子名单（概念稿语义）
     const ids = (task.atom_ids || []).map(a => `<code class="font-mono text-[11px] text-teal-700">${esc(a)}</code>`).join(' · ');
     head = `<h2 class="text-sm font-semibold">本批 ${(task.atom_ids || []).length} 个原子</h2>
@@ -1404,6 +1418,7 @@ function pmRenderDrawer() {
     newLog.scrollTop = stickBottom ? newLog.scrollHeight : savedScroll;
   }
   if (task.kind === 'skill' || task.kind === 'traj') pmStartLog(task.kind, task.kind === 'skill' ? task.skill_name : task.traj_id);
+  else if (task.kind === 'generate') pmStartLog('generate', task.job_id);
   else pmStopLog();
 }
 

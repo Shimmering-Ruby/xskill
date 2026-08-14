@@ -84,6 +84,8 @@ class AgentToolContext:
     grep_fallback_warned: bool = False
     # 实例 registry.db；skills_catalog 写出口从此取库，禁止隐式摸全局库。
     registry_db_path: Path | None = None
+    extra_read_roots: tuple[Path, ...] = ()
+    generate_user_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -97,6 +99,8 @@ class AgentToolContext:
                 "registry_db_path",
                 Path(self.registry_db_path),
             )
+        extra = tuple(Path(p) for p in (self.extra_read_roots or ()))
+        object.__setattr__(self, "extra_read_roots", extra)
 
 
 _EMPTY_AGENT_TOOL_CONTEXT = AgentToolContext()
@@ -123,6 +127,8 @@ def create_agent_tool_context(
     skill_edit_skill_name=None,
     skill_edit_batch_ids=(),
     registry_db_path=None,
+    extra_read_roots=(),
+    generate_user_id=None,
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -153,6 +159,10 @@ def create_agent_tool_context(
         ),
         registry_db_path=(
             Path(registry_db_path) if registry_db_path is not None else None
+        ),
+        extra_read_roots=tuple(Path(p) for p in (extra_read_roots or ())),
+        generate_user_id=(
+            str(generate_user_id) if generate_user_id else None
         ),
     )
 
@@ -263,6 +273,8 @@ class AgentToolConfig:
             "skill_edit_batch_ids": current.skill_edit_batch_ids,
             "grep_fallback_warned": current.grep_fallback_warned,
             "registry_db_path": current.registry_db_path,
+            "extra_read_roots": current.extra_read_roots,
+            "generate_user_id": current.generate_user_id,
         }
 
     def restore(self, snapshot: dict) -> None:
@@ -280,6 +292,8 @@ class AgentToolConfig:
             skill_edit_skill_name=snapshot.get("skill_edit_skill_name"),
             skill_edit_batch_ids=snapshot.get("skill_edit_batch_ids") or (),
             registry_db_path=snapshot.get("registry_db_path"),
+            extra_read_roots=snapshot.get("extra_read_roots") or (),
+            generate_user_id=snapshot.get("generate_user_id"),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()
@@ -425,18 +439,78 @@ SENSITIVE_NAME_TOKENS = frozenset({
 })
 
 
+_READ_FILES: contextvars.ContextVar[set[str]] = contextvars.ContextVar(
+    "xskill_agent_read_files",
+)
+_GENERATE_COMMITTED: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
+    "xskill_generate_committed_skills",
+)
+
+
+def reset_generate_session() -> None:
+    """Clear per-run read tracking and generate commit ledger."""
+    _READ_FILES.set(set())
+    _GENERATE_COMMITTED.set([])
+
+
+def generate_committed_skills() -> list[str]:
+    try:
+        return list(_GENERATE_COMMITTED.get())
+    except LookupError:
+        return []
+
+
+def _read_file_ledger() -> set[str]:
+    try:
+        return _READ_FILES.get()
+    except LookupError:
+        ledger: set[str] = set()
+        _READ_FILES.set(ledger)
+        return ledger
+
+
+def _mark_file_read(path: Path) -> None:
+    try:
+        _read_file_ledger().add(str(path.resolve()))
+    except OSError:
+        logger.debug("mark_file_read failed for %s", path, exc_info=True)
+
+
+def _file_was_read(path: Path) -> bool:
+    try:
+        return str(path.resolve()) in _read_file_ledger()
+    except OSError:
+        return False
+
+
+def _record_generate_commit(skill_name: str) -> None:
+    try:
+        committed = _GENERATE_COMMITTED.get()
+    except LookupError:
+        committed = []
+        _GENERATE_COMMITTED.set(committed)
+    if skill_name not in committed:
+        committed.append(skill_name)
+
+
 def _allowed_read_roots() -> list[Path]:
     """探索类工具（read_file / list_files / grep_files）共用的只读根集合。"""
+    ctx = current_agent_tool_context()
+    extra = tuple(ctx.extra_read_roots or ())
+    if extra:
+        roots = [Path(p).resolve() for p in extra]
+        if ctx.spill_root is not None:
+            roots.append(Path(ctx.spill_root).resolve())
+        return list(dict.fromkeys(roots))
     roots: list[Path] = []
-    configured_root = agent_tool_config.skill_dir or agent_tool_config.atom_skill_dir
+    configured_root = ctx.skill_dir or ctx.atom_skill_dir
     if configured_root is not None:
         roots.append(Path(configured_root).parent.resolve())
-    elif not current_agent_tool_context().configured:
+    elif not ctx.configured:
         from xskill.config import XSKILL_HOME
         roots.append(XSKILL_HOME.resolve())
-    spill_root = current_agent_tool_context().spill_root
-    if spill_root is not None:
-        roots.append(Path(spill_root).resolve())
+    if ctx.spill_root is not None:
+        roots.append(Path(ctx.spill_root).resolve())
     return list(dict.fromkeys(roots))
 
 
@@ -596,6 +670,7 @@ def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
             f"line_range: [{line_offset}, {line_end_exclusive})\n"
             "--- file content ---\n"
         )
+        _mark_file_read(resolved)
         if len(selected) > 10000:
             return (
                 header + selected[:10000]
@@ -818,7 +893,100 @@ def write_file(path: str, content: str) -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
     logger.info(f"✏️  wrote: {p} ({len(content)} bytes)")
+    _mark_file_read(resolved)
     return f"wrote: {p} ({len(content)} chars)"
+
+
+@tool(name="edit")
+def edit_file(path: str, old_string: str, new_string: str) -> str:
+    """Replace one exact substring in a skill file the agent already read.
+
+    The file must have been read in this run via read_file or skill_read
+    (write_file also counts).  New files that do not exist yet should use
+    write_file instead.
+    """
+    if agent_tool_config.atom_skill_dir is not None:
+        skill_dir = agent_tool_config.atom_skill_dir
+    else:
+        skill_dir = agent_tool_config.skill_dir
+    if skill_dir is None:
+        return "error: skill directory is not configured"
+    try:
+        resolved = Path(path).resolve()
+        resolved.relative_to(Path(skill_dir).resolve())
+    except (OSError, ValueError):
+        return f"error: writes restricted to the skill repository (tried: {path})"
+    if ".git" in resolved.parts:
+        return f"error: writes into .git/ are forbidden (tried: {path})"
+    if not resolved.is_file():
+        return (
+            f"error: file not found ({path}). "
+            "Create new files with write_file first."
+        )
+    if not _file_was_read(resolved):
+        return (
+            f"error: this file has not been read in this run ({resolved}). "
+            "Call read_file or skill_read on it before edit."
+        )
+    if old_string == "":
+        return "error: old_string must not be empty"
+    if old_string == new_string:
+        return "error: old_string and new_string are identical"
+    try:
+        original = resolved.read_text(encoding="utf-8")
+    except OSError as error:
+        return f"error: read failed ({error})"
+    count = original.count(old_string)
+    if count == 0:
+        return "error: old_string was not found in the file"
+    if count > 1:
+        return (
+            f"error: old_string matched {count} times; "
+            "provide a unique snippet"
+        )
+    updated = original.replace(old_string, new_string, 1)
+    if resolved.name == "SKILL.md":
+        try:
+            fm, body = fm_parse_strict(updated)
+        except FrontmatterError as error:
+            return (
+                f"error: SKILL.md frontmatter 非法，未写盘 —— {error}\n"
+                "请修正后再调用 edit。"
+            )
+        _sanitize_frontmatter_dates(fm)
+        updated = fm_serialize(fm, body)
+    resolved.write_text(updated, encoding="utf-8")
+    logger.info("edited: %s", resolved)
+    return f"edited: {resolved}"
+
+
+@tool(name="commit_generate_main")
+def commit_generate_main(skill_name: str, message: str) -> str:
+    """Commit the named skill onto main no matter the current git state.
+
+    Creates the repository and the main branch when they do not exist.
+    Empty or stub content is allowed.  Never opens a staging branch.
+    The initiating user id is prepended to the commit message.
+    """
+    from xskill.skill.git import commit_generate_to_main_branch
+
+    skill_dir = agent_tool_config.atom_skill_dir or agent_tool_config.skill_dir
+    if skill_dir is None:
+        return "error: skill directory is not configured"
+    slug = _slugify(skill_name)
+    if not slug:
+        return "error: skill_name 不能为空"
+    target = Path(skill_dir) / slug
+    msg = (message or "").strip() or "generate"
+    user_id = current_agent_tool_context().generate_user_id or "unknown"
+    prefixed = f"generate-by: {user_id}\n\n{msg}"
+    try:
+        sha = commit_generate_to_main_branch(str(target), prefixed)
+    except Exception as error:  # noqa: BLE001 — tool must return error text
+        logger.exception("commit_generate_main failed for %s", slug)
+        return f"error: commit_generate_main 失败: {error}"
+    _record_generate_commit(slug)
+    return f"committed to main: {slug} {sha[:12]}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1029,6 +1197,7 @@ def skill_read(skill_name: str) -> str:
     markdown_path = skill_path / "SKILL.md"
     if markdown_path.is_file():
         markdown_text = markdown_path.read_text(encoding="utf-8")
+        _mark_file_read(markdown_path)
         body = (f"--- SKILL.md ({len(markdown_text.splitlines())} lines) ---\n"
                 f"{markdown_text}")
     else:

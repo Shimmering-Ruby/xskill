@@ -2130,6 +2130,54 @@ def commit_changes(skill_dir: str, message: str) -> bool:
     return False
 
 
+def commit_generate_to_main_branch(skill_dir: str, message: str) -> str:
+    """Put the current worktree onto main and commit, creating either if needed.
+
+    Empty commits are allowed.  Staging is never created.  Returns the full
+    commit SHA (hex string).
+    """
+    from dulwich import porcelain
+
+    root = Path(skill_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    with skill_repo_lock(skill_dir):
+        if not (root / ".git").is_dir():
+            repo = porcelain.init(str(root), bare=False)
+            try:
+                _write_repo_identity(repo)
+            finally:
+                repo.close()
+        with _open_repo(skill_dir) as repo:
+            if not _has_branch(repo, "main"):
+                code, err = _checkout_branch(repo, "main", create=True)
+                if code != 0:
+                    raise RuntimeError(
+                        f"failed to create main branch: {err or code}"
+                    )
+            elif _current_branch_name(repo) != "main":
+                try:
+                    head_sha = repo.refs[b"HEAD"]
+                except KeyError:
+                    head_sha = None
+                if head_sha is not None:
+                    _branch_force_create(repo, "main", head_sha)
+                repo.refs.set_symbolic_ref(b"HEAD", _ref_for_branch("main"))
+            _stage_all(repo, root)
+            sha, err = _do_commit(repo, message, allow_empty=True)
+            if sha is None:
+                raise RuntimeError(
+                    f"commit_generate_to_main_branch commit 失败: {err}"
+                )
+    full_sha = sha.decode("ascii", errors="strict")
+    logger.info(
+        "generate commit on main: %s %s: %s",
+        root.name, full_sha[:7], message.splitlines()[0] if message else "",
+    )
+    from xskill.skill.catalog_store import notify_native_upsert
+    notify_native_upsert(skill_dir)
+    return full_sha
+
+
 def current_branch(skill_dir: str) -> str:
     with _open_repo(skill_dir) as repo:
         return _current_branch_name(repo)
