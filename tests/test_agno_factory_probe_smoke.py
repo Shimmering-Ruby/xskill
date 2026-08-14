@@ -121,7 +121,8 @@ def test_context_management_reads_compact_config_and_calls_compactor(tmp_path):
             })
             if len(calls) == 1:
                 assert len(messages) == 1
-                assert "SkillEditAgent working memory" in messages[0].content
+                assert "CONTEXT CHECKPOINT COMPACTION" in messages[0].content
+                assert "Keep only information needed" not in messages[0].content
                 if assistant_message is not None:
                     assistant_message.role = "assistant"
                     assistant_message.content = "COMPACT SUMMARY"

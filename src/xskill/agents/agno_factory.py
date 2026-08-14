@@ -71,7 +71,7 @@ def _wrap_with_context_mgmt(model, llm_cfg: dict, *, spill_root=None):
 
     - max_context 配置优先,缺省 200K + warning（``resolve_max_context``）。
     - 发请求前到 85% 主动剪裁旧 look/readfile 工具返回。
-    - 若 llm/llm_skill 配了 compact_token_limit，剪裁后仍超限时做一次摘要。
+    - 若 llm/llm_skill 配了 compact_token_limit，剪裁后仍超限时写一份续跑 handoff 摘要。
     - 唯一底层兜底：抓后端"上下文超长"报错 → 再剪 → 重发一次。
     - 记后端真实 prompt_tokens 供 ``context_budget()`` 工具读。
 
