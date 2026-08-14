@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from xskill.skill import candidates as C
-from xskill.agents.skill_edit_agent import SkillEditAgent, SYSTEM_PROMPT_TEMPLATE
+from xskill.agents.skill_edit_agent import (
+    SkillEditAgent,
+    SYSTEM_PROMPT_TEMPLATE,
+)
 from xskill.skill.git import init_skill_repo_on_baby, run_git
 
 
@@ -457,45 +460,39 @@ class TestWritingDisciplineInPrompt:
         """目标改为知识提炼，不再是把执行过程复述一遍。"""
         assert "提炼可泛化的知识" in SYSTEM_PROMPT_TEMPLATE
 
-    def test_has_anti_pattern_blacklist(self):
-        """反模式黑名单三件套必须明示。"""
-        for kw in ("反模式", "任务流程复述", "实例细节搬运", "触发表述抄题面"):
-            assert kw in SYSTEM_PROMPT_TEMPLATE, f"缺反模式纪律词 {kw!r}"
+    def test_has_do_not_write_blacklist(self):
+        """「不写什么」约束：空泛流程、实例细节、旧扁平编号规则。"""
+        for kw in ("不写什么", "执行流程复述", "实例细节", "编号领域规则"):
+            assert kw in SYSTEM_PROMPT_TEMPLATE, f"缺不写纪律词 {kw!r}"
+        assert "勿抄题面原文" in SYSTEM_PROMPT_TEMPLATE
 
-    def test_has_generalization_gate(self):
-        """泛化自检闸必须在场。"""
-        assert "泛化自检" in SYSTEM_PROMPT_TEMPLATE
+    def test_has_generalization_self_check(self):
+        """写完自检闸必须在场（换题仍成立）。"""
+        assert "写完自检" in SYSTEM_PROMPT_TEMPLATE
+        assert "换一道同领域不同题" in SYSTEM_PROMPT_TEMPLATE
 
-    def test_has_pitfall_quadruple(self):
-        """坑位四元组（错误模式→症状→根因→修法）必须明示。"""
-        assert "坑位四元组" in SYSTEM_PROMPT_TEMPLATE
+    def test_has_pitfall_quadruple_in_mode(self):
+        """模式内坑：错误模式→症状→根因→修法。"""
+        assert "**坑**：错误模式 → 症状 → 根因（机制）→ 修法" in SYSTEM_PROMPT_TEMPLATE
         for col in ("错误模式", "症状", "根因", "修法"):
-            assert col in SYSTEM_PROMPT_TEMPLATE, f"坑位四元组缺列 {col!r}"
+            assert col in SYSTEM_PROMPT_TEMPLATE, f"坑四元组缺列 {col!r}"
 
-    def test_has_evidence_strength(self):
-        """证据强度标注三档 + [推断] 上限。"""
-        assert "证据强度" in SYSTEM_PROMPT_TEMPLATE
-        assert "[实证：N 条轨迹]" in SYSTEM_PROMPT_TEMPLATE
+    def test_evidence_bar_forbids_body_tags(self):
+        """证据杆秤只约束取舍；正文禁止实证标签/题号/atom_id。"""
+        assert "证据杆秤" in SYSTEM_PROMPT_TEMPLATE
+        assert "正文不出现任何证据标签" in SYSTEM_PROMPT_TEMPLATE
+        assert "不要在正文或高频死因表中写" in SYSTEM_PROMPT_TEMPLATE
         assert "[单例]" in SYSTEM_PROMPT_TEMPLATE
         assert "[推断]" in SYSTEM_PROMPT_TEMPLATE
-
-    def test_marks_atom_ids_as_server_only_non_actionable_evidence(self):
-        """允许保留服务器端证据标记，但不得诱导用户 agent 回查。"""
-        assert "atom/traj id 可以保留为服务器端证据标记" in SYSTEM_PROMPT_TEMPLATE
-        assert "[XSkill 服务器端证据标记：atom_xxx_0001]" in SYSTEM_PROMPT_TEMPLATE
-        assert "用户 agent 没有读取原始 atom / traj 的接口" in SYSTEM_PROMPT_TEMPLATE
-        assert "不得用“见、参见、读取、查找”等" in SYSTEM_PROMPT_TEMPLATE
-        assert "标记前的结论也必须完整、自包含" in SYSTEM_PROMPT_TEMPLATE
-        assert "用户可见产物不得出现 ``atom_id`` / ``traj_id``" not in SYSTEM_PROMPT_TEMPLATE
-        assert '见 atom_xxx_0001' not in SYSTEM_PROMPT_TEMPLATE
-        # 内部来源信息仍需保留，不能误删现有 provenance 契约。
+        # provenance 仍在 frontmatter / commit message，不进正文。
         assert 'source_atoms: ["atom_xxx_0001", ...]' in SYSTEM_PROMPT_TEMPLATE
         assert "commit message 写明本次基于哪些 atom_id" in SYSTEM_PROMPT_TEMPLATE
+        assert "[XSkill 服务器端证据标记：atom_xxx_0001]" not in SYSTEM_PROMPT_TEMPLATE
 
     def test_has_param_no_fallback(self):
         """参数化禁兜底——禁止硬编码默认值。"""
-        assert "禁止任何具体值兜底" in SYSTEM_PROMPT_TEMPLATE
-        assert "somefile.xlsx" in SYSTEM_PROMPT_TEMPLATE
+        assert "禁止硬编码默认值兜底" in SYSTEM_PROMPT_TEMPLATE
+        assert "禁止硬编码路径/题面值兜底" in SYSTEM_PROMPT_TEMPLATE
 
     def test_has_failure_mining(self):
         """失败挖掘三规则：死因回溯 / 成败差分 / 无症状死亡。"""
@@ -503,14 +500,25 @@ class TestWritingDisciplineInPrompt:
             assert kw in SYSTEM_PROMPT_TEMPLATE, f"缺失败挖掘纪律词 {kw!r}"
 
     def test_has_length_budget_and_deletion_rule(self):
-        """≤200 行长度预算 + 删减铁律（宁删整条弱规则不砍强规则半条）。"""
-        assert "200 行" in SYSTEM_PROMPT_TEMPLATE
-        assert "宁可删掉整条弱规则" in SYSTEM_PROMPT_TEMPLATE
+        """≤400 行长度预算 + 弱模式整条删、不许砍半条。"""
+        assert "400 行" in SYSTEM_PROMPT_TEMPLATE
+        assert "不许砍成半条" in SYSTEM_PROMPT_TEMPLATE
 
-    def test_has_four_section_structure(self):
-        """V4 四段结构：核心原则 / 领域规则 / 坑位清单 / 工具。"""
-        for sec in ("## 核心原则", "## 领域规则", "## 坑位清单", "## 工具"):
-            assert sec in SYSTEM_PROMPT_TEMPLATE, f"缺正文结构段 {sec!r}"
+    def test_has_v7_structure_guidance(self):
+        """v7 默认结构：通用核心 + 任务模式索引 + 模式四件套 + 交付前自检。"""
+        for kw in (
+            "## 通用核心（所有任务必读，≤3 条）",
+            "## 任务模式索引",
+            "## 交付前自检（必跑）",
+            "**适用**：",
+            "**方法**：",
+            "**坑**：",
+            "**验证**：",
+        ):
+            assert kw in SYSTEM_PROMPT_TEMPLATE, f"缺 v7 结构词 {kw!r}"
+        # 旧四段不再作为合法默认骨架。
+        assert "正文四段顺序固定" not in SYSTEM_PROMPT_TEMPLATE
+        assert "不要把正文写回「核心原则 → 编号领域规则 → 文末坑位清单 → 工具」旧四段" in SYSTEM_PROMPT_TEMPLATE
 
     def test_old_full_executable_guidance_removed(self):
         """旧的伪技能导向措辞必须删干净。"""
