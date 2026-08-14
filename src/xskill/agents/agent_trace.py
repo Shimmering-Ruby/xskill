@@ -202,6 +202,7 @@ def _append(text: str) -> None:
     try:
         with open(sink, "a", encoding="utf-8") as trace_file:
             trace_file.write(text)
+            trace_file.flush()
     except OSError as exc:
         _warn_io_failure(exc, sink)
 
@@ -215,6 +216,7 @@ def append_to(path: Path | str | None, text: str) -> None:
         sink.parent.mkdir(parents=True, exist_ok=True)
         with sink.open("a", encoding="utf-8") as trace_file:
             trace_file.write(text)
+            trace_file.flush()
     except OSError as exc:
         _warn_io_failure(exc, sink)
 

@@ -65,7 +65,11 @@ def create_job(
 ) -> dict[str, Any]:
     job_id = uuid.uuid4().hex
     log_path = _job_dir(logs_dir, user_id) / f"{job_id}.log"
-    log_path.write_text("", encoding="utf-8")
+    log_path.write_text(
+        f"generate queued job_id={job_id} user={user_id}\n"
+        "waiting for SkillEdit pool seat\n",
+        encoding="utf-8",
+    )
     job = {
         "job_id": job_id,
         "client_id": client_id,
@@ -267,6 +271,17 @@ def _update_job(job_id: str, **fields: Any) -> dict[str, Any] | None:
     return snapshot
 
 
+def _append_generate_log(log_path: str | None, text: str) -> None:
+    if not log_path:
+        return
+    try:
+        with Path(log_path).open("a", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+    except OSError:
+        logger.debug("failed to append generate log %s", log_path, exc_info=True)
+
+
 def _write_status(job: dict[str, Any]) -> None:
     log_path = Path(job["log_path"])
     payload = {
@@ -385,6 +400,10 @@ def run_claimed_generate_job(
         stored.setdefault("error", "")
         _JOBS[job_id] = stored
     _update_job(job_id, status="running")
+    _append_generate_log(
+        stored.get("log_path") or job.get("log_path"),
+        "generate running, starting agent\n",
+    )
     try:
         _run_generate_job_body(
             get_job(job_id) or stored,
@@ -532,6 +551,9 @@ def iter_job_events(
             }
             return
         if time.time() - last_emit >= ping_every:
-            yield {"type": "ping"}
+            yield {
+                "type": "ping",
+                "status": current.get("status") or "queued",
+            }
             last_emit = time.time()
         time.sleep(poll_seconds)
