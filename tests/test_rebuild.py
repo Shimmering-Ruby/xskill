@@ -235,6 +235,74 @@ def test_wipe_all_skills_removes_skill_dirs_keeps_references(tmp_path):
     assert not (skill_root / ".skill_index.pkl").exists()
 
 
+def test_wipe_all_skills_retries_enotempty_on_git_objects(tmp_path, monkeypatch):
+    """serve/git 还在写 .git/objects 时 rmtree 会 ENOTEMPTY；应重试删干净。"""
+    import errno
+    import shutil
+    import xskill.skill.skill as skill_mod
+
+    skill_root = tmp_path / "skill"
+    skill_path = skill_root / "foo"
+    objects = skill_path / ".git" / "objects" / "ab"
+    objects.mkdir(parents=True)
+    blob = objects / ("c" * 38)
+    blob.write_bytes(b"git-obj")
+    blob.chmod(0o444)
+    (skill_path / "SKILL.md").write_text(
+        "---\nname: foo\ndescription: d\n---\n",
+        encoding="utf-8",
+    )
+
+    real_rmtree = shutil.rmtree
+    calls = {"n": 0}
+
+    def flaky(path, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", "objects")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(skill_mod.shutil, "rmtree", flaky)
+    monkeypatch.setattr(skill_mod.time, "sleep", lambda _s: None)
+
+    removed_count = SkillRepo(skill_root).wipe_all_skills()
+
+    assert removed_count == 1
+    assert not skill_path.exists()
+    leftovers = [p for p in skill_root.iterdir() if p.name.startswith(".wipe-")]
+    assert leftovers == []
+    assert calls["n"] >= 2
+
+
+def test_wipe_all_skills_cleans_leftover_wipe_dir(tmp_path):
+    skill_root = tmp_path / "skill"
+    leftover = skill_root / ".wipe-foo-1"
+    (leftover / ".git").mkdir(parents=True)
+    (leftover / "SKILL.md").write_text("# leftover\n", encoding="utf-8")
+
+    removed_count = SkillRepo(skill_root).wipe_all_skills()
+
+    assert removed_count == 1
+    assert not leftover.exists()
+
+
+def test_wipe_all_skills_deletes_readonly_git_objects(tmp_path):
+    skill_root = tmp_path / "skill"
+    skill_path = skill_root / "packed"
+    objects = skill_path / ".git" / "objects" / "de"
+    objects.mkdir(parents=True)
+    blob = objects / ("f" * 38)
+    blob.write_bytes(b"packed")
+    blob.chmod(0o444)
+    (skill_path / "SKILL.md").write_text(
+        "---\nname: packed\ndescription: d\n---\n",
+        encoding="utf-8",
+    )
+
+    assert SkillRepo(skill_root).wipe_all_skills() == 1
+    assert not skill_path.exists()
+
+
 def test_rebuild_force_clears_derived_state_and_install_history(
     monkeypatch, tmp_path,
 ):

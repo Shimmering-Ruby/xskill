@@ -13,11 +13,13 @@ YAML frontmatter；legacy（skill.md + .abstract）目录读时惰性合成，�
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
 import shutil
 import stat
+import time
 from datetime import datetime, date
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
@@ -36,17 +38,94 @@ if TYPE_CHECKING:
 logger = logging.getLogger("xskill.skill_manager")
 
 
-def _remove_readonly_file(function, path: str, error_info) -> None:
-    """让 Windows 上只读的 Git 对象可由 shutil.rmtree 删除。"""
+_RMTREE_RETRY_ERRNOS = {errno.ENOTEMPTY, errno.EBUSY, errno.EAGAIN}
+if hasattr(errno, "ESTALE"):
+    _RMTREE_RETRY_ERRNOS.add(errno.ESTALE)
+_RMTREE_ATTEMPTS = 8
+
+
+def _chmod_writable(path: str) -> None:
+    try:
+        mode = os.stat(path).st_mode
+        os.chmod(path, mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    except OSError:
+        pass
+
+
+def _make_tree_writable(path: Path) -> None:
+    """Git 对象常是 0444；overlay/NFS 上还要目录可写才能 rmdir。"""
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            _chmod_writable(os.path.join(root, name))
+        for name in dirs:
+            _chmod_writable(os.path.join(root, name))
+    _chmod_writable(str(path))
+
+
+def _rmtree_onerror(function, path: str, error_info) -> None:
+    """只读 git 对象、以及偶发 PermissionError：chmod 后再删一次。"""
     error = error_info[1]
-    if os.name != "nt" or not isinstance(error, PermissionError):
+    _chmod_writable(path)
+    try:
+        function(path)
+    except OSError:
         raise error
-    os.chmod(path, stat.S_IWRITE)
-    function(path)
+
+
+def _park_for_delete(path: Path) -> Path:
+    """先改名再删，避免 serve/git 还往原路径写 objects 导致 ENOTEMPTY。"""
+    parent = path.parent
+    for index in range(16):
+        parked = parent / (
+            f".wipe-{path.name}-{os.getpid()}-{time.time_ns()}-{index}"
+        )
+        try:
+            path.rename(parked)
+            return parked
+        except OSError:
+            continue
+    return path
+
+
+def _rmtree_with_retry(path: Path) -> None:
+    delay = 0.05
+    last: OSError | None = None
+    for attempt in range(_RMTREE_ATTEMPTS):
+        try:
+            shutil.rmtree(path, onerror=_rmtree_onerror)
+            return
+        except OSError as error:
+            if not path.exists():
+                return
+            if error.errno not in _RMTREE_RETRY_ERRNOS:
+                raise
+            last = error
+            if attempt >= 1:
+                _make_tree_writable(path)
+            time.sleep(delay)
+            delay = min(delay * 2, 0.8)
+    assert last is not None
+    raise last
 
 
 def _remove_tree(path: Path) -> None:
-    shutil.rmtree(path, onerror=_remove_readonly_file)
+    """删 skill 目录（含 ``.git/objects``）。ENOTEMPTY 时重试。"""
+    path = Path(path)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if not path.is_dir():
+        return
+    parked = _park_for_delete(path)
+    try:
+        _rmtree_with_retry(parked)
+    except OSError as error:
+        raise OSError(
+            error.errno,
+            f"failed to delete {path}: {error.strerror}. "
+            "If xskill serve is still running, stop it and retry.",
+            str(parked),
+        ) from error
 
 
 # ═════════════════════════════════════════════════════════════════

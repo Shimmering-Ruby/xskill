@@ -13,13 +13,12 @@ from __future__ import annotations
 import logging
 import operator
 import pickle
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Optional
 
 import numpy
 
-from xskill.skill.skill import Skill, _load_skill
+from xskill.skill.skill import Skill, _load_skill, _remove_tree
 from xskill.skill.git import commit_changes
 
 if TYPE_CHECKING:
@@ -118,7 +117,7 @@ class SkillRepo:
             # 一个 skill 目录的判据：有 SKILL.md 或 .git 子仓（baby 态可能
             # 只有 .git 还没写 SKILL.md）。
             if (sub / "SKILL.md").is_file() or (sub / ".git").is_dir():
-                shutil.rmtree(sub)
+                _remove_tree(sub)
                 n += 1
         # 索引已失效，删掉避免指向不存在的 skill
         idx = self.root / ".skill_index.pkl"
