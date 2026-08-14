@@ -1,0 +1,213 @@
+diff --git a/src/xskill/ecosystems/_history.py b/src/xskill/ecosystems/_history.py
+index d4748b8..35e6ca8 100644
+--- a/src/xskill/ecosystems/_history.py
++++ b/src/xskill/ecosystems/_history.py
+@@ -38,6 +38,10 @@ from typing import Any, Callable, Iterable, Optional
+ 
+ logger = logging.getLogger("xskill.ecosystems.install_history")
+ 
++# 旧账本没有 append_sequence，升级后 sidecar 可能落后于行号。
++# 中间几条序号倒退或一行坏 JSON 不应把整台机器的安装停掉。
++_SKIP_BAD_HISTORY_LINES = 64
++
+ 
+ def fsync_directory(directory: Path) -> None:
+     """在 POSIX 上持久化 rename/unlink 元数据；Windows 不支持目录 fsync。"""
+@@ -463,6 +467,8 @@ class InstallHistory:
+         self._index_cache_initialized = False
+         self._sequence_validated = False
+         self._sequence_floor = 0
++        self._seq_file_size: int | None = None
++        self._skipped_bad_lines = 0
+ 
+     @property
+     def _history_lock_path(self) -> Path:
+@@ -614,6 +620,8 @@ class InstallHistory:
+                 f"install history cannot be decoded: {self.path}"
+             ) from exc
+         records: list[dict] = []
++        if starting_line_number == 1 and previous_sequence == 0:
++            self._skipped_bad_lines = 0
+         for line_number, raw_line in enumerate(
+             lines,
+             start=starting_line_number,
+@@ -625,42 +633,49 @@ class InstallHistory:
+             try:
+                 record = json.loads(line)
+             except json.JSONDecodeError as exc:
+-                logger.error(
+-                    "invalid install history JSON path=%s line=%d error_type=%s",
+-                    self.path,
++                self._skip_or_raise(
+                     line_number,
+-                    type(exc).__name__,
++                    reason="invalid_json",
++                    error_type=type(exc).__name__,
+                 )
+-                raise InstallHistoryCorruptError(
+-                    f"invalid install history JSON at line {line_number}"
+-                ) from exc
++                continue
+             if not isinstance(record, dict):
+-                logger.error(
+-                    "invalid install history schema path=%s line=%d",
+-                    self.path,
+-                    line_number,
+-                )
+-                raise InstallHistoryCorruptError(
+-                    f"install history line {line_number} is not an object"
+-                )
++                self._skip_or_raise(line_number, reason="not_object")
++                continue
+             append_sequence = record.get("append_sequence", line_number)
+             if (
+-                not isinstance(append_sequence, int)
++                isinstance(append_sequence, bool)
++                or not isinstance(append_sequence, int)
+                 or append_sequence <= previous_sequence
+             ):
+-                logger.error(
+-                    "non-monotonic install history sequence path=%s line=%d",
+-                    self.path,
+-                    line_number,
+-                )
+-                raise InstallHistoryCorruptError(
+-                    f"non-monotonic install history at line {line_number}"
+-                )
++                self._skip_or_raise(line_number, reason="non_monotonic")
++                continue
+             record["append_sequence"] = append_sequence
+             previous_sequence = append_sequence
+             records.append(record)
+         return records
+ 
++    def _skip_or_raise(
++        self,
++        line_number: int,
++        *,
++        reason: str,
++        error_type: str | None = None,
++    ) -> None:
++        """跳过少量坏行。不把行内容写进日志。超限仍 fail-loud。"""
++        self._skipped_bad_lines += 1
++        logger.warning(
++            "skipping install history line path=%s line=%d reason=%s%s",
++            self.path,
++            line_number,
++            reason,
++            f" error_type={error_type}" if error_type else "",
++        )
++        if self._skipped_bad_lines > _SKIP_BAD_HISTORY_LINES:
++            raise InstallHistoryCorruptError(
++                f"too many unreadable install history lines at line {line_number}"
++            )
++
+     def _parse_records_snapshot_locked(
+         self,
+     ) -> tuple[list[dict], Optional[InstallHistoryFileSignature]]:
+@@ -1005,6 +1020,13 @@ class InstallHistory:
+                 )
+ 
+     def _next_sequence_locked(self, minimum: int) -> int:
++        size_now = self.path.stat().st_size if self.path.is_file() else 0
++        if (
++            self._seq_file_size is not None
++            and size_now != self._seq_file_size
++        ):
++            # 别的进程用旧格式追加过，sidecar 可能已经落后于行号。
++            self._sequence_validated = False
+         stored: int | None = None
+         sequence_present = self._sequence_path.is_file()
+         if sequence_present:
+@@ -1038,8 +1060,13 @@ class InstallHistory:
+                 ),
+                 default=0,
+             )
+-            stored = max(stored or 0, history_maximum)
++            stored = max(
++                stored or 0,
++                history_maximum,
++                self._last_read_physical_line_count,
++            )
+             self._sequence_validated = True
++        self._seq_file_size = size_now
+         return max(stored or 0, minimum, self._sequence_floor) + 1
+ 
+     def _append_records(
+@@ -1088,6 +1115,10 @@ class InstallHistory:
+                 ) from exc
+             if not history_existed:
+                 fsync_directory(self.path.parent)
++            try:
++                self._seq_file_size = self.path.stat().st_size
++            except OSError:
++                self._seq_file_size = None
+         return tuple(drafts)
+ 
+     def _read_recovery(self, skill: str, target: str) -> Optional[dict]:
+diff --git a/src/xskill/team/client/import_follow.py b/src/xskill/team/client/import_follow.py
+index dda060d..34fce12 100644
+--- a/src/xskill/team/client/import_follow.py
++++ b/src/xskill/team/client/import_follow.py
+@@ -4,7 +4,10 @@ from __future__ import annotations
+ import logging
+ from pathlib import Path
+ 
+-from xskill.ecosystems._history import InstallHistory
++from xskill.ecosystems._history import (
++    InstallHistory,
++    InstallHistoryCorruptError,
++)
+ from xskill.team.client.daemon import install_skill_to_ecosystems
+ from xskill.team.shared.git_bundle import apply_repo_bundle
+ from xskill.team.shared.reconcile import reconcile_skill_side
+@@ -22,7 +25,11 @@ def follow_imported_skill(
+     home_root: Path,
+     history_path: Path,
+ ) -> None:
+-    """拉 bundle，把本机 ``_active`` 切到这次导入的主干，并装到编程代理目录。"""
++    """拉 bundle，把本机 ``_active`` 切到这次导入的主干，并装到编程代理目录。
++
++    安装历史只用于灰度归因。账本坏了也要把技能装进 harness，不能让用户
++    看见「纳入失败」。
++    """
+     if not sha:
+         raise RuntimeError(f"import follow missing sha for {name}")
+     response = http.get(f"/api/v1/team/skill/{name}/bundle", headers=headers)
+@@ -33,16 +40,25 @@ def follow_imported_skill(
+         )
+     dest = Path(skill_dir) / name
+     apply_repo_bundle(response.content, dest)
+-    history = InstallHistory(history_path)
+-    result = reconcile_skill_side(
+-        repo_dir=dest,
+-        target_side="main",
+-        target_sha=sha,
+-        history=history,
+-        on_changed=lambda repo: install_skill_to_ecosystems(
+-            repo, home_root=home_root,
+-        ),
+-    )
+-    if result == "already_aligned":
++    result = "bundle_applied"
++    try:
++        history = InstallHistory(history_path)
++        result = reconcile_skill_side(
++            repo_dir=dest,
++            target_side="main",
++            target_sha=sha,
++            history=history,
++            on_changed=lambda repo: install_skill_to_ecosystems(
++                repo, home_root=home_root,
++            ),
++        )
++    except (InstallHistoryCorruptError, OSError) as history_error:
++        logger.warning(
++            "import follow history skipped for %s: %s",
++            name,
++            history_error,
++        )
++        result = "history_skipped"
++    if result != "checked_out" and result != "skipped_user_edit":
+         install_skill_to_ecosystems(dest, home_root=home_root)
+     logger.info("import follow %s -> main %s (%s)", name, sha[:8], result)

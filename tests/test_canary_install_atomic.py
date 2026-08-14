@@ -18,6 +18,7 @@ from xskill.ecosystems._history import (
     InstallHistoryCorruptError,
     InstallPlan,
     InstallTransactionRequest,
+    _SKIP_BAD_HISTORY_LINES,
 )
 from xskill.ecosystems.claude_code import (
     CCSessionIngester,
@@ -3080,16 +3081,16 @@ def test_transact_many_parses_history_once_for_twenty_five_skills(tmp_path):
     assert len(history.all_records()) == 25
 
 
-def test_bad_history_line_fails_loud_without_logging_content(tmp_path, caplog):
+def test_bad_history_line_is_skipped_without_logging_content(tmp_path, caplog):
     history_path = tmp_path / "history.jsonl"
     history_path.write_text(
-        '{"skill":"safe"}\nSECRET-BROKEN-CONTENT\n',
+        '{"skill":"safe"}\nSECRET-BROKEN-CONTENT\n{"skill":"after"}\n',
         encoding="utf-8",
     )
 
-    with pytest.raises(InstallHistoryCorruptError):
-        InstallHistory(history_path).all_records()
+    records = InstallHistory(history_path).all_records()
 
+    assert [record.get("skill") for record in records] == ["safe", "after"]
     assert "line=2" in caplog.text
     assert "SECRET-BROKEN-CONTENT" not in caplog.text
 
@@ -3178,3 +3179,49 @@ def test_terminal_and_rotation_share_generation_fence(tmp_path):
 
     assert state == {"generation": "main-v2:", "target": "main"}
     assert history.index().latest("race-skill", "claude_code")["sha"] == "main-v2"
+
+
+def _legacy_line(skill: str) -> str:
+    return json.dumps({
+        "t": 1.0,
+        "action": "install",
+        "skill": skill,
+        "side": "main",
+        "sha": "abc",
+    })
+
+
+def test_mixed_legacy_and_stale_sidecar_sequences_do_not_block(tmp_path):
+    """旧行无序号 + 新行 sidecar 落后于行号时，仍可读、仍可追加。"""
+    history_path = tmp_path / "history.jsonl"
+    lines = [_legacy_line(f"old-{index}") for index in range(1, 11)]
+    lines.append(json.dumps({
+        "t": 2.0,
+        "action": "install",
+        "skill": "atlas-dependency-analysis",
+        "side": "main",
+        "sha": "abc",
+        "append_sequence": 8,
+    }))
+    lines.append(_legacy_line("after-mix"))
+    history_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / "history.jsonl.sequence").write_text("9\n", encoding="ascii")
+
+    history = InstallHistory(history_path)
+    records = history.all_records()
+    skills = [record["skill"] for record in records]
+    assert "old-1" in skills
+    assert "after-mix" in skills
+    assert "atlas-dependency-analysis" not in skills
+
+    written = history.record(skill="new-skill", side="main", sha="def")
+    assert written["append_sequence"] > 11
+
+
+def test_too_many_bad_history_lines_still_fail_loud(tmp_path):
+    history_path = tmp_path / "history.jsonl"
+    payload = "\n".join(["not-json"] * (_SKIP_BAD_HISTORY_LINES + 1)) + "\n"
+    history_path.write_text(payload, encoding="utf-8")
+    with pytest.raises(InstallHistoryCorruptError, match="too many"):
+        InstallHistory(history_path).all_records()
+
