@@ -959,8 +959,12 @@ class TestContextManager:
         cm.wrap(fake_invoke)(messages)
 
         assert len(compact_calls) == 1
-        assert "SkillEditAgent working memory" in compact_calls[0]
+        assert "CONTEXT CHECKPOINT COMPACTION" in compact_calls[0]
+        assert "handoff summary" in compact_calls[0]
+        assert "Keep only information needed" not in compact_calls[0]
         assert "spill_path:" in compact_calls[0]
+        # system prompt is kept verbatim; do not dump it into the summarizer
+        assert compact_calls[0].count("SkillEditAgent system prompt") == 0
         compacted = seen["messages"]
         assert [m.role for m in compacted] == [
             "system", "user", "assistant", "assistant", "user",
@@ -1038,6 +1042,57 @@ class TestContextManager:
         )
 
         assert compact_calls == []
+
+    def test_compact_prompt_is_handoff_and_includes_tool_calls(self, tmp_path):
+        """压缩提示词应是续跑 handoff，并让摘要模型看见已执行的 tool_call。"""
+        from xskill.agents.context_budget import (
+            COMPACT_PROMPT_TEMPLATE,
+            build_compact_prompt,
+        )
+
+        assert "Keep only information needed" not in COMPACT_PROMPT_TEMPLATE
+        assert "Candidate Status" not in COMPACT_PROMPT_TEMPLATE
+        assert "CONTEXT CHECKPOINT COMPACTION" in COMPACT_PROMPT_TEMPLATE
+        assert "### Done" in COMPACT_PROMPT_TEMPLATE
+        assert "compacted summary" in COMPACT_PROMPT_TEMPLATE
+        assert "GenerateAgent" in COMPACT_PROMPT_TEMPLATE
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None, tool_calls=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+                self.tool_calls = tool_calls
+
+        prompt = build_compact_prompt([
+            _Msg("user", "根据 alice 的轨迹生成 docker-compose skill"),
+            _Msg(
+                "assistant",
+                "",
+                tool_calls=[{
+                    "id": "call_grep",
+                    "function": {
+                        "name": "grep_files",
+                        "arguments": '{"pattern": "compose", "path": "/data/traj"}',
+                    },
+                }],
+            ),
+            _Msg("tool", "hit: docker-compose.yml", "grep_files"),
+            _Msg(
+                "assistant",
+                "准备提交",
+                tool_calls=[{
+                    "id": "call_commit",
+                    "function": {
+                        "name": "commit_generate_main",
+                        "arguments": '{"skill_name": "docker-compose"}',
+                    },
+                }],
+            ),
+        ])
+        assert "[tool_call] grep_files(" in prompt
+        assert "commit_generate_main" in prompt
+        assert "根据 alice 的轨迹生成 docker-compose skill" in prompt
 
     def test_overlong_error_triggers_retrim_and_resend(self):
         from xskill.agents.context_budget import ContextManager, _TRIM_MARK

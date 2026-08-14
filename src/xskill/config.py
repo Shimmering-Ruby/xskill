@@ -81,10 +81,11 @@ llm:
                          # gpt-4o, 64000 for deepseek-chat).
   # compact_token_limit: 120000  # optional; after trimming/spilling old tool
                          # results, if the estimated history is still above this
-                         # limit, ask the same chat model to summarize old
-                         # SkillEditAgent memory. The effective limit is never
-                         # below spill@ (85% of max_context), so spill always
-                         # runs first. Leave commented to disable.
+                         # limit, ask the same chat model to write a handoff
+                         # summary of old agent memory (Generate / SkillEdit).
+                         # The effective limit is never below spill@ (85% of
+                         # max_context), so spill always runs first. Leave
+                         # commented to disable.
   # compact_keep_recent_messages: 6 # optional; recent complete message blocks
                          # kept verbatim after compact. Default 6.
   # temperature: 0.0     # optional; default 0 (deterministic)

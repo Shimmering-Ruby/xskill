@@ -15,8 +15,8 @@
    ``usage.prompt_tokens`` 与估算 raw 值做 EMA 方向校准。  
    从最旧的开始剪,剪到回落 85% 以下为止。
 3. **可选 compact**：先把可 spill 的结果尽量降到 85% 边界；仍超出
-   ``max(compact_token_limit, spill 边界)`` 才调用同一个 model 做一次工作
-   记忆摘要，然后保留 system、首轮 user、摘要和最近完整消息块。
+   ``max(compact_token_limit, spill 边界)`` 才调用同一个 model 写一份
+   可续跑的 handoff 摘要，然后保留 system、首轮 user、摘要和最近完整消息块。
 4. **最底层兜底（唯一）**：抓住后端抛的"上下文超长"报错 → 再剪一轮历史 →
    **重发一次**。就这一条,不做解析上限学分母、不做多触发统一。
 5. **真实已用 token**：每次请求拿到 ``usage.prompt_tokens`` 写进 thread-local,
@@ -67,32 +67,49 @@ _SPILLABLE_TOOLS = (
     "grep_files", "edit",
 )
 _TRIM_MARK = "[…look 旧结果已剪裁,需要可重新 look…]"
-_COMPACT_MARK = "[compacted_skill_edit_agent_memory]"
+_COMPACT_MARK = "[compacted_agent_memory]"
+_COMPACT_TOOL_ARGS_MAX_CHARS = 2000
 
-COMPACT_PROMPT_TEMPLATE = """You are compacting SkillEditAgent working memory.
+# Handoff prompt: Pi's structured checkpoint + Codex's "another LLM resumes"
+# framing. The old SkillEdit-only "Keep only …" wording made GenerateAgent
+# summaries collapse to empty sections, so the next turn forgot executed work.
+COMPACT_PROMPT_TEMPLATE = """You are performing a CONTEXT CHECKPOINT COMPACTION.
 
-Keep only information needed to continue editing the skill safely.
+The conversation below is working memory for an XSkill agent (GenerateAgent, SkillEditAgent, or similar). Another LLM will resume the SAME task from your summary, plus the original system prompt and a short recent-message tail. If you drop executed work, that next agent will not know what it already did.
 
-You must preserve:
-1. The original task scenario and target skill name.
-2. Candidate atom_ids, weightscore, intent, summary, and unresolved work.
-3. Evidence already read from atom_task_read/read_traj/read_file/skill_read.
-4. Any concrete rules, pitfalls, commands, or file edits already inferred.
-5. Files already read, files already written, and pending files to edit.
-6. All spill_path values needed to reload full evidence later.
+Do NOT continue the task. Do NOT call tools. Do NOT answer the user. ONLY output the handoff summary.
+
+Be dense, not empty. Prefer a longer accurate handoff over a short one that forgets progress. A good summary is usually hundreds to a few thousand words. Empty or near-empty sections are a failure when the history shows real tool calls, file edits, or findings.
+
+If the history already contains a compacted summary, carry every still-relevant fact forward. Newer messages update progress; they do not license deleting earlier decisions, findings, file paths, skill names, or unfinished work.
+
+Preserve, with exact names, paths, ids, commands, and error text whenever present:
+1. The original user request, constraints, and target skill.
+2. What was already executed: tools called, files/trajectories read, files written or edited, searches run, commits attempted, and each outcome.
+3. Concrete findings: rules, pitfalls, commands, errors, function names, line-level evidence, examples, and any skill text already drafted.
+4. SkillEdit candidates when present (atom_id, weightscore, intent, summary) and any still unresolved items. If this run has no candidates, do not invent a Candidate section — put the real work under Progress and Evidence.
+5. All spill_path values, with tool_name and how to reload them.
+6. Current file and skill state, and the next concrete actions.
 
 Do not invent evidence.
-Do not drop unresolved candidates.
-Do not copy long raw trajectory text; summarize it and keep spill_path.
+Do not omit unfinished work just to look concise.
+Do not paste huge raw trajectory dumps; extract the concrete facts listed above and keep every spill_path so full text can be reloaded.
 
-Output sections:
-## Current Goal
-## Candidate Status
-## Evidence Summary
-## Derived Rules
-## File State
-## Pending Actions
+Write in the same language as the conversation.
+
+Use this format:
+
+## Goal
+## Constraints
+## Progress
+### Done
+### In Progress
+### Blocked
+## Key Decisions
+## Evidence And Artifacts
 ## Reloadable Spill Paths
+## Next Steps
+## Critical Context
 
 Conversation history to compact:
 {history}
@@ -381,18 +398,93 @@ def _estimate_history_tokens(
     return int(total * calibration)
 
 
+def _truncate_for_compact(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"{text[:max_chars]}\n... [{omitted} chars truncated]"
+
+
+def _format_tool_calls_for_compact(msg: Any) -> str:
+    """Serialize assistant tool_calls so the summarizer can see executed work."""
+    calls = getattr(msg, "tool_calls", None)
+    if calls is None and isinstance(msg, dict):
+        calls = msg.get("tool_calls")
+    lines: list[str] = []
+    for call in calls or []:
+        if isinstance(call, dict):
+            function_data = call.get("function") or {}
+            name = function_data.get("name") or call.get("name") or "unknown"
+            arguments = function_data.get("arguments")
+        else:
+            function_data = getattr(call, "function", None)
+            name = (
+                getattr(function_data, "name", None)
+                or getattr(call, "name", None)
+                or "unknown"
+            )
+            arguments = getattr(function_data, "arguments", None)
+        if arguments is None:
+            args_text = ""
+        elif isinstance(arguments, str):
+            args_text = arguments
+        else:
+            args_text = json.dumps(arguments, ensure_ascii=False)
+        args_text = _truncate_for_compact(args_text, _COMPACT_TOOL_ARGS_MAX_CHARS)
+        lines.append(f"[tool_call] {name}({args_text})")
+    return "\n".join(lines)
+
+
+def _format_message_for_compact(index: int, msg: Any) -> str:
+    role = _msg_role(msg) or "unknown"
+    tool = _tool_name(msg)
+    title = f"### message {index}: role={role}"
+    if tool:
+        title += f" tool={tool}"
+    body_parts: list[str] = []
+    content = _msg_content_str(msg)
+    if content:
+        body_parts.append(content)
+    tool_calls_text = _format_tool_calls_for_compact(msg)
+    if tool_calls_text:
+        body_parts.append(tool_calls_text)
+    body = "\n".join(body_parts) if body_parts else "(empty)"
+    return f"{title}\n{body}"
+
+
 def build_compact_prompt(messages: list) -> str:
-    """Build the LLM prompt used to compact SkillEditAgent working memory."""
-    parts: list[str] = []
-    for i, msg in enumerate(messages or [], 1):
-        role = _msg_role(msg) or "unknown"
-        tool = _tool_name(msg)
-        title = f"### message {i}: role={role}"
-        if tool:
-            title += f" tool={tool}"
-        parts.append(title)
-        parts.append(_msg_content_str(msg))
+    """Build the LLM prompt used to compact agent working memory."""
+    parts = [
+        _format_message_for_compact(i, msg)
+        for i, msg in enumerate(messages or [], 1)
+    ]
     return COMPACT_PROMPT_TEMPLATE.replace("{history}", "\n\n".join(parts))
+
+
+def _messages_for_compact_prompt(
+    messages: list,
+    *,
+    system_msg: Any,
+    first_user: Any,
+    tail: list,
+) -> list:
+    """History the summarizer must cover: first user + dropped middle.
+
+    System and the recent tail stay verbatim after compact, so they are
+    omitted here. Dumping the huge system prompt made the summarizer ignore
+    executed work.
+    """
+    kept_ids = {
+        id(msg)
+        for msg in (system_msg, first_user, *tail)
+        if msg is not None
+    }
+    dropped = [msg for msg in messages or [] if id(msg) not in kept_ids]
+    source: list = []
+    if first_user is not None:
+        source.append(first_user)
+    source.extend(dropped)
+    return source
 
 
 def _safe_recent_tail(messages: list, keep_recent_messages: int) -> list:
@@ -568,7 +660,16 @@ def _compact_history_in_place(
     system_msg = next((m for m in messages if _msg_role(m) == "system"), None)
     first_user = next((m for m in messages if _msg_role(m) == "user"), None)
     tail = _safe_recent_tail(messages, keep_recent_messages)
-    prompt = build_compact_prompt(messages)
+    compact_source = _messages_for_compact_prompt(
+        messages,
+        system_msg=system_msg,
+        first_user=first_user,
+        tail=tail,
+    )
+    dropped = [msg for msg in compact_source if msg is not first_user]
+    if not dropped:
+        return False
+    prompt = build_compact_prompt(compact_source)
     summary = (compact_fn(prompt) or "").strip()
     if not summary:
         return False
