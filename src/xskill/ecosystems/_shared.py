@@ -193,6 +193,17 @@ _KNOWN_ECOSYSTEMS: list[dict] = [
         "bridge_subpath": ".xskill/cursor_sessions",
         "source_kind": "dir",
     },
+    {
+        "id": "deepseek_harness",
+        # DeepSeek Harness (dsh)：探测 ``~/.dsh``（dsh home）存在即视为可用
+        # —— 用户可能装了 dsh 还没跑过 session，skill 安装不应依赖
+        # ``sessions`` 子目录。session 在 <home>/.dsh/sessions/
+        # --<normalized-cwd>--/<encoded-id>/session.jsonl（明文模式）。
+        # $DSH_HOME 自定义位置暂不识别（探测表是静态 home 相对路径）。
+        "source_subpath": ".dsh",
+        "bridge_subpath": ".xskill/dsh_sessions",
+        "source_kind": "dir",
+    },
 ]
 
 
@@ -526,7 +537,8 @@ def adapt_trajectory(
     - ``raw`` -- plain text; wrapped in a basic trajectory markdown template.
     - ``claude_code_jsonl`` / ``codex_rollout_jsonl`` /
       ``nga3_jsonl`` / ``zcode_jsonl`` / ``openclaw_trajectory_jsonl`` /
-      ``cursor_transcripts_jsonl`` / ``trae_ide_session_json`` /
+      ``cursor_transcripts_jsonl`` / ``deepseek_harness_session_jsonl`` /
+      ``trae_ide_session_json`` /
       ``trae_agent_trajectory_json`` -- 各 agent
       生态原生 session；分发到对应平台模块的 ``_adapt_*``。
 
@@ -538,6 +550,9 @@ def adapt_trajectory(
     from xskill.ecosystems.nga3 import _adapt_nga3_jsonl
     from xskill.ecosystems.openclaw import _adapt_openclaw_trajectory_jsonl
     from xskill.ecosystems.cursor import _adapt_cursor_transcripts_jsonl
+    from xskill.ecosystems.deepseek_harness import (
+        _adapt_deepseek_harness_session_jsonl,
+    )
     from xskill.ecosystems.trae import (
         _adapt_trae_agent_trajectory_json,
         _adapt_trae_ide_session_json,
@@ -568,6 +583,9 @@ def adapt_trajectory(
 
     if format == "cursor_transcripts_jsonl":
         return _adapt_cursor_transcripts_jsonl(content, metadata)
+
+    if format == "deepseek_harness_session_jsonl":
+        return _adapt_deepseek_harness_session_jsonl(content, metadata)
 
     if format == "trae_ide_session_json":
         return _adapt_trae_ide_session_json(content, metadata)

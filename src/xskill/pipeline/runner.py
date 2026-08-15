@@ -1042,6 +1042,7 @@ class DirectoryWatcher:
             install_to_ngagent,
             install_to_openclaw,
             install_to_cursor,
+            install_to_deepseek_harness,
             install_to_trae,
         )
 
@@ -1061,6 +1062,7 @@ class DirectoryWatcher:
             "openclaw": install_to_openclaw,  # copy 模式，详见 install_to_openclaw docstring
             "cursor": install_to_cursor,
             "trae": install_to_trae,
+            "deepseek_harness": install_to_deepseek_harness,
         }
 
         results: dict = {}
