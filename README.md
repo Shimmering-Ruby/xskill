@@ -192,7 +192,6 @@ xskill serve --server  # 会打印connect join命令，复制给组内同事便�
 xskill connect <host:port> --token <token>  --name <工号/姓名>   # 在每个同事的机器上运行
 ```
 
-
 #### 额外功能：管控面板
 
 在config.yaml中可以填写管理员身份:
@@ -222,6 +221,28 @@ xskill dashboard
 - 下线某个自己不喜欢的skill
 - 查看自己的轨迹贡献给了哪些用户，谁用了自己的skill
 - 查看skill的版本血缘，得分趋势
+
+#### 额外功能：即时生成或改写 Skill
+
+`generate` 不是凭空创作 Skill：它会从 team server 上已有且有权访问的轨迹中提取经验，自然语言指令只用来描述想生成或改写什么。连接到支持 `generate` 的 team server 后，可以这样创建 Skill：
+
+```bash
+xskill generate "创建一个排查 Python 内存泄漏的 Skill，包含常用诊断命令"
+```
+
+同一个命令也能基于轨迹改写已有 Skill；在指令中写明 Skill 名称和修改目标即可：
+
+```bash
+xskill generate "改写现有的 python-memory-debug Skill，补充 Windows 排查步骤"
+```
+
+需要代理优先参考指定用户的历史轨迹时，使用 `--name`；多个工号或用户 ID 以逗号分隔。省略该参数时，代理可以在 server 授权的全部轨迹范围内检索：
+
+```bash
+xskill generate --name alice,bob "根据这些用户的成功案例生成数据库迁移 Skill"
+```
+
+任务可能会先等待 SkillEdit 池的空闲席位。CLI 会持续输出排队和运行日志；完成后，生成或改写的 Skill 会直接提交到主干，并 pin 到发起人的推荐列表。如果 CLI 提示 server 版本过旧，请联系管理员升级 team server。
 
 #### 额外功能：按需搜索
 
