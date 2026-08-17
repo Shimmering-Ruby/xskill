@@ -140,6 +140,8 @@ def test_pin_generated_skills(tmp_path: Path):
     assert pinned == ["invoice-check"]
     rows = prefs_for("alice", db_path=db)
     assert any(r["skill_name"] == "invoice-check" and r["pref"] == "pinned" for r in rows)
+    from xskill.pipeline.registry import skill_origin_user
+    assert skill_origin_user("invoice-check", db_path=db) == "alice"
 
 
 def test_iter_job_events_pings_while_running(tmp_path: Path):

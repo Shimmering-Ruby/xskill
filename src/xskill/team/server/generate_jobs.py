@@ -335,8 +335,11 @@ def pin_generated_skills(
     skill_names: list[str],
     db_path: Path | None,
     max_pinned: int | None,
+    origin_source: str = "generate",
 ) -> list[str]:
-    from xskill.pipeline.registry import PinQuotaExceeded, set_skill_pref
+    from xskill.pipeline.registry import (
+        PinQuotaExceeded, record_skill_origin, set_skill_pref,
+    )
 
     pinned: list[str] = []
     for name in skill_names:
@@ -354,6 +357,15 @@ def pin_generated_skills(
             logger.warning("generate pin quota exceeded for %s: %s", name, error)
         except Exception:
             logger.exception("generate pin failed for %s", name)
+        try:
+            record_skill_origin(
+                skill_name=name,
+                user_key=user_id,
+                source=origin_source,
+                db_path=db_path,
+            )
+        except Exception:
+            logger.exception("skill origin record failed for %s", name)
     try:
         from xskill.team.server import api as server_api
         with server_api._MANIFEST_CONTROL_CACHE_LOCK:

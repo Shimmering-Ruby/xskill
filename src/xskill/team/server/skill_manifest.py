@@ -11,9 +11,9 @@ slot 结构 = 80 ranked + 20 recommended：
                  从候选里取 cosine 最近邻（``profile_reco.py``）。无画像
                  （冷启动）或非 team server 调用 → 退回 ux 排序往下取。
 
-灰度归因：某 skill 有 staging 分支 → side = CanaryRouter.assign(client_id,
-name, p, staging_sha)；同 client 同 staging 版本内 side 钉死。无 staging → main。
-种子/破平随机沿用 pick_side 的 hash（见 canary.CanaryRouter）。
+灰度归因：某 skill 有 staging 分支时，纳入/生成发起人与体验分用量最多的用户
+走体验分补漏换侧（自动灰度）；其余 client 仍由 ``CanaryRouter.assign`` sticky。
+无 staging → main。看板钉死的 side 覆盖自动灰度。
 """
 from __future__ import annotations
 
@@ -26,7 +26,14 @@ from functools import partial
 from pathlib import Path
 from typing import Callable
 
-from xskill.canary import CanaryRouter, main_sha, staging_sha
+from xskill.canary import (
+    CanaryConfig,
+    CanaryRouter,
+    auto_canary_side,
+    main_sha,
+    pick_side,
+    staging_sha,
+)
 from xskill.skill.skill import Skill
 from xskill.skill.repo import SkillRepo
 from xskill.team.shared.protocol import SkillSlot, SyncResponse
@@ -236,6 +243,10 @@ def get_recommend_engine():
 def _resolve_slot(
     skill: Skill | dict, client_id: str, probability: float, bucket: str,
     refs: dict[str, tuple[str, str | None]] | None = None,
+    *,
+    user_key: str = "",
+    fill_need: int = 5,
+    db_path: Path | str | None = None,
 ) -> SkillSlot | None:
     """对一个 skill 现算它对该 client 的 side + sha。"""
     if isinstance(skill, dict) and skill.get("source") == "skillhub":
@@ -259,15 +270,34 @@ def _resolve_slot(
         (main_sha(skill.path) or "", staging_sha(skill.path))
     )
     if cached_staging:
-        # team-CS：有状态 CanaryRouter（hash 种子/破平），避免小基数饿死 staging。
-        # SkillRecommendEngine.resolve_side 仍供推荐链路其它调用方使用；manifest
-        # 槽位 side 以 Router 账本为准（同 client / staging_sha / p sticky）。
-        side = _ROUTER.assign(
-            client_id=client_id,
-            skill_name=skill.name,
-            probability=probability,
-            staging_sha=cached_staging or "",
-        )
+        from xskill.pipeline.registry import is_auto_canary_user
+        origin_db = Path(db_path) if db_path else None
+        if user_key and is_auto_canary_user(
+                user_key, skill.name, db_path=origin_db):
+            # 纳入/生成发起人与用量最多的用户：按体验分补漏换侧。
+            fallback = pick_side(client_id, skill.name, probability)
+            side = auto_canary_side(
+                skill.path,
+                main_sha=cached_main or "",
+                staging_sha=cached_staging or "",
+                need=max(int(fill_need), 1),
+                fallback=fallback,
+            )
+            _ROUTER.note(
+                client_id=client_id,
+                skill_name=skill.name,
+                side=side,
+                probability=probability,
+                staging_sha=cached_staging or "",
+            )
+        else:
+            # team-CS：有状态 CanaryRouter（hash 种子/破平），避免小基数饿死 staging。
+            side = _ROUTER.assign(
+                client_id=client_id,
+                skill_name=skill.name,
+                probability=probability,
+                staging_sha=cached_staging or "",
+            )
         sha = cached_staging if side == "staging" else cached_main
     else:
         side = "main"
@@ -288,6 +318,9 @@ def build_manifest(
     prefs: dict | None = None,
     retired: set | None = None,
     telemetry_submit: Callable[[Callable[[], None]], bool] | None = None,
+    user_key: str = "",
+    fill_need: int | None = None,
+    db_path: Path | str | None = None,
 ) -> SyncResponse:
     """为 ``client_id`` 现算 manifest。skill 总数不足 total_slots 时全发。
 
@@ -355,6 +388,8 @@ def build_manifest(
     )
 
     side_overrides = prefs.get("side") or {}
+    need = CanaryConfig().min_samples if fill_need is None else max(int(fill_need), 1)
+    origin_db = Path(db_path) if db_path else None
     slots: list[SkillSlot] = []
     for idx, skill in enumerate(chosen):
         if idx < len(pinned):
@@ -365,6 +400,7 @@ def build_manifest(
             bucket = "recommended"
         slot = _resolve_slot(
             skill, client_id, probability, bucket, refs=catalog.refs,
+            user_key=user_key, fill_need=need, db_path=origin_db,
         )
         if slot is not None:
             ov = side_overrides.get(slot.skill_name)

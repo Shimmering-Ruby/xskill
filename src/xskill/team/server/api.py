@@ -825,6 +825,7 @@ def team_sync(
             prefs=prefs,
             retired=retired,
             telemetry_submit=telemetry_submit,
+            user_key=user_key,
         )
         resp.server_slots = total_slots
         # client 截取安装数：默认=服务器 skill_slots；看板可改 user_client_settings
@@ -1289,6 +1290,7 @@ def _pin_imported_skill(client_id: str, skill_name: str) -> list[str]:
         skill_names=[skill_name],
         db_path=get_registry_db_path(),
         max_pinned=max_pinned,
+        origin_source="import",
     )
     try:
         from xskill.dashboard.console import _bump_routing_epoch

@@ -507,6 +507,8 @@ def test_team_import_pins_named_initiator(
     assert body["pinned"] == ["foo"]
     rows = prefs_for("alice", db_path=_isolate_import_registry)
     assert any(p["skill_name"] == "foo" and p["pref"] == "pinned" for p in rows)
+    from xskill.pipeline.registry import skill_origin_user
+    assert skill_origin_user("foo", db_path=_isolate_import_registry) == "alice"
 
 
 def test_team_import_anonymous_does_not_pin(tmp_path, _isolate_import_registry):
