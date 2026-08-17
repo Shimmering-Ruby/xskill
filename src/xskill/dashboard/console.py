@@ -361,6 +361,8 @@ def annotate_library_skills(page: dict, *, user: str,
             traj_root=ctx.traj_root,
             prefs=prefs,
             retired=retired_skills(db_path=db_path),
+            user_key=user,
+            db_path=db_path,
         )
         push_bucket = {slot.skill_name: slot.bucket for slot in resp.slots}
     except Exception:  # pylint: disable=broad-exception-caught
@@ -395,6 +397,8 @@ def _manifest_slots_for_user(ctx, *, user: str,
         traj_root=ctx.traj_root,
         prefs=prefs,
         retired=retired_skills(db_path=db_path),
+        user_key=user,
+        db_path=db_path,
     )
     return _pack_manifest_slots(
         resp.slots, user=user, prefs=prefs, skill_dir=ctx.skill_dir,
@@ -637,7 +641,8 @@ def _normalize_pref_side(side: Optional[str]) -> Optional[str]:
 
 def _skill_routing_table(ctx, *, skill_name: str, db_path: Optional[Path]) -> dict:
     """现算某 skill 对所有已注册 client 的推送路由（与 /sync 同源 build_manifest）。"""
-    from xskill.canary import main_sha, pick_side, staging_sha
+    from xskill.canary import auto_canary_side, main_sha, pick_side, staging_sha
+    from xskill.pipeline.registry import is_auto_canary_user
     from xskill.team.server.api import live_manifest_tuning
     from xskill.team.server.skill_manifest import build_manifest
 
@@ -654,6 +659,7 @@ def _skill_routing_table(ctx, *, skill_name: str, db_path: Optional[Path]) -> di
         client_id = client["client_id"]
         user = (client.get("user_name") or "").strip() or client_id
         prefs = effective_prefs(user, db_path=db_path)
+        auto = is_auto_canary_user(user, skill_name, db_path=db_path)
         resp = build_manifest(
             client_id=client_id,
             skill_dir=ctx.skill_dir,
@@ -663,6 +669,8 @@ def _skill_routing_table(ctx, *, skill_name: str, db_path: Optional[Path]) -> di
             traj_root=ctx.traj_root,
             prefs=prefs,
             retired=retired,
+            user_key=user,
+            db_path=db_path,
         )
         hit = next(
             (s for s in resp.slots if s.skill_name == skill_name), None)
@@ -678,12 +686,23 @@ def _skill_routing_table(ctx, *, skill_name: str, db_path: Optional[Path]) -> di
                 "sha": hit.sha or "",
                 "overridden": bool(side_ov),
                 "pinned": pinned or hit.bucket == "pinned",
+                "auto_canary": auto and not bool(side_ov),
             })
             continue
         would = "main"
         if has_staging:
-            would = side_ov if side_ov in ("main", "staging") else pick_side(
-                client_id, skill_name, probability)
+            if side_ov in ("main", "staging"):
+                would = side_ov
+            elif auto:
+                would = auto_canary_side(
+                    skill_path,
+                    main_sha=m_sha,
+                    staging_sha=s_sha or "",
+                    need=5,
+                    fallback=pick_side(client_id, skill_name, probability),
+                )
+            else:
+                would = pick_side(client_id, skill_name, probability)
         sha = (s_sha if would == "staging" and s_sha else m_sha) or ""
         users.append({
             "user": user,
@@ -694,6 +713,7 @@ def _skill_routing_table(ctx, *, skill_name: str, db_path: Optional[Path]) -> di
             "sha": sha,
             "overridden": bool(side_ov),
             "pinned": pinned,
+            "auto_canary": auto and not bool(side_ov),
         })
     staging_n = sum(
         1 for u in users if u["in_manifest"] and u["side"] == "staging")
@@ -773,6 +793,8 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             traj_root=ctx.traj_root,
             prefs=prefs,
             retired=retired_skills(db_path=db_path),
+            user_key=user,
+            db_path=db_path,
         )
         server_push = _pack_manifest_slots(
             resp.slots, user=user, prefs=prefs, skill_dir=ctx.skill_dir,
@@ -817,6 +839,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             probability=probability, ranked_slots=ranked_slots,
             total_slots=total_slots, traj_root=ctx.traj_root,
             prefs=prefs, retired=retired_skills(db_path=db_path),
+            user_key=user, db_path=db_path,
         )
         return _settings_payload(
             user, server_slots=total_slots, server_pushed=len(resp.slots),

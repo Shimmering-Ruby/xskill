@@ -517,6 +517,49 @@ def pick_side_scoped(traj_id: str, skill_name: str, probability: float,
     return pick_side(traj_id, skill_name, probability)
 
 
+def fill_deficit_side(
+    *,
+    staging_n: int,
+    main_n: int,
+    need: int,
+    fallback: str,
+) -> str:
+    """体验分补漏：staging 不够先喂 staging，够了 main 还不够就喂 main。
+
+    两侧都达到 ``need`` 后返回 ``fallback``（通常是 CanaryRouter / pick_side）。
+    只改路由，不虚补分数。
+    """
+    if need <= 0:
+        return fallback if fallback in ("main", "staging") else "main"
+    if staging_n < need:
+        return "staging"
+    if main_n < need:
+        return "main"
+    return fallback if fallback in ("main", "staging") else "main"
+
+
+def auto_canary_side(
+    skill_dir: Path,
+    *,
+    main_sha: str,
+    staging_sha: str,
+    need: int,
+    fallback: str,
+) -> str:
+    """按当前这对 sha 的体验分条数做补漏换侧。"""
+    s_sha = staging_sha or ""
+    m_sha = main_sha or ""
+    staging_n = len(recent_scores(
+        skill_dir, side="staging", commit_sha=s_sha, n=max(need, 1),
+    )) if s_sha else 0
+    main_n = len(recent_scores(
+        skill_dir, side="main", commit_sha=m_sha, n=max(need, 1),
+    )) if m_sha else 0
+    return fill_deficit_side(
+        staging_n=staging_n, main_n=main_n, need=need, fallback=fallback,
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 有状态分流：CanaryRouter —— 在线偏差最小化 + pick_side hash 随机
 # ═══════════════════════════════════════════════════════════════════
@@ -573,6 +616,24 @@ class CanaryRouter:
                 probability, (staging_sha or "")[:12],
             )
             return side
+
+    def note(self, *, client_id: str, skill_name: str, side: str,
+             probability: float, staging_sha: str) -> None:
+        """把已决定的 side 记进账本（自动灰度补漏后同步人数）。"""
+        if side not in ("main", "staging"):
+            return
+        with self._lock:
+            st = self._skills.get(skill_name)
+            if (st is None
+                    or st["staging_sha"] != staging_sha
+                    or st["probability"] != probability):
+                st = {
+                    "staging_sha": staging_sha,
+                    "probability": probability,
+                    "sides": {},
+                }
+                self._skills[skill_name] = st
+            st["sides"][client_id] = side
 
     @staticmethod
     def _balanced_side(n_main: int, n_staging: int, probability: float,

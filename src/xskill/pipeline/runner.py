@@ -2914,7 +2914,9 @@ class DirectoryWatcher:
                 skill_sub, side, sha = self._resolve_server_skill(
                     skill_name, hub=hub, client_id=client_id,
                     source_model=atom.source_model,
-                    canary_cfg=canary_cfg, eligible=eligible)
+                    canary_cfg=canary_cfg, eligible=eligible,
+                    user_key=client_id, db_path=kw.get("db_path"),
+                )
                 if skill_sub is None:
                     continue
                 try:
@@ -2947,6 +2949,8 @@ class DirectoryWatcher:
     def _resolve_server_skill(
         self, skill_name: str, *, hub, client_id: str,
         source_model: str, canary_cfg, eligible,
+        user_key: str = "",
+        db_path=None,
     ) -> tuple[Path | None, str, str]:
         """CS 模式两步定位打分目标 skill：先 ``skill_dir``（自有，走灰度路由），
         后 ``skillhub_dir``（三方，side 恒 ``main``）。
@@ -2956,13 +2960,29 @@ class DirectoryWatcher:
           无 staging → ``main`` + main_sha。
         - 三方 skill：无 git/staging → ``main`` + ``SkillHub.content_sha``。
         """
-        from xskill.canary import has_staging, main_sha, pick_side_scoped, staging_sha
+        from xskill.canary import (
+            auto_canary_side, has_staging, main_sha, pick_side_scoped,
+            staging_sha,
+        )
+        from xskill.pipeline.registry import is_auto_canary_user
         own = self.skill_dir / skill_name
         if (own / ".git").is_dir():
             if has_staging(own):
                 side = pick_side_scoped(
                     client_id, skill_name, canary_cfg.probability,
                     user_model=source_model, eligible=eligible)
+                model_ok = eligible is None or source_model in eligible
+                if model_ok and is_auto_canary_user(
+                        user_key, skill_name, db_path=db_path):
+                    m_sha = main_sha(own) or ""
+                    s_sha = staging_sha(own) or ""
+                    side = auto_canary_side(
+                        own,
+                        main_sha=m_sha,
+                        staging_sha=s_sha,
+                        need=max(int(canary_cfg.min_samples), 1),
+                        fallback=side,
+                    )
                 sha = staging_sha(own) if side == "staging" else main_sha(own)
             else:
                 side = "main"
