@@ -819,3 +819,86 @@ def test_admin_skills_uses_cached_catalog_and_keeps_skillrepo_scope(
         {"name": "beta", "state": "canary", "usage_30d": 0},
         {"name": "gamma", "state": "retired", "usage_30d": 0},
     ]
+
+
+def test_user_cannot_patch_pipeline_pools(console_env):
+    alice = console_env["alice"]
+    assert alice.patch(
+        "/api/v1/dashboard/admin/pipeline/pools",
+        json={"pool": "edit", "workers": 2},
+    ).status_code == 403
+
+
+def test_admin_patch_pipeline_pools_writes_yaml(console_env, tmp_path, monkeypatch):
+    import xskill.config as C
+    from xskill.api import app as app_mod
+    cfgp = tmp_path / "config.yaml"
+    cfgp.write_text(
+        "llm:\n  base_url: http://x/v1\n"
+        "agent_worker:\n  pools:\n    edit:\n      workers: 4\n      llm_weight: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(C, "CONFIG_PATH", cfgp)
+    monkeypatch.setattr(app_mod, "_config", {
+        "llm": {"base_url": "http://x/v1"},
+        "agent_worker": {"pools": {"edit": {"workers": 4, "llm_weight": 1}}},
+    })
+    boss = console_env["boss"]
+    r = boss.patch(
+        "/api/v1/dashboard/admin/pipeline/pools",
+        json={"pool": "edit", "workers": 8, "llm_weight": 2},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["needs_restart"] == []
+    text = cfgp.read_text(encoding="utf-8")
+    assert "workers: 8" in text
+    assert "llm_weight: 2" in text
+    assert app_mod._config["agent_worker"]["pools"]["edit"]["workers"] == 8
+
+
+def test_admin_patch_pipeline_pools_rejects_zero(console_env, tmp_path, monkeypatch):
+    import xskill.config as C
+    cfgp = tmp_path / "config.yaml"
+    cfgp.write_text(
+        "llm:\n  base_url: http://x/v1\n"
+        "agent_worker:\n  pools:\n    edit:\n      workers: 4\n      llm_weight: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(C, "CONFIG_PATH", cfgp)
+    boss = console_env["boss"]
+    r = boss.patch(
+        "/api/v1/dashboard/admin/pipeline/pools",
+        json={"pool": "edit", "workers": 0},
+    )
+    assert r.status_code == 422
+    assert "workers: 4" in cfgp.read_text(encoding="utf-8")
+
+
+def test_reload_pool_seats_only_is_hot_not_restart(console_env, tmp_path, monkeypatch):
+    import xskill.config as C
+    from xskill.api import app as app_mod
+    cfgp = tmp_path / "config.yaml"
+    base = (
+        "llm:\n  base_url: http://x/v1\n"
+        "agent_worker:\n  pools:\n    edit:\n      workers: 4\n      llm_weight: 1\n"
+    )
+    cfgp.write_text(base, encoding="utf-8")
+    monkeypatch.setattr(C, "CONFIG_PATH", cfgp)
+    monkeypatch.setattr(app_mod, "_config", {
+        "llm": {"base_url": "http://x/v1"},
+        "agent_worker": {"pools": {"edit": {"workers": 4, "llm_weight": 1}}},
+    })
+    new = (
+        "llm:\n  base_url: http://x/v1\n"
+        "agent_worker:\n  pools:\n    edit:\n      workers: 2\n      llm_weight: 3\n"
+    )
+    r = console_env["boss"].post(
+        "/api/v1/dashboard/admin/config/reload", json={"raw": new},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "agent_worker" not in body["needs_restart"]
+    assert "agent_worker" in body["hot_reloaded"]
+

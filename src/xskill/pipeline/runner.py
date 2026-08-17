@@ -37,6 +37,7 @@ from pathlib import Path
 from xskill.config import (
     interests_config,
     interests_fingerprint,
+    read_agent_worker_pools,
     read_interests_config,
 )
 from xskill.pipeline.registry import (
@@ -192,6 +193,11 @@ class DirectoryWatcher:
         self.pending_atoms: deque[str] = deque()
         self.claimed_atoms: set[str] = set()
         self.cluster_futures: set[Future] = set()
+        self._round_new_atoms: list[str] = []
+        self._pool_hot_fingerprint = self._pools_hot_fingerprint(self.pool_config)
+        self._pool_disk_fingerprint_at_start = self._read_pool_disk_fingerprint()
+        from xskill.utils.rate_limit import set_llm_pool_weights
+        set_llm_pool_weights(self._llm_pool_weights())
         # SkillEdit baby 消化失败到 N=1 时释放 worker；下一轮 watcher 从 1
         # 继续，成功 checkpoint 后由 agent 自动恢复配置默认值。仅驻留内存，
         # 进程重启后自然回到配置值。
@@ -278,7 +284,10 @@ class DirectoryWatcher:
             # 看板「流水线」页配置 chip 的展示值（席位/配额比/批量）；
             # 配置键不变，热更在 P1 另行评审。
             "pool_config": {
-                name: dict(self.pool_config.get(name) or {})
+                name: {
+                    **dict(self.pool_config.get(name) or {}),
+                    "workers": self._pools[name].workers,
+                }
                 for name in ("split", "cluster", "edit")
             },
             "generate": {
@@ -318,6 +327,67 @@ class DirectoryWatcher:
             reset_count,
         )
 
+    def _llm_pool_weights(self) -> dict[str, int]:
+        return {
+            name: int((self.pool_config.get(name) or {}).get("llm_weight") or 1)
+            for name in ("split", "cluster", "edit")
+        }
+
+    @staticmethod
+    def _pools_hot_fingerprint(pools: dict) -> tuple:
+        return tuple(
+            (
+                name,
+                int((pools.get(name) or {}).get("workers") or 0),
+                int((pools.get(name) or {}).get("llm_weight") or 0),
+            )
+            for name in ("split", "cluster", "edit", "embed")
+        )
+
+    def _read_pool_disk_fingerprint(self) -> tuple | None:
+        try:
+            return self._pools_hot_fingerprint(
+                read_agent_worker_pools(self.config_path),
+            )
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+
+    def _refresh_pool_config(self):
+        """Hot-reload pool seats and LLM weights without restarting the worker."""
+        try:
+            pools = read_agent_worker_pools(self.config_path)
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.exception("agent_worker pool config reload failed")
+            return
+        fingerprint = self._pools_hot_fingerprint(pools)
+        if fingerprint == self._pool_hot_fingerprint:
+            return
+        # 测试常注入 pool_config，config.yaml 仍是进程默认那份；磁盘没变就
+        # 不要用文件里的席位覆盖构造参数。管理员改盘之后指纹会离开启动快照。
+        if fingerprint == self._pool_disk_fingerprint_at_start:
+            return
+        for name, pool in self._pools.items():
+            new_workers = int((pools.get(name) or {}).get("workers") or pool.workers)
+            if new_workers != pool.workers:
+                pool.set_workers(new_workers)
+            current = dict(self.pool_config.get(name) or {})
+            current["workers"] = new_workers
+            if "llm_weight" in (pools.get(name) or {}):
+                current["llm_weight"] = int(pools[name]["llm_weight"])
+            self.pool_config[name] = current
+        from xskill.utils.rate_limit import set_llm_pool_weights
+        set_llm_pool_weights(self._llm_pool_weights())
+        self._pool_hot_fingerprint = fingerprint
+        self._pool_disk_fingerprint_at_start = fingerprint
+        logger.info(
+            "agent_worker pools reloaded: %s",
+            {name: {"workers": self._pools[name].workers,
+                    "llm_weight": (self.pool_config.get(name) or {}).get("llm_weight")}
+             for name in ("split", "cluster", "edit")},
+        )
+
     # ───────────────────────────────────────────────────────────
     # Main loop
     # ───────────────────────────────────────────────────────────
@@ -345,6 +415,8 @@ class DirectoryWatcher:
         self._stats["polls"] += 1
         kw = self._db_kw()
         self._refresh_interests()
+        self._refresh_pool_config()
+        self._round_new_atoms.clear()
 
         # ── Step 0: 收割已完成的 futures ──
         self._harvest()
@@ -367,6 +439,9 @@ class DirectoryWatcher:
             active_watch_dirs.append(wd)
             self._scan_dir(wd, consumed_index, **kw)
 
+        if self._round_new_atoms:
+            self.pending_atoms.extendleft(reversed(self._round_new_atoms))
+            self._round_new_atoms.clear()
         # 全部 watch_dir 共用一个 pending/claimed 队列；持续提交到 cluster 池满。
         # 最后不足 batch_size 的尾批也立即提交。
         self._submit_cluster_batches()
@@ -586,6 +661,7 @@ class DirectoryWatcher:
         from xskill.skill import candidates as candidate_buffer
         from xskill.skill.git import current_branch, run_git
         from xskill.canary import evaluate_jam_gates, load_ux_scores
+        from xskill.skill.importer import is_imported_skill
 
         skill_dirs = [
             d for d in self.skill_dir.iterdir()
@@ -695,12 +771,14 @@ class DirectoryWatcher:
         if not skill_dirs:
             return
 
-        # 错误少优先；有候选优先于空 buffer；再 lean-first。
+        # 错误少优先；已纳入且已达触发条件的 skill 先于自动蒸馏；
+        # 有候选优先于空 buffer；再 lean-first。
         # 无 .git 等「仍提交」的空目录靠 empty-last 避免抢窗。
         def _skill_edit_sort_key(path: Path):
             pending = _pending_atom_count(path)
             return (
                 self._skill_edit_error_counts.get(path, 0),
+                0 if is_imported_skill(path) else 1,
                 0 if pending > 0 else 1,
                 pending,
                 path.name,
@@ -2581,7 +2659,7 @@ class DirectoryWatcher:
                 if atom.atom_id in self.claimed_atoms:
                     continue
                 self.claimed_atoms.add(atom.atom_id)
-                self.pending_atoms.append(atom.atom_id)
+                self._round_new_atoms.append(atom.atom_id)
 
     def _submit_cluster_batches(self) -> None:
         """Fill the cluster pool without ever waiting in the watcher thread."""

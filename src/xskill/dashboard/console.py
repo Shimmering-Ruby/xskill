@@ -569,6 +569,12 @@ class ConfigPayload(BaseModel):
     raw: str               # config.yaml 全文(原文编辑器提交)
 
 
+class PipelinePoolPatch(BaseModel):
+    pool: Literal["split", "cluster", "edit"]
+    workers: Optional[int] = Field(default=None, gt=0)
+    llm_weight: Optional[int] = Field(default=None, gt=0)
+
+
 # 热加载范围显式声明(2.9):这些段改完即生效(读方每次现取);
 # llm/embedding/agent_worker/watcher 涉及进程级资源，改动需重启 serve。
 HOT_RELOAD_SECTIONS = ("dashboard", "canary", "recommend", "skillhub")
@@ -622,6 +628,48 @@ def _team_change_is_hot_only(old_cfg: dict, new_cfg: dict) -> bool:
         old_server.pop(key, None)
         new_server.pop(key, None)
     return old_server == new_server
+
+
+HOT_AGENT_WORKER_POOL_KEYS = ("workers", "llm_weight")
+
+
+def _agent_worker_change_is_hot_only(old_cfg: dict, new_cfg: dict) -> bool:
+    """agent_worker 这次是否只改了各池的席位和配额比。"""
+    old_aw = dict(old_cfg.get("agent_worker") or {})
+    new_aw = dict(new_cfg.get("agent_worker") or {})
+    old_rest = {k: v for k, v in old_aw.items() if k != "pools"}
+    new_rest = {k: v for k, v in new_aw.items() if k != "pools"}
+    if old_rest != new_rest:
+        return False
+    old_pools = dict(old_aw.get("pools") or {})
+    new_pools = dict(new_aw.get("pools") or {})
+    if set(old_pools) != set(new_pools):
+        return False
+    for name in old_pools:
+        old_pool = dict(old_pools.get(name) or {})
+        new_pool = dict(new_pools.get(name) or {})
+        for key in HOT_AGENT_WORKER_POOL_KEYS:
+            old_pool.pop(key, None)
+            new_pool.pop(key, None)
+        if old_pool != new_pool:
+            return False
+    return True
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _normalize_pref_side(side: Optional[str]) -> Optional[str]:
@@ -1517,8 +1565,6 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         from xskill.config import CONFIG_PATH
-        import os
-        import tempfile as _tf
         from xskill.api import app as app_mod
 
         old_cfg = dict(app_mod._config or {})
@@ -1526,17 +1572,7 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             k for k in set(old_cfg) | set(new_cfg)
             if old_cfg.get(k) != new_cfg.get(k))
         # 原子落盘:同目录 tmp + rename,写一半断电不会留半个 config
-        fd, tmp = _tf.mkstemp(dir=str(CONFIG_PATH.parent), suffix=".yaml.tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(req.raw)
-            os.replace(tmp, str(CONFIG_PATH))
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        _atomic_write_text(CONFIG_PATH, req.raw)
         # 原地更新:所有持引用的读方(watcher self.config 等)即刻看到新值
         if app_mod._config is not None:
             app_mod._config.clear()
@@ -1546,10 +1582,50 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
         # team 段若只改了热子键(推荐个数等),现取即生效,别误标要重启
         if "team" in needs_restart and _team_change_is_hot_only(old_cfg, new_cfg):
             needs_restart.remove("team")
+        if (
+            "agent_worker" in needs_restart
+            and _agent_worker_change_is_hot_only(old_cfg, new_cfg)
+        ):
+            needs_restart.remove("agent_worker")
         hot = [k for k in changed if k not in needs_restart]
         logger.info("admin %s reloaded config (hot=%s, needs_restart=%s)",
                     ident["user"], hot, needs_restart)
         return {"ok": True, "hot_reloaded": hot, "needs_restart": needs_restart}
+
+    @router.patch("/admin/pipeline/pools")
+    def admin_pipeline_pools(req: PipelinePoolPatch, ident=Depends(require_admin)):
+        """只改某一栏的席位或配额比，落盘后由 agent-worker 下一轮扫描热更。"""
+        if req.workers is None and req.llm_weight is None:
+            raise HTTPException(
+                status_code=400, detail="workers 与 llm_weight 至少提供一个")
+        from xskill.config import CONFIG_PATH, patch_agent_worker_pool_yaml
+        from xskill.api import app as app_mod
+        if not CONFIG_PATH.is_file():
+            raise HTTPException(
+                status_code=404, detail=f"config 不存在: {CONFIG_PATH}")
+        raw = CONFIG_PATH.read_text(encoding="utf-8")
+        try:
+            new_raw = patch_agent_worker_pool_yaml(
+                raw, req.pool, workers=req.workers, llm_weight=req.llm_weight,
+            )
+            new_cfg = _validate_config_text(new_raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _atomic_write_text(CONFIG_PATH, new_raw)
+        if app_mod._config is not None:
+            app_mod._config.clear()
+            app_mod._config.update(new_cfg)
+        logger.info(
+            "admin %s patched pipeline pool %s workers=%s llm_weight=%s",
+            ident["user"], req.pool, req.workers, req.llm_weight,
+        )
+        return {
+            "ok": True,
+            "pool": req.pool,
+            "workers": req.workers,
+            "llm_weight": req.llm_weight,
+            "needs_restart": [],
+        }
 
     return router
 

@@ -2047,16 +2047,18 @@ def get_trajs_by_status(
     max_retries: int = 3,
     db_path: Optional[Path] = None,
 ) -> list[str]:
-    """按状态查询文件名。error 状态自动过滤超过 max_retries 的。"""
+    """按状态查询文件名，新的在前（discovered_at、file_mtime、id 降序）。
+    error 状态自动过滤超过 max_retries 的。"""
     with pooled_connection(db_path) as conn:
         sql = "SELECT filename FROM trajectories WHERE watch_dir_id=? AND status=?"
         params: list = [watch_dir_id, status]
         if status == "error":
             sql += " AND retry_count < ?"
             params.append(max_retries)
-        sql += " ORDER BY filename"
+        sql += " ORDER BY discovered_at DESC, file_mtime DESC, id DESC"
         if limit > 0:
-            sql += f" LIMIT {limit}"
+            sql += " LIMIT ?"
+            params.append(int(limit))
         rows = conn.execute(sql, params).fetchall()
         return [r["filename"] for r in rows]
 

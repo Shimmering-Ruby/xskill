@@ -370,12 +370,14 @@ def run_generate_job(job_id: str, *, ctx: Any, config: dict | None) -> None:
         return
     try:
         traj_root = Path(ctx.traj_root) if getattr(ctx, "traj_root", None) is not None else None
-        _run_generate_job_body(
-            job,
-            skill_dir=Path(ctx.skill_dir),
-            traj_root=traj_root,
-            config=config or {},
-        )
+        from xskill.utils.rate_limit import request_source
+        with request_source("generate"):
+            _run_generate_job_body(
+                job,
+                skill_dir=Path(ctx.skill_dir),
+                traj_root=traj_root,
+                config=config or {},
+            )
     except Exception as error:  # noqa: BLE001 — job must end in failed, not crash thread
         logger.exception("generate job %s failed", job_id)
         _update_job(job_id, status="failed", error=str(error))
@@ -405,14 +407,16 @@ def run_claimed_generate_job(
         "generate running, starting agent\n",
     )
     try:
-        _run_generate_job_body(
-            get_job(job_id) or stored,
-            skill_dir=Path(skill_dir),
-            traj_root=Path(traj_root) if traj_root is not None else None,
-            config=config or {},
-            db_path=db_path,
-            logs_dir=logs_dir,
-        )
+        from xskill.utils.rate_limit import request_source
+        with request_source("generate"):
+            _run_generate_job_body(
+                get_job(job_id) or stored,
+                skill_dir=Path(skill_dir),
+                traj_root=Path(traj_root) if traj_root is not None else None,
+                config=config or {},
+                db_path=db_path,
+                logs_dir=logs_dir,
+            )
     except Exception as error:  # noqa: BLE001
         logger.exception("generate job %s failed", job_id)
         _update_job(job_id, status="failed", error=str(error))
