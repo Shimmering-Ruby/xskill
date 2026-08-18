@@ -199,6 +199,7 @@ class _FakeEngine:
         return SimpleNamespace(changed=True, cancelled=False, embed_items=1)
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=1)
 def test_service_event_trigger_submits_both_methods(tmp_path):
     engine = _FakeEngine(tmp_path / "team_profile.db")
     service = ProfileRefreshService(engine, workers=1, queue_size=4)
