@@ -76,6 +76,7 @@ _BUILTIN_ONLY_OPERATIONS = {
     ("put", "/api/v1/dashboard/admin/client/{client_id}/ingest"),
     ("get", "/api/v1/dashboard/admin/user/{user_key}/prefs"),
     ("get", "/api/v1/dashboard/admin/user/{user_key}/assignment"),
+    ("get", "/api/v1/dashboard/admin/user/{user_key}/recommendations"),
     ("post", "/api/v1/dashboard/admin/prefs"),
     ("get", "/api/v1/dashboard/admin/cluster-graph"),
     ("get", "/api/v1/dashboard/admin/skills"),

@@ -13,7 +13,7 @@ import operator
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from xskill.dashboard.auth import require_admin, require_user
@@ -103,6 +103,66 @@ def _client_to_user(registry) -> dict[str, str]:
     for row in registry.list():
         out[row["client_id"]] = row.get("user_name") or row["client_id"]
     return out
+
+
+def _recommendation_history_for_user(
+    *,
+    user: str,
+    registry,
+    db_path: Optional[Path],
+    offset: int,
+    limit: int,
+) -> dict:
+    """Return one user's first-exposure records, newest first.
+
+    ``recommendation_log`` and ``ClientRegistry`` live in separate databases,
+    so resolve all client ids for the user before querying the log.  Anonymous
+    clients keep their client id as the user key, matching ``_client_to_user``.
+    """
+    client_ids = sorted({
+        row["client_id"]
+        for row in registry.list()
+        if (row.get("user_name") or row["client_id"]) == user
+    })
+    if not client_ids:
+        return {
+            "user": user,
+            "total": 0,
+            "offset": offset,
+            "limit": limit,
+            "has_more": False,
+            "exposures": [],
+        }
+
+    placeholders = ",".join("?" for _ in client_ids)
+    with pooled_connection(db_path) as conn:
+        total = int(conn.execute(
+            f"SELECT COUNT(*) FROM recommendation_log "
+            f"WHERE client_id IN ({placeholders})",
+            client_ids,
+        ).fetchone()[0])
+        rows = conn.execute(
+            "SELECT ts,skill,side,bucket,sha FROM recommendation_log "
+            f"WHERE client_id IN ({placeholders}) "
+            "ORDER BY ts DESC,id DESC LIMIT ? OFFSET ?",
+            [*client_ids, limit, offset],
+        ).fetchall()
+
+    exposures = [{
+        "ts": row["ts"] or "",
+        "skill": row["skill"] or "",
+        "side": row["side"] or "main",
+        "bucket": row["bucket"] or "recommended",
+        "sha": row["sha"] or "",
+    } for row in rows]
+    return {
+        "user": user,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(exposures) < total,
+        "exposures": exposures,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1263,6 +1323,23 @@ def build_console_router(db_path: Optional[Path] = None) -> APIRouter:
             raise HTTPException(status_code=400, detail="user_key required")
         slots = _manifest_slots_for_user(ctx, user=user_key, db_path=db_path)
         return {"user": user_key, "slots": slots}
+
+    @router.get("/admin/user/{user_key}/recommendations")
+    def admin_user_recommendations(
+        user_key: str,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(20, ge=1, le=100),
+        _=Depends(require_admin),
+    ):
+        """管理抽屉：某用户历史推荐曝光，与当前 manifest 分开分页。"""
+        ctx = _require_team_ctx()
+        return _recommendation_history_for_user(
+            user=user_key,
+            registry=ctx.client_registry,
+            db_path=db_path,
+            offset=offset,
+            limit=limit,
+        )
 
     @router.put("/admin/client/{client_id}/ingest")
     def admin_client_ingest(
