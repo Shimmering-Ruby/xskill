@@ -13,13 +13,18 @@ session.jsonl``）桥接回 xskill 的标准 ``traj_*.md`` 格式。
 - skill 发现：``@deepseek-ai/dsh-skill-filesystem`` 扫 ``<dshHome>/skills``
   （rank 400 user-dsh；``.system`` 子目录被跳过）。目录包 ``SKILL.md`` 与
   扁平 ``<name>.md`` 均可；本模块安装目录包，与其他生态一致。
-- session 存储：``@deepseek-ai/dsh-session-persistence-jsonl``。默认
-  ``session.jsonl.zstd``（zstd 帧序列，**本期不支持**，检测到即跳过并
-  记日志）；``compression: 'none'`` 时为明文 ``session.jsonl``，首行是
-  ``{"type": "session", ...}`` 的 SessionHeader（带 ``cwd``），随后每行一个
-  ``{type, seq, time, data}`` 的 SessionEvent。``assistant/chunk`` 与打包行
-  （``text-chunks`` / ``reasoning-chunks`` / ``tool-call-chunks``）是重放
-  数据，装配后的 ``assistant/message`` 才是权威文本，桥接时跳过。
+- session 存储：``@deepseek-ai/dsh-session-persistence-jsonl``。**默认**
+  写 ``session.jsonl.zstd``——多个独立 Zstandard 帧顺序拼接（首帧只含
+  header 行，之后每次落盘一帧），不能按行读；``compression: 'none'`` 时
+  为明文 ``session.jsonl``。两种都桥接：``.zstd`` 用可选依赖 ``zstandard``
+  流式跨帧解码为同样的逐行文本，再走同一个 adapter。缺 ``zstandard`` 时
+  只警告一次并跳过压缩文件（明文仍正常），提示 ``pip install
+  'xskill[dsh]'``。逻辑行：首行 ``{"type": "session", ...}`` SessionHeader
+  （带 ``cwd``），随后每行一个 ``{type, seq, time, data}`` SessionEvent。
+  ``assistant/chunk`` 与打包行（``text-chunks`` / ``reasoning-chunks`` /
+  ``tool-call-chunks``）是重放数据，装配后的 ``assistant/message`` 才是权威
+  文本，桥接时跳过。dsh 还会以 user 角色注入运行时上下文（system-prompt
+  快照、skill 目录清单），按 ``data.source.kind`` 只保留 ``"user"``。
 
 限制：仅探测默认位置 ``~/.dsh``；``$DSH_HOME`` 自定义位置暂不识别
 （探测表是静态 home 相对路径，env 覆盖会破坏测试与多用户隔离，待后续
@@ -114,10 +119,10 @@ def install_all_to_deepseek_harness(
 
 
 def _dsh_session_id_from_path(jsonl_path: Path) -> str:
-    """``…/<encoded-id>/session.jsonl`` → ``<encoded-id>``。
+    """``…/<encoded-id>/session.jsonl[.zstd]`` → ``<encoded-id>``。
 
-    dsh 的 transcript 文件名固定为 ``session.jsonl``，session 标识在父目录名
-    （injectively escaped 的 session id）。"""
+    dsh 的 transcript 文件名固定为 ``session.jsonl`` 或 ``session.jsonl.zstd``，
+    session 标识在父目录名（injectively escaped 的 session id）。"""
     return jsonl_path.parent.name
 
 
@@ -144,20 +149,58 @@ def _read_cwd_from_dsh_jsonl(content: str) -> str:
 # Ecosystem spec
 # ─────────────────────────────────────────────────────────────────
 
+_ZSTD_MISSING_WARNED = False
+
+
+def _read_dsh_session(path: Path) -> Optional[str]:
+    """把 dsh session 文件读成逐行文本：``session.jsonl`` 直读；
+    ``session.jsonl.zstd`` 用 ``zstandard`` 跨帧流式解码。
+
+    dsh 的压缩产物是**独立帧的顺序拼接**（首帧 header、之后每批一帧），
+    ``ZstdDecompressor.stream_reader(read_across_frames=True)`` 正好对应
+    这一布局。缺 ``zstandard`` 时返回 None：只警告一次（避免每 5 秒刷屏），
+    ingester 跳过该文件；明文文件不受影响。
+    """
+    global _ZSTD_MISSING_WARNED
+    if path.suffix != ".zstd":
+        return path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        import zstandard
+    except ImportError:
+        if not _ZSTD_MISSING_WARNED:
+            _ZSTD_MISSING_WARNED = True
+            logger.warning(
+                "DeepSeek Harness 会话默认为 zstd 压缩（%s），解码需要可选"
+                "依赖 zstandard：pip install 'xskill[dsh]'（或 pip install "
+                "zstandard）。安装前压缩会话不会被桥接；明文会话不受影响。",
+                path,
+            )
+        return None
+    try:
+        raw = path.read_bytes()
+        dctx = zstandard.ZstdDecompressor()
+        with dctx.stream_reader(raw, read_across_frames=True) as reader:
+            return reader.read().decode("utf-8", errors="ignore")
+    except (OSError, zstandard.ZstdError) as exc:
+        # 正在写入中的最后一帧可能不完整；下一轮 settle 后重试即可
+        logger.debug("dsh zstd session not decodable yet (%s): %s", path, exc)
+        return None
+
+
 DSH_SPEC = EcosystemSpec(
     name="deepseek_harness",
     source_kind="jsonl",
     sessions_path=_dsh_sessions_path,
-    # --<normalized-cwd>--/<encoded-id>/session.jsonl；仅明文模式。
-    # session.jsonl.zstd 不在 glob 内 —— zstd 帧序列不能按行读，本期明确
-    # 不支持（README 有说明），glob 收窄即天然跳过。
-    sessions_glob="*/*/session.jsonl",
+    # --<normalized-cwd>--/<encoded-id>/session.jsonl 或 .jsonl.zstd。
+    # 一个 root 只会是一种编码（dsh 拒绝混放），glob 同时接受两种即可。
+    sessions_glob="*/*/session.jsonl*",
     session_id_from_path=_dsh_session_id_from_path,
     cwd_from_content=_read_cwd_from_dsh_jsonl,
     adapter_format="deepseek_harness_session_jsonl",
     traj_id_prefix="traj_dsh_",
     skills_install_path=_dsh_skills_path,
     label="deepseek_harness",
+    read_content=_read_dsh_session,
 )
 
 
@@ -319,10 +362,10 @@ def ingest_deepseek_harness_sessions(
     """Bridge DeepSeek Harness plaintext session JSONLs into xskill's
     trajectory directory.
 
-    Scans ``<home_root>/.dsh/sessions/*/*/session.jsonl``（仅
-    ``compression: 'none'`` 的明文 transcript；默认的 ``session.jsonl.zstd``
-    本期不解码）and submits any session whose encoded-id directory is not in
-    ``seen_sessions`` as a new trajectory under ``target_traj_dir``.
+    Scans ``<home_root>/.dsh/sessions/*/*/session.jsonl`` and
+    ``session.jsonl.zstd``（后者需可选依赖 ``zstandard``；缺失时警告一次并
+    跳过压缩文件）and submits any session whose encoded-id directory is not
+    in ``seen_sessions`` as a new trajectory under ``target_traj_dir``.
     """
     return JsonlIngester(DSH_SPEC).scan_and_bridge(
         target_traj_dir=Path(target_traj_dir),

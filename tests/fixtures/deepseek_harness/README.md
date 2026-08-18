@@ -32,3 +32,18 @@ What the file demonstrates that a synthetic fixture did not:
 - The header omits `agentPreset` for a headless run.
 
 Regenerate by repeating the run above if the upstream format version changes.
+
+## `session.jsonl.zstd`
+
+Also written by DeepSeek Harness itself, in its **default** persistence mode
+(`compression: zstd`, no override), from a second headless run whose prompt
+asks for the reply `ZSTD CHECK`. The same two sanitizations were applied to
+the decoded lines (temp path -> `/home/u/proj`; skill-catalog entries trimmed
+to two placeholders), and the result was re-encoded following dsh's on-disk
+layout — a concatenation of independent Zstandard frames (here: one frame for
+the header line, one for the remaining rows; a live run appends one frame per
+durable batch, so any multi-frame reader must handle this). The adapter test
+`test_ingest_bridges_zstd_sessions` decodes it with `zstandard`
+(`read_across_frames=True`) and asserts the cleaned trajectory matches the
+plaintext behaviour; `test_ingest_zstd_without_zstandard_skips_and_warns_once`
+covers the missing-dependency path.

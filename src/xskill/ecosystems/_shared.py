@@ -109,6 +109,11 @@ class EcosystemSpec:
     skills_install_path: Callable[[Path], Path]
     label: str
     is_session_complete: Optional[Callable[[str], bool]] = None
+    # 可选：自定义「文件 → 文本」读取。默认 None = ``read_text``。给需要先
+    # 解码再解析的生态用（DeepSeek Harness 默认写 zstd 帧序列的
+    # ``session.jsonl.zstd``）。返回 None 表示本轮读不了（例如缺解码依赖），
+    # ingester 跳过该文件并由 reader 自己负责告警。
+    read_content: Optional[Callable[[Path], Optional[str]]] = None
 
 
 @dataclass(frozen=True)
@@ -986,7 +991,12 @@ class JsonlIngester:
                         continue
                 rebridged = True  # 源在转换后又增长 → 全量重转换覆盖
 
-            content = jsonl_path.read_text(encoding="utf-8", errors="ignore")
+            if self.spec.read_content is not None:
+                content = self.spec.read_content(jsonl_path)
+                if content is None:
+                    continue  # reader 已告警（如缺解码依赖），本轮跳过
+            else:
+                content = jsonl_path.read_text(encoding="utf-8", errors="ignore")
             if not content.strip():
                 continue
             if (

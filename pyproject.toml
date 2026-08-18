@@ -58,6 +58,12 @@ dependencies = [
 milvus = [
     "pymilvus>=2.4.2",
 ]
+# DeepSeek Harness (dsh) 默认把会话写成 zstd 帧序列（session.jsonl.zstd）。
+# 解码需要 zstandard；不进主依赖，缺失时 dsh 压缩会话跳过并警告一次，
+# 明文会话与 skill 安装不受影响。pip install 'xskill[dsh]'。
+dsh = [
+    "zstandard>=0.21",
+]
 dev = [
     "pytest>=7",
     "pytest-timeout>=2",

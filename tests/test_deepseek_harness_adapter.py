@@ -45,6 +45,9 @@ from xskill.skill.frontmatter import serialize as fm_serialize
 FIXTURE_PATH = (
     Path(__file__).parent / "fixtures" / "deepseek_harness" / "session.jsonl"
 )
+ZSTD_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "deepseek_harness" / "session.jsonl.zstd"
+)
 
 
 @pytest.fixture
@@ -223,18 +226,61 @@ class TestIngest:
         )
         assert results == []
 
-    def test_ingest_ignores_zstd_sessions(self, tmp_path, fixture_content):
-        """默认压缩模式 session.jsonl.zstd 本期不解码——glob 收窄不拾取。"""
-        session_dir = (
-            tmp_path / ".dsh" / "sessions" / "--p--" / "enc-zzz"
-        )
+    def test_ingest_bridges_zstd_sessions(self, tmp_path):
+        """dsh 默认写 session.jsonl.zstd（多帧拼接）；有 zstandard 时须桥接，
+        结果与明文完全一致。fixture 是 dsh 真跑写出的压缩文件（脱敏后按
+        dsh 布局重压为 2 帧：header 一帧 + 其余一帧）。"""
+        pytest.importorskip("zstandard")
+        session_dir = tmp_path / ".dsh" / "sessions" / "--home-u-proj--" / "zsess"
         session_dir.mkdir(parents=True)
-        (session_dir / "session.jsonl.zstd").write_bytes(b"\x28\xb5\x2f\xfd")
+        (session_dir / "session.jsonl.zstd").write_bytes(ZSTD_FIXTURE_PATH.read_bytes())
 
         results = ingest_deepseek_harness_sessions(
             tmp_path / "traj", home_root=tmp_path,
         )
-        assert results == []
+        assert len(results) == 1
+        md = next((tmp_path / "traj").glob("traj_dsh_*.md")).read_text(encoding="utf-8")
+        assert "ZSTD CHECK" in md
+        assert "example-skill-a" not in md   # injected catalog filtered on zstd path too
+
+    def test_ingest_zstd_without_zstandard_skips_and_warns_once(
+            self, tmp_path, monkeypatch, caplog):
+        """缺 zstandard：跳过压缩文件、只警告一次；明文文件不受影响。"""
+        import builtins
+        import logging
+
+        from xskill.ecosystems import deepseek_harness as dsh_mod
+
+        real_import = builtins.__import__
+
+        def _no_zstd(name, *a, **kw):
+            if name == "zstandard":
+                raise ImportError("simulated missing zstandard")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", _no_zstd)
+        monkeypatch.setattr(dsh_mod, "_ZSTD_MISSING_WARNED", False)
+
+        z1 = tmp_path / ".dsh" / "sessions" / "--p--" / "z1"
+        z2 = tmp_path / ".dsh" / "sessions" / "--p--" / "z2"
+        z1.mkdir(parents=True)
+        z2.mkdir(parents=True)
+        (z1 / "session.jsonl.zstd").write_bytes(b"\x28\xb5\x2f\xfd")
+        (z2 / "session.jsonl.zstd").write_bytes(b"\x28\xb5\x2f\xfd")
+        plain = tmp_path / ".dsh" / "sessions" / "--p--" / "plain"
+        plain.mkdir(parents=True)
+        (plain / "session.jsonl").write_text(
+            FIXTURE_PATH.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="xskill.ecosystems"):
+            results = ingest_deepseek_harness_sessions(
+                tmp_path / "traj", home_root=tmp_path,
+            )
+        assert len(results) == 1                      # only the plaintext one
+        warns = [r for r in caplog.records if "zstandard" in r.getMessage()]
+        assert len(warns) == 1                        # warned once, not per file
+        assert "xskill[dsh]" in warns[0].getMessage()
 
     def test_ingest_finds_across_multiple_projects(self, tmp_path, fixture_content):
         _place_fixture_in_dsh_home(
@@ -304,7 +350,7 @@ class TestHelpers:
         assert DSH_SPEC.name == "deepseek_harness"
         assert DSH_SPEC.adapter_format == "deepseek_harness_session_jsonl"
         assert DSH_SPEC.traj_id_prefix == "traj_dsh_"
-        assert DSH_SPEC.sessions_glob == "*/*/session.jsonl"
+        assert DSH_SPEC.sessions_glob == "*/*/session.jsonl*"  # plaintext and .zstd
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -356,6 +402,37 @@ class TestInstall:
         from xskill.team.client import daemon
         src = inspect.getsource(daemon.install_skill_to_ecosystems)
         assert '"deepseek_harness": install_to_deepseek_harness' in src
+
+    def test_team_collector_starts_dsh_ingester(self, tmp_path, monkeypatch):
+        """team 客户端的采集器（TeamCollector）必须接 dsh：connect 后自动把
+        dsh 会话镜像进 ~/.xskill/dsh_sessions/（PR #243 评审在云机实测发现
+        此前漏接）。"""
+        import xskill.ecosystems as eco
+        from xskill.team.client import collector as coll_mod
+
+        (tmp_path / ".dsh").mkdir()
+        started = []
+
+        class _FakeIngester:
+            def __init__(self, spec=None, *a, **kw):
+                self.spec = spec
+
+            def start(self):
+                started.append(getattr(self.spec, "name", "?"))
+
+        monkeypatch.setattr(eco, "JsonlIngester", _FakeIngester)
+        c = coll_mod.TeamCollector.__new__(coll_mod.TeamCollector)
+        c.home_root = tmp_path
+        c.poll_interval = 5
+        c._ingesters = []
+        c.start_ingesters()
+        assert "deepseek_harness" in started
+
+    def test_harness_name_for_dsh_bridge_dir(self, tmp_path):
+        """上传元数据里的 harness 必须是 deepseek_harness，不能退化为 dsh。"""
+        from xskill.team.client.collector import _harness_for
+        md = tmp_path / "dsh_sessions" / "traj_dsh_x.md"
+        assert _harness_for(md) == "deepseek_harness"
 
 
 # ──────────────────────────────────────────────────────────────────
