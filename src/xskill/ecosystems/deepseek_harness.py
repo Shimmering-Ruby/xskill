@@ -237,6 +237,19 @@ def _adapt_deepseek_harness_session_jsonl(
         role = ""
         body = ""
         if rtype == "user/message":
+            # dsh 用 user 角色**注入运行时上下文**（system-prompt 快照、
+            # skill 目录清单等），以 ``data.source.kind`` 区分：只有
+            # ``"user"`` 才是用户真正说的话。真机（dsh 0.1.0-rc.7）一次
+            # 任务写出 3 条 user/message，其中 2 条是 ``plugin`` /
+            # ``skill-catalog`` 注入，含整份 skill 目录，若不过滤会把几十 KB
+            # 每次相同的样板文本当用户消息写进轨迹，污染后续聚类。
+            # 无 ``source`` 字段（旧格式）视为用户消息，前向兼容。
+            source = data.get("source")
+            source_kind = (
+                source.get("kind") if isinstance(source, dict) else None
+            )
+            if source_kind not in (None, "user"):
+                continue
             role = "user"
             body = _text_from_message_content(data.get("content"))
         elif rtype == "assistant/message":

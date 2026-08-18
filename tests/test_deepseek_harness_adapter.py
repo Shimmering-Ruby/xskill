@@ -55,7 +55,7 @@ def fixture_content() -> str:
 
 def _place_fixture_in_dsh_home(
     home: Path, fixture_text: str,
-    project_dir: str = "--home-u-proj--", encoded_id: str = "probe-real-sess-1",
+    project_dir: str = "--home-u-proj--", encoded_id: str = "session-c69faa5c-9536-443a-b839-a640f199e663",
 ) -> Path:
     session_dir = home / ".dsh" / "sessions" / project_dir / encoded_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -92,38 +92,41 @@ class TestAdapter:
         assert md.startswith("# DeepSeek Harness Trajectory")
         assert "## User" in md
         assert "## Assistant" in md
-        assert "空指针" in md
-        assert "已定位" in md
+        assert "HELLO XSKILL" in md
 
     def test_adapter_extracts_first_user_query(self, fixture_content):
         _md, meta = adapt_trajectory(
             fixture_content, "deepseek_harness_session_jsonl",
         )
-        assert meta["query"].startswith("帮我修复登录页")
+        assert meta["query"].startswith("Reply with exactly the two words")
 
     def test_adapter_collects_tool_names(self, fixture_content):
         _md, meta = adapt_trajectory(
             fixture_content, "deepseek_harness_session_jsonl",
         )
-        assert meta["tool_names"] == ["read_file"]
+        assert meta["tool_names"] == []  # the real run used no tools
 
     def test_adapter_skips_chunks_and_packed_rows(self, fixture_content):
         """assistant/chunk 与 text-chunks 打包行是重放数据，不进 timeline。"""
         md, meta = adapt_trajectory(
             fixture_content, "deepseek_harness_session_jsonl",
         )
-        assert "我先" not in md          # assistant/chunk 内容
-        assert "看看" not in md          # 打包行内容
-        # timeline: user + tool_call + assistant/message = 3 条
-        assert meta["total_turns"] == 3
+        # 4 assistant/chunk + 1 text-chunks packed row exist in the file;
+        # only the assembled assistant/message may reach the timeline, so
+        # there is exactly one Assistant section (chunks would add more).
+        assert md.count("## Assistant") == 1
+        assistant_turns = [e for e in meta["timeline"] if e["role"] == "assistant"]
+        assert [e["content"] for e in assistant_turns] == ["HELLO XSKILL"]
+        # timeline: 1 real user message + 1 assistant/message = 2 条
+        assert meta["total_turns"] == 2
 
     def test_adapter_session_header_metadata(self, fixture_content):
         __, meta = adapt_trajectory(
             fixture_content, "deepseek_harness_session_jsonl",
         )
-        assert meta["session_id"] == "probe-real-sess-1"
-        assert meta["cwd"] == "/home/u/proj"
-        assert meta["agent_preset"] == "default"
+        assert meta["session_id"] == "session-c69faa5c-9536-443a-b839-a640f199e663"
+        assert meta["cwd"] == "/home/u/proj"  # sanitized in fixture
+        assert "agent_preset" not in meta  # headless run wrote no agentPreset
         assert meta["source"] == "deepseek_harness_session_jsonl"
         assert meta["category"] == "deepseek_harness_session"
 
@@ -134,9 +137,37 @@ class TestAdapter:
 
     def test_adapter_skips_malformed_lines(self):
         content = "not-json\n{\"type\": \"user/message\", \"seq\": 1}\n"
-        md, meta = adapt_trajectory(content, "deepseek_harness_session_jsonl")
+        _md, meta = adapt_trajectory(content, "deepseek_harness_session_jsonl")
         # 第二行缺 data，也应安全跳过
         assert meta["total_turns"] == 0
+
+    def test_adapter_filters_injected_user_context(self, fixture_content):
+        """dsh 以 user 角色注入运行时上下文（source.kind = plugin /
+        skill-catalog）；只有 source.kind == "user" 才是用户说的话。真机一次
+        任务写出 3 条 user/message，其中 2 条是注入——必须过滤，否则整份
+        skill 目录清单与沙箱策略会被当作用户消息写进轨迹。"""
+        md, meta = adapt_trajectory(
+            fixture_content, "deepseek_harness_session_jsonl",
+        )
+        assert "example-skill-a" not in md        # skill-catalog injection
+        assert "Approval policy" not in md        # system-prompt snapshot
+        assert "Current runtime context" not in md
+        user_turns = [e for e in meta["timeline"] if e["role"] == "user"]
+        assert len(user_turns) == 1
+        assert user_turns[0]["content"].startswith("Reply with exactly")
+
+    def test_adapter_legacy_user_message_without_source_is_kept(self):
+        """无 source 字段的旧格式 user/message 视为用户消息（前向兼容）。"""
+        content = "\n".join([
+            json.dumps({"type": "session", "id": "s1", "cwd": "/w"}),
+            json.dumps({
+                "type": "user/message", "seq": 1, "time": 1,
+                "data": {"role": "user", "content": "legacy question"},
+            }),
+        ])
+        md, meta = adapt_trajectory(content, "deepseek_harness_session_jsonl")
+        assert "legacy question" in md
+        assert meta["total_turns"] == 1
 
     def test_adapter_string_content_form(self):
         """Message.content 的 string 形态也要能取到正文。"""
