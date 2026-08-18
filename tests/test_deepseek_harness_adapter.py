@@ -16,6 +16,10 @@ test_deepseek_harness_adapter.py -- DeepSeek Harness (dsh) 接入端到端单测
 * **T5 install** —— ``install_to_deepseek_harness`` 装到
   ``~/.dsh/skills/<name>/``，POSIX 上 symlink；不写共享的
   ``~/.agents/skills``；watcher / daemon 安装表含 deepseek_harness。
+
+fixture 来源：``fixtures/deepseek_harness/session.jsonl`` 由 DeepSeek Harness
+自身的序列化函数（``@deepseek-ai/dsh-session-persistence-jsonl`` 0.1.0-rc.7）
+生成，非手写；见同目录 README.md。
 """
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ def fixture_content() -> str:
 
 def _place_fixture_in_dsh_home(
     home: Path, fixture_text: str,
-    project_dir: str = "--home-u-proj--", encoded_id: str = "sess-abc123",
+    project_dir: str = "--home-u-proj--", encoded_id: str = "probe-real-sess-1",
 ) -> Path:
     session_dir = home / ".dsh" / "sessions" / project_dir / encoded_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -117,7 +121,7 @@ class TestAdapter:
         __, meta = adapt_trajectory(
             fixture_content, "deepseek_harness_session_jsonl",
         )
-        assert meta["session_id"] == "sess-abc123"
+        assert meta["session_id"] == "probe-real-sess-1"
         assert meta["cwd"] == "/home/u/proj"
         assert meta["agent_preset"] == "default"
         assert meta["source"] == "deepseek_harness_session_jsonl"
