@@ -26,7 +26,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Optional
 
 from agno.tools import tool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
@@ -1003,7 +1003,7 @@ point. No preamble. Output the 2 sentences only.
 
 
 @tool(name="update_frontmatter_metadata")
-def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None = None) -> str:
+def update_frontmatter_metadata(skill_name: str, source_trajs: Optional[list] = None) -> str:
     """
     Update frontmatter.metadata on a skill's SKILL.md:
       - bump version if source_trajs changed
@@ -1398,7 +1398,7 @@ def score_task(atom_id: str, score: int) -> str:
 def add_task(
     atom_id: str, *, traj_id: str, offset_start: int, offset_end: int,
     intent: str, summary: str, tags: list, used_skills: list,
-    ux_score: int | None = None,
+    ux_score: Optional[int] = None,
 ) -> str:
     """手动创建一个 AtomTask（offline 脚本 / agent 合成 atom 用）。
 
@@ -1437,8 +1437,8 @@ def make_task_agent_tools(
 
     @tool(name="submit_atom")
     def submit_atom(start_line: int, intent: str, summary: str,
-                    tags: list | None = None,
-                    used_skills: list | None = None,
+                    tags: Optional[list] = None,
+                    used_skills: Optional[list] = None,
                     *, ux_score: StrictInt) -> str:
         """提交一个新 AtomTask（提交即校验,不合法返 error 让你自改）。
 
