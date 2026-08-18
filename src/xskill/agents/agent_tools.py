@@ -29,7 +29,7 @@ from types import MappingProxyType
 from typing import Any
 
 from agno.tools import tool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from xskill.skill.frontmatter import (
     parse as fm_parse,
@@ -1439,7 +1439,7 @@ def make_task_agent_tools(
     def submit_atom(start_line: int, intent: str, summary: str,
                     tags: list | None = None,
                     used_skills: list | None = None,
-                    ux_score: int | None = None) -> str:
+                    *, ux_score: StrictInt) -> str:
         """提交一个新 AtomTask（提交即校验,不合法返 error 让你自改）。
 
         Args:
@@ -1470,6 +1470,8 @@ def make_task_agent_tools(
                     f"({submitted[-1]['start_line']})，本次 {sl}")
         if not (intent or "").strip() or not (summary or "").strip():
             return "error: intent 和 summary 必填"
+        if not 1 <= ux_score <= 10:
+            return f"error: ux_score 必须是 1~10 的整数 (got {ux_score})"
         submitted.append({
             "start_line": sl,
             "intent": intent.strip(),
@@ -1477,8 +1479,7 @@ def make_task_agent_tools(
             "tags": [str(t).strip() for t in (tags or []) if str(t).strip()],
             "used_skills": [str(s).strip() for s in (used_skills or [])
                             if str(s).strip()],
-            "ux_score": ux_score if isinstance(ux_score, int)
-            and 1 <= ux_score <= 10 else None,
+            "ux_score": ux_score,
         })
         return f"ok: 已记录 atom #{len(submitted)} (start_line={sl})"
 

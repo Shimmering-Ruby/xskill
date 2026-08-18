@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from xskill.pipeline.atom import AtomTaskStore
 from xskill.agents.task_agent import (
@@ -85,11 +86,12 @@ def _scripted_factory(submit_calls, *, status=None):
     名也记到 captured。``status`` 注入 run_response.status（测 error 兜底）。
     """
     captured: dict = {"results": [], "instructions": None, "user_msg": None,
-                      "tool_names": None}
+                      "submit_tool": None, "tool_names": None}
 
     def factory(*, instructions, tools):
         toolmap = {_tool_name(t): t for t in tools}
         captured["instructions"] = instructions
+        captured["submit_tool"] = toolmap["submit_atom"]
         captured["tool_names"] = sorted(toolmap)
 
         class _A:
@@ -305,7 +307,7 @@ class TestFirstRunSinglePass:
         traj_path.write_text(_TRAJ_MD, encoding="utf-8")
         store = AtomTaskStore(root=traj_dir)
         factory = _scripted_factory([
-            dict(start_line=5, intent="i", summary="s"),
+            dict(start_line=5, intent="i", summary="s", ux_score=7),
         ])
         TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_t", traj_path=traj_path)
@@ -461,7 +463,7 @@ class TestZeroSubmitRaises:
             value = "ERROR"
 
         factory = _scripted_factory([
-            dict(start_line=5, intent="i", summary="s"),
+            dict(start_line=5, intent="i", summary="s", ux_score=7),
         ], status=_Status())
         with pytest.raises(RuntimeError, match="ERROR"):
             TaskAgent(agno_agent_factory=factory, store=store).run(
@@ -485,8 +487,9 @@ class TestSubmitValidation:
         traj_path, store = self._setup(tmp_path)
         # 第 9 行是 ## Assistant,不是 ## User 回合
         factory = _scripted_factory([
-            dict(start_line=9, intent="i", summary="s"),
-            dict(start_line=5, intent="i2", summary="s2"),  # 补一个合法的
+            dict(start_line=9, intent="i", summary="s", ux_score=7),
+            dict(start_line=5, intent="i2", summary="s2",
+                 ux_score=7),  # 补一个合法的
         ])
         atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_e", traj_path=traj_path)
@@ -500,8 +503,9 @@ class TestSubmitValidation:
         """撤销/反悔不切：倒退的 start_line（回到上一意图）被拒,不另起 atom。"""
         traj_path, store = self._setup(tmp_path)
         factory = _scripted_factory([
-            dict(start_line=17, intent="i1", summary="s1"),
-            dict(start_line=5, intent="撤销回上一个", summary="s2"),  # 倒退 → reject
+            dict(start_line=17, intent="i1", summary="s1", ux_score=7),
+            dict(start_line=5, intent="撤销回上一个", summary="s2",
+                 ux_score=7),  # 倒退 → reject
         ])
         atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_e", traj_path=traj_path)
@@ -516,14 +520,58 @@ class TestSubmitValidation:
     def test_missing_required_field_then_valid(self, tmp_path):
         traj_path, store = self._setup(tmp_path)
         factory = _scripted_factory([
-            dict(start_line=5, intent="i", summary=""),   # 缺 summary → reject
-            dict(start_line=5, intent="i", summary="s"),  # 改对重提
+            dict(start_line=5, intent="i", summary="", ux_score=7),
+            dict(start_line=5, intent="i", summary="s", ux_score=7),
         ])
         atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_e", traj_path=traj_path)
         assert factory.captured["results"][0].startswith("error:")
         assert "必填" in factory.captured["results"][0]
         assert len(atoms) == 1
+
+    def test_ux_score_is_required_strict_integer(self, tmp_path):
+        traj_path, store = self._setup(tmp_path)
+        factory = _scripted_factory([
+            dict(start_line=5, intent="i", summary="s", ux_score=8),
+        ])
+        TaskAgent(agno_agent_factory=factory, store=store).run(
+            traj_id="traj_e", traj_path=traj_path)
+
+        submit_tool = factory.captured["submit_tool"]
+        assert "ux_score" in submit_tool.parameters["required"]
+        assert submit_tool.parameters["properties"]["ux_score"]["type"] == "integer"
+        with pytest.raises(ValidationError):
+            _call_tool(
+                submit_tool,
+                start_line=17,
+                intent="i2",
+                summary="s2",
+            )
+        for invalid_score in (None, True, "8"):
+            with pytest.raises(ValidationError):
+                _call_tool(
+                    submit_tool,
+                    start_line=17,
+                    intent="i2",
+                    summary="s2",
+                    ux_score=invalid_score,
+                )
+
+    @pytest.mark.parametrize("invalid_score", [0, 11])
+    def test_ux_score_out_of_range_rejected(self, tmp_path, invalid_score):
+        traj_path, store = self._setup(tmp_path)
+        factory = _scripted_factory([
+            dict(start_line=5, intent="i", summary="s",
+                 ux_score=invalid_score),
+            dict(start_line=5, intent="i", summary="s", ux_score=8),
+        ])
+        atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
+            traj_id="traj_e", traj_path=traj_path)
+
+        assert factory.captured["results"][0].startswith("error:")
+        assert "ux_score" in factory.captured["results"][0]
+        assert len(atoms) == 1
+        assert atoms[0].ux_score == 8
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -553,6 +601,7 @@ class TestLookTool:
                         start_line=5,
                         intent="i",
                         summary="s",
+                        ux_score=7,
                     )
                     return _RunResult()
 
@@ -584,12 +633,14 @@ class TestLookTool:
                         start_line=5,
                         intent="i",
                         summary="s",
+                        ux_score=7,
                     )
                     _call_tool(
                         toolmap["submit_atom"],
                         start_line=17,
                         intent="i2",
                         summary="s2",
+                        ux_score=7,
                     )
                     captured_my["out"] = _call_tool(toolmap["my_atoms"])
                     captured_my["budget"] = _call_tool(toolmap["context_budget"])
@@ -619,8 +670,8 @@ class TestSystemPrompt:
         traj_path.write_text(_TRAJ_MD, encoding="utf-8")
         store = AtomTaskStore(root=traj_dir)
         factory = _scripted_factory([
-            dict(start_line=5, intent="i", summary="s"),
-            dict(start_line=17, intent="i2", summary="s2"),
+            dict(start_line=5, intent="i", summary="s", ux_score=7),
+            dict(start_line=17, intent="i2", summary="s2", ux_score=7),
         ])
         TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_p", traj_path=traj_path)
@@ -649,7 +700,7 @@ class TestSystemPrompt:
         )
         store = AtomTaskStore(root=traj_dir)
         factory = _scripted_factory([
-            dict(start_line=1, intent="i", summary="s"),
+            dict(start_line=1, intent="i", summary="s", ux_score=7),
         ])
         atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
             traj_id="traj_b", traj_path=traj_path)
@@ -666,8 +717,8 @@ class TestInterestFilter:
         traj_path.write_text(_TRAJ_MD, encoding="utf-8")
         store = AtomTaskStore(root=traj_dir)
         factory = _scripted_factory([
-            dict(start_line=5, intent="deploy", summary="done"),
-            dict(start_line=17, intent="frontend", summary="done"),
+            dict(start_line=5, intent="deploy", summary="done", ux_score=7),
+            dict(start_line=17, intent="frontend", summary="done", ux_score=7),
         ])
 
         TaskAgent(
@@ -685,8 +736,8 @@ class TestInterestFilter:
         traj_path.write_text(_TRAJ_MD, encoding="utf-8")
         store = AtomTaskStore(root=traj_dir)
         factory = _scripted_factory([
-            dict(start_line=5, intent="deploy", summary="done"),
-            dict(start_line=17, intent="frontend", summary="done"),
+            dict(start_line=5, intent="deploy", summary="done", ux_score=7),
+            dict(start_line=17, intent="frontend", summary="done", ux_score=7),
         ])
 
         TaskAgent(
@@ -752,6 +803,7 @@ class TestInterestFilter:
                             start_line=5,
                             intent="deploy",
                             summary="done",
+                            ux_score=7,
                         )
                     )
                     return _RunResult()
@@ -789,6 +841,7 @@ class TestInterestFilter:
                             start_line=5,
                             intent="deploy",
                             summary="done",
+                            ux_score=7,
                         )
                     )
                     captured["results"].append(
