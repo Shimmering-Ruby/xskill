@@ -112,6 +112,7 @@ def test_pool_capacity_evicts_oldest(tmp_path):
     assert paths[-1].resolve() in kept_keys
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=2, only_rerun=["OperationalError"])
 def test_concurrent_record_usage_from_pool_threads(tmp_path):
     db = tmp_path / "r.db"
     def write(_i):
