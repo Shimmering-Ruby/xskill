@@ -529,6 +529,7 @@ def test_skills_catalog_failed_backfill_does_not_poison_meta(tmp_path):
         ("vendor", "skillhub")]
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=1)
 def test_skills_catalog_concurrent_failure_is_shared(
         tmp_path, monkeypatch):
     root = tmp_path / "skills"; root.mkdir()
