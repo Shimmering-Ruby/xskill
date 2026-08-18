@@ -559,7 +559,11 @@ def test_skills_catalog_concurrent_failure_is_shared(
     with ThreadPoolExecutor(max_workers=16) as pool:
         futures = [pool.submit(load_error) for _ in range(16)]
         assert entered.wait(timeout=5)
-        time.sleep(0.05)
+        # 给其余 15 个线程赶到共享等待点的余量。它们在被测代码内部等待，
+        # 测试无法直接观测，只能留时间：0.05 s 在慢 runner（Windows）上偶发
+        # 不够（表现为部分线程在放行后才进入、被判为第二次扫描）。放大到
+        # 0.3 s，并保留 flaky 重试作为兜底。
+        time.sleep(0.3)
         release.set()
         errors = [future.result(timeout=5) for future in futures]
 
