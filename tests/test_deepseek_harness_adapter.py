@@ -245,7 +245,7 @@ class TestIngest:
 
     def test_ingest_zstd_without_zstandard_skips_and_warns_once(
             self, tmp_path, monkeypatch, caplog):
-        """缺 zstandard：跳过压缩文件、只警告一次；明文文件不受影响。"""
+        """环境缺 zstandard（安装不完整）：跳过压缩文件、只警告一次；明文不受影响。"""
         import builtins
         import logging
 
@@ -280,7 +280,7 @@ class TestIngest:
         assert len(results) == 1                      # only the plaintext one
         warns = [r for r in caplog.records if "zstandard" in r.getMessage()]
         assert len(warns) == 1                        # warned once, not per file
-        assert "xskill[dsh]" in warns[0].getMessage()
+        assert "pip install zstandard" in warns[0].getMessage()
 
     def test_ingest_finds_across_multiple_projects(self, tmp_path, fixture_content):
         _place_fixture_in_dsh_home(

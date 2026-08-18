@@ -16,10 +16,10 @@ session.jsonl``）桥接回 xskill 的标准 ``traj_*.md`` 格式。
 - session 存储：``@deepseek-ai/dsh-session-persistence-jsonl``。**默认**
   写 ``session.jsonl.zstd``——多个独立 Zstandard 帧顺序拼接（首帧只含
   header 行，之后每次落盘一帧），不能按行读；``compression: 'none'`` 时
-  为明文 ``session.jsonl``。两种都桥接：``.zstd`` 用可选依赖 ``zstandard``
-  流式跨帧解码为同样的逐行文本，再走同一个 adapter。缺 ``zstandard`` 时
-  只警告一次并跳过压缩文件（明文仍正常），提示 ``pip install
-  'xskill[dsh]'``。逻辑行：首行 ``{"type": "session", ...}`` SessionHeader
+  为明文 ``session.jsonl``。两种都桥接：``.zstd`` 用 ``zstandard``（主依赖）
+  流式跨帧解码为同样的逐行文本，再走同一个 adapter。若环境缺 ``zstandard``
+  （安装不完整），只警告一次并跳过压缩文件（明文仍正常）。逻辑行：首行
+  ``{"type": "session", ...}`` SessionHeader
   （带 ``cwd``），随后每行一个 ``{type, seq, time, data}`` SessionEvent。
   ``assistant/chunk`` 与打包行（``text-chunks`` / ``reasoning-chunks`` /
   ``tool-call-chunks``）是重放数据，装配后的 ``assistant/message`` 才是权威
@@ -158,8 +158,8 @@ def _read_dsh_session(path: Path) -> Optional[str]:
 
     dsh 的压缩产物是**独立帧的顺序拼接**（首帧 header、之后每批一帧），
     ``ZstdDecompressor.stream_reader(read_across_frames=True)`` 正好对应
-    这一布局。缺 ``zstandard`` 时返回 None：只警告一次（避免每 5 秒刷屏），
-    ingester 跳过该文件；明文文件不受影响。
+    这一布局。``zstandard`` 是主依赖；若环境仍缺失（安装不完整）返回 None：
+    只警告一次（避免每 5 秒刷屏），ingester 跳过该文件；明文文件不受影响。
     """
     global _ZSTD_MISSING_WARNED
     if path.suffix != ".zstd":
@@ -170,9 +170,10 @@ def _read_dsh_session(path: Path) -> Optional[str]:
         if not _ZSTD_MISSING_WARNED:
             _ZSTD_MISSING_WARNED = True
             logger.warning(
-                "DeepSeek Harness 会话默认为 zstd 压缩（%s），解码需要可选"
-                "依赖 zstandard：pip install 'xskill[dsh]'（或 pip install "
-                "zstandard）。安装前压缩会话不会被桥接；明文会话不受影响。",
+                "DeepSeek Harness 会话默认为 zstd 压缩（%s），解码需要依赖 "
+                "zstandard（xskill 主依赖之一，安装不完整时缺失）："
+                "pip install zstandard。安装前压缩会话不会被桥接；明文会话"
+                "不受影响。",
                 path,
             )
         return None
@@ -363,8 +364,8 @@ def ingest_deepseek_harness_sessions(
     trajectory directory.
 
     Scans ``<home_root>/.dsh/sessions/*/*/session.jsonl`` and
-    ``session.jsonl.zstd``（后者需可选依赖 ``zstandard``；缺失时警告一次并
-    跳过压缩文件）and submits any session whose encoded-id directory is not
+    ``session.jsonl.zstd``（后者用主依赖 ``zstandard`` 解码；环境缺失时警告
+    一次并跳过压缩文件）and submits any session whose encoded-id directory is not
     in ``seen_sessions`` as a new trajectory under ``target_traj_dir``.
     """
     return JsonlIngester(DSH_SPEC).scan_and_bridge(
