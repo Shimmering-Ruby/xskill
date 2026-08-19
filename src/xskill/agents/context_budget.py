@@ -368,6 +368,15 @@ def _positive_int_or_none(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _msg_estimate_text(msg: Any) -> str:
+    """Return all message text fields included in the token estimate."""
+    return (
+        _msg_content_str(msg)
+        + _msg_reasoning_str(msg)
+        + _msg_tool_args_str(msg)
+    )
+
+
 def _estimate_history_tokens(
     messages: list,
     *,
@@ -378,11 +387,7 @@ def _estimate_history_tokens(
     """字符粗估整段历史 token。仅作"未发出去那部分"的估值。"""
     total = 0
     for msg in messages or []:
-        counted_text = (
-            _msg_content_str(msg)
-            + _msg_reasoning_str(msg)
-            + _msg_tool_args_str(msg)
-        )
+        counted_text = _msg_estimate_text(msg)
         key = (id(msg), len(counted_text))
         if cache is not None and key in cache:
             single = cache[key]
@@ -617,16 +622,21 @@ def _trim_old_look_results(messages: list, target_tokens: int,
     返回被剪裁的 message 数。已是剪裁标记的不重复剪。
     """
     trimmed = 0
+    raw_tokens = None
+    if not force_all:
+        # Estimate the full history once, then maintain the raw total with
+        # per-message deltas. Re-estimating all messages for every candidate
+        # makes a long history with late tool results quadratic.
+        raw_tokens = _estimate_history_tokens(
+            messages,
+            cjk_rate=cjk_rate,
+            calibration=1.0,
+            cache=cache,
+        )
     for m in messages or []:
         if (
-            not force_all
-            and _estimate_history_tokens(
-                messages,
-                cjk_rate=cjk_rate,
-                calibration=calibration,
-                cache=cache,
-            )
-            <= target_tokens
+            raw_tokens is not None
+            and int(raw_tokens * calibration) <= target_tokens
         ):
             break
         if not _is_trimmable_tool_msg(m):
@@ -634,6 +644,15 @@ def _trim_old_look_results(messages: list, target_tokens: int,
         original = _msg_content_str(m)
         if _is_already_trimmed(original):
             continue
+        old_cache_key = (id(m), len(_msg_estimate_text(m)))
+        original_tokens = None
+        if raw_tokens is not None:
+            original_tokens = _estimate_history_tokens(
+                [m],
+                cjk_rate=cjk_rate,
+                calibration=1.0,
+                cache=cache,
+            )
         name = _tool_name(m)
         if name in _SPILLABLE_TOOLS:
             if spill_root is None:
@@ -644,6 +663,18 @@ def _trim_old_look_results(messages: list, target_tokens: int,
         else:
             replacement = _TRIM_MARK
         if _replace_tool_content(m, replacement):
+            if cache is not None:
+                # The cache key includes text length rather than content. Drop
+                # the old value even when the replacement has the same length.
+                cache.pop(old_cache_key, None)
+            if raw_tokens is not None and original_tokens is not None:
+                replacement_tokens = _estimate_history_tokens(
+                    [m],
+                    cjk_rate=cjk_rate,
+                    calibration=1.0,
+                    cache=cache,
+                )
+                raw_tokens += replacement_tokens - original_tokens
             trimmed += 1
     return trimmed
 
