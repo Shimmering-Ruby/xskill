@@ -118,12 +118,25 @@ def install_all_to_deepseek_harness(
 # ─────────────────────────────────────────────────────────────────
 
 
+_DSH_SESSION_DIR_PREFIX = "session-"
+
+
 def _dsh_session_id_from_path(jsonl_path: Path) -> str:
-    """``…/<encoded-id>/session.jsonl[.zstd]`` → ``<encoded-id>``。
+    """``…/<session-dir>/session.jsonl[.zstd]`` → 会话标识。
 
     dsh 的 transcript 文件名固定为 ``session.jsonl`` 或 ``session.jsonl.zstd``，
-    session 标识在父目录名（injectively escaped 的 session id）。"""
-    return jsonl_path.parent.name
+    session 标识在父目录名。目录名带固定前缀 ``session-``（后接 uuid），
+    而 ``session-`` 恰好 8 个字符——若把整个目录名当会话标识，通用的
+    文件名尾段截断（取前 8 个字符）会把**所有**会话截成同一个 ``session-``，
+    同一项目下多条会话写进同一个轨迹文件、后写覆盖先写（评审实测 10 条
+    压缩会话只落成 3 个文件）。因此这里剥掉固定前缀、以 uuid 段为会话
+    标识；不带该前缀的目录名（未来格式变化）原样返回，不做猜测。"""
+    name = jsonl_path.parent.name
+    if name.startswith(_DSH_SESSION_DIR_PREFIX):
+        remainder = name[len(_DSH_SESSION_DIR_PREFIX):]
+        if remainder:
+            return remainder
+    return name
 
 
 def _read_cwd_from_dsh_jsonl(content: str) -> str:

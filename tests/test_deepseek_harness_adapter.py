@@ -206,6 +206,47 @@ class TestIngest:
         text = written[0].read_text(encoding="utf-8")
         assert "DeepSeek Harness Trajectory" in text
 
+    def test_two_sessions_same_project_get_distinct_traj_files(
+        self, tmp_path, fixture_content,
+    ):
+        """评审实测发现的覆盖缺陷（PR #243）：dsh 会话目录名带固定前缀
+        ``session-``，恰好 8 个字符——若整个目录名进文件名截断，所有会话
+        尾段都变成 ``session-``，同一项目多条会话写进同一个轨迹文件、
+        后写覆盖先写。修复后会话标识取 uuid 段，各会话各落各的文件。"""
+        _place_fixture_in_dsh_home(
+            tmp_path, fixture_content,
+            encoded_id="session-11111111-aaaa-bbbb-cccc-dddddddddddd",
+        )
+        _place_fixture_in_dsh_home(
+            tmp_path, fixture_content,
+            encoded_id="session-22222222-aaaa-bbbb-cccc-dddddddddddd",
+        )
+        traj_dir = tmp_path / "traj"
+
+        results = ingest_deepseek_harness_sessions(
+            traj_dir, home_root=tmp_path,
+        )
+
+        assert len(results) == 2
+        written = sorted(p.name for p in traj_dir.glob("traj_dsh_*.md"))
+        assert len(written) == 2, written
+        # 尾段来自 uuid，不再是清一色的 ``session-``
+        assert written[0] != written[1]
+        assert not any(name.endswith("_session-.md") for name in written)
+
+    def test_session_id_strips_fixed_prefix(self, tmp_path):
+        from xskill.ecosystems.deepseek_harness import (
+            _dsh_session_id_from_path,
+        )
+        path = (tmp_path / "session-851be686-dc2e-4271-af4b-5f35299af69e"
+                / "session.jsonl")
+        assert _dsh_session_id_from_path(path) == (
+            "851be686-dc2e-4271-af4b-5f35299af69e"
+        )
+        # 不带固定前缀的目录名原样返回（未来格式变化不做猜测）
+        other = tmp_path / "run_0001" / "session.jsonl"
+        assert _dsh_session_id_from_path(other) == "run_0001"
+
     def test_ingest_idempotent(self, tmp_path, fixture_content):
         _place_fixture_in_dsh_home(tmp_path, fixture_content)
         traj_dir = tmp_path / "traj"
