@@ -503,7 +503,11 @@ def test_embed_failure_cooldown_skips_repeated_backend_calls(tmp_path, monkeypat
     hub = SkillHub(enabled=True, hub_dir=hub_dir, embed_client=client,
                    search_max_embed=1)
     _prime_corpus_cache(hub)
-    monkeypatch.setattr(skillhub_module, "QUERY_EMBED_FAILURE_COOLDOWN_SECONDS", 0.02)
+    # 冷却窗与等待时长必须远大于 Windows 上 time.monotonic() 的分辨率
+    # （Python ≤3.12 约 15.6 ms）：原先 cooldown=0.02 / sleep(0.03) 只跨一到
+    # 两个时钟 tick，起点相位不巧时 sleep 后 monotonic() 只前进 15.6 ms，
+    # 冷却「仍未过期」→ 第二次 embed 被跳过，断言看到 ['alpha']（CI 偶发）。
+    monkeypatch.setattr(skillhub_module, "QUERY_EMBED_FAILURE_COOLDOWN_SECONDS", 0.1)
 
     client.fail = True
     first = hub.search("alpha", limit=5)
@@ -512,7 +516,7 @@ def test_embed_failure_cooldown_skips_repeated_backend_calls(tmp_path, monkeypat
     assert first and all(result["semantic_rank"] is None for result in first)
     assert second == []
 
-    time.sleep(0.03)
+    time.sleep(0.25)
     client.fail = False
     hub.search("beta", limit=5)
     assert client.encode_calls == ["alpha", "beta"]
