@@ -909,6 +909,82 @@ class TestContextManager:
         # 旧 look 返回被剪成标记
         assert sent["look_content"] == _TRIM_MARK
 
+    def test_trim_estimator_work_is_linear_in_history(self, monkeypatch):
+        """Each trimmed result must not trigger another full-history scan."""
+        import xskill.agents.context_budget as context_budget
+
+        messages = [
+            {"role": "assistant", "content": f"prefix-{i}"}
+            for i in range(200)
+        ]
+        messages.extend(
+            {"role": "tool", "tool_name": "look", "content": "x" * 1000}
+            for _ in range(4)
+        )
+        estimate_work = 0
+        real_estimate = context_budget._estimate_history_tokens
+
+        def tracked_estimate(batch, **kwargs):
+            nonlocal estimate_work
+            estimate_work += len(batch or [])
+            return real_estimate(batch, **kwargs)
+
+        monkeypatch.setattr(
+            context_budget,
+            "_estimate_history_tokens",
+            tracked_estimate,
+        )
+
+        trimmed = context_budget._trim_old_look_results(
+            messages,
+            target_tokens=0,
+            cjk_rate=context_budget.DEFAULT_CJK_TOKENS_PER_CHAR,
+            cache={},
+        )
+
+        assert trimmed == 4
+        assert estimate_work <= len(messages) + 2 * trimmed
+        assert all(
+            message["content"] == context_budget._TRIM_MARK
+            for message in messages[-trimmed:]
+        )
+
+    def test_trim_refreshes_equal_length_cache_at_calibrated_target(self):
+        """An equal-length marker must not reuse the original token estimate."""
+        import xskill.agents.context_budget as context_budget
+
+        rate = context_budget.DEFAULT_CJK_TOKENS_PER_CHAR
+        calibration = 1.3
+        original = "界" * len(context_budget._TRIM_MARK)
+        messages = [
+            {"role": "tool", "tool_name": "look", "content": original},
+            {"role": "tool", "tool_name": "look", "content": original},
+        ]
+        expected_after_one = [
+            {
+                "role": "tool",
+                "tool_name": "look",
+                "content": context_budget._TRIM_MARK,
+            },
+            {"role": "tool", "tool_name": "look", "content": original},
+        ]
+        target = context_budget._estimate_history_tokens(
+            expected_after_one,
+            cjk_rate=rate,
+            calibration=calibration,
+        )
+
+        trimmed = context_budget._trim_old_look_results(
+            messages,
+            target_tokens=target,
+            cjk_rate=rate,
+            calibration=calibration,
+            cache={},
+        )
+
+        assert trimmed == 1
+        assert messages == expected_after_one
+
     def test_trim_spills_atom_task_read_result_with_metadata(self, tmp_path):
         """SkillEditAgent 的旧 atom_task_read 结果应落临时文件,上下文只留摘要+路径。"""
         import json
