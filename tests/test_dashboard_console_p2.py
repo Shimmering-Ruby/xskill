@@ -692,6 +692,13 @@ def test_reco_trigger_matrix_computed_once_across_requests(
     _write_ux_score(console_env["skills"] / "alpha", "alpha",
                     "atom_traj0_0001", "2026-07-01T00:00:00")
     _clear_console_caches()
+    # 断言「5 次请求只算一次」依赖 5 次请求都落在缓存 TTL（5 s）内。Windows
+    # runner 比 Linux 慢约 6 倍，5 个 TestClient 请求 + 首次全量构建偶发跨过
+    # 5 s，缓存到期后重建第二次（CI 见 assert 2 == 1）。测试关心的是「同一
+    # 波次复用」，不是 TTL 长度——把 TTL 拉大，去掉对机器速度的隐含依赖。
+    import xskill.dashboard.console as console_module
+    monkeypatch.setattr(console_module._reco_trigger_cache, "ttl_seconds", 300.0)
+    monkeypatch.setattr(dashboard_metrics._usage_records_cache, "ttl_seconds", 300.0)
 
     builds: list[int] = []
     real_load = dashboard_metrics.load_usage_records
