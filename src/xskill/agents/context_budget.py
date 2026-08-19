@@ -7,18 +7,21 @@
 
 1. **分母 max_context**：无统一查询 API。**配置优先**（``llm.max_context``）；
    缺省 **200K** 并打一条 warning（提醒用户按自己模型上限反注释配置）。
-2. **主动剪裁**：每次发请求前,若历史估算 token 到 max_context 的 **85%**,把旧的
-   ``look`` 工具结果替换成短标记；把 SkillEdit 的读文件类工具结果 spill 到
-   当前 XSkill 实例的隔离目录，message 里只保留摘要 + ``spill_path``。
-   估算口径覆盖 ``content``、``reasoning_content``、``tool_calls`` 的 arguments，
-   同时用分类字符启发式乘以 `1.15` 安全边际偏高估。每次响应会把
-   ``usage.prompt_tokens`` 与估算 raw 值做 EMA 方向校准。  
-   从最旧的开始剪,剪到回落 85% 以下为止。
-3. **可选 compact**：先把可 spill 的结果尽量降到 85% 边界；仍超出
-   ``max(compact_token_limit, spill 边界)`` 才调用同一个 model 写一份
-   可续跑的 handoff 摘要，然后保留 system、首轮 user、摘要和最近完整消息块。
-4. **最底层兜底（唯一）**：抓住后端抛的"上下文超长"报错 → 再剪一轮历史 →
-   **重发一次**。就这一条,不做解析上限学分母、不做多触发统一。
+2. **可选 spill / 主动剪裁**（``enable_spill``, 默认关闭）：打开时，历史估到
+   max_context 的 **85%** 才把旧 ``look`` 换成短标记，读文件类结果 spill 到
+   实例隔离目录并留 ``spill_path``。默认关闭时不做任何 spill / 丢弃旧 tool
+   结果，只靠下面的 compact 收敛。估算口径覆盖 ``content``、
+   ``reasoning_content``、``tool_calls`` 的 arguments，同时用分类字符启发式
+   乘以 `1.15` 安全边际偏高估。每次响应会把 ``usage.prompt_tokens`` 与估算
+   raw 值做 EMA 方向校准。
+3. **可选 compact**：估算超出 ``compact_token_limit`` 时，调用同一个 model
+   写一份可续跑的 handoff 摘要（system、首轮 user、账本摘要、最近完整消息块
+   保留）。spill 打开时 compact 阈值不会低于 spill@；关闭时按配置原值。
+   失败会打原因并按 ``max_retries`` 重试；中间失败只缩小压缩请求副本；耗尽
+   后抛出，不带着膨胀历史继续发主请求。compact 可走同步 ``invoke_stream``。
+4. **最底层兜底（唯一）**：抓住后端抛的"上下文超长"报错 → compact 或
+   （spill 开时）再剪一轮历史 → **重发一次**。就这一条,不做解析上限学分母、
+   不做多触发统一。
 5. **真实已用 token**：每次请求拿到 ``usage.prompt_tokens`` 写进 thread-local,
    供 TaskAgent 的 ``context_budget()`` 工具读"后端真实已用"。
 
@@ -31,6 +34,7 @@ import json
 import logging
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from copy import copy
@@ -38,6 +42,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger("xskill.context_budget")
+
+
+class CompactFailedError(RuntimeError):
+    """Compact did not succeed. Outer LLM retry must not treat this as a timeout."""
+
 
 DEFAULT_MAX_CONTEXT = 200_000          # 配置缺省时的兜底上限（spec §4.5）
 TRIM_TRIGGER_RATIO = 0.85              # 到上限 85% 触发主动剪裁
@@ -399,6 +408,29 @@ def _positive_int_or_none(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _non_negative_float_or_default(value: Any, default: float) -> float:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _bool_or_default(value: Any, default: bool) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def _estimate_history_tokens(
@@ -860,7 +892,7 @@ def _compact_history_in_place(
     prompt = COMPACT_PROMPT_TEMPLATE.replace("{ledger}", ledger)
     summary = (compact_fn(prompt) or "").strip()
     if not summary:
-        return False
+        raise RuntimeError("compact produced empty summary")
     template = system_msg or first_user or messages[0]
     summary_msg = _new_user_message(
         template,
@@ -901,18 +933,119 @@ def _response_text(resp: Any, assistant_message: Any | None = None) -> str:
     return str(content)
 
 
+def _copy_message(msg: Any) -> Any:
+    if isinstance(msg, dict):
+        return dict(msg)
+    try:
+        return copy(msg)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return msg
+
+
+def _shrink_copied_tool_results(
+    messages: list,
+    target_tokens: int,
+    *,
+    force_all: bool = False,
+    spill_root: Path | None = None,
+    cjk_rate: float,
+    calibration: float = 1.0,
+    cache: dict | None = None,
+) -> int:
+    """Trim tool bodies on a message copy used only for the compact LLM call.
+
+    Live history is not mutated. If spill_root is missing, use the short
+    look-trim mark even for spillable tools — this copy is discarded after
+    the compact request.
+    """
+    trimmed = 0
+    for m in messages or []:
+        if (
+            not force_all
+            and _estimate_history_tokens(
+                messages,
+                cjk_rate=cjk_rate,
+                calibration=calibration,
+                cache=cache,
+            )
+            <= target_tokens
+        ):
+            break
+        if not _is_trimmable_tool_msg(m):
+            continue
+        original = _msg_content_str(m)
+        if _is_already_trimmed(original):
+            continue
+        name = _tool_name(m)
+        if name in _SPILLABLE_TOOLS and spill_root is not None:
+            replacement = _spill_tool_result(m, original, spill_root)
+        else:
+            replacement = _TRIM_MARK
+        if _replace_tool_content(m, replacement):
+            trimmed += 1
+    return trimmed
+
+
+def _wait_compact_retry(delay: float) -> None:
+    """Sleep between compact retries; abort immediately on process shutdown."""
+    if delay <= 0:
+        return
+    from xskill.utils.shutdown import SHUTTING_DOWN
+    if SHUTTING_DOWN.wait(delay):
+        raise CompactFailedError(
+            "working-memory compact did not succeed: process is shutting down"
+        )
+
+
+def _stream_delta_text(chunk: Any) -> str:
+    """Extract one streaming delta. Do not fall back to assistant_message."""
+    content = getattr(chunk, "content", None)
+    if content is None and isinstance(chunk, dict):
+        content = chunk.get("content")
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return str(content)
+
+
+def _consume_compact_stream(invoke_stream, compact_messages: list, assistant_message) -> str:
+    parts: list[str] = []
+    for chunk in invoke_stream(
+        list(compact_messages),
+        assistant_message=assistant_message,
+    ):
+        piece = _stream_delta_text(chunk)
+        if piece:
+            parts.append(piece)
+    text = "".join(parts).strip()
+    if text:
+        return text
+    return _response_text(None, assistant_message)
+
+
 def _model_compact_fn(
     original_invoke: Callable[..., Any],
-    prefix_messages: list,
+    prefix_messages: list | Callable[[], list],
+    invoke_stream: Callable[..., Any] | None = None,
 ) -> Callable[[str], str]:
+    def _prefix() -> list:
+        if callable(prefix_messages):
+            return list(prefix_messages())
+        return list(prefix_messages)
+
     def compact(prompt: str) -> str:
         from agno.models.message import Message
 
         assistant_message = Message(role="assistant", content=None)
         compact_messages = [
-            *prefix_messages,
+            *_prefix(),
             Message(role="user", content=prompt),
         ]
+        if invoke_stream is not None:
+            return _consume_compact_stream(
+                invoke_stream, compact_messages, assistant_message,
+            )
         resp = original_invoke(
             compact_messages,
             assistant_message=assistant_message,
@@ -923,12 +1056,12 @@ def _model_compact_fn(
 
 
 class ContextManager:
-    """把 model.invoke 包成"发请求前主动剪裁 + 超长兜底重发 + 记真实已用"。
+    """把 model.invoke 包成"可选 spill + compact 重试 + 超长兜底重发 + 记真实已用"。
 
     构造时拿 ``max_context``（已 resolve）。``wrap(original_invoke)`` 返回新的
-    invoke,生产/测试都能套。剪裁直接改传进来的 ``messages`` 列表里：
-    ``look`` 旧结果替换成短标记；SkillEdit 读文件类工具结果先 spill 到
-    当前 XSkill 实例的 spill 目录，上下文只留摘要和可回读路径。
+    invoke。默认 ``enable_spill=false``：不主动剪旧 tool 结果、不落盘 spill，
+    只按 ``compact_token_limit`` 压缩工作记忆。打开 spill 后才恢复 85% 剪裁 /
+    spill_path 回读。
     """
 
     def __init__(
@@ -955,16 +1088,42 @@ class ContextManager:
             if spill_root is not None
             else None
         )
-        # Compact is always a fallback after the proactive spill boundary.
-        # A legacy config below spill@ can no longer make summarization fire
-        # first or on every moderately large round.
-        self.compact_token_limit = (
-            max(int(compact_token_limit), self.trigger)
-            if compact_token_limit is not None
-            else None
-        )
+        # Default off: rely on compact. Set llm.enable_spill: true to restore
+        # proactive trim/spill of old tool results.
+        self.enable_spill = _bool_or_default(cfg.get("enable_spill"), False)
+        if self.enable_spill:
+            # Spill-on: compact stays a fallback after the spill@ boundary.
+            self.compact_token_limit = (
+                max(int(compact_token_limit), self.trigger)
+                if compact_token_limit is not None
+                else None
+            )
+        else:
+            self.compact_token_limit = (
+                int(compact_token_limit)
+                if compact_token_limit is not None
+                else None
+            )
         self.compact_keep_recent_messages = int(compact_keep_recent_messages)
         self.compact_fn = compact_fn
+        # Compact invoke 不走最外层 LLM retry 包装，这里单独做有界重试。
+        self.compact_max_retries = (
+            _positive_int_or_none(cfg.get("compact_max_retries"))
+            or _positive_int_or_none(cfg.get("max_retries"))
+            or 8
+        )
+        self.compact_retry_base_delay = _non_negative_float_or_default(
+            cfg.get("compact_retry_base_delay")
+            if cfg.get("compact_retry_base_delay") not in (None, "")
+            else cfg.get("retry_base_delay"),
+            2.0,
+        )
+        self.compact_retry_max_delay = _non_negative_float_or_default(
+            cfg.get("compact_retry_max_delay")
+            if cfg.get("compact_retry_max_delay") not in (None, "")
+            else cfg.get("retry_max_delay"),
+            60.0,
+        )
         self.cjk_rate, self.family = _family_cjk_rate(cfg.get("model"))
         if self.family is None:
             logger.warning(
@@ -982,8 +1141,129 @@ class ContextManager:
         text = f"{exc}".lower()
         return any(h in text for h in _OVERLONG_HINTS)
 
-    def wrap(self, original_invoke):
-        """返回包好上下文自管理的 invoke。"""
+    def _trace_compact(self, message: str) -> None:
+        from xskill.agents import agent_trace
+        try:
+            agent_trace.event("CONTEXT", message, include_timestamp=False)
+        except Exception:  # noqa: BLE001 — tracing must not abort compact retry
+            logger.debug("compact trace write failed", exc_info=True)
+
+    def _compact_invoke_fn(
+        self,
+        compact_fn: Callable[[str], str],
+        *,
+        attempt: int,
+        prefix_box: dict,
+        source_messages: list,
+    ) -> Callable[[str], str]:
+        """Wrap compact_fn: after a timeout, shrink only the compact request copy."""
+
+        def invoke(prompt: str) -> str:
+            if attempt > 1:
+                work = [_copy_message(m) for m in source_messages]
+                limit = self.compact_token_limit or self.trigger
+                target = max(1, int(limit * 0.5))
+                trimmed = _shrink_copied_tool_results(
+                    work,
+                    target,
+                    force_all=attempt > 2,
+                    spill_root=self.spill_root,
+                    cjk_rate=self.cjk_rate,
+                    calibration=self._calibration,
+                    cache=self._est_cache,
+                )
+                prefix_box["msgs"] = work
+                if trimmed:
+                    self._trace_compact(
+                        f"Shrunk compact request: spilled/trimmed {trimmed} "
+                        f"tool result(s) before retry {attempt}/"
+                        f"{self.compact_max_retries}."
+                    )
+            return compact_fn(prompt)
+
+        return invoke
+
+    def _compact_until_success(
+        self,
+        messages: list,
+        compact_fn: Callable[[str], str],
+        prefix_box: dict,
+    ) -> bool:
+        """Retry compact. Do not swallow the last failure.
+
+        Compact is inside context_mgmt, so it does not inherit the outer LLM
+        retry wrapper. First failure used to dump a full OpenAI traceback and
+        look like a crash; intermediate attempts now log one line. Exhaustion
+        raises CompactFailedError (not the raw timeout) so the outer retry
+        wrapper does not multiply 8×8 timed-out compact calls.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, self.compact_max_retries + 1):
+            try:
+                compacted = _compact_history_in_place(
+                    messages,
+                    compact_fn=self._compact_invoke_fn(
+                        compact_fn,
+                        attempt=attempt,
+                        prefix_box=prefix_box,
+                        source_messages=messages,
+                    ),
+                    keep_recent_messages=self.compact_keep_recent_messages,
+                )
+            except CompactFailedError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                detail = f"{type(exc).__name__}: {exc}"
+                last_attempt = attempt >= self.compact_max_retries
+                tb = traceback.format_exc()
+                if last_attempt:
+                    logger.warning(
+                        "上下文 compact 失败 (%d/%d),不再重试: %s\n%s",
+                        attempt,
+                        self.compact_max_retries,
+                        detail,
+                        tb,
+                    )
+                    self._trace_compact(
+                        f"Compact failed ({attempt}/"
+                        f"{self.compact_max_retries}): {detail}\n{tb}"
+                    )
+                    raise CompactFailedError(
+                        "working-memory compact did not succeed after "
+                        f"{self.compact_max_retries} attempts"
+                    ) from exc
+                logger.warning(
+                    "上下文 compact 失败 (%d/%d): %s；缩小压缩请求后重试",
+                    attempt,
+                    self.compact_max_retries,
+                    detail,
+                )
+                delay = min(
+                    self.compact_retry_max_delay,
+                    self.compact_retry_base_delay * (2 ** (attempt - 1)),
+                )
+                self._trace_compact(
+                    f"Compact failed ({attempt}/{self.compact_max_retries}): "
+                    f"{detail}. Shrinking compact request, retrying in "
+                    f"{delay:.0f}s."
+                )
+                _wait_compact_retry(delay)
+                continue
+            return compacted
+        if last_exc is not None:
+            raise CompactFailedError(
+                "working-memory compact did not succeed after "
+                f"{self.compact_max_retries} attempts"
+            ) from last_exc
+        return False
+
+    def wrap(self, original_invoke, invoke_stream=None):
+        """返回包好上下文自管理的 invoke。
+
+        ``invoke_stream`` 若有，compact 走同步流式（分片刷新读超时），
+        主请求仍用非流式 ``original_invoke``。
+        """
         def managed_invoke(messages, **kwargs):
             from xskill.agents import agent_trace
             from xskill.usage import extract_usage
@@ -991,7 +1271,13 @@ class ContextManager:
             set_max_context(self.max_context)
             if len(self._est_cache) > 8192:
                 self._est_cache.clear()
-            # 1) 主动剪裁：到 85% 就剪旧工具结果（纯截断/spill,不调模型）。
+            prefix_box = {"msgs": messages}
+            default_compact_fn = _model_compact_fn(
+                original_invoke,
+                lambda: prefix_box["msgs"],
+                invoke_stream=invoke_stream,
+            )
+            # 1) 可选 spill：仅 enable_spill=true 且到 85% 时剪旧工具结果。
             est = _estimate_history_tokens(
                 messages,
                 cjk_rate=self.cjk_rate,
@@ -999,7 +1285,7 @@ class ContextManager:
                 cache=self._est_cache,
             )
             trimmed = 0
-            if est >= self.trigger:
+            if self.enable_spill and est >= self.trigger:
                 trimmed = _trim_old_look_results(
                     messages,
                     self.trigger,
@@ -1034,6 +1320,12 @@ class ContextManager:
                         "No more eligible tool results could be spilled.",
                         include_timestamp=False,
                     )
+            elif (not self.enable_spill) and est >= self.trigger:
+                agent_trace.event(
+                    "CONTEXT",
+                    "Spill disabled; skipping trim of old tool results.",
+                    include_timestamp=False,
+                )
             after_spill = _estimate_history_tokens(
                 messages,
                 cjk_rate=self.cjk_rate,
@@ -1044,24 +1336,10 @@ class ContextManager:
                 self.compact_token_limit is not None
                 and after_spill > self.compact_token_limit
             ):
-                compact_fn = self.compact_fn or _model_compact_fn(
-                    original_invoke,
-                    messages,
+                compact_fn = self.compact_fn or default_compact_fn
+                compacted = self._compact_until_success(
+                    messages, compact_fn, prefix_box,
                 )
-                try:
-                    compacted = _compact_history_in_place(
-                        messages,
-                        compact_fn=compact_fn,
-                        keep_recent_messages=self.compact_keep_recent_messages,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    compacted = False
-                    logger.warning("上下文 compact 失败,继续使用剪裁后的历史：%s", exc)
-                    agent_trace.event(
-                        "CONTEXT",
-                        "Compact failed; continuing with spilled history.",
-                        include_timestamp=False,
-                    )
                 if compacted:
                     after_compact = _estimate_history_tokens(
                         messages,
@@ -1101,32 +1379,57 @@ class ContextManager:
             except Exception as exc:  # noqa: BLE001 — 唯一底层兜底
                 if not self._is_overlong_error(exc):
                     raise
-                # 2) 超长兜底（唯一）：再狠剪一轮 → 重发一次。
-                logger.warning("后端报上下文超长,剪裁历史后重发一次：%s", exc)
-                before_retry_spill = _estimate_history_tokens(
+                # 2) 超长兜底（唯一）：尽量 compact /（可选）狠剪 → 重发一次。
+                logger.warning("后端报上下文超长,收敛历史后重发一次：%s", exc)
+                before_retry = _estimate_history_tokens(
                     messages,
                     cjk_rate=self.cjk_rate,
                     calibration=self._calibration,
                     cache=self._est_cache,
                 )
-                _trim_old_look_results(messages, self.max_context // 2,
-                                       force_all=True,
-                                       spill_root=self.spill_root,
-                                       cjk_rate=self.cjk_rate,
-                                       calibration=self._calibration,
-                                       cache=self._est_cache)
-                after_retry_spill = _estimate_history_tokens(
+                if self.enable_spill:
+                    _trim_old_look_results(
+                        messages, self.max_context // 2,
+                        force_all=True,
+                        spill_root=self.spill_root,
+                        cjk_rate=self.cjk_rate,
+                        calibration=self._calibration,
+                        cache=self._est_cache,
+                    )
+                    agent_trace.event(
+                        "CONTEXT",
+                        "Backend reported context too long; forced spill "
+                        "before one retry.",
+                        include_timestamp=False,
+                    )
+                else:
+                    compact_fn = self.compact_fn or default_compact_fn
+                    compacted = self._compact_until_success(
+                        messages, compact_fn, prefix_box,
+                    )
+                    agent_trace.event(
+                        "CONTEXT",
+                        (
+                            "Backend reported context too long; "
+                            + (
+                                "compacted before one retry."
+                                if compacted
+                                else "compact unavailable, retrying as-is."
+                            )
+                        ),
+                        include_timestamp=False,
+                    )
+                after_retry = _estimate_history_tokens(
                     messages,
                     cjk_rate=self.cjk_rate,
                     calibration=self._calibration,
                     cache=self._est_cache,
                 )
-                agent_trace.event(
-                    "CONTEXT",
-                    "Backend reported context too long; forced spill before "
-                    f"one retry: {before_retry_spill:,} -> "
-                    f"{after_retry_spill:,} tokens.",
-                    include_timestamp=False,
+                logger.info(
+                    "超长兜底收敛 %d -> %d tokens (enable_spill=%s)",
+                    before_retry,
+                    after_retry,
+                    self.enable_spill,
                 )
                 est_raw = _estimate_history_tokens(
                     messages,

@@ -890,7 +890,9 @@ class TestContextManager:
                 self.tool_name = tool_name
 
         # max_context 小,凑一条超大的 look 返回触发剪裁。
-        cm = ContextManager(max_context=1000)
+        cm = ContextManager(
+            max_context=1000, config={"enable_spill": True},
+        )
         big = "x" * 8000  # ~2000 token,远超 85%*1000=850
         messages = [
             _Msg("user", "map"),
@@ -939,7 +941,11 @@ class TestContextManager:
             sent["tool_content"] = msgs[1].content
             return {"usage": {"prompt_tokens": 123}}
 
-        cm = ContextManager(max_context=1000, spill_root=tmp_path / "spill")
+        cm = ContextManager(
+            max_context=1000,
+            spill_root=tmp_path / "spill",
+            config={"enable_spill": True},
+        )
         cm.wrap(fake_invoke)(messages)
 
         content = sent["tool_content"]
@@ -970,7 +976,9 @@ class TestContextManager:
             raise AssertionError("unsafe spill must fail before model invoke")
 
         with pytest.raises(RuntimeError, match="spill_root 未绑定"):
-            ContextManager(max_context=1000).wrap(fake_invoke)(messages)
+            ContextManager(
+                max_context=1000, config={"enable_spill": True},
+            ).wrap(fake_invoke)(messages)
 
     def test_compact_runs_after_spill_when_history_still_exceeds_limit(self, tmp_path):
         """spill 后仍超 compact_token_limit 时,应调用 compact_fn 并收敛历史。"""
@@ -1037,6 +1045,7 @@ class TestContextManager:
             compact_token_limit=20,
             compact_keep_recent_messages=2,
             compact_fn=compact_fn,
+            config={"enable_spill": True},
         )
         cm.wrap(fake_invoke)(messages)
 
@@ -1145,11 +1154,278 @@ class TestContextManager:
             spill_root=tmp_path / "spill",
             compact_token_limit=20,
             compact_fn=lambda prompt: compact_calls.append(prompt) or "summary",
+            config={"enable_spill": True},
         ).wrap(lambda _messages, **_kwargs: {"usage": {"prompt_tokens": 100}})(
             messages
         )
 
         assert compact_calls == []
+
+    def test_spill_disabled_skips_trim_and_compacts_directly(self, tmp_path):
+        """默认关闭 spill：不剪旧 tool 结果，直接按 compact_token_limit 压缩。"""
+        from xskill.agents.context_budget import ContextManager, _TRIM_MARK
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        original = "KEEP_FULL_TOOL_BODY\n" + ("x" * 8000)
+        live_tool = {"content": None}
+        compact_calls: list[str] = []
+
+        def compact_fn(prompt: str) -> str:
+            live_tool["content"] = messages[3].content
+            compact_calls.append(prompt)
+            return "COMPACTED without spill"
+
+        messages = [
+            _Msg("system", "system\n" + ("S" * 4000)),
+            _Msg("user", "turn0"),
+            _Msg("assistant", "old"),
+            _Msg("tool", original, "read_file"),
+            _Msg("assistant", "recent"),
+            _Msg("user", "continue"),
+        ]
+        seen = {}
+
+        def fake_invoke(msgs, **_kwargs):
+            seen["messages"] = list(msgs)
+            return {"usage": {"prompt_tokens": 100}}
+
+        ContextManager(
+            max_context=1000,
+            spill_root=tmp_path / "spill",
+            compact_token_limit=20,
+            compact_keep_recent_messages=2,
+            compact_fn=compact_fn,
+        ).wrap(fake_invoke)(messages)
+
+        assert compact_calls
+        assert live_tool["content"] == original
+        assert _TRIM_MARK not in original
+        compacted = seen["messages"]
+        assert compacted[2].role == "user"
+        assert "COMPACTED without spill" in compacted[2].content
+
+    def test_compact_failure_retries_then_succeeds(self, tmp_path, caplog):
+        """compact 瞬时失败应打原因并重试，成功后再发主请求。"""
+        import logging
+        from xskill.agents.context_budget import ContextManager
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        compact_calls = {"n": 0}
+
+        def compact_fn(_prompt: str) -> str:
+            compact_calls["n"] += 1
+            if compact_calls["n"] < 3:
+                raise RuntimeError("502 Bad Gateway: Request timed out.")
+            return "COMPACTED after retry"
+
+        messages = [
+            _Msg("system", "system\n" + ("S" * 4000)),
+            _Msg("user", "turn0"),
+            _Msg("assistant", "old"),
+            _Msg("tool", "KEEP\n" + ("x" * 8000), "read_file"),
+            _Msg("assistant", "recent"),
+            _Msg("user", "continue"),
+        ]
+        seen = {}
+        main_calls = {"n": 0}
+
+        def fake_invoke(msgs, **_kwargs):
+            main_calls["n"] += 1
+            seen["messages"] = list(msgs)
+            return {"usage": {"prompt_tokens": 100}}
+
+        caplog.set_level(logging.WARNING, logger="xskill.context_budget")
+        ContextManager(
+            max_context=1000,
+            spill_root=tmp_path / "spill",
+            compact_token_limit=20,
+            compact_keep_recent_messages=2,
+            compact_fn=compact_fn,
+            config={
+                "max_retries": 4,
+                "retry_base_delay": 0,
+                "retry_max_delay": 0,
+            },
+        ).wrap(fake_invoke)(messages)
+
+        assert compact_calls["n"] == 3
+        assert main_calls["n"] == 1
+        assert "COMPACTED after retry" in seen["messages"][2].content
+        assert "Compact failed (1/" in caplog.text or "上下文 compact 失败 (1/" in caplog.text
+        assert "502 Bad Gateway" in caplog.text
+        assert caplog.text.count("Traceback (most recent call last)") == 0
+
+    def test_compact_timeout_retry_shrinks_request_copy(self, tmp_path, caplog):
+        """超时后只缩小压缩请求副本，不改还没 compact 成功的 live history。"""
+        import logging
+        from xskill.agents.context_budget import ContextManager, _TRIM_MARK
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        original = "KEEP\n" + ("x" * 8000)
+        seen_requests: list = []
+
+        def fake_invoke(msgs, **kwargs):
+            contents = [getattr(m, "content", "") or "" for m in msgs]
+            is_compact = any(
+                "CONTEXT CHECKPOINT COMPACTION" in content for content in contents
+            )
+            if is_compact:
+                seen_requests.append(list(msgs))
+                if len(seen_requests) == 1:
+                    raise RuntimeError("Request timed out.")
+                assistant_message = kwargs.get("assistant_message")
+                if assistant_message is not None:
+                    assistant_message.content = "COMPACTED after shrink"
+                return {"content": "COMPACTED after shrink"}
+            return {"usage": {"prompt_tokens": 100}}
+
+        messages = [
+            _Msg("system", "system\n" + ("S" * 4000)),
+            _Msg("user", "turn0"),
+            _Msg("assistant", "old"),
+            _Msg("tool", original, "read_file"),
+            _Msg("assistant", "recent"),
+            _Msg("user", "continue"),
+        ]
+
+        caplog.set_level(logging.WARNING, logger="xskill.context_budget")
+        ContextManager(
+            max_context=1000,
+            spill_root=tmp_path / "spill",
+            compact_token_limit=20,
+            compact_keep_recent_messages=2,
+            config={
+                "max_retries": 4,
+                "retry_base_delay": 0,
+                "retry_max_delay": 0,
+            },
+        ).wrap(fake_invoke)(messages)
+
+        assert len(seen_requests) == 2
+        first_tool = next(
+            m for m in seen_requests[0] if getattr(m, "role", None) == "tool"
+        )
+        second_tool = next(
+            m for m in seen_requests[1] if getattr(m, "role", None) == "tool"
+        )
+        assert original in first_tool.content
+        assert original not in second_tool.content
+        assert "spill_path:" in second_tool.content or _TRIM_MARK in second_tool.content
+        assert all(getattr(m, "content", None) != original for m in messages)
+
+    def test_compact_failure_does_not_fall_through_to_main_invoke(
+        self, tmp_path, caplog,
+    ):
+        """compact 重试耗尽后抛出，不得带着膨胀历史继续发主请求。"""
+        import logging
+        from xskill.agents.context_budget import CompactFailedError, ContextManager
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        compact_calls = {"n": 0}
+
+        def compact_fn(_prompt: str) -> str:
+            compact_calls["n"] += 1
+            raise RuntimeError("502 Bad Gateway: Request timed out.")
+
+        messages = [
+            _Msg("system", "system\n" + ("S" * 4000)),
+            _Msg("user", "turn0"),
+            _Msg("assistant", "old"),
+            _Msg("tool", "KEEP\n" + ("x" * 8000), "read_file"),
+            _Msg("assistant", "recent"),
+            _Msg("user", "continue"),
+        ]
+        main_calls = {"n": 0}
+
+        def fake_invoke(_msgs, **_kwargs):
+            main_calls["n"] += 1
+            raise AssertionError("must not continue with uncompacted history")
+
+        caplog.set_level(logging.WARNING, logger="xskill.context_budget")
+        with pytest.raises(CompactFailedError, match="working-memory compact did not succeed"):
+            ContextManager(
+                max_context=1000,
+                spill_root=tmp_path / "spill",
+                compact_token_limit=20,
+                compact_keep_recent_messages=2,
+                compact_fn=compact_fn,
+                config={
+                    "max_retries": 3,
+                    "retry_base_delay": 0,
+                    "retry_max_delay": 0,
+                },
+            ).wrap(fake_invoke)(messages)
+
+        assert compact_calls["n"] == 3
+        assert main_calls["n"] == 0
+        assert "Traceback (most recent call last)" in caplog.text
+        assert "Compact failed; continuing with spilled history." not in caplog.text
+
+    def test_compact_uses_sync_invoke_stream_and_concatenates_chunks(self, tmp_path):
+        """compact 应走同步 invoke_stream，把分片拼成摘要，不走非流式 invoke。"""
+        from types import SimpleNamespace
+        from xskill.agents.context_budget import ContextManager
+
+        class _Msg:
+            def __init__(self, role, content, tool_name=None):
+                self.role = role
+                self.content = content
+                self.tool_name = tool_name
+
+        stream_calls = {"n": 0}
+
+        def fake_stream(msgs, **_kwargs):
+            stream_calls["n"] += 1
+            assert msgs[-1].role == "user"
+            yield SimpleNamespace(content="STREAM ")
+            yield SimpleNamespace(content="COMPACT")
+
+        messages = [
+            _Msg("system", "system\n" + ("S" * 4000)),
+            _Msg("user", "turn0"),
+            _Msg("assistant", "old"),
+            _Msg("tool", "KEEP\n" + ("x" * 8000), "read_file"),
+            _Msg("assistant", "recent"),
+            _Msg("user", "continue"),
+        ]
+        seen = {}
+
+        def after_compact_invoke(msgs, **_kwargs):
+            seen["messages"] = list(msgs)
+            return {"usage": {"prompt_tokens": 100}}
+
+        cm = ContextManager(
+            max_context=1000,
+            spill_root=tmp_path / "spill",
+            compact_token_limit=20,
+            compact_keep_recent_messages=2,
+            config={"retry_base_delay": 0, "retry_max_delay": 0},
+        )
+        managed = cm.wrap(after_compact_invoke, invoke_stream=fake_stream)
+        managed(messages)
+
+        assert stream_calls["n"] == 1
+        assert "STREAM COMPACT" in seen["messages"][2].content
 
     def test_compact_prompt_has_deterministic_mutation_ledger(self, tmp_path):
         """Compact 只附加可靠操作账本，不重新格式化整段历史。"""
@@ -1394,7 +1670,9 @@ class TestContextManager:
                 self.content = content
                 self.tool_name = tool_name
 
-        cm = ContextManager(max_context=100000)
+        cm = ContextManager(
+            max_context=100000, config={"enable_spill": True},
+        )
         messages = [
             _Msg("user", "map"),
             _Msg("tool", "y" * 4000, tool_name="look"),

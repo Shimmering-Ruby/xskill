@@ -142,6 +142,7 @@ def test_context_management_reads_compact_config_and_calls_compactor(tmp_path):
             "max_context": 1000,
             "compact_token_limit": 20,
             "compact_keep_recent_messages": 2,
+            "enable_spill": True,
         },
         spill_root=tmp_path / "spill",
     )
