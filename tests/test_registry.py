@@ -24,6 +24,7 @@ from xskill.pipeline.registry import (
     find_traj_file,
     update_traj_status,
     get_trajs_by_status,
+    increment_retry,
     mark_not_fit,
     reset_not_fit_for_interest_change,
 )
@@ -465,4 +466,110 @@ def test_get_trajs_by_status_newest_first(tmp_path, db_path):
     assert get_trajs_by_status(
         wid, "discovered", limit=1, db_path=db_path,
     ) == ["traj_zzz.md"]
+
+
+_WATCH_STATUS_INDEX = "idx_trajectories_watch_status_newest"
+
+
+def _watch_status_index_columns(conn):
+    return [
+        (row["name"], int(row["desc"]))
+        for row in conn.execute(f"PRAGMA index_xinfo({_WATCH_STATUS_INDEX})")
+        if row["key"]
+    ]
+
+
+def test_watch_status_index_on_new_and_existing_db(tmp_path, db_path):
+    """新库有索引；旧库下次 schema 检查用 CREATE INDEX IF NOT EXISTS 补上。"""
+    traj_dir = tmp_path / "dataset"
+    traj_dir.mkdir()
+    (traj_dir / "traj_keep.md").write_text("# keep\n")
+    wid = register_dir(traj_dir, db_path=db_path)
+    discover_trajectories(wid, traj_dir, db_path=db_path)
+
+    conn = get_connection(db_path)
+    assert _watch_status_index_columns(conn) == [
+        ("watch_dir_id", 0),
+        ("status", 0),
+        ("discovered_at", 1),
+        ("file_mtime", 1),
+        ("id", 1),
+    ]
+    before = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT filename, status FROM trajectories ORDER BY id"
+        )
+    ]
+    conn.execute(f"DROP INDEX {_WATCH_STATUS_INDEX}")
+    conn.execute("PRAGMA user_version=0")
+    conn.commit()
+    conn.close()
+
+    conn = get_connection(db_path)
+    assert _watch_status_index_columns(conn) == [
+        ("watch_dir_id", 0),
+        ("status", 0),
+        ("discovered_at", 1),
+        ("file_mtime", 1),
+        ("id", 1),
+    ]
+    after = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT filename, status FROM trajectories ORDER BY id"
+        )
+    ]
+    conn.close()
+    assert after == before
+    assert after == [{"filename": "traj_keep.md", "status": "discovered"}]
+
+
+def test_watch_status_query_plan_uses_index(db_path):
+    """状态查询按 watch_dir_id + status 走新索引，排序不再建临时 B-tree。"""
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO watch_dirs (id, path, label) VALUES (1, '/tmp/wd', 'wd')"
+    )
+    conn.executemany(
+        "INSERT INTO trajectories"
+        " (watch_dir_id, filename, status, discovered_at, file_mtime)"
+        " VALUES (1, ?, ?, ?, ?)",
+        [
+            ("traj_old.md", "indexed", "2024-01-01 00:00:00", 1.0),
+            ("traj_new.md", "indexed", "2026-08-20 00:00:00", 9.0),
+            ("traj_done.md", "done", "2026-08-19 00:00:00", 8.0),
+        ],
+    )
+    conn.commit()
+    plan = " ".join(
+        row["detail"]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT filename FROM trajectories "
+            "WHERE watch_dir_id=? AND status=? "
+            "ORDER BY discovered_at DESC, file_mtime DESC, id DESC",
+            (1, "indexed"),
+        )
+    )
+    conn.close()
+    assert _WATCH_STATUS_INDEX in plan
+    assert "TEMP B-TREE" not in plan
+
+
+def test_get_trajs_by_status_error_retry_filter(tmp_path, db_path):
+    traj_dir = tmp_path / "dataset"
+    traj_dir.mkdir()
+    (traj_dir / "traj_err.md").write_text("# err\n")
+    wid = register_dir(traj_dir, db_path=db_path)
+    discover_trajectories(wid, traj_dir, db_path=db_path)
+    update_traj_status(wid, "traj_err.md", "error", db_path=db_path)
+    assert get_trajs_by_status(wid, "error", db_path=db_path) == ["traj_err.md"]
+    increment_retry(wid, "traj_err.md", db_path=db_path)
+    increment_retry(wid, "traj_err.md", db_path=db_path)
+    increment_retry(wid, "traj_err.md", db_path=db_path)
+    assert get_trajs_by_status(wid, "error", db_path=db_path) == []
+    assert get_trajs_by_status(
+        wid, "error", max_retries=4, db_path=db_path,
+    ) == ["traj_err.md"]
 
