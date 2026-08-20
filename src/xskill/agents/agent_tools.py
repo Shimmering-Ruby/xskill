@@ -15,13 +15,13 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import copy
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -518,7 +518,10 @@ def _onhold_block_message(path: Path | str) -> str:
 
 
 def _maybe_spill_list_files(body: str, listed_path: Path) -> str:
-    """If a directory listing is too large, write it to spill_root and tell the model to page it."""
+    """超长列表写入 spill 文件，文件名由目录路径哈希决定，同一目录覆盖同一文件。
+
+    没有 spill_root 时保持整份列表，不截断——否则模型没有翻页入口。
+    """
     lines = body.splitlines()
     too_long = (
         len(lines) > _LIST_FILES_INLINE_MAX_LINES
@@ -527,19 +530,13 @@ def _maybe_spill_list_files(body: str, listed_path: Path) -> str:
     if not too_long:
         return body
     ctx = current_agent_tool_context()
-    spill_root = ctx.spill_root
-    if spill_root is None:
-        kept = "\n".join(lines[:_LIST_FILES_INLINE_MAX_LINES])
-        omitted = max(0, len(lines) - _LIST_FILES_INLINE_MAX_LINES)
-        return (
-            f"{kept}\n"
-            f"... (truncated {omitted} entries — 目录过长。"
-            "请收窄 path，或对具体文件用 read_file 按行读取)"
-        )
-    spill_dir = Path(spill_root)
+    if ctx.spill_root is None:
+        return body
+    spill_dir = Path(ctx.spill_root) / "list_files"
     spill_dir.mkdir(parents=True, exist_ok=True)
-    spill_path = spill_dir / f"{uuid.uuid4().hex}_list_files.txt"
-    spill_path.write_text(body, encoding="utf-8")
+    digest = hashlib.sha256(str(listed_path).encode("utf-8")).hexdigest()[:16]
+    spill_path = spill_dir / f"{digest}.txt"
+    spill_path.write_text(body + "\n", encoding="utf-8")
     return "\n".join((
         "[list_files_spilled]",
         f"listed_path: {listed_path}",
