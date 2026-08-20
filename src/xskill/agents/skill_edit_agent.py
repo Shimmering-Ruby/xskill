@@ -404,11 +404,17 @@ class SkillEditAgent:
     def _skill_tree_context_lines(self, max_entries: int = 80) -> list[str]:
         """返回当前 skill 根目录与文件树，供 agent 决定是否 read_file。"""
         cwd = Path.cwd().resolve()
+        skill = Path(self.skill_dir)
+        name = skill.name
         lines = [
             "",
             f"process_cwd: {cwd}",
-            f"skill_base_path: {self.skill_dir}",
-            "write_file / edit 相对路径按 skill_base_path 解析（SKILL.md、scripts/foo.py）。不要加 ./skill/ 前缀。",
+            f"skill_base_path: {skill}",
+            "write_file / edit 相对路径按 skill_base_path 解析。写错会返回 error，并带上对错例子。",
+            f"对：write_file(path=\"SKILL.md\")  写成  {skill / 'SKILL.md'}",
+            f"对：write_file(path=\"scripts/foo.py\")  写成  {skill / 'scripts' / 'foo.py'}",
+            "错：write_file(path=\"./skill/SKILL.md\")",
+            f"错：write_file(path=\"{name}/SKILL.md\")",
             "read_file / list_files / grep_files 相对路径按 process_cwd 解析；list_files 返回的完整路径可直接给 read_file。",
             "# 当前 skill 文件树（相对 skill_base_path；需要内容时用 read_file 读取）",
         ]
@@ -1037,16 +1043,18 @@ class SkillEditAgent:
 
     def _trace_run(self, agent: Any, user_msg: str) -> None:
         """Append one agent.run() to the skill's single human-readable trace."""
+        from xskill.agents import agent_tools
         from xskill.agents.agent_trace import trace_to
 
         spill_limit, compact_limit = self._trace_limits()
-        with trace_to(
-            self._trace_path(),
-            append=True,
-            spill_token_limit=spill_limit,
-            compact_token_limit=compact_limit,
-        ):
-            agent.run(user_msg)
+        with agent_tools.use_skill_write_target(self.skill_dir.name):
+            with trace_to(
+                self._trace_path(),
+                append=True,
+                spill_token_limit=spill_limit,
+                compact_token_limit=compact_limit,
+            ):
+                agent.run(user_msg)
 
     # ───────────────────────────────────────────────────────────────
     # 多轮消化主循环

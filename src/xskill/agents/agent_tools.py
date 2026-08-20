@@ -243,6 +243,15 @@ def use_skill_edit_batch(
         yield bound
 
 
+@contextlib.contextmanager
+def use_skill_write_target(skill_name: str) -> Iterator[AgentToolContext]:
+    """把 write_file / edit 的相对路径根钉到这个 skill 仓，不改 commit 批次。"""
+    current = current_agent_tool_context()
+    bound = replace(current, skill_edit_skill_name=_slugify(skill_name))
+    with use_agent_tool_context(bound):
+        yield bound
+
+
 class AgentToolConfig:
     """Stateless compatibility facade over the current task's context."""
 
@@ -966,35 +975,53 @@ def list_candidates(skill_name: str) -> str:
 
 
 def _writable_skill_root() -> Path | None:
-    root = agent_tool_config.writable_skill_dir
-    if root is None:
+    current = current_agent_tool_context()
+    lib = current.atom_skill_dir or current.skill_dir
+    if lib is None:
         return None
-    return Path(root).resolve()
+    lib = Path(lib).resolve()
+    name = current.skill_edit_skill_name
+    if name:
+        if lib.name == name:
+            return lib
+        return (lib / name).resolve()
+    return lib
+
+
+def _skill_write_hint_lines(skill_dir: Path) -> list[str]:
+    name = skill_dir.name
+    return [
+        f"skill_dir: {skill_dir}",
+        f"ok: SKILL.md  ->  {skill_dir / 'SKILL.md'}",
+        f"ok: scripts/foo.py  ->  {skill_dir / 'scripts' / 'foo.py'}",
+        "not: ./skill/SKILL.md",
+        f"not: {name}/SKILL.md",
+    ]
 
 
 def _skill_write_error(path: str, skill_dir: Path | None, detail: str) -> str:
     lines = [f"error: {detail} (tried: {path})"]
     if skill_dir is not None:
-        lines.append(f"skill_dir: {skill_dir}")
-        lines.append(f"example: SKILL.md  or  {skill_dir / 'SKILL.md'}")
+        lines.extend(_skill_write_hint_lines(skill_dir))
     return "\n".join(lines)
 
 
 def _resolve_skill_write_path(path: str) -> tuple[Path | None, str | None]:
     """把 write_file / edit 的 path 收到当前 skill_dir 下。
 
-    相对路径按 skill_dir 拼接，不按进程 cwd。``skill/`` 或 ``./skill/``
-    前缀会写成仓内套一层 skill/，直接拒掉并给出可写示例。
+    相对路径按 skill_dir 拼接，不按进程 cwd。``skill/``、``./skill/``
+    或技能文件夹名当第一段，会写成仓内再套一层，直接拒掉并给出对错例子。
     """
     skill_dir = _writable_skill_root()
     if skill_dir is None:
         return None, "error: skill directory is not configured"
     raw = Path(path)
-    if not raw.is_absolute() and raw.parts and raw.parts[0] == "skill":
+    first = raw.parts[0] if raw.parts else ""
+    if not raw.is_absolute() and first in {"skill", skill_dir.name}:
         return None, _skill_write_error(
             path,
             skill_dir,
-            "path is relative to skill_dir; do not prefix skill/",
+            f"path is relative to skill_dir; do not prefix {first}/",
         )
     candidate = raw if raw.is_absolute() else (skill_dir / raw)
     try:
@@ -1016,7 +1043,8 @@ def write_file(path: str, content: str) -> str:
 
     Relative paths resolve against skill_dir, not the process working
     directory. Use ``SKILL.md`` or ``scripts/foo.py``. Do not prefix
-    ``./skill/``. Absolute paths must stay inside skill_dir.
+    ``./skill/`` or the skill folder name. Wrong paths return error
+    with ok or not examples. Absolute paths must stay inside skill_dir.
 
     v2 行为：只做路径安全 + frontmatter 日期消毒。旧 v1 ``source_trajs ≥ 3``
     gate 和 ``N/M 条轨迹`` warning 消毒已删——v2 用 ``source_atoms`` 引用 atom

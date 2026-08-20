@@ -55,7 +55,8 @@ def test_skill_prefix_is_rejected_with_location(skill_repo, tmp_path, monkeypatc
         assert out.startswith("error:"), path
         assert "do not prefix skill/" in out
         assert f"skill_dir: {skill_repo.resolve()}" in out
-        assert "example: SKILL.md" in out
+        assert "ok: SKILL.md" in out
+        assert f"not: {skill_repo.name}/SKILL.md" in out
         assert not (skill_repo / "skill").exists()
 
 
@@ -66,6 +67,41 @@ def test_outside_absolute_path_names_skill_dir(skill_repo, tmp_path):
     assert "writes restricted to skill_dir" in out
     assert f"skill_dir: {skill_repo.resolve()}" in out
     assert not outsider.exists()
+
+
+def test_skill_folder_prefix_is_rejected(skill_repo, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = agent_tools.write_file.entrypoint(
+        f"{skill_repo.name}/SKILL.md",
+        SKILL_MD,
+    )
+    assert out.startswith("error:")
+    assert f"do not prefix {skill_repo.name}/" in out
+    assert "ok: SKILL.md" in out
+    assert not (skill_repo / skill_repo.name).exists()
+
+
+def test_skill_edit_name_writes_into_repo_not_library(tmp_path, monkeypatch):
+    parent = tmp_path / "workspace" / "skill"
+    repo = parent / "demo-skill"
+    repo.mkdir(parents=True)
+    (repo / "scripts").mkdir()
+    snap = agent_tools.agent_tool_config.snapshot()
+    agent_tools.init_skill_authoring_tool_context(parent, parent, {})
+    agent_tools.init_atom_task_tool_context(
+        skill_dir=parent,
+        atom_store=None,
+        default_traj_root=parent,
+    )
+    monkeypatch.chdir(tmp_path)
+    try:
+        with agent_tools.use_skill_write_target("demo-skill"):
+            out = agent_tools.write_file.entrypoint("SKILL.md", SKILL_MD)
+        assert not out.startswith("error"), out
+        assert (repo / "SKILL.md").is_file()
+        assert not (parent / "SKILL.md").exists()
+    finally:
+        agent_tools.agent_tool_config.restore(snap)
 
 
 def test_edit_relative_path_from_other_cwd(skill_repo, tmp_path, monkeypatch):
