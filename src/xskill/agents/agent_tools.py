@@ -1236,30 +1236,101 @@ def update_frontmatter_metadata(skill_name: str, source_trajs: Optional[list] = 
 # AtomTask-era tools (v2) — consumed by TaskClusterAgent / SkillEditAgent
 # ═══════════════════════════════════════════════════════════════════
 
+READ_TRAJ_MAX_LINES = 200
+# AtomTaskRead 原样留给模型的字段。raw_segment 不在这里——原文走 read_traj。
+_ATOM_READ_KEEP_KEYS = (
+    "atom_id",
+    "traj_id",
+    "intent",
+    "summary",
+    "tags",
+    "used_skills",
+    "offset_start",
+    "offset_end",
+    "ux_score",
+    "pre_atom_id",
+    "post_atom_id",
+    "context_prefix",
+    "source_model",
+    "clustered",
+)
+
+
+def _atom_read_payload(atom) -> dict:
+    """intent / summary / 行号等元数据；不含 raw_segment。"""
+    full = json.loads(atom.to_json())
+    raw = full.get("raw_segment") or ""
+    start = int(full.get("offset_start") or 0)
+    end = int(full.get("offset_end") or 0)
+    line_span = max(0, end - start) if end > start else 0
+    first_end = start + min(line_span, READ_TRAJ_MAX_LINES) if line_span else start
+    if line_span > READ_TRAJ_MAX_LINES:
+        page_hint = (
+            f"本 atom 共 {line_span} 行，超过单次上限。先读 "
+            f"[{start}, {first_end})，再从 {first_end} 继续。"
+        )
+    elif line_span:
+        page_hint = f"本 atom 共 {line_span} 行，一次可读完。"
+    else:
+        page_hint = "本 atom 没有有效行区间。"
+    data = {key: full.get(key) for key in _ATOM_READ_KEEP_KEYS}
+    data["raw_segment_chars"] = len(raw)
+    data["raw_segment_lines"] = line_span
+    data["how_to_read"] = (
+        f'原文请用 read_traj(traj_id="{atom.traj_id}", '
+        f"offset_start={start}, offset_end=...)。"
+        f"行号是 1-based 半开区间 [{start}, {end})。"
+        f"每次最多 {READ_TRAJ_MAX_LINES} 行。{page_hint}"
+    )
+    return data
+
+
 @tool(name="atom_task_read")
 def atom_task_read(atom_id: str) -> str:
-    """读一个 AtomTask 的完整 JSON。
+    """读 AtomTask 的 intent / summary / 行号等，不含原文。
 
-    用于 cluster / edit agent 在决定归类前查看 atom 的 intent / summary /
-    raw_segment / used_skills。
+    返回 intent、summary、tags、used_skills、ux_score、前后 atom、
+    行号区间，以及 how_to_read。原文必须用 read_traj 按行分页取。
     """
     store = agent_tool_config.atom_store
     if store is None:
         return "error: atom task tool context not initialized"
     try:
-        return store.load(atom_id).to_json()
+        atom = store.load(atom_id)
     except FileNotFoundError as e:
         return f"error: {e}"
+    return json.dumps(_atom_read_payload(atom), ensure_ascii=False, indent=2)
 
 
 @tool(name="read_traj")
 def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
-    """按**行号**读 traj.md 片段。
+    f"""按行号读取一条轨迹的原文。这是读 traj 正文的专用工具。
 
-    用法：agent 看了 atom 摘要后想确认细节时，传 atom 的 offset_start /
-    offset_end（都是 1-based 行号，半开区间 ``[start, end)``）回来取原文。
-    校验区间合法（``offset_end > offset_start`` 且区间在文件行数内），
-    违反直接返回 error。
+    先调用 atom_task_read，拿到 traj_id、offset_start、offset_end 和
+    how_to_read。本工具只读你指定的那一段行，不会返回 atom 的 intent 或
+    summary。整段 atom 往往远超一页，必须分页，不要一次把 atom 的
+    起止行原样塞进来指望拿全文。
+
+    行号规则：1-based 半开区间 [offset_start, offset_end)，含起始行、
+    不含结束行。第一行是 1，禁止传 0。对的例子：前 200 行是
+    offset_start=1, offset_end=201。错的例子：offset_start=0。
+
+    每次最多 {READ_TRAJ_MAX_LINES} 行（offset_end - offset_start）。超过则只
+    返回前 {READ_TRAJ_MAX_LINES} 行，并在正文开头给出 continue，下一页用
+    那个 offset_start 接着读。不要因为被截断就改用 grep_files 或
+    read_file 去倒整份 traj.md。
+
+    traj_id 必须与 atom_task_read 返回的字符串完全一致，包括下划线。
+    不要把 traj_oc_xskill-debug_ses_1da2 改成带连字符的近形名字。
+
+    不要用 grep_files(pattern='.' 或 '^')、也不要用 read_file 去整包
+    读取 traj.md。grep 只适合搜关键词定位行号；定位之后仍用本工具
+    按行号精读。
+
+    Args:
+        traj_id: atom 里的轨迹 id，原样复制。
+        offset_start: 起始行号，从 1 起。
+        offset_end: 结束行号（不含），必须大于 offset_start。
     """
     traj_root = agent_tool_config.default_traj_root
     if traj_root is None:
@@ -1279,17 +1350,42 @@ def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
     p = traj_root / f"{traj_id}.md"
     if not p.is_file():
         return f"error: traj file not found: {p}"
-    if offset_end <= offset_start:
-        return f"error: offset_end ({offset_end}) must be > offset_start ({offset_start})"
+    try:
+        start = int(offset_start)
+        end = int(offset_end)
+    except (TypeError, ValueError):
+        return f"error: offset_start/offset_end must be int (got {offset_start!r}, {offset_end!r})"
+    if end <= start:
+        return f"error: offset_end ({end}) must be > offset_start ({start})"
+    if start < 1:
+        return (
+            f"error: line range [{start}..{end}) outside file "
+            f"(offset_start must be >= 1)"
+        )
     lines = p.read_text(encoding="utf-8").splitlines(keepends=True)
     total = len(lines)
-    # offset_end 是半开上界（行号），末 atom 可达 total + 1
-    if offset_start < 1 or offset_end > total + 1:
+    if start > total:
         return (
-            f"error: line range [{offset_start}..{offset_end}) outside file "
+            f"error: line range [{start}..{end}) outside file "
             f"line count {total}"
         )
-    return "".join(lines[offset_start - 1:offset_end - 1])
+    file_end = min(end, total + 1)
+    page_end = min(file_end, start + READ_TRAJ_MAX_LINES)
+    body = "".join(lines[start - 1:page_end - 1])
+    if page_end == end:
+        return body
+    next_hint = (
+        f"continue: read_traj(traj_id=\"{traj_id}\", "
+        f"offset_start={page_end}, offset_end=...)"
+        if page_end < file_end
+        else "no further lines in this file"
+    )
+    header = (
+        f"[read_traj] traj={traj_id} returned [{start}, {page_end}) "
+        f"requested [{start}, {end}); file_lines={total}; "
+        f"max_lines={READ_TRAJ_MAX_LINES}. {next_hint}\n"
+    )
+    return header + body
 
 
 @tool(name="new_skill_folder")

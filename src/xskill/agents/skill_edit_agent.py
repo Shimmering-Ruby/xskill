@@ -193,10 +193,12 @@ weightscore ≥ 10，需要你产出/更新它的 SKILL.md。
 
 # 你的目标
 
-读 atom 内容（AtomTaskRead），必要时读 traj 原文（ReadTraj），从轨迹里
-**提炼可泛化的知识**，写成 skill。skill 的价值 = 读它的人少踩多少坑、
-少试多少次错，而不是把一次执行过程复述一遍。SKILL.md 是必产物，但你
-**不限于**只写 SKILL.md——可以补充任何辅助文件，只要在 skill 目录范围内：
+先 AtomTaskRead 看 atom 的 intent、summary、tags、used_skills 和行号，
+不要指望它带回原文。需要证据时用 ReadTraj 按行分页取 traj 原文（每次最多
+200 行），从轨迹里 **提炼可泛化的知识**，写成 skill。skill 的价值 = 读它
+的人少踩多少坑、少试多少次错，而不是把一次执行过程复述一遍。SKILL.md 是
+必产物，但你 **不限于** 只写 SKILL.md——可以补充任何辅助文件，只要在
+skill 目录范围内：
 
 - ``<skill_dir>/SKILL.md`` — 必产物，frontmatter + body
 - ``<skill_dir>/scripts/*.py`` / ``*.sh`` — 可机械执行、参数化的脚本
@@ -292,8 +294,10 @@ commit message 写明本次基于哪些 atom_id 整理，以及**行为级**变�
 若本轮判定「仅印证、无行为变化」：不要为凑 commit 改正文；按更新场景跳过无意义版本。
 
 # 可用工具
-- AtomTaskRead(atom_id) — 读 atom JSON
-- ReadTraj(traj_id, offset_start, offset_end) — 按行号取轨迹原文（offset 即 1-based 行号）
+- AtomTaskRead(atom_id) — 读 intent / summary / tags / used_skills / 行号等元数据，
+  不含 raw_segment。原文用 ReadTraj
+- ReadTraj(traj_id, offset_start, offset_end) — 按行号取 traj 原文（1-based 半开
+  区间）；每次最多 200 行，超了只返回前 200 行并告诉下一页从哪起
 - SkillRead(skill_name) — 读现有 SKILL.md + 该 skill 目录其余文件树（更新场景先看这个）
 - read_file(path, offset=1, limit=200) — 按 1-based 行号窗口读取 skill 仓 /
   ~/.xskill / /tmp spill 下的文件；trim 后的 ``spill_path`` 也用它分页回读
