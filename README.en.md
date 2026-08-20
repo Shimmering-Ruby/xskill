@@ -123,6 +123,28 @@ xskill connect <host:port> --token <token>     # on each teammate's machine
 - **A/B-driven evolution** — a change is measured per person before it spreads. More people → faster, sharper evolution.
 - **Experts can teach manually** — edit a Skill locally and it is pulled in as `user-staging/<client_id>` to feed the next round.
 
+#### Generate or rewrite a Skill on demand
+
+`generate` does not create a Skill from scratch. It distills or rewrites one from existing trajectories the team server allows it to access; the natural-language instruction only describes the desired result. Once connected to a team server that supports `generate`, create a Skill like this:
+
+```bash
+xskill generate "Create a Skill for diagnosing Python memory leaks, including common diagnostic commands"
+```
+
+The same command can rewrite an existing Skill from trajectory evidence. Name the Skill and describe the change in the instruction:
+
+```bash
+xskill generate "Rewrite the existing python-memory-debug Skill to add Windows troubleshooting steps"
+```
+
+Use `--name` when the agent should prioritize specific users' trajectories. Separate multiple employee or user IDs with commas. Without this option, the agent can search all trajectories the server allows it to access:
+
+```bash
+xskill generate --name alice,bob "Build a database migration Skill from these users' successful sessions"
+```
+
+The job may wait for a free seat in the SkillEdit pool. The CLI streams queue and execution logs; when it finishes, the generated or rewritten Skill is committed directly to its main branch and pinned to the initiator's recommendation list. If the CLI reports that the server is too old, ask the administrator to upgrade the team server.
+
 #### Run it persistently
 
 `xskill connect` connects **directly** by default, bypassing corporate proxies (e.g. Huawei SWG) — teammates on an internal network no longer need to set `NO_PROXY` by hand. Add `--use-proxy` only when the machine's sole route out is a proxy that can actually reach the server.
@@ -161,6 +183,7 @@ xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md)
 | **OpenClaw** | 🟡 implemented | `~/.openclaw/agents/` | copy → `~/.agents/skills/<name>/` |
 | **Cursor** | 🟡 implemented | `~/.cursor/projects/*/agent-transcripts/` | symlink → `~/.cursor/skills/<name>/` |
 | **Trae** | 🟡 implemented | IDE `state.vscdb` / CLI `trajectory_*.json` | symlink → `~/.trae-cn/skills/`, `~/.trae/skills/` |
+| **DeepSeek Harness (dsh)** | 🟡 implemented | `~/.dsh/sessions/` (plaintext and default zstd sessions) | symlink → `~/.dsh/skills/<name>/` |
 | **Any other agent** | manual | SDK `xskill.adapters.submit_trajectory` | copy/symlink the `SKILL.md` dir |
 
 ## 📖 Concepts

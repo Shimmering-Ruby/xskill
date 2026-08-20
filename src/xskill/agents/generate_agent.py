@@ -13,6 +13,8 @@ from typing import Any, Callable
 
 logger = logging.getLogger("xskill.generate_agent")
 
+ONHOLD_PROMPT_LINE = "不要参考 on hold 轨迹。"
+
 SYSTEM_PROMPT = """你是 XSkill 的 GenerateAgent。用户通过 `xskill generate` 发来一条指令，
 要你立刻新建或改写一个 skill，并且提交到主干分支 main。
 
@@ -30,6 +32,8 @@ scripts/ 下放可执行脚本、在 references/ 下放长参考材料。价值�
 优先阅读范围：{name_hint}
 这不是禁读名单。磁盘上你能读到的轨迹目录都可以搜；上面列出的人只是
 用户希望你先看的范围。
+
+不要参考 on hold 轨迹。
 
 # 你可以读的目录
 
@@ -53,7 +57,7 @@ scripts/ 下放可执行脚本、在 references/ 下放长参考材料。价值�
 
 # 可用工具
 
-- list_files(path)
+- list_files(path)：目录条目过多时完整列表写入 spill 文件，用 read_file 按行翻页。
 - grep_files(pattern, path="", glob="", max_results=100)
 - read_file(path, offset=1, limit=200)
 - skill_read(skill_name)
@@ -109,6 +113,7 @@ class GenerateAgent:
         from xskill.agents.context_budget import (
             DEFAULT_MAX_CONTEXT,
             TRIM_TRIGGER_RATIO,
+            _bool_or_default,
         )
 
         preferred_names = preferred_names or []
@@ -134,11 +139,15 @@ class GenerateAgent:
         )
         spill_limit = int(max_context * TRIM_TRIGGER_RATIO)
         compact_raw = (self.llm_cfg or {}).get("compact_token_limit")
-        compact_limit = (
-            max(int(compact_raw), spill_limit)
-            if compact_raw not in (None, "")
-            else None
+        enable_spill = _bool_or_default(
+            (self.llm_cfg or {}).get("enable_spill"), False,
         )
+        if compact_raw in (None, ""):
+            compact_limit = None
+        elif enable_spill:
+            compact_limit = max(int(compact_raw), spill_limit)
+        else:
+            compact_limit = int(compact_raw)
         user_msg = (
             f"发起人: {user_id}\n"
             f"指令: {instruction.strip()}\n"

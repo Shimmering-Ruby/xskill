@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -26,10 +27,10 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Optional
 
 from agno.tools import tool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from xskill.skill.frontmatter import (
     parse as fm_parse,
@@ -79,6 +80,7 @@ class AgentToolContext:
     usage_ledger: Any = None
     cluster_write_queue: Any = None
     cluster_result_recorder: Any = None
+    cluster_batch_ids: frozenset[str] = frozenset()
     skill_edit_skill_name: str | None = None
     skill_edit_batch_ids: tuple[str, ...] = ()
     grep_fallback_warned: bool = False
@@ -86,6 +88,7 @@ class AgentToolContext:
     registry_db_path: Path | None = None
     extra_read_roots: tuple[Path, ...] = ()
     generate_user_id: str | None = None
+    blocked_read_roots: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -101,6 +104,8 @@ class AgentToolContext:
             )
         extra = tuple(Path(p) for p in (self.extra_read_roots or ()))
         object.__setattr__(self, "extra_read_roots", extra)
+        blocked = tuple(Path(p) for p in (self.blocked_read_roots or ()))
+        object.__setattr__(self, "blocked_read_roots", blocked)
 
 
 _EMPTY_AGENT_TOOL_CONTEXT = AgentToolContext()
@@ -124,11 +129,13 @@ def create_agent_tool_context(
     usage_ledger=None,
     cluster_write_queue=None,
     cluster_result_recorder=None,
+    cluster_batch_ids=(),
     skill_edit_skill_name=None,
     skill_edit_batch_ids=(),
     registry_db_path=None,
     extra_read_roots=(),
     generate_user_id=None,
+    blocked_read_roots=(),
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -149,6 +156,9 @@ def create_agent_tool_context(
         usage_ledger=usage_ledger,
         cluster_write_queue=cluster_write_queue,
         cluster_result_recorder=cluster_result_recorder,
+        cluster_batch_ids=frozenset(
+            str(atom_id) for atom_id in (cluster_batch_ids or ())
+        ),
         skill_edit_skill_name=(
             str(skill_edit_skill_name)
             if skill_edit_skill_name is not None
@@ -163,6 +173,9 @@ def create_agent_tool_context(
         extra_read_roots=tuple(Path(p) for p in (extra_read_roots or ())),
         generate_user_id=(
             str(generate_user_id) if generate_user_id else None
+        ),
+        blocked_read_roots=tuple(
+            Path(p) for p in (blocked_read_roots or ())
         ),
     )
 
@@ -196,6 +209,18 @@ def use_agent_tool_context(
         yield context
     finally:
         reset_agent_tool_context(token)
+
+
+@contextlib.contextmanager
+def use_cluster_batch(atom_ids) -> Iterator[AgentToolContext]:
+    """Limit candidate writes to atom IDs supplied for one cluster turn."""
+    current = current_agent_tool_context()
+    bound = replace(
+        current,
+        cluster_batch_ids=frozenset(str(atom_id) for atom_id in atom_ids),
+    )
+    with use_agent_tool_context(bound):
+        yield bound
 
 
 @contextlib.contextmanager
@@ -269,12 +294,14 @@ class AgentToolConfig:
             "usage_ledger": current.usage_ledger,
             "cluster_write_queue": current.cluster_write_queue,
             "cluster_result_recorder": current.cluster_result_recorder,
+            "cluster_batch_ids": current.cluster_batch_ids,
             "skill_edit_skill_name": current.skill_edit_skill_name,
             "skill_edit_batch_ids": current.skill_edit_batch_ids,
             "grep_fallback_warned": current.grep_fallback_warned,
             "registry_db_path": current.registry_db_path,
             "extra_read_roots": current.extra_read_roots,
             "generate_user_id": current.generate_user_id,
+            "blocked_read_roots": current.blocked_read_roots,
         }
 
     def restore(self, snapshot: dict) -> None:
@@ -289,11 +316,13 @@ class AgentToolConfig:
             usage_ledger=snapshot.get("usage_ledger"),
             cluster_write_queue=snapshot.get("cluster_write_queue"),
             cluster_result_recorder=snapshot.get("cluster_result_recorder"),
+            cluster_batch_ids=snapshot.get("cluster_batch_ids") or (),
             skill_edit_skill_name=snapshot.get("skill_edit_skill_name"),
             skill_edit_batch_ids=snapshot.get("skill_edit_batch_ids") or (),
             registry_db_path=snapshot.get("registry_db_path"),
             extra_read_roots=snapshot.get("extra_read_roots") or (),
             generate_user_id=snapshot.get("generate_user_id"),
+            blocked_read_roots=snapshot.get("blocked_read_roots") or (),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()
@@ -369,13 +398,13 @@ def _run_cluster_mutation(operation):
     """Run one ClusterAgent filesystem mutation in queue order."""
     context = current_agent_tool_context()
     queue = context.cluster_write_queue
-    if queue is None:
-        return operation()
 
     def run_bound():
         with use_agent_tool_context(context):
             return operation()
 
+    if queue is None:
+        return run_bound()
     return queue.call(run_bound)
 
 
@@ -383,6 +412,26 @@ def _record_cluster_result(atom_id: str, skill_name: str, weightscore: int) -> N
     recorder = current_agent_tool_context().cluster_result_recorder
     if recorder is not None:
         recorder.record(atom_id, skill_name, weightscore)
+
+
+def _move_cluster_result(
+    atom_id: str,
+    skill_from: str,
+    skill_to: str,
+    weightscore: int,
+) -> None:
+    recorder = current_agent_tool_context().cluster_result_recorder
+    if recorder is not None:
+        recorder.move(atom_id, skill_from, skill_to, weightscore)
+
+
+def _cluster_batch_membership_error(atom_id: str) -> str | None:
+    allowed_ids = current_agent_tool_context().cluster_batch_ids
+    if atom_id not in allowed_ids:
+        return (
+            f"error: atom_id {atom_id!r} is not in the current cluster batch"
+        )
+    return None
 
 
 def init_atom_task_tool_context(
@@ -428,6 +477,74 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+_LIST_FILES_INLINE_MAX_LINES = 200
+_LIST_FILES_INLINE_MAX_CHARS = 10000
+_ONHOLD_BLOCK_ERROR = "error: on hold 轨迹，不要参考"
+
+
+def _blocked_read_roots() -> list[Path]:
+    ctx = current_agent_tool_context()
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in ctx.blocked_read_roots or ():
+        path = Path(raw)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def _is_blocked_read_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for root in _blocked_read_roots():
+        if resolved == root or _is_relative_to(resolved, root):
+            return True
+    return False
+
+
+def _onhold_block_message(path: Path | str) -> str:
+    return f"{_ONHOLD_BLOCK_ERROR} ({path})"
+
+
+def _maybe_spill_list_files(body: str, listed_path: Path) -> str:
+    """超长列表写入 spill 文件，文件名由目录路径哈希决定，同一目录覆盖同一文件。
+
+    没有 spill_root 时保持整份列表，不截断——否则模型没有翻页入口。
+    """
+    lines = body.splitlines()
+    too_long = (
+        len(lines) > _LIST_FILES_INLINE_MAX_LINES
+        or len(body) > _LIST_FILES_INLINE_MAX_CHARS
+    )
+    if not too_long:
+        return body
+    ctx = current_agent_tool_context()
+    if ctx.spill_root is None:
+        return body
+    spill_dir = Path(ctx.spill_root) / "list_files"
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(str(listed_path).encode("utf-8")).hexdigest()[:16]
+    spill_path = spill_dir / f"{digest}.txt"
+    spill_path.write_text(body + "\n", encoding="utf-8")
+    return "\n".join((
+        "[list_files_spilled]",
+        f"listed_path: {listed_path}",
+        f"entries: {len(lines)}",
+        f"spill_path: {spill_path}",
+        f"chars: {len(body)}",
+        "reload: 用 read_file(spill_path, offset=1, limit=200) 按行读取，需要时增大 offset 翻页。",
+    ))
 
 
 SENSITIVE_FILENAMES = frozenset({
@@ -642,6 +759,8 @@ def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
             f"resolved_path: {resolved}\n"
             f"allowed_roots:\n{allowed_block}"
         )
+    if _is_blocked_read_path(resolved):
+        return _onhold_block_message(resolved)
     if _is_sensitive_file(resolved):
         return f"error: sensitive file, not readable by agent ({path})"
 
@@ -1003,7 +1122,7 @@ point. No preamble. Output the 2 sentences only.
 
 
 @tool(name="update_frontmatter_metadata")
-def update_frontmatter_metadata(skill_name: str, source_trajs: list[str] | None = None) -> str:
+def update_frontmatter_metadata(skill_name: str, source_trajs: Optional[list] = None) -> str:
     """
     Update frontmatter.metadata on a skill's SKILL.md:
       - bump version if source_trajs changed
@@ -1232,11 +1351,17 @@ def skill_read(skill_name: str) -> str:
 
 
 @tool(name="add_task_to_skill")
-def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
+def add_task_to_skill(
+    skill_name: str,
+    atom_id: str,
+    weightscore: StrictInt,
+) -> str:
     """v2.1: 把 atom 加进 skill 的 candidates buffer。
 
-    同 atom 重复 add 时**覆盖**（不累加，cluster 可改主意）。返回末尾附该
-    atom 的 weightscore + buffer 总分 / 10，让 agent 看到"还差多少到阈值"。
+    同 atom + 同 skill 重复 add 时**覆盖**（不累加，cluster 可改分）。同一
+    atom 可以独立支撑多个不同 skill，每个 skill 保留自己的 weightscore。
+    返回末尾附该 atom 的 weightscore + buffer 总分 / 10，让 agent 看到
+    "还差多少到阈值"。
     """
     from xskill.skill import candidates as C
     skill_dir = agent_tool_config.atom_skill_dir
@@ -1246,10 +1371,12 @@ def add_task_to_skill(skill_name: str, atom_id: str, weightscore: int) -> str:
     target = skill_dir / slug
     if not target.is_dir():
         return f"error: skill {slug} not found; call new_skill_folder first"
-    try:
-        weightscore_value = int(weightscore)
-    except (TypeError, ValueError):
+    batch_error = _cluster_batch_membership_error(atom_id)
+    if batch_error is not None:
+        return batch_error
+    if type(weightscore) is not int:
         return f"error: weightscore must be int 1..10 (got {weightscore!r})"
+    weightscore_value = weightscore
     if not (1 <= weightscore_value <= 10):
         return (
             "error: weightscore must be 1..10 "
@@ -1281,7 +1408,7 @@ class CandidateTaskInput(BaseModel):
         min_length=1,
         description="Existing AtomTask identifier from the current batch.",
     )
-    weightscore: int = Field(
+    weightscore: StrictInt = Field(
         ge=1,
         le=10,
         description="Candidate relevance score from 1 through 10.",
@@ -1301,7 +1428,8 @@ def add_tasks_to_skill(
 
     Each item requires ``atom_id`` and ``weightscore``; ``note`` is optional.
     Use this instead of repeated ``add_task_to_skill`` calls when several atoms
-    in the current cluster batch belong to the same skill.
+    in the current cluster batch belong to the same skill. An atom may appear
+    in separate calls for different skills when it materially supports each.
     """
     from xskill.skill import candidates as C
 
@@ -1330,14 +1458,16 @@ def add_tasks_to_skill(
         if atom_id in seen_atom_ids:
             return f"error: duplicate atom_id in tasks ({atom_id})"
         seen_atom_ids.add(atom_id)
+        batch_error = _cluster_batch_membership_error(atom_id)
+        if batch_error is not None:
+            return batch_error
         weightscore = task_data.get("weightscore")
-        try:
-            weightscore_value = int(weightscore)
-        except (TypeError, ValueError):
+        if type(weightscore) is not int:
             return (
                 "error: each task.weightscore must be int 1..10 "
                 f"(got {weightscore!r})"
             )
+        weightscore_value = weightscore
         if not (1 <= weightscore_value <= 10):
             return (
                 "error: each task.weightscore must be 1..10 "
@@ -1398,7 +1528,7 @@ def score_task(atom_id: str, score: int) -> str:
 def add_task(
     atom_id: str, *, traj_id: str, offset_start: int, offset_end: int,
     intent: str, summary: str, tags: list, used_skills: list,
-    ux_score: int | None = None,
+    ux_score: Optional[int] = None,
 ) -> str:
     """手动创建一个 AtomTask（offline 脚本 / agent 合成 atom 用）。
 
@@ -1437,9 +1567,9 @@ def make_task_agent_tools(
 
     @tool(name="submit_atom")
     def submit_atom(start_line: int, intent: str, summary: str,
-                    tags: list | None = None,
-                    used_skills: list | None = None,
-                    ux_score: int | None = None) -> str:
+                    tags: Optional[list] = None,
+                    used_skills: Optional[list] = None,
+                    *, ux_score: StrictInt) -> str:
         """提交一个新 AtomTask（提交即校验,不合法返 error 让你自改）。
 
         Args:
@@ -1470,6 +1600,8 @@ def make_task_agent_tools(
                     f"({submitted[-1]['start_line']})，本次 {sl}")
         if not (intent or "").strip() or not (summary or "").strip():
             return "error: intent 和 summary 必填"
+        if not 1 <= ux_score <= 10:
+            return f"error: ux_score 必须是 1~10 的整数 (got {ux_score})"
         submitted.append({
             "start_line": sl,
             "intent": intent.strip(),
@@ -1477,8 +1609,7 @@ def make_task_agent_tools(
             "tags": [str(t).strip() for t in (tags or []) if str(t).strip()],
             "used_skills": [str(s).strip() for s in (used_skills or [])
                             if str(s).strip()],
-            "ux_score": ux_score if isinstance(ux_score, int)
-            and 1 <= ux_score <= 10 else None,
+            "ux_score": ux_score,
         })
         return f"ok: 已记录 atom #{len(submitted)} (start_line={sl})"
 
@@ -1563,21 +1694,29 @@ def list_files(path: str) -> str:
 
     可列 skill 仓、~/.xskill、/tmp spill 三个只读根内的任意目录——摸清 skill
     已有文件、轨迹 / atom 数据布局都用它。越界返回 error。
+    on hold 轨迹目录会被拦截，不出现在列表里。
+    目录条目过多时完整列表写入 spill 文件，请用 read_file 按行翻页。
     """
     target_directory = Path(path).resolve()
     roots = _allowed_read_roots()
     if not any(_is_relative_to(target_directory, root) for root in roots):
         allowed_block = ", ".join(str(root) for root in roots)
         return f"error: list_files restricted to {allowed_block} (tried: {path})"
+    if _is_blocked_read_path(target_directory):
+        return _onhold_block_message(target_directory)
     if not target_directory.is_dir():
         return f"error: not a directory: {path}"
     entries = sorted(target_directory.iterdir())
     if not entries:
         return "(empty)"
-    return "\n".join(
+    visible = [e for e in entries if not _is_blocked_read_path(e)]
+    if not visible:
+        return "(empty)"
+    body = "\n".join(
         f"{'[dir] ' if e.is_dir() else '[file] '}{e.resolve()}{'/' if e.is_dir() else ''}"
-        for e in entries
+        for e in visible
     )
+    return _maybe_spill_list_files(body, target_directory)
 
 
 @tool(name="grep_files")
@@ -1597,6 +1736,8 @@ def grep_files(pattern: str, path: str = "", glob: str = "",
     if not any(_is_relative_to(search_root, root) for root in roots):
         allowed_block = ", ".join(str(root) for root in roots)
         return f"error: grep_files restricted to {allowed_block} (tried: {path})"
+    if _is_blocked_read_path(search_root):
+        return _onhold_block_message(search_root)
     if not search_root.exists():
         return f"error: path not found ({path})"
 
@@ -1665,6 +1806,8 @@ def grep_files(pattern: str, path: str = "", glob: str = "",
         hit_match = hit_line_pattern.match(output_line)
         # resolve() 后再判敏感：防符号链接用无害文件名包装密钥文件绕过过滤。
         if hit_match and _is_sensitive_file(Path(hit_match.group(1)).resolve()):
+            continue
+        if hit_match and _is_blocked_read_path(Path(hit_match.group(1))):
             continue
         filtered_lines.append(output_line)
         if len(filtered_lines) >= max_results:
@@ -2129,7 +2272,7 @@ def move_task_to(skill_from: str, skill_to: str, atom_id: str) -> str:
         )
         if weightscore is None:
             return f"error: atom_id {atom_id} 不在 {from_slug} buffer 中"
-        _record_cluster_result(atom_id, to_slug, weightscore)
+        _move_cluster_result(atom_id, from_slug, to_slug, weightscore)
         logger.info(f"moved task: atom={atom_id} {from_slug} → {to_slug}")
         return (f"moved: atom={atom_id} from {from_slug} to {to_slug} "
                 f"(weightscore={weightscore})")

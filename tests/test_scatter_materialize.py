@@ -207,7 +207,11 @@ def test_service_event_trigger_submits_both_methods(tmp_path):
     try:
         assert service.request("client-x")
         assert service.wait_idle(timeout=3)
-        time.sleep(0.05)  # 事件触发在 finalize 前,给投递一点点余量
+        # 事件触发在 finalize 前，投递由另一线程完成：用条件等待而不是固定
+        # sleep(0.05)——慢 runner（Windows）上固定睡眠偶发不够，CI 偶发失败。
+        deadline = time.monotonic() + 3.0
+        while len(recorder.enqueued) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert recorder.enqueued == [("client-x", "tsne"), ("client-x", "umap")]
     finally:
         assert service.stop(timeout=3)

@@ -19,6 +19,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -360,10 +361,11 @@ CREATE TABLE IF NOT EXISTS ux_scores_meta (
 -- atom 在途 pending 投影：真相仍是各 skill 的 .candidates.yml；
 -- 写出口（candidates 落盘闸）同步；dashboard 读路径只查本表，禁止 per-atom 扫盘。
 CREATE TABLE IF NOT EXISTS atom_candidate_pending (
-    atom_id     TEXT PRIMARY KEY,
+    atom_id     TEXT NOT NULL,
     skill       TEXT NOT NULL,
     weightscore INTEGER NOT NULL DEFAULT 0,
-    updated_at  TEXT DEFAULT (datetime('now'))
+    updated_at  TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (atom_id, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_acp_skill ON atom_candidate_pending(skill);
 
@@ -373,6 +375,15 @@ CREATE TABLE IF NOT EXISTS atom_candidate_pending_meta (
     root_key      TEXT PRIMARY KEY,
     backfilled_at TEXT NOT NULL
 );
+
+-- 纳入 / generate 发起人。首次写入生效，供自动灰度对象（与用量最多的用户取并）。
+CREATE TABLE IF NOT EXISTS skill_origin (
+    skill_name TEXT PRIMARY KEY,
+    user_key   TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    ts         TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_origin_user ON skill_origin(user_key);
 """
 
 
@@ -505,6 +516,68 @@ def pooled_connection(db_path: Optional[Path] = None) -> Iterator[sqlite3.Connec
         slot.busy = False
 
 
+def _migrate_atom_candidate_pending(conn: sqlite3.Connection) -> None:
+    """Replace the legacy key and invalidate stale projection readiness."""
+    table_info = conn.execute(
+        "PRAGMA table_info(atom_candidate_pending)",
+    ).fetchall()
+    primary_key = [
+        row[1]
+        for row in sorted(table_info, key=lambda row: row[5])
+        if row[5]
+    ]
+    if primary_key == ["atom_id", "skill"]:
+        return
+
+    required_columns = {"atom_id", "skill", "weightscore", "updated_at"}
+    actual_columns = {row[1] for row in table_info}
+    if not required_columns.issubset(actual_columns):
+        raise sqlite3.DatabaseError(
+            "cannot migrate atom_candidate_pending with columns "
+            f"{sorted(actual_columns)!r}",
+        )
+
+    conn.execute("SAVEPOINT migrate_atom_candidate_pending")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE atom_candidate_pending_v2 (
+                atom_id     TEXT NOT NULL,
+                skill       TEXT NOT NULL,
+                weightscore INTEGER NOT NULL DEFAULT 0,
+                updated_at  TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (atom_id, skill)
+            )
+            """,
+        )
+        conn.execute(
+            """
+            INSERT INTO atom_candidate_pending_v2(
+                atom_id, skill, weightscore, updated_at
+            )
+            SELECT atom_id, skill, weightscore, updated_at
+            FROM atom_candidate_pending
+            """,
+        )
+        conn.execute("DROP TABLE atom_candidate_pending")
+        conn.execute(
+            "ALTER TABLE atom_candidate_pending_v2 "
+            "RENAME TO atom_candidate_pending",
+        )
+        conn.execute(
+            "CREATE INDEX idx_acp_skill ON atom_candidate_pending(skill)",
+        )
+        # The legacy table retained at most one skill for each Atom.  Force a
+        # reconcile from the authoritative .candidates.yml files so cached
+        # root/mtime markers cannot hide associations lost before migration.
+        conn.execute("DELETE FROM atom_candidate_pending_meta")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT migrate_atom_candidate_pending")
+        conn.execute("RELEASE SAVEPOINT migrate_atom_candidate_pending")
+        raise
+    conn.execute("RELEASE SAVEPOINT migrate_atom_candidate_pending")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns missing from older schema versions."""
     # ── trajectories ──
@@ -594,6 +667,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE skill_prefs ADD COLUMN side TEXT NOT NULL DEFAULT ''"
         )
+
+    _migrate_atom_candidate_pending(conn)
 
     # Backfill status from has_meta/has_embedding —— **只在首次补 status 列时跑一次**。
     # 以前每次 get_connection 都跑这条,会把任何 status='discovered' 的**活行**
@@ -810,6 +885,147 @@ def clear_skill_pref(*, user_key: str, skill_name: str,
         except Exception:  # pylint: disable=broad-exception-caught
             logger.debug("mark recommend dirty after clear pref failed", exc_info=True)
     return deleted
+
+
+_SKILL_ORIGIN_SOURCES = frozenset({"import", "generate"})
+_AUTO_CANARY_TTL_SEC = 5.0
+_auto_canary_cache_lock = threading.Lock()
+_auto_canary_cache: dict[str, tuple[float, dict[str, set[str]]]] = {}
+
+
+def _auto_canary_cache_key(db_path: Optional[Path]) -> str:
+    path = db_path if db_path is not None else get_registry_db_path()
+    return str(Path(path).expanduser().resolve())
+
+
+def clear_auto_canary_cache_for_tests() -> None:
+    with _auto_canary_cache_lock:
+        _auto_canary_cache.clear()
+
+
+def record_skill_origin(
+    *,
+    skill_name: str,
+    user_key: str,
+    source: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """记录纳入或 generate 发起人。首次写入生效，后写忽略。"""
+    skill_name = (skill_name or "").strip()
+    user_key = (user_key or "").strip()
+    source = (source or "").strip()
+    if not skill_name or not user_key or source not in _SKILL_ORIGIN_SOURCES:
+        return False
+    with pooled_connection(db_path) as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO skill_origin(skill_name, user_key, source)"
+            " VALUES(?,?,?)",
+            (skill_name, user_key, source),
+        )
+        conn.commit()
+        inserted = cur.rowcount > 0
+    if inserted:
+        clear_auto_canary_cache_for_tests()
+    return inserted
+
+
+def skill_origin_user(skill_name: str, *,
+                      db_path: Optional[Path] = None) -> Optional[str]:
+    skill_name = (skill_name or "").strip()
+    if not skill_name:
+        return None
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT user_key FROM skill_origin WHERE skill_name=?",
+            (skill_name,),
+        ).fetchone()
+    user = (row["user_key"] or "").strip() if row else ""
+    return user or None
+
+
+def _traj_id_from_ux_row(traj_id: str, atom_id: str) -> str:
+    tid = (traj_id or "").strip()
+    if tid:
+        return tid
+    atom = atom_id or ""
+    if not atom.startswith("atom_"):
+        return ""
+    body = atom[5:]
+    idx = body.rfind("_")
+    return body[:idx] if idx > 0 else ""
+
+
+def _build_auto_canary_users(db_path: Optional[Path]) -> dict[str, set[str]]:
+    """skill_name → {纳入/生成发起人, 体验分用量最多的用户}。"""
+    with pooled_connection(db_path) as conn:
+        origin_rows = conn.execute(
+            "SELECT skill_name, user_key FROM skill_origin",
+        ).fetchall()
+        traj_rows = conn.execute(
+            "SELECT filename, user_key FROM trajectories WHERE user_key!=''",
+        ).fetchall()
+        ux_rows = conn.execute(
+            "SELECT skill_name, traj_id, atom_id FROM ux_scores",
+        ).fetchall()
+    out: dict[str, set[str]] = {}
+    for row in origin_rows:
+        skill = (row["skill_name"] or "").strip()
+        user = (row["user_key"] or "").strip()
+        if skill and user:
+            out.setdefault(skill, set()).add(user)
+    traj_user: dict[str, str] = {}
+    for row in traj_rows:
+        fn = row["filename"] or ""
+        stem = fn[:-3] if fn.endswith(".md") else fn
+        user = (row["user_key"] or "").strip()
+        if stem and user:
+            traj_user[stem] = user
+    usage: dict[str, dict[str, int]] = {}
+    for row in ux_rows:
+        skill = (row["skill_name"] or "").strip()
+        traj = _traj_id_from_ux_row(row["traj_id"] or "", row["atom_id"] or "")
+        user = traj_user.get(traj, "")
+        if not skill or not user:
+            continue
+        bucket = usage.setdefault(skill, {})
+        bucket[user] = bucket.get(user, 0) + 1
+    for skill, by_user in usage.items():
+        ranked = sorted(by_user.items(), key=lambda kv: (-kv[1], kv[0]))
+        if ranked:
+            out.setdefault(skill, set()).add(ranked[0][0])
+    return out
+
+
+def auto_canary_users_by_skill(
+    *, db_path: Optional[Path] = None,
+) -> dict[str, set[str]]:
+    """短 TTL 缓存：每个 skill 的自动灰度对象集合。"""
+    key = _auto_canary_cache_key(db_path)
+    now = time.monotonic()
+    with _auto_canary_cache_lock:
+        hit = _auto_canary_cache.get(key)
+        if hit is not None and now - hit[0] < _AUTO_CANARY_TTL_SEC:
+            return {name: set(users) for name, users in hit[1].items()}
+    built = _build_auto_canary_users(db_path)
+    with _auto_canary_cache_lock:
+        _auto_canary_cache[key] = (now, built)
+    return {name: set(users) for name, users in built.items()}
+
+
+def auto_canary_users(skill_name: str, *,
+                      db_path: Optional[Path] = None) -> set[str]:
+    skill_name = (skill_name or "").strip()
+    if not skill_name:
+        return set()
+    return auto_canary_users_by_skill(db_path=db_path).get(skill_name, set())
+
+
+def is_auto_canary_user(user_key: str, skill_name: str, *,
+                        db_path: Optional[Path] = None) -> bool:
+    user_key = (user_key or "").strip()
+    if not user_key:
+        return False
+    return user_key in auto_canary_users(skill_name, db_path=db_path)
 
 
 def prefs_for(user_key: str, *, db_path: Optional[Path] = None) -> list[dict]:
@@ -1044,7 +1260,7 @@ def sync_atom_candidate_pending_for_skill(
 ) -> None:
     """按某 skill 当前 candidates 快照替换其 pending 投影行。
 
-    ``atom_id`` 为主键：同 atom 若改挂到其他 skill，ON CONFLICT 覆盖 skill 列。
+    ``(atom_id, skill)`` 为关联主键；同 atom 可独立挂到多个 skill。
     """
     rows: list[tuple[str, str, int]] = []
     for candidate in candidates or []:
@@ -1063,8 +1279,7 @@ def sync_atom_candidate_pending_for_skill(
                 """
                 INSERT INTO atom_candidate_pending(atom_id, skill, weightscore)
                 VALUES (?, ?, ?)
-                ON CONFLICT(atom_id) DO UPDATE SET
-                    skill=excluded.skill,
+                ON CONFLICT(atom_id, skill) DO UPDATE SET
                     weightscore=excluded.weightscore,
                     updated_at=datetime('now')
                 """,
@@ -1175,8 +1390,7 @@ def backfill_atom_candidate_pending(
                 """
                 INSERT INTO atom_candidate_pending(atom_id, skill, weightscore)
                 VALUES (?, ?, ?)
-                ON CONFLICT(atom_id) DO UPDATE SET
-                    skill=excluded.skill,
+                ON CONFLICT(atom_id, skill) DO UPDATE SET
                     weightscore=excluded.weightscore,
                     updated_at=datetime('now')
                 """,

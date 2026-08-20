@@ -657,6 +657,7 @@ function _routeUserRowHtml(u) {
         <span>${esc(u.user)}</span>
         ${_routePushPill(u)}
         ${u.overridden ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">pinned</span>' : ''}
+        ${u.auto_canary && !u.overridden ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 ring-1 ring-sky-100">自动灰度</span>' : ''}
       </div>
       <div class="text-[10.5px] text-slate-400 mt-0.5 flex items-center gap-1.5">
         ${u.sha ? `<code>${esc(String(u.sha).slice(0, 7))}</code>` : '<span>—</span>'}

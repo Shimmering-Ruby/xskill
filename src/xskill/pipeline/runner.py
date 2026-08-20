@@ -1120,6 +1120,7 @@ class DirectoryWatcher:
             install_to_ngagent,
             install_to_openclaw,
             install_to_cursor,
+            install_to_deepseek_harness,
             install_to_trae,
         )
 
@@ -1139,6 +1140,7 @@ class DirectoryWatcher:
             "openclaw": install_to_openclaw,  # copy 模式，详见 install_to_openclaw docstring
             "cursor": install_to_cursor,
             "trae": install_to_trae,
+            "deepseek_harness": install_to_deepseek_harness,
         }
 
         results: dict = {}
@@ -2788,10 +2790,13 @@ class DirectoryWatcher:
         ``_finalize_completed_trajs`` 按"该轨迹 atom 是否全落地"独立判定。
         """
         n_total = len(results)
-        in_skills = [r for r in results if r.get("skill_name")]
+        in_skills = [r for r in results if _result_skill_assignments(r)]
         dropped = [
             r for r in results
-            if r.get("action") == "clustered" and not r.get("skill_name")
+            if (
+                r.get("action") == "clustered"
+                and not _result_skill_assignments(r)
+            )
         ]
 
         _emit = logger.info if n_total > 0 else logger.debug
@@ -2799,12 +2804,15 @@ class DirectoryWatcher:
             "cluster batch → %d total, %d in skills, %d dropped",
             n_total, len(in_skills), len(dropped),
         )
-        # 落到 skill 的每个 atom 一行 info（per-atom 审计链）
+        # 每个 atom→skill 关联一行 info（per-association 审计链）。
         for r in in_skills:
-            logger.info(
-                "  %s → %s @ ws=%s",
-                r.get("atom_id"), r.get("skill_name"), r.get("weightscore"),
-            )
+            for assignment in _result_skill_assignments(r):
+                logger.info(
+                    "  %s → %s @ ws=%s",
+                    r.get("atom_id"),
+                    assignment.get("skill_name"),
+                    assignment.get("weightscore"),
+                )
         # drop 的 atom 走 WARNING 让人 grep 得到。新 prompt 改完不应再出现，
         # 但作为 defensive 保留——cluster agent 真违反"任何分数都必须 add"
         # 这条硬约束时必须立刻被发现。
@@ -2992,7 +3000,9 @@ class DirectoryWatcher:
                 skill_sub, side, sha = self._resolve_server_skill(
                     skill_name, hub=hub, client_id=client_id,
                     source_model=atom.source_model,
-                    canary_cfg=canary_cfg, eligible=eligible)
+                    canary_cfg=canary_cfg, eligible=eligible,
+                    user_key=client_id, db_path=kw.get("db_path"),
+                )
                 if skill_sub is None:
                     continue
                 try:
@@ -3025,6 +3035,8 @@ class DirectoryWatcher:
     def _resolve_server_skill(
         self, skill_name: str, *, hub, client_id: str,
         source_model: str, canary_cfg, eligible,
+        user_key: str = "",
+        db_path=None,
     ) -> tuple[Path | None, str, str]:
         """CS 模式两步定位打分目标 skill：先 ``skill_dir``（自有，走灰度路由），
         后 ``skillhub_dir``（三方，side 恒 ``main``）。
@@ -3034,13 +3046,29 @@ class DirectoryWatcher:
           无 staging → ``main`` + main_sha。
         - 三方 skill：无 git/staging → ``main`` + ``SkillHub.content_sha``。
         """
-        from xskill.canary import has_staging, main_sha, pick_side_scoped, staging_sha
+        from xskill.canary import (
+            auto_canary_side, has_staging, main_sha, pick_side_scoped,
+            staging_sha,
+        )
+        from xskill.pipeline.registry import is_auto_canary_user
         own = self.skill_dir / skill_name
         if (own / ".git").is_dir():
             if has_staging(own):
                 side = pick_side_scoped(
                     client_id, skill_name, canary_cfg.probability,
                     user_model=source_model, eligible=eligible)
+                model_ok = eligible is None or source_model in eligible
+                if model_ok and is_auto_canary_user(
+                        user_key, skill_name, db_path=db_path):
+                    m_sha = main_sha(own) or ""
+                    s_sha = staging_sha(own) or ""
+                    side = auto_canary_side(
+                        own,
+                        main_sha=m_sha,
+                        staging_sha=s_sha,
+                        need=max(int(canary_cfg.min_samples), 1),
+                        fallback=side,
+                    )
                 sha = staging_sha(own) if side == "staging" else main_sha(own)
             else:
                 side = "main"
@@ -3086,6 +3114,29 @@ class DirectoryWatcher:
 # 都调本函数，传入已 split + indexed 完毕的 atom_id。
 
 _process_logger = logging.getLogger("xskill.process")
+
+
+def _result_skill_assignments(result: dict) -> list[dict]:
+    """Return the multi-skill view, with legacy result compatibility."""
+    assignments = result.get("skill_assignments")
+    if assignments:
+        return list(assignments)
+    skill_name = result.get("skill_name")
+    if not skill_name:
+        return []
+    return [{
+        "skill_name": skill_name,
+        "weightscore": result.get("weightscore"),
+    }]
+
+
+def _recorded_skill_assignments(recorder, atom_id: str) -> list[dict]:
+    if recorder is None:
+        return []
+    return [
+        {"skill_name": skill_name, "weightscore": weightscore}
+        for skill_name, weightscore in recorder.get_all(atom_id)
+    ]
 
 
 def process_atom_task(*, atom_id: str, config: dict, skill_dir: Path,
@@ -3181,17 +3232,21 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
     except BaseException as error:  # preserve successful tool writes before failure
         cluster_error = (error, error.__traceback__)
 
-    hit = (
-        cluster_result_recorder.get(atom_id)
-        if cluster_result_recorder is not None
-        else None
+    skill_assignments = _recorded_skill_assignments(
+        cluster_result_recorder,
+        atom_id,
     )
-    skill_name = hit[0] if hit else None
-    weightscore = hit[1] if hit else None
+    latest_assignment = skill_assignments[-1] if skill_assignments else None
+    skill_name = (
+        latest_assignment["skill_name"] if latest_assignment else None
+    )
+    weightscore = (
+        latest_assignment["weightscore"] if latest_assignment else None
+    )
 
     # 落地即打耐久消费标记（与批量版 process_atom_batch 一致），让 watcher 的
     # 去重/done 判定不依赖会被 SkillEdit 晋升清空的 .candidates.yml。
-    if skill_name:
+    if skill_assignments:
         latest_atom = store.load(atom_id)
         if not latest_atom.clustered:
             latest_atom.clustered = True
@@ -3200,12 +3255,16 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
     # 埋点：atom 实际落到某 skill = 一次采纳(best-effort，失败不阻断)。
     # 在 cluster(大模型调用,按秒)之后,这条数据库写入(毫秒级)可忽略——和
     # record_usage 同样的代价位置,生产无影响。
-    if skill_name:
+    for assignment in skill_assignments:
         try:
             from xskill.pipeline.registry import record_atom_adoption
-            record_atom_adoption(atom_id=atom_id, skill=skill_name,
-                                 weightscore=weightscore or 0, was_new=True,
-                                 db_path=db_path)
+            record_atom_adoption(
+                atom_id=atom_id,
+                skill=assignment["skill_name"],
+                weightscore=assignment["weightscore"],
+                was_new=True,
+                db_path=db_path,
+            )
         except Exception:  # pylint: disable=broad-exception-caught
             logger.debug("atom adoption telemetry skipped", exc_info=True)
 
@@ -3218,6 +3277,7 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
         "atom_id": atom_id,
         "skill_name": skill_name,
         "weightscore": weightscore,
+        "skill_assignments": skill_assignments,
         "cluster_log": (cluster_content or "")[:500],
     }
 
@@ -3278,7 +3338,8 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
 
     Returns:
         list[dict]，每条含 keys: action / atom_id / skill_name / weightscore /
-        cluster_log。
+        skill_assignments / cluster_log。``skill_name`` 和 ``weightscore`` 保留
+        最近一次写入作为兼容视图；完整结果以 ``skill_assignments`` 为准。
     """
     from xskill.agents.task_cluster_agent import TaskClusterAgent
     from xskill.agents import agent_tools
@@ -3310,27 +3371,37 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
 
     results: list[dict] = []
     for aid in atom_ids:
-        hit = (
-            cluster_result_recorder.get(aid)
-            if cluster_result_recorder is not None
-            else None
+        skill_assignments = _recorded_skill_assignments(
+            cluster_result_recorder,
+            aid,
         )
-        skill_name = hit[0] if hit else None
-        weightscore = hit[1] if hit else None
+        latest_assignment = (
+            skill_assignments[-1] if skill_assignments else None
+        )
+        skill_name = (
+            latest_assignment["skill_name"] if latest_assignment else None
+        )
+        weightscore = (
+            latest_assignment["weightscore"] if latest_assignment else None
+        )
         # 落地即打耐久消费标记（在 SkillEdit 可能清空 .candidates.yml 之前完成
         # 这次回查），让 watcher 的去重/done 判定不受后续 skill 晋升影响。
-        if skill_name and aid in atom_by_id:
+        if skill_assignments and aid in atom_by_id:
             latest_atom = store.load(aid)
             if not latest_atom.clustered:
                 latest_atom.clustered = True
                 store.save(latest_atom)
         # 埋点：atom 落到某 skill = 一次采纳（best-effort，失败不阻断）。
-        if skill_name:
+        for assignment in skill_assignments:
             try:
                 from xskill.pipeline.registry import record_atom_adoption
-                record_atom_adoption(atom_id=aid, skill=skill_name,
-                                     weightscore=weightscore or 0, was_new=True,
-                                     db_path=db_path)
+                record_atom_adoption(
+                    atom_id=aid,
+                    skill=assignment["skill_name"],
+                    weightscore=assignment["weightscore"],
+                    was_new=True,
+                    db_path=db_path,
+                )
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.debug("atom adoption telemetry skipped", exc_info=True)
         results.append({
@@ -3338,6 +3409,7 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
             "atom_id": aid,
             "skill_name": skill_name,
             "weightscore": weightscore,
+            "skill_assignments": skill_assignments,
             "cluster_log": (cluster_content or "")[:500],
         })
     if cluster_error is not None:

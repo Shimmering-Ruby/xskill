@@ -315,12 +315,14 @@ class _ConcurrentSkillEdit:
                 },
             },
         )
-        result = _call_tool(
-            agent_tools.add_task_to_skill,
-            self._skill_dir.name,
-            f"edit-atom-{suffix}",
-            5,
-        )
+        atom_id = f"edit-atom-{suffix}"
+        with agent_tools.use_cluster_batch([atom_id]):
+            result = _call_tool(
+                agent_tools.add_task_to_skill,
+                self._skill_dir.name,
+                atom_id,
+                5,
+            )
         assert not result.startswith("error:")
         return False
 
@@ -561,6 +563,7 @@ def test_long_context_spills_are_instance_isolated_and_never_use_shared_tmp(
         ContextManager(
             max_context=1000,
             spill_root=spill_root,
+            config={"enable_spill": True},
         ).wrap(fake_invoke)(messages)
         match = re.search(r"spill_path: (.+)", seen["content"])
         assert match is not None

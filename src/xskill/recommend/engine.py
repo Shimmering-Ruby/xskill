@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
-from xskill.canary import CanaryConfig, main_sha, pick_side, staging_sha
+from xskill.canary import CanaryConfig, fill_deficit_side, main_sha, pick_side, staging_sha
 from xskill.config import recommend_config
 from xskill.pipeline.atom import AtomTaskStore
 from xskill.recommend.profile_store import ProfileStore
@@ -682,12 +682,13 @@ class SkillRecommendEngine:
         if not s_sha:
             return "main"
         staging_n = self._side_count(skill.path, "staging", s_sha)
-        if staging_n < self.staging_need:
-            return "staging"
         main_n = self._side_count(skill.path, "main", m_sha)
-        if main_n < self.staging_need:
-            return "main"
-        return pick_side(client_user.user_id, skill.name, self.canary_cfg.probability)
+        fallback = pick_side(
+            client_user.user_id, skill.name, self.canary_cfg.probability)
+        return fill_deficit_side(
+            staging_n=staging_n, main_n=main_n,
+            need=self.staging_need, fallback=fallback,
+        )
 
     # ── 5.6 find_friend ──────────────────────────────────────────
     def relevance_search(self, query_vec, top_k: int = 5) -> list[tuple[str, bool]]:

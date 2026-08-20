@@ -240,9 +240,9 @@ class TestManifestWiring(unittest.TestCase):
         src = Path(sm.__file__).read_text(encoding="utf-8")
         self.assertIn("_ROUTER.assign", src)
         self.assertIn("CanaryRouter", src)
-        # 有 staging 时不应再直接 pick_side(client_id, ...)
         resolve = src.split("def _resolve_slot", 1)[1].split("def build_manifest", 1)[0]
-        self.assertNotIn("pick_side(", resolve)
+        self.assertIn("_ROUTER.assign", resolve)
+        self.assertIn("auto_canary_side", resolve)
 
 
 class TestStarvationRateComparison(unittest.TestCase):
