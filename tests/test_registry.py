@@ -435,3 +435,34 @@ class TestSchemaOnce:
         conn.execute("SELECT 1 FROM trajectories").fetchall()
         conn.close()
         assert migrate_calls["count"] == 2
+
+
+def test_get_trajs_by_status_newest_first(tmp_path, db_path):
+    """待办按进库时间新的在前，不是按文件名。"""
+    traj_dir = tmp_path / "dataset"
+    traj_dir.mkdir()
+    (traj_dir / "traj_aaa.md").write_text("# old name sorts first\n")
+    (traj_dir / "traj_zzz.md").write_text("# new content\n")
+    wid = register_dir(traj_dir, db_path=db_path)
+    discover_trajectories(wid, traj_dir, db_path=db_path)
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE trajectories SET discovered_at=?, file_mtime=? "
+        "WHERE watch_dir_id=? AND filename=?",
+        ("2024-01-01 00:00:00", 1.0, wid, "traj_aaa.md"),
+    )
+    conn.execute(
+        "UPDATE trajectories SET discovered_at=?, file_mtime=? "
+        "WHERE watch_dir_id=? AND filename=?",
+        ("2026-08-17 00:00:00", 9.0, wid, "traj_zzz.md"),
+    )
+    conn.commit()
+    conn.close()
+    assert get_trajs_by_status(wid, "discovered", db_path=db_path) == [
+        "traj_zzz.md",
+        "traj_aaa.md",
+    ]
+    assert get_trajs_by_status(
+        wid, "discovered", limit=1, db_path=db_path,
+    ) == ["traj_zzz.md"]
+
