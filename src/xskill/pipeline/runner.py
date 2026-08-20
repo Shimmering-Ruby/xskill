@@ -93,7 +93,7 @@ class DirectoryWatcher:
     - indexed 阶段以 AtomTask 为单位整批重建 ``<traj_root>/index.pkl``
     - cluster 阶段**跨轨迹池化**：把所有 indexed 轨迹里尚未落地的 atom 汇成一池，
       按 ``cluster.batch_size`` 分批，提交给全局 cluster pool。
-    - indexed → done 由 ``_finalize_completed_trajs`` 标：一条轨迹的 atom 全部落进某个
+    - indexed → done 由 ``_reconcile_indexed_atoms`` 标：一条轨迹的 atom 全部落进某个
       skill 的 ``.candidates.yml`` 时才 done（文件系统即队列，天然去重+断点续传）。
     """
 
@@ -427,21 +427,15 @@ class DirectoryWatcher:
         # 避免 1 万 skill 下每轮白扫 1 万个 .candidates.yml。本轮内快照一致有效。
         from xskill.skill.candidates import LazyConsumedIndex
         consumed_index = LazyConsumedIndex(self.skill_dir)
-        # 同一轮内 collection / finalization / scoring 共享同一份 Atom 视图。
-        # key 带 wd_id，避免多个 watch directory 中同名 traj 相互污染；缓存不
-        # 跨 poll 存活，下一轮仍会重新读取文件系统上的 durable 状态。
-        atom_snapshots: dict[tuple[int, str], tuple] = {}
 
         # ── Step 1-4: 对每个目录扫描 + 提交 split/embed + 收集 cluster atom ──
         watch_dirs = list_watch_dirs(**kw)
-        active_watch_dirs = []
         for wd in watch_dirs:
             if self._stop.is_set():
                 break
             if not wd.get("auto_index"):
                 continue
-            active_watch_dirs.append(wd)
-            self._scan_dir(wd, consumed_index, atom_snapshots, **kw)
+            self._scan_dir(wd, consumed_index, **kw)
 
         if self._round_new_atoms:
             self.pending_atoms.extendleft(reversed(self._round_new_atoms))
@@ -449,17 +443,6 @@ class DirectoryWatcher:
         # 全部 watch_dir 共用一个 pending/claimed 队列；持续提交到 cluster 池满。
         # 最后不足 batch_size 的尾批也立即提交。
         self._submit_cluster_batches()
-
-        # 已完成归类的轨迹在下一次 durable atom 检查中进入 done。
-        if self.skill_dir:
-            for wd in active_watch_dirs:
-                dir_path = Path(wd["path"])
-                if dir_path.is_dir():
-                    self._finalize_completed_trajs(
-                        wd["id"], dir_path, consumed_index, atom_snapshots, **kw,
-                    )
-        # 后续 SkillEdit / canary 步骤不再使用 Atom 视图，尽早释放长轨迹内容。
-        atom_snapshots.clear()
 
         # ── Step 5a: 用户点名的 generate 入队到 SkillEdit 同一线程池 ──
         # 先于自动 SkillEdit 提交，避免后台整理把用户任务挤到池外。
@@ -2337,7 +2320,7 @@ class DirectoryWatcher:
 
         cluster batch 与 split/embed 不同：一个 batch future 覆盖一批跨轨迹的
         atom，没有单一 fname。它只负责"把 atom 写进 candidates"（agent 用工具
-        完成）+ 记日志；轨迹 done 由 ``_finalize_completed_trajs`` 独立核对落地情况后标。
+        完成）+ 记日志；轨迹 done 由 ``_reconcile_indexed_atoms`` 独立核对落地情况后标。
         batch 整体抛异常（如 LLM 余额耗尽）时，atom 留在未落地池，下一轮 scan
         重新进池重试——无单独重试计数，靠重池化自愈（cluster prompt 要求每个
         atom 必落地，永久失败不会发生，失败都是瞬时的）。
@@ -2415,7 +2398,7 @@ class DirectoryWatcher:
     # 扫描单个目录：发现 + 提交任务
     # ───────────────────────────────────────────────────────────
 
-    def _scan_dir(self, wd, consumed_index, atom_snapshots, **kw):
+    def _scan_dir(self, wd, consumed_index, **kw):
         wd_id = wd["id"]
         dir_path = Path(wd["path"])
         if not dir_path.is_dir():
@@ -2436,7 +2419,7 @@ class DirectoryWatcher:
                 update_traj_status(wd_id, fname, "discovered", **kw)
 
         # 跨轨迹批处理下 watcher 不再把轨迹置 "clustering"（done 由
-        # _finalize_completed_trajs 按 atom 落地情况标）。任何遗留的 "clustering"
+        # _reconcile_indexed_atoms 按 atom 落地情况标）。任何遗留的 "clustering"
         # （旧 daemon 升级残留 / 历史数据）一律回退 "indexed" 让其重新进池——
         # 已落地的 atom 会在 _collect_cluster_batch 被去重跳过，不会重复消费。
         for fname in get_trajs_by_status(wd_id, "clustering", **kw):
@@ -2514,10 +2497,10 @@ class DirectoryWatcher:
                         "stage": "embed",
                     }
 
-        # ── Cluster：只收集到全局 pending，不在目录循环内等待或串行 ──
+        # ── Cluster：逐轨迹收集 pending 并判断完成，不在目录循环内等待 ──
         if self.skill_dir:
-            self._collect_cluster_atoms(
-                dir_path, wd_id, consumed_index, atom_snapshots, **kw,
+            self._reconcile_indexed_atoms(
+                dir_path, wd_id, consumed_index, **kw,
             )
 
     # ───────────────────────────────────────────────────────────
@@ -2645,18 +2628,8 @@ class DirectoryWatcher:
         store.rebuild_vector_index(self.embed_client)
         return (wd_id, filenames)
 
-    @staticmethod
-    def _poll_atoms(store, wd_id, traj_id, atom_snapshots):
-        """Return one immutable Atom list snapshot per trajectory and poll."""
-        key = (wd_id, traj_id)
-        if key not in atom_snapshots:
-            atom_snapshots[key] = tuple(store.list_by_traj(traj_id))
-        return atom_snapshots[key]
-
-    def _collect_cluster_atoms(
-        self, dir_path, wd_id, consumed_index, atom_snapshots, **kw,
-    ):
-        """Collect every new unclustered atom into the global pending queue.
+    def _reconcile_indexed_atoms(self, dir_path, wd_id, consumed_index, **kw):
+        """Read each indexed trajectory once, then release its full Atom view.
 
         过滤靠 atom 的耐久 ``clustered`` 标记——已消费 atom（含上一批刚写入的、
         以及进程被 kill 前已消费的）一律跳过。这从机制上同时实现了**去重**与
@@ -2666,20 +2639,45 @@ class DirectoryWatcher:
         atom 看起来又"未消费"而被重复送 LLM。
 
         ``claimed_atoms`` covers both pending and running batches, so repeated
-        scans never enqueue the same atom twice.
+        scans never enqueue the same atom twice.  Collection, completion, and
+        scoring share one stable tuple for the current trajectory; the helper
+        returns before the next trajectory is loaded, bounding retained full
+        Atom content to one trajectory instead of the entire indexed backlog.
         """
         store = self._store_for(dir_path)
         for fname in get_trajs_by_status(wd_id, "indexed", **kw):
-            traj_id = (dir_path / fname).stem
-            for atom in self._poll_atoms(
-                store, wd_id, traj_id, atom_snapshots,
-            ):
-                if self._atom_consumed(atom, consumed_index):
-                    continue  # 已消费 → 跳过（去重 + 断点续传）
-                if atom.atom_id in self.claimed_atoms:
-                    continue
-                self.claimed_atoms.add(atom.atom_id)
-                self._round_new_atoms.append(atom.atom_id)
+            self._reconcile_indexed_traj(
+                store, dir_path, wd_id, fname, consumed_index, **kw,
+            )
+
+    def _reconcile_indexed_traj(
+        self, store, dir_path, wd_id, fname, consumed_index, **kw,
+    ):
+        """Reconcile one trajectory against a single durable Atom snapshot."""
+        traj_id = (dir_path / fname).stem
+        atoms = tuple(store.list_by_traj(traj_id))
+        all_consumed = True
+        for atom in atoms:
+            if self._atom_consumed(atom, consumed_index):
+                continue  # 已消费 → 跳过（去重 + 断点续传）
+            all_consumed = False
+            if atom.atom_id in self.claimed_atoms:
+                continue
+            self.claimed_atoms.add(atom.atom_id)
+            self._round_new_atoms.append(atom.atom_id)
+
+        if not all_consumed:
+            return
+        update_traj_status(
+            wd_id, fname, "done", process_action="clustered", **kw,
+        )
+        # 该轨迹所有 atom 已落盘——ux_score 使用同一份快照，避免再次读 JSON。
+        if self.server_mode:
+            self._score_atoms_for_traj_server(
+                wd_id, fname, atoms=atoms, **kw,
+            )
+        else:
+            self._score_atoms_for_traj(wd_id, fname, atoms=atoms, **kw)
 
     def _submit_cluster_batches(self) -> None:
         """Fill the cluster pool without ever waiting in the watcher thread."""
@@ -2805,7 +2803,7 @@ class DirectoryWatcher:
         轨迹状态。
 
         轨迹 done 与具体 batch 解耦——一个 batch 跨多条轨迹，done 由
-        ``_finalize_completed_trajs`` 按"该轨迹 atom 是否全落地"独立判定。
+        ``_reconcile_indexed_atoms`` 按"该轨迹 atom 是否全落地"独立判定。
         """
         n_total = len(results)
         in_skills = [r for r in results if _result_skill_assignments(r)]
@@ -2840,38 +2838,6 @@ class DirectoryWatcher:
                 len(dropped), [r.get("atom_id") for r in dropped],
             )
         self._stats["atoms_clustered"] += len(in_skills)
-
-    def _finalize_completed_trajs(
-        self, wd_id, dir_path, consumed_index, atom_snapshots, **kw,
-    ):
-        """把"所有 atom 都已落进某个 skill .candidates.yml"的 indexed 轨迹标
-        done，并触发该轨迹的 ux 打分。
-
-        这是跨轨迹批处理下 done 的唯一判据：cluster batch 不再 1:1 对应一条
-        轨迹，所以每轮 scan 重新核对每条 indexed 轨迹是否已被完全消费。0-atom
-        轨迹（无可拆 User 回合）视为已消费 → 直接 done。标 done 后该轨迹离开
-        indexed，下一轮不再重复处理 → 打分每条只触发一次。
-
-        判据用 atom 的耐久 ``clustered`` 标记（非 .candidates.yml 成员）——
-        SkillEdit 晋升会清空 .candidates.yml，用它判 done 会让已消费 atom 看起来
-        又未消费、轨迹永不 done。
-        """
-        store = self._store_for(dir_path)
-        for fname in get_trajs_by_status(wd_id, "indexed", **kw):
-            traj_id = (dir_path / fname).stem
-            atoms = self._poll_atoms(store, wd_id, traj_id, atom_snapshots)
-            if any(not self._atom_consumed(a, consumed_index) for a in atoms):
-                continue  # 还有未消费 atom → 等后续 batch 消费
-            update_traj_status(
-                wd_id, fname, "done", process_action="clustered", **kw,
-            )
-            # 该轨迹所有 atom 已落盘——ux_score 应当跑的时机。
-            if self.server_mode:
-                self._score_atoms_for_traj_server(
-                    wd_id, fname, atoms=atoms, **kw,
-                )
-            else:
-                self._score_atoms_for_traj(wd_id, fname, atoms=atoms, **kw)
 
     # ───────────────────────────────────────────────────────────
     # ux_score
