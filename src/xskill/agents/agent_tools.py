@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -87,6 +88,7 @@ class AgentToolContext:
     registry_db_path: Path | None = None
     extra_read_roots: tuple[Path, ...] = ()
     generate_user_id: str | None = None
+    blocked_read_roots: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -102,6 +104,8 @@ class AgentToolContext:
             )
         extra = tuple(Path(p) for p in (self.extra_read_roots or ()))
         object.__setattr__(self, "extra_read_roots", extra)
+        blocked = tuple(Path(p) for p in (self.blocked_read_roots or ()))
+        object.__setattr__(self, "blocked_read_roots", blocked)
 
 
 _EMPTY_AGENT_TOOL_CONTEXT = AgentToolContext()
@@ -131,6 +135,7 @@ def create_agent_tool_context(
     registry_db_path=None,
     extra_read_roots=(),
     generate_user_id=None,
+    blocked_read_roots=(),
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -168,6 +173,9 @@ def create_agent_tool_context(
         extra_read_roots=tuple(Path(p) for p in (extra_read_roots or ())),
         generate_user_id=(
             str(generate_user_id) if generate_user_id else None
+        ),
+        blocked_read_roots=tuple(
+            Path(p) for p in (blocked_read_roots or ())
         ),
     )
 
@@ -293,6 +301,7 @@ class AgentToolConfig:
             "registry_db_path": current.registry_db_path,
             "extra_read_roots": current.extra_read_roots,
             "generate_user_id": current.generate_user_id,
+            "blocked_read_roots": current.blocked_read_roots,
         }
 
     def restore(self, snapshot: dict) -> None:
@@ -313,6 +322,7 @@ class AgentToolConfig:
             registry_db_path=snapshot.get("registry_db_path"),
             extra_read_roots=snapshot.get("extra_read_roots") or (),
             generate_user_id=snapshot.get("generate_user_id"),
+            blocked_read_roots=snapshot.get("blocked_read_roots") or (),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()
@@ -467,6 +477,74 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+_LIST_FILES_INLINE_MAX_LINES = 200
+_LIST_FILES_INLINE_MAX_CHARS = 10000
+_ONHOLD_BLOCK_ERROR = "error: on hold 轨迹，不要参考"
+
+
+def _blocked_read_roots() -> list[Path]:
+    ctx = current_agent_tool_context()
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in ctx.blocked_read_roots or ():
+        path = Path(raw)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def _is_blocked_read_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for root in _blocked_read_roots():
+        if resolved == root or _is_relative_to(resolved, root):
+            return True
+    return False
+
+
+def _onhold_block_message(path: Path | str) -> str:
+    return f"{_ONHOLD_BLOCK_ERROR} ({path})"
+
+
+def _maybe_spill_list_files(body: str, listed_path: Path) -> str:
+    """超长列表写入 spill 文件，文件名由目录路径哈希决定，同一目录覆盖同一文件。
+
+    没有 spill_root 时保持整份列表，不截断——否则模型没有翻页入口。
+    """
+    lines = body.splitlines()
+    too_long = (
+        len(lines) > _LIST_FILES_INLINE_MAX_LINES
+        or len(body) > _LIST_FILES_INLINE_MAX_CHARS
+    )
+    if not too_long:
+        return body
+    ctx = current_agent_tool_context()
+    if ctx.spill_root is None:
+        return body
+    spill_dir = Path(ctx.spill_root) / "list_files"
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(str(listed_path).encode("utf-8")).hexdigest()[:16]
+    spill_path = spill_dir / f"{digest}.txt"
+    spill_path.write_text(body + "\n", encoding="utf-8")
+    return "\n".join((
+        "[list_files_spilled]",
+        f"listed_path: {listed_path}",
+        f"entries: {len(lines)}",
+        f"spill_path: {spill_path}",
+        f"chars: {len(body)}",
+        "reload: 用 read_file(spill_path, offset=1, limit=200) 按行读取，需要时增大 offset 翻页。",
+    ))
 
 
 SENSITIVE_FILENAMES = frozenset({
@@ -681,6 +759,8 @@ def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
             f"resolved_path: {resolved}\n"
             f"allowed_roots:\n{allowed_block}"
         )
+    if _is_blocked_read_path(resolved):
+        return _onhold_block_message(resolved)
     if _is_sensitive_file(resolved):
         return f"error: sensitive file, not readable by agent ({path})"
 
@@ -1614,21 +1694,29 @@ def list_files(path: str) -> str:
 
     可列 skill 仓、~/.xskill、/tmp spill 三个只读根内的任意目录——摸清 skill
     已有文件、轨迹 / atom 数据布局都用它。越界返回 error。
+    on hold 轨迹目录会被拦截，不出现在列表里。
+    目录条目过多时完整列表写入 spill 文件，请用 read_file 按行翻页。
     """
     target_directory = Path(path).resolve()
     roots = _allowed_read_roots()
     if not any(_is_relative_to(target_directory, root) for root in roots):
         allowed_block = ", ".join(str(root) for root in roots)
         return f"error: list_files restricted to {allowed_block} (tried: {path})"
+    if _is_blocked_read_path(target_directory):
+        return _onhold_block_message(target_directory)
     if not target_directory.is_dir():
         return f"error: not a directory: {path}"
     entries = sorted(target_directory.iterdir())
     if not entries:
         return "(empty)"
-    return "\n".join(
+    visible = [e for e in entries if not _is_blocked_read_path(e)]
+    if not visible:
+        return "(empty)"
+    body = "\n".join(
         f"{'[dir] ' if e.is_dir() else '[file] '}{e.resolve()}{'/' if e.is_dir() else ''}"
-        for e in entries
+        for e in visible
     )
+    return _maybe_spill_list_files(body, target_directory)
 
 
 @tool(name="grep_files")
@@ -1648,6 +1736,8 @@ def grep_files(pattern: str, path: str = "", glob: str = "",
     if not any(_is_relative_to(search_root, root) for root in roots):
         allowed_block = ", ".join(str(root) for root in roots)
         return f"error: grep_files restricted to {allowed_block} (tried: {path})"
+    if _is_blocked_read_path(search_root):
+        return _onhold_block_message(search_root)
     if not search_root.exists():
         return f"error: path not found ({path})"
 
@@ -1716,6 +1806,8 @@ def grep_files(pattern: str, path: str = "", glob: str = "",
         hit_match = hit_line_pattern.match(output_line)
         # resolve() 后再判敏感：防符号链接用无害文件名包装密钥文件绕过过滤。
         if hit_match and _is_sensitive_file(Path(hit_match.group(1)).resolve()):
+            continue
+        if hit_match and _is_blocked_read_path(Path(hit_match.group(1))):
             continue
         filtered_lines.append(output_line)
         if len(filtered_lines) >= max_results:
