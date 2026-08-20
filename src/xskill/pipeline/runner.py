@@ -44,6 +44,7 @@ from xskill.pipeline.registry import (
     ProcessAction,
     TrajectoryStatus,
     list_watch_dirs,
+    list_watcher_dirs,
     discover_trajectories,
     get_pending_traj_ids,
     get_trajs_by_status,
@@ -152,6 +153,22 @@ class DirectoryWatcher:
             else xskill_state_root / "tmp" / "spill"
         ).expanduser().resolve()
         self.poll_interval = poll_interval
+        watcher_config = self.config.get("watcher") or {}
+        configured_reconcile_interval = watcher_config.get(
+            "full_reconcile_interval",
+        )
+        # Production defaults to a low-frequency correctness sweep.  Tests and
+        # direct callers traditionally use poll_interval=0 to request an eager
+        # scan on every call, so preserve that behavior unless configured.
+        if configured_reconcile_interval is None:
+            configured_reconcile_interval = 60.0 if poll_interval > 0 else 0.0
+        self.full_reconcile_interval = max(
+            0.0,
+            float(configured_reconcile_interval),
+        )
+        # watch_dir_id -> ((device, inode, directory mtime ns), last full scan)
+        # Only the watcher thread reads/writes this map.
+        self._discovery_snapshots: dict[int, tuple[tuple[int, int, int], float]] = {}
         self.max_retries = max_retries
         self.db_path = db_path
         # 每轮 _loop 在 _scan_once 之前调一次的钩子，用来让 server 端的"生态
@@ -429,7 +446,7 @@ class DirectoryWatcher:
         consumed_index = LazyConsumedIndex(self.skill_dir)
 
         # ── Step 1-4: 对每个目录扫描 + 提交 split/embed + 收集 cluster atom ──
-        watch_dirs = list_watch_dirs(**kw)
+        watch_dirs = list_watcher_dirs(**kw)
         active_watch_dirs = []
         for wd in watch_dirs:
             if self._stop.is_set():
@@ -2442,8 +2459,9 @@ class DirectoryWatcher:
             increment_retry(wd_id, fname, **kw)
             self._stats["retries"] += 1
 
-        # 发现新文件
-        new = discover_trajectories(wd_id, dir_path, **kw)
+        # 发现新文件。稳态轮询只 stat 目录本身；目录项变化时立即协调，已有
+        # 文件被原地覆盖（目录 mtime 可能不变）则由低频全量扫描兜底。
+        new = self._discover_if_needed(wd_id, dir_path, **kw)
         if new:
             self._stats["new_trajs"] += len(new)
             logger.info("[%s] discovered %d new", dir_path.name, len(new))
@@ -2513,6 +2531,46 @@ class DirectoryWatcher:
             self._collect_cluster_atoms(
                 dir_path, wd_id, consumed_index, **kw,
             )
+
+    def _discover_if_needed(self, watch_dir_id, dir_path, **kw):
+        """按目录变化增量触发发现，并周期性执行全量 correctness sweep。
+
+        新建、删除、rename/atomic replace 会改变目录身份或 mtime，因此下一轮
+        poll 立即执行 ``discover_trajectories``。普通的原地覆盖不一定改变目录
+        mtime，最迟会在 ``full_reconcile_interval`` 内由全量扫描发现。首次
+        poll、目录被替换和进程重启都无快照，必定全量扫描。
+        """
+        if not kw:
+            kw = self._db_kw()
+        try:
+            directory_stat = dir_path.stat()
+        except OSError:
+            return []
+        directory_token = (
+            directory_stat.st_dev,
+            directory_stat.st_ino,
+            directory_stat.st_mtime_ns,
+        )
+        now = time.monotonic()
+        previous = self._discovery_snapshots.get(watch_dir_id)
+        full_reconcile_due = (
+            previous is None
+            or self.full_reconcile_interval == 0
+            or now - previous[1] >= self.full_reconcile_interval
+        )
+        if (
+            previous is not None
+            and previous[0] == directory_token
+            and not full_reconcile_due
+        ):
+            return []
+
+        discovered = discover_trajectories(watch_dir_id, dir_path, **kw)
+        # Record the token observed before scanning.  If a writer changes the
+        # directory while discovery is running, the next poll sees a mismatch
+        # instead of hiding that race until the periodic sweep.
+        self._discovery_snapshots[watch_dir_id] = (directory_token, now)
+        return discovered
 
     # ───────────────────────────────────────────────────────────
     # Helpers: store / agno factory 按需获取

@@ -1718,6 +1718,21 @@ def list_watch_dirs(
         return [dict(r) for r in rows]
 
 
+def list_watcher_dirs(*, db_path: Optional[Path] = None) -> list[dict]:
+    """返回 watcher 调度所需目录，不计算 dashboard 统计。
+
+    ``list_watch_dirs`` 会为每个目录统计历史轨迹数和已索引数，适合 CLI 与
+    dashboard，但不适合每几秒调用一次的 watcher 热路径。这里仅返回
+    ``watch_dirs`` 行；是否暂停仍由 watcher 在内存中判断，使查询不依赖旧库
+    可能缺少的 ``auto_index`` 列，并让空闲成本不随历史轨迹数量增长。
+    """
+    with pooled_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM watch_dirs ORDER BY id",
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_watch_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> dict | None:
     """查询单个目录记录。"""
     dir_path = str(Path(dir_path).resolve())

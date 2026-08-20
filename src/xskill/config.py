@@ -202,6 +202,8 @@ server:
 # ===== Watcher (scan scheduling only) =====
 watcher:
   poll_interval: 5              # seconds between scans of every watch_dir
+  full_reconcile_interval: 60   # idle polls only stat the directory; this
+                                # periodic full scan catches in-place rewrites
 
 # ===== Persistent agent worker =====
 # Every pool has an automatic waiting capacity of workers * 2. Running plus
