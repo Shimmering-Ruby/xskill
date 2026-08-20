@@ -291,6 +291,19 @@ commit message 写明本次基于哪些 atom_id 整理，以及**行为级**变�
 
 若本轮判定「仅印证、无行为变化」：不要为凑 commit 改正文；按更新场景跳过无意义版本。
 
+# 怎么改文件
+
+THINK 里一旦想到要改某个已有文件，下一手不要直接整文件 write_file。
+按这个顺序做：
+
+1. 用 list_files 看 skill 目录里有哪些文件（启动场景已给出文件树时，可直接用树上的路径）
+2. 用 read_file 或 skill_read 读到要改的原文（辅助文件必须单独 read_file；skill_read 只算读过 SKILL.md）
+3. 用 edit(path, old_string, new_string) 只替换那一处；old_string 必须在文件里唯一
+
+write_file 只用于：文件还不存在、SKILL.md 仍是 init stub、或现有正文仍是旧扁平骨架必须整篇改写。
+已是新骨架时只 edit 本批有行为差异的段落，禁止无故全篇覆盖。
+edit 前必须先读过该文件，否则工具会报错。
+
 # 可用工具
 - AtomTaskRead(atom_id) — 读 atom JSON
 - ReadTraj(traj_id, offset_start, offset_end) — 按行号取轨迹原文（offset 即 1-based 行号）
@@ -300,8 +313,9 @@ commit message 写明本次基于哪些 atom_id 整理，以及**行为级**变�
 - list_files(path) — 列目录文件，返回可直接传给 read_file 的完整路径
 - grep_files(pattern, path="", glob="", max_results=100) — 全文检索（ripgrep），
   返回「文件:行号:内容」；先检索定位、再 read_file 精读，别逐个翻文件
-- write_file(path, content) — 写到 skill_dir 下；相对路径如 SKILL.md、
+- write_file(path, content) — 写新文件或必须整篇重写时用；相对路径如 SKILL.md、
   scripts/foo.py，不要加 ./skill/ 前缀
+- edit(path, old_string, new_string) — 改已读过的文件里一处原文；相对路径规则同 write_file
 - commit_baby(skill_name, message) — 仅 baby 分支可用；checkpoint 当前批次
 - commit_to_staging(skill_name, message) — 仅 main 分支可用
 
@@ -401,6 +415,21 @@ class SkillEditAgent:
         if self.logs_dir is not None:
             self.logs_dir = Path(self.logs_dir)
 
+    def _base_tools(self) -> list[Any]:
+        """读、列目录、整写、局部改。commit 工具由各轮按分支再追加。"""
+        from xskill.agents import agent_tools
+
+        return [
+            agent_tools.atom_task_read,
+            agent_tools.read_traj,
+            agent_tools.skill_read,
+            agent_tools.read_file,
+            agent_tools.list_files,
+            agent_tools.grep_files,
+            agent_tools.write_file,
+            agent_tools.edit_file,
+        ]
+
     def _skill_tree_context_lines(self, max_entries: int = 80) -> list[str]:
         """返回当前 skill 根目录与文件树，供 agent 决定是否 read_file。"""
         cwd = Path.cwd().resolve()
@@ -409,6 +438,8 @@ class SkillEditAgent:
             f"process_cwd: {cwd}",
             f"skill_base_path: {self.skill_dir}",
             "write_file / edit 相对路径按 skill_base_path 解析（SKILL.md、scripts/foo.py）。不要加 ./skill/ 前缀。",
+            "已有文件先 list_files（或看下面这棵树）再 read_file，然后 edit；不要一上来整文件 write_file。",
+            f"对：edit(path=\"SKILL.md\", old_string=..., new_string=...)  改  {self.skill_dir / 'SKILL.md'}",
             "read_file / list_files / grep_files 相对路径按 process_cwd 解析；list_files 返回的完整路径可直接给 read_file。",
             "# 当前 skill 文件树（相对 skill_base_path；需要内容时用 read_file 读取）",
         ]
@@ -776,15 +807,7 @@ class SkillEditAgent:
             scenario_block=scenario_block,
             branch_now="baby",
         )
-        tools = [
-            agent_tools.atom_task_read,
-            agent_tools.read_traj,
-            agent_tools.skill_read,
-            agent_tools.read_file,
-            agent_tools.list_files,
-            agent_tools.grep_files,
-            agent_tools.write_file,
-        ]
+        tools = self._base_tools()
         agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
         agent_trace.append_to(
             self._trace_path(),
@@ -1030,8 +1053,9 @@ class SkillEditAgent:
         else:
             note = (
                 f"这是渐进式编辑第 {turn_idx}/{num_batches} 轮：当前 SKILL.md 已经"
-                "融合了前面几批候选的内容，请先读现状（SkillRead / read_file）再"
-                "基于本轮候选继续编辑，不要覆盖丢弃前面几轮已经写好的内容。"
+                "融合了前面几批候选的内容，请先 list_files 或 SkillRead / read_file"
+                "看现状，再用 edit 改本轮相关段落，不要整文件 write_file 覆盖丢掉"
+                "前面几轮已经写好的内容。"
             )
         return ["", note]
 
@@ -1153,15 +1177,7 @@ class SkillEditAgent:
         scenario_block = "\n".join(lines)
         sysprompt = build_system_prompt(scenario_block=scenario_block, branch_now="main")
 
-        tools = [
-            agent_tools.atom_task_read,
-            agent_tools.read_traj,
-            agent_tools.skill_read,
-            agent_tools.read_file,
-            agent_tools.list_files,
-            agent_tools.grep_files,
-            agent_tools.write_file,
-        ]
+        tools = self._base_tools()
         if is_last:
             tools.append(agent_tools.commit_update_main)
 
@@ -1237,15 +1253,7 @@ class SkillEditAgent:
         )
         user_msg = scenario_block  # 同时也作为 user 消息（agno 两端都看）
 
-        tools = [
-            agent_tools.atom_task_read,
-            agent_tools.read_traj,
-            agent_tools.skill_read,
-            agent_tools.read_file,
-            agent_tools.list_files,
-            agent_tools.grep_files,
-            agent_tools.write_file,
-        ]
+        tools = self._base_tools()
         if is_last:
             if current_branch_name == "baby":
                 tools.append(agent_tools.commit_baby)
