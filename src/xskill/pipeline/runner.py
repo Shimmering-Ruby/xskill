@@ -427,6 +427,10 @@ class DirectoryWatcher:
         # 避免 1 万 skill 下每轮白扫 1 万个 .candidates.yml。本轮内快照一致有效。
         from xskill.skill.candidates import LazyConsumedIndex
         consumed_index = LazyConsumedIndex(self.skill_dir)
+        # 同一轮内 collection / finalization / scoring 共享同一份 Atom 视图。
+        # key 带 wd_id，避免多个 watch directory 中同名 traj 相互污染；缓存不
+        # 跨 poll 存活，下一轮仍会重新读取文件系统上的 durable 状态。
+        atom_snapshots: dict[tuple[int, str], tuple] = {}
 
         # ── Step 1-4: 对每个目录扫描 + 提交 split/embed + 收集 cluster atom ──
         watch_dirs = list_watch_dirs(**kw)
@@ -437,7 +441,7 @@ class DirectoryWatcher:
             if not wd.get("auto_index"):
                 continue
             active_watch_dirs.append(wd)
-            self._scan_dir(wd, consumed_index, **kw)
+            self._scan_dir(wd, consumed_index, atom_snapshots, **kw)
 
         if self._round_new_atoms:
             self.pending_atoms.extendleft(reversed(self._round_new_atoms))
@@ -452,8 +456,10 @@ class DirectoryWatcher:
                 dir_path = Path(wd["path"])
                 if dir_path.is_dir():
                     self._finalize_completed_trajs(
-                        wd["id"], dir_path, consumed_index, **kw,
+                        wd["id"], dir_path, consumed_index, atom_snapshots, **kw,
                     )
+        # 后续 SkillEdit / canary 步骤不再使用 Atom 视图，尽早释放长轨迹内容。
+        atom_snapshots.clear()
 
         # ── Step 5a: 用户点名的 generate 入队到 SkillEdit 同一线程池 ──
         # 先于自动 SkillEdit 提交，避免后台整理把用户任务挤到池外。
@@ -2409,7 +2415,7 @@ class DirectoryWatcher:
     # 扫描单个目录：发现 + 提交任务
     # ───────────────────────────────────────────────────────────
 
-    def _scan_dir(self, wd, consumed_index, **kw):
+    def _scan_dir(self, wd, consumed_index, atom_snapshots, **kw):
         wd_id = wd["id"]
         dir_path = Path(wd["path"])
         if not dir_path.is_dir():
@@ -2511,7 +2517,7 @@ class DirectoryWatcher:
         # ── Cluster：只收集到全局 pending，不在目录循环内等待或串行 ──
         if self.skill_dir:
             self._collect_cluster_atoms(
-                dir_path, wd_id, consumed_index, **kw,
+                dir_path, wd_id, consumed_index, atom_snapshots, **kw,
             )
 
     # ───────────────────────────────────────────────────────────
@@ -2639,7 +2645,17 @@ class DirectoryWatcher:
         store.rebuild_vector_index(self.embed_client)
         return (wd_id, filenames)
 
-    def _collect_cluster_atoms(self, dir_path, wd_id, consumed_index, **kw):
+    @staticmethod
+    def _poll_atoms(store, wd_id, traj_id, atom_snapshots):
+        """Return one immutable Atom list snapshot per trajectory and poll."""
+        key = (wd_id, traj_id)
+        if key not in atom_snapshots:
+            atom_snapshots[key] = tuple(store.list_by_traj(traj_id))
+        return atom_snapshots[key]
+
+    def _collect_cluster_atoms(
+        self, dir_path, wd_id, consumed_index, atom_snapshots, **kw,
+    ):
         """Collect every new unclustered atom into the global pending queue.
 
         过滤靠 atom 的耐久 ``clustered`` 标记——已消费 atom（含上一批刚写入的、
@@ -2655,7 +2671,9 @@ class DirectoryWatcher:
         store = self._store_for(dir_path)
         for fname in get_trajs_by_status(wd_id, "indexed", **kw):
             traj_id = (dir_path / fname).stem
-            for atom in store.list_by_traj(traj_id):
+            for atom in self._poll_atoms(
+                store, wd_id, traj_id, atom_snapshots,
+            ):
                 if self._atom_consumed(atom, consumed_index):
                     continue  # 已消费 → 跳过（去重 + 断点续传）
                 if atom.atom_id in self.claimed_atoms:
@@ -2823,7 +2841,9 @@ class DirectoryWatcher:
             )
         self._stats["atoms_clustered"] += len(in_skills)
 
-    def _finalize_completed_trajs(self, wd_id, dir_path, consumed_index, **kw):
+    def _finalize_completed_trajs(
+        self, wd_id, dir_path, consumed_index, atom_snapshots, **kw,
+    ):
         """把"所有 atom 都已落进某个 skill .candidates.yml"的 indexed 轨迹标
         done，并触发该轨迹的 ux 打分。
 
@@ -2839,7 +2859,7 @@ class DirectoryWatcher:
         store = self._store_for(dir_path)
         for fname in get_trajs_by_status(wd_id, "indexed", **kw):
             traj_id = (dir_path / fname).stem
-            atoms = store.list_by_traj(traj_id)
+            atoms = self._poll_atoms(store, wd_id, traj_id, atom_snapshots)
             if any(not self._atom_consumed(a, consumed_index) for a in atoms):
                 continue  # 还有未消费 atom → 等后续 batch 消费
             update_traj_status(
@@ -2847,15 +2867,17 @@ class DirectoryWatcher:
             )
             # 该轨迹所有 atom 已落盘——ux_score 应当跑的时机。
             if self.server_mode:
-                self._score_atoms_for_traj_server(wd_id, fname, **kw)
+                self._score_atoms_for_traj_server(
+                    wd_id, fname, atoms=atoms, **kw,
+                )
             else:
-                self._score_atoms_for_traj(wd_id, fname, **kw)
+                self._score_atoms_for_traj(wd_id, fname, atoms=atoms, **kw)
 
     # ───────────────────────────────────────────────────────────
     # ux_score
     # ───────────────────────────────────────────────────────────
 
-    def _score_atoms_for_traj(self, wd_id, fname, **kw):
+    def _score_atoms_for_traj(self, wd_id, fname, atoms=None, **kw):
         """对一条已跑完 cluster 的 traj 扫所有 atom 打 ux_score。
 
         前置：
@@ -2892,8 +2914,8 @@ class DirectoryWatcher:
             return
         skill_name = header["skill"]
         traj_id = md_path.stem
-        store = self._store_for(dir_path)
-        atoms = store.list_by_traj(traj_id)
+        if atoms is None:
+            atoms = self._store_for(dir_path).list_by_traj(traj_id)
         if not atoms:
             return
         skill_sub, side, commit_sha = self._resolve_skill_for_scoring(
@@ -2950,7 +2972,7 @@ class DirectoryWatcher:
             return None, "", ""
         return hub_sub, "main", hub.content_sha(skill_name) or ""
 
-    def _score_atoms_for_traj_server(self, wd_id, fname, **kw):
+    def _score_atoms_for_traj_server(self, wd_id, fname, atoms=None, **kw):
         """CS 模式打分：遍历每个 atom 的 used_skills，对每个用到的 team skill
         用 pick_side(client_id, ...) 现算 side，逐个 score + AtomCanary.append。
 
@@ -2984,8 +3006,8 @@ class DirectoryWatcher:
         if not md_path.is_file():
             return
         traj_id = md_path.stem
-        store = self._store_for(dir_path)
-        atoms = store.list_by_traj(traj_id)
+        if atoms is None:
+            atoms = self._store_for(dir_path).list_by_traj(traj_id)
         if not atoms:
             return
         canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
