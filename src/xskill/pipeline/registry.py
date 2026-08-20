@@ -635,9 +635,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "UPDATE trajectories SET discovered_at=datetime('now')"
             " WHERE discovered_at IS NULL"
         )
-    # 旧表必须先补齐 status / discovered_at / file_mtime，索引才能创建。
-    conn.execute(_WATCH_STATUS_INDEX_SQL)
-
     # ── watch_dirs ──
     # ── recommendation_log ──（审计 P0-2：曝光去重根治注水）
     # 加 sha 列 + (client_id,skill,side,sha) 唯一索引；建索引前一次性清历史重复行
@@ -709,6 +706,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "UPDATE trajectories SET status='meta_done'"
             " WHERE has_meta=1 AND has_embedding=0 AND (status IS NULL OR status='discovered')"
         )
+    # 旧表先补齐并回填 status / discovered_at / file_mtime，再一次性建索引，
+    # 避免历史状态更新额外维护刚创建的索引。
+    conn.execute(_WATCH_STATUS_INDEX_SQL)
     conn.commit()
 
 
