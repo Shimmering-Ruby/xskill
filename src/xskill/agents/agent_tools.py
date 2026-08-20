@@ -965,38 +965,73 @@ def list_candidates(skill_name: str) -> str:
     return "\n".join(lines)
 
 
+def _writable_skill_root() -> Path | None:
+    root = agent_tool_config.writable_skill_dir
+    if root is None:
+        return None
+    return Path(root).resolve()
+
+
+def _skill_write_error(path: str, skill_dir: Path | None, detail: str) -> str:
+    lines = [f"error: {detail} (tried: {path})"]
+    if skill_dir is not None:
+        lines.append(f"skill_dir: {skill_dir}")
+        lines.append(f"example: SKILL.md  or  {skill_dir / 'SKILL.md'}")
+    return "\n".join(lines)
+
+
+def _resolve_skill_write_path(path: str) -> tuple[Path | None, str | None]:
+    """把 write_file / edit 的 path 收到当前 skill_dir 下。
+
+    相对路径按 skill_dir 拼接，不按进程 cwd。``skill/`` 或 ``./skill/``
+    前缀会写成仓内套一层 skill/，直接拒掉并给出可写示例。
+    """
+    skill_dir = _writable_skill_root()
+    if skill_dir is None:
+        return None, "error: skill directory is not configured"
+    raw = Path(path)
+    if not raw.is_absolute() and raw.parts and raw.parts[0] == "skill":
+        return None, _skill_write_error(
+            path,
+            skill_dir,
+            "path is relative to skill_dir; do not prefix skill/",
+        )
+    candidate = raw if raw.is_absolute() else (skill_dir / raw)
+    try:
+        resolved = candidate.resolve()
+        if not _is_relative_to(resolved, skill_dir):
+            raise ValueError("outside skill_dir")
+    except (OSError, ValueError):
+        return None, _skill_write_error(
+            path, skill_dir, "writes restricted to skill_dir"
+        )
+    if ".git" in resolved.parts:
+        return None, f"error: writes into .git/ are forbidden (tried: {path})"
+    return resolved, None
+
+
 @tool(name="write_file")
 def write_file(path: str, content: str) -> str:
-    """Write or overwrite a file under ./skill/ only.
+    """Write or overwrite a file under the current skill_dir.
+
+    Relative paths resolve against skill_dir, not the process working
+    directory. Use ``SKILL.md`` or ``scripts/foo.py``. Do not prefix
+    ``./skill/``. Absolute paths must stay inside skill_dir.
 
     v2 行为：只做路径安全 + frontmatter 日期消毒。旧 v1 ``source_trajs ≥ 3``
     gate 和 ``N/M 条轨迹`` warning 消毒已删——v2 用 ``source_atoms`` 引用 atom
     而非 traj，且质量保障靠 candidates buffer 累计 weightscore ≥ 10 的硬门槛，
     不需要 SKILL.md 写入端再卡一道。
     """
-    p = Path(path)
-    if agent_tool_config.atom_skill_dir is not None:
-        skill_dir = agent_tool_config.atom_skill_dir
-    else:
-        skill_dir = agent_tool_config.skill_dir
-
-    try:
-        resolved = p.resolve()
-        resolved.relative_to(skill_dir.resolve())
-    except ValueError:
-        return f"error: writes restricted to ./skill/ (tried: {path})"
-
-    # 拒写 .git/ —— agent LLM 撞到 git 错误时会试图"自己修 git"，把可恢复
-    # 的 index race 变成永久 repo 损坏（实跑遇到 3 个 skill 仓被 LLM 写进
-    # .git/HEAD / .git/refs / .git/config 而毁掉）。.git 严格归 git 自己管。
-    if ".git" in resolved.parts:
-        return f"error: writes into .git/ are forbidden (tried: {path})"
+    resolved, err = _resolve_skill_write_path(path)
+    if err:
+        return err
 
     # 写 SKILL.md：先做 frontmatter 写后校验（漏拦=静默放行坏 skill），
     # 非法**不写盘**，把富误差返回给 agent 让它当场改重写；合法再消毒日期 +
     # 重序列化写入。校验逻辑见 frontmatter.parse_strict（必填 name/description、
     # description 必须非空字符串、body 非空）。
-    if p.name == "SKILL.md":
+    if resolved.name == "SKILL.md":
         try:
             fm, body = fm_parse_strict(content)
         except FrontmatterError as e:
@@ -1009,11 +1044,11 @@ def write_file(path: str, content: str) -> str:
         _sanitize_frontmatter_dates(fm)
         content = fm_serialize(fm, body)
 
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    logger.info(f"✏️  wrote: {p} ({len(content)} bytes)")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(content, encoding="utf-8")
+    logger.info(f"✏️  wrote: {resolved} ({len(content)} bytes)")
     _mark_file_read(resolved)
-    return f"wrote: {p} ({len(content)} chars)"
+    return f"wrote: {resolved} ({len(content)} chars)"
 
 
 @tool(name="edit")
@@ -1024,19 +1059,9 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
     (write_file also counts).  New files that do not exist yet should use
     write_file instead.
     """
-    if agent_tool_config.atom_skill_dir is not None:
-        skill_dir = agent_tool_config.atom_skill_dir
-    else:
-        skill_dir = agent_tool_config.skill_dir
-    if skill_dir is None:
-        return "error: skill directory is not configured"
-    try:
-        resolved = Path(path).resolve()
-        resolved.relative_to(Path(skill_dir).resolve())
-    except (OSError, ValueError):
-        return f"error: writes restricted to the skill repository (tried: {path})"
-    if ".git" in resolved.parts:
-        return f"error: writes into .git/ are forbidden (tried: {path})"
+    resolved, err = _resolve_skill_write_path(path)
+    if err:
+        return err
     if not resolved.is_file():
         return (
             f"error: file not found ({path}). "
