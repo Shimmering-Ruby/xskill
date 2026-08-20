@@ -152,6 +152,14 @@ CREATE TABLE IF NOT EXISTS trajectories (
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(watch_dir_id, filename)
 );
+CREATE INDEX IF NOT EXISTS idx_trajectories_watch_status_newest
+    ON trajectories(
+        watch_dir_id,
+        status,
+        discovered_at DESC,
+        file_mtime DESC,
+        id DESC
+    );
 
 CREATE TABLE IF NOT EXISTS llm_usage (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
