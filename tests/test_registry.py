@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -525,6 +526,59 @@ def test_watch_status_index_on_new_and_existing_db(tmp_path, db_path):
     assert after == [{"filename": "traj_keep.md", "status": "discovered"}]
 
 
+def test_watch_status_index_created_after_legacy_column_migration(tmp_path):
+    """A pre-status registry gains every index dependency before CREATE INDEX."""
+    db_path = tmp_path / "legacy.db"
+    traj_dir = tmp_path / "legacy-trajectories"
+    traj_dir.mkdir()
+    raw = sqlite3.connect(db_path)
+    raw.execute(
+        "CREATE TABLE watch_dirs ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, label TEXT)"
+    )
+    raw.execute(
+        "CREATE TABLE trajectories ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, watch_dir_id INTEGER, "
+        "filename TEXT, has_meta INTEGER DEFAULT 0, "
+        "has_embedding INTEGER DEFAULT 0, UNIQUE(watch_dir_id, filename))"
+    )
+    raw.execute(
+        "INSERT INTO watch_dirs (path, label) VALUES (?, 'legacy')",
+        (str(traj_dir),),
+    )
+    raw.execute(
+        "INSERT INTO trajectories (watch_dir_id, filename) "
+        "VALUES (1, 'traj_old.md')"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = get_connection(db_path)
+    legacy = conn.execute(
+        "SELECT status, file_mtime, discovered_at FROM trajectories"
+    ).fetchone()
+    assert legacy["status"] == "discovered"
+    assert legacy["file_mtime"] == 0.0
+    assert legacy["discovered_at"]
+    assert _watch_status_index_columns(conn) == [
+        ("watch_dir_id", 0),
+        ("status", 0),
+        ("discovered_at", 1),
+        ("file_mtime", 1),
+        ("id", 1),
+    ]
+    conn.close()
+
+    (traj_dir / "traj_new.md").write_text("# new\n", encoding="utf-8")
+    assert discover_trajectories(1, traj_dir, db_path=db_path) == ["traj_new.md"]
+    conn = get_connection(db_path)
+    discovered_at = conn.execute(
+        "SELECT discovered_at FROM trajectories WHERE filename='traj_new.md'"
+    ).fetchone()["discovered_at"]
+    conn.close()
+    assert discovered_at
+
+
 def test_watch_status_query_plan_uses_index(db_path):
     """状态查询按 watch_dir_id + status 走新索引，排序不再建临时 B-tree。"""
     conn = get_connection(db_path)
@@ -572,4 +626,3 @@ def test_get_trajs_by_status_error_retry_filter(tmp_path, db_path):
     assert get_trajs_by_status(
         wid, "error", max_retries=4, db_path=db_path,
     ) == ["traj_err.md"]
-
