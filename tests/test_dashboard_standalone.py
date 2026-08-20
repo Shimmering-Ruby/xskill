@@ -82,6 +82,7 @@ _BUILTIN_ONLY_OPERATIONS = {
     ("post", "/api/v1/dashboard/admin/skill/{name}/retire"),
     ("post", "/api/v1/dashboard/admin/skill/{name}/unretire"),
     ("delete", "/api/v1/dashboard/admin/skill/{name}"),
+    ("patch", "/api/v1/dashboard/admin/pipeline/pools"),
     ("get", "/api/v1/dashboard/admin/config"),
     ("post", "/api/v1/dashboard/admin/config/validate"),
     ("post", "/api/v1/dashboard/admin/config/reload"),
