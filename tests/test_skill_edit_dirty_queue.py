@@ -8,6 +8,8 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from xskill.pipeline import registry as reg
 from xskill.pipeline.atom import AtomTaskStore
 from xskill.pipeline.registry import register_dir
@@ -102,6 +104,7 @@ def test_candidate_writes_coalesce_per_skill_and_use_generation_fence(
     ] == ["bar"]
 
 
+@pytest.mark.performance_contract
 def test_idle_round_does_not_rescan_skill_directories_or_candidates(
     tmp_path: Path,
     monkeypatch,

@@ -1,6 +1,8 @@
 """块 3 画像短命子进程:profile-refresh --once 遍历所有 client、写状态文件、失败可控。"""
 from __future__ import annotations
 
+import pytest
+
 from xskill import _workers
 from xskill.utils.status_file import PROFILE_STATUS_FILE, read_status_file
 
@@ -97,6 +99,7 @@ def test_empty_client_list_is_ok(tmp_path, monkeypatch):
     assert read_status_file(tmp_path / PROFILE_STATUS_FILE)["stats"]["clients"] == 0
 
 
+@pytest.mark.performance_contract
 def test_unchanged_second_tick_reads_no_client_profiles(tmp_path, monkeypatch):
     from xskill.recommend.profile_dirty import mark_profile_dirty
 
