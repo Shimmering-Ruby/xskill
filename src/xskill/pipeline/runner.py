@@ -3073,6 +3073,18 @@ class DirectoryWatcher:
             tasks_extracted=total_atoms, **kw,
         )
         self._stats["atoms_extracted"] += n_atoms
+        if n_atoms:
+            try:
+                from xskill.recommend.profile_dirty import (
+                    mark_profile_dirty_for_store,
+                )
+                mark_profile_dirty_for_store(
+                    matched[0]["path"],
+                    reason="atom_split",
+                    db_path=kw.get("db_path"),
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.debug("profile dirty mark failed after split", exc_info=True)
 
     def _on_embed_done(self, wd_id, _filename, result, **kw):
         _wd_id, filenames = result

@@ -165,6 +165,28 @@ def test_reset_deletes_atom_location_projection_rows(tmp_path, db_path):
     assert count == 0
 
 
+def test_reset_marks_only_team_profile_dirty(tmp_path, db_path):
+    from xskill.recommend.profile_dirty import list_dirty_profiles
+
+    sessions = tmp_path / "trajectories" / "clients" / "alice" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "traj_team.md").write_text("# team", encoding="utf-8")
+    watch_dir_id = register_dir(
+        sessions,
+        label="alice",
+        ecosystem="team_client",
+        db_path=db_path,
+    )
+    discover_trajectories(watch_dir_id, sessions, db_path=db_path)
+
+    reset_trajectories(traj_id="traj_team", db_path=db_path)
+
+    dirty = list_dirty_profiles(db_path=db_path)
+    assert [(row["user_key"], row["reason"]) for row in dirty] == [
+        ("alice", "atom_reset"),
+    ]
+
+
 def test_reset_requeues_not_fit_and_clears_interest_fields(tmp_path, db_path):
     directory_path, watch_dir_id = _seed_done_traj(tmp_path, db_path)
     mark_not_fit(
