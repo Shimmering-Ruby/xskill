@@ -119,6 +119,9 @@ def test_wrong_credentials_401(console_env):
 def test_user_hitting_admin_endpoint_403(console_env):
     alice = console_env["alice"]
     assert alice.get("/api/v1/dashboard/admin/skills").status_code == 403
+    assert alice.get(
+        "/api/v1/dashboard/admin/user/alice/recommendations"
+    ).status_code == 403
     assert alice.post(
         "/api/v1/dashboard/admin/skill/alpha/retire").status_code == 403
     assert alice.get("/api/v1/dashboard/admin/config").status_code == 403
@@ -421,6 +424,61 @@ def test_users_matrix_lists_clients_with_version(console_env):
     assert row["client_version"] == "0.9.9"
     assert row["client_id"] == cid
     assert row["ingest_paused"] is False
+
+
+def test_admin_recommendation_history_is_separate_and_paginated(console_env):
+    db = console_env["db"]
+    client_id = console_env["registry"].find_by_user_name("alice")
+    with R.get_connection(db) as conn:
+        conn.executemany(
+            "INSERT INTO recommendation_log("
+            "ts,client_id,skill,side,bucket,sha) VALUES(?,?,?,?,?,?)",
+            [
+                ("2026-07-01 00:00:00", client_id, "alpha", "main",
+                 "recommended", "sha-alpha"),
+                ("2026-07-02 00:00:00", client_id, "beta", "staging",
+                 "ranked", "sha-beta"),
+                ("2026-07-03 00:00:00", client_id, "gamma", "main",
+                 "recommended", "sha-gamma"),
+                ("2026-07-04 00:00:00", "another-client", "other", "main",
+                 "recommended", "sha-other"),
+            ],
+        )
+        conn.commit()
+
+    boss = console_env["boss"]
+    first = boss.get(
+        "/api/v1/dashboard/admin/user/alice/recommendations",
+        params={"offset": 0, "limit": 2},
+    )
+    assert first.status_code == 200
+    payload = first.json()
+    assert payload == {
+        "user": "alice",
+        "total": 3,
+        "offset": 0,
+        "limit": 2,
+        "has_more": True,
+        "exposures": [
+            {"ts": "2026-07-03 00:00:00", "skill": "gamma",
+             "side": "main", "bucket": "recommended", "sha": "sha-gamma"},
+            {"ts": "2026-07-02 00:00:00", "skill": "beta",
+             "side": "staging", "bucket": "ranked", "sha": "sha-beta"},
+        ],
+    }
+    assert all("client_id" not in row for row in payload["exposures"])
+
+    second = boss.get(
+        "/api/v1/dashboard/admin/user/alice/recommendations",
+        params={"offset": 2, "limit": 2},
+    ).json()
+    assert second["total"] == 3
+    assert second["has_more"] is False
+    assert [row["skill"] for row in second["exposures"]] == ["alpha"]
+    assert boss.get(
+        "/api/v1/dashboard/admin/user/alice/recommendations",
+        params={"limit": 0},
+    ).status_code == 422
 
 
 def test_admin_ingest_control_is_authorized_idempotent_and_syncs_watch_dir(
