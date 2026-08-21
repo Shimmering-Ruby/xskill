@@ -7,7 +7,7 @@ ClusterAgent 由"每次消费 1 个 atom"改为"每次消费 cluster batch_size 
 1. **批量生效**：构造 N 条 indexed 轨迹（N > batch_size），观察 ClusterAgent
    调用次数 == ceil(总未归类 atom 数 / batch_size)，而**非** == 总 atom 数。
 2. **已落地过滤**：构造已在某 skill ``.candidates.yml`` 的 atom，确认被
-   ``_collect_cluster_atoms`` 过滤、永不进入任何 batch、不送 LLM。
+   ``_reconcile_indexed_atoms`` 过滤、永不进入任何 batch、不送 LLM。
 3. **断点续传**：消费中途"kill 进程"（丢弃 watcher + 线程池），重启（新 watcher
    同一 wd/db/skill_dir/store）后从断点继续，已落地 atom 不重复消费。
 

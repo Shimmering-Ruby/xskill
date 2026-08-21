@@ -152,14 +152,6 @@ CREATE TABLE IF NOT EXISTS trajectories (
     updated_at    TEXT DEFAULT (datetime('now')),
     UNIQUE(watch_dir_id, filename)
 );
-CREATE INDEX IF NOT EXISTS idx_trajectories_watch_status_newest
-    ON trajectories(
-        watch_dir_id,
-        status,
-        discovered_at DESC,
-        file_mtime DESC,
-        id DESC
-    );
 
 CREATE TABLE IF NOT EXISTS llm_usage (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -394,6 +386,17 @@ CREATE TABLE IF NOT EXISTS skill_origin (
 CREATE INDEX IF NOT EXISTS idx_skill_origin_user ON skill_origin(user_key);
 """
 
+_WATCH_STATUS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_trajectories_watch_status_newest
+    ON trajectories(
+        watch_dir_id,
+        status,
+        discovered_at DESC,
+        file_mtime DESC,
+        id DESC
+    )
+"""
+
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """打开（或创建）注册表 DB。schema 过期（含新建）时自动建表 + 迁移。"""
@@ -432,7 +435,9 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
                         _REGISTRY_WAL_READY[db_key] = _registry_db_identity(db_key)
         conn.execute("PRAGMA foreign_keys=ON")
         # schema 内容指纹存 DB 头：指纹一致则跳过建表/迁移（此函数在热路径高频调用）
-        schema_fingerprint = zlib.crc32(_SCHEMA_SQL.encode()) & 0x7FFFFFFF
+        schema_fingerprint = zlib.crc32(
+            (_SCHEMA_SQL + _WATCH_STATUS_INDEX_SQL).encode()
+        ) & 0x7FFFFFFF
         if conn.execute("PRAGMA user_version").fetchone()[0] != schema_fingerprint:
             # WAL 设置完成不代表 schema 已就绪。首次并发连接的
             # 建表/迁移也必须按 DB 串行，并在锁内重查指纹。
@@ -593,6 +598,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in cur.fetchall()}
     # status 列是否本次才补上——决定要不要跑下方那条历史状态回填(只该一次性)。
     status_was_missing = "status" not in cols
+    discovered_at_was_missing = "discovered_at" not in cols
     migrations = [
         ("status", "TEXT DEFAULT 'discovered'"),
         ("process_action", "TEXT"),
@@ -601,6 +607,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("ux_score", "REAL"),
         ("error_msg", "TEXT"),
         ("retry_count", "INTEGER DEFAULT 0"),
+        ("file_mtime", "REAL DEFAULT 0"),
+        # SQLite 的 ADD COLUMN 不接受 CURRENT_TIMESTAMP 等非恒定默认值。
+        # 旧表先补普通 TEXT 列、下方回填；新写入则显式写 discovered_at。
+        ("discovered_at", "TEXT"),
         ("updated_at", "TEXT"),
         ("process_log", "TEXT"),
         # v2: AtomTask 流水线状态
@@ -620,7 +630,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col, typedef in migrations:
         if col not in cols:
             conn.execute(f"ALTER TABLE trajectories ADD COLUMN {col} {typedef}")
-
+    if discovered_at_was_missing:
+        conn.execute(
+            "UPDATE trajectories SET discovered_at=datetime('now')"
+            " WHERE discovered_at IS NULL"
+        )
     # ── watch_dirs ──
     # ── recommendation_log ──（审计 P0-2：曝光去重根治注水）
     # 加 sha 列 + (client_id,skill,side,sha) 唯一索引；建索引前一次性清历史重复行
@@ -692,6 +706,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "UPDATE trajectories SET status='meta_done'"
             " WHERE has_meta=1 AND has_embedding=0 AND (status IS NULL OR status='discovered')"
         )
+    # 旧表先补齐并回填 status / discovered_at / file_mtime，再一次性建索引，
+    # 避免历史状态更新额外维护刚创建的索引。
+    conn.execute(_WATCH_STATUS_INDEX_SQL)
     conn.commit()
 
 
@@ -1796,8 +1813,8 @@ def discover_trajectories(
                 conn.execute(
                     "INSERT INTO trajectories"
                     " (watch_dir_id, filename, file_mtime, source_model,"
-                    "  source_harness, user_key)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    "  source_harness, user_key, discovered_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
                     (watch_dir_id, md.name, mtime, _sidecar_model(md),
                      _sidecar_field(md, "harness"), user_key),
                 )
