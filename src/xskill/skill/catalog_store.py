@@ -281,13 +281,72 @@ def catalog_api_row(stored: dict) -> dict:
     return row
 
 
-def _upsert_row(conn, row: dict) -> None:
+def _vector_target(row: dict | None, *, retired: bool = False):
+    if row is None:
+        return None
+    from xskill.recommend.skill_vector_store import (
+        catalog_row_is_indexable,
+        content_sha_for_text,
+    )
+
+    candidate = {**row, "retired": retired}
+    if not catalog_row_is_indexable(candidate):
+        return None
+    description = (candidate.get("description") or "").strip()
+    content_sha = candidate.get("content_sha") or content_sha_for_text(description)
+    return (
+        content_sha,
+        candidate.get("source") or "",
+        candidate.get("name") or "",
+        description,
+    )
+
+
+def _stored_vector_row(conn, catalog_key: str) -> tuple[dict | None, bool]:
+    row = conn.execute(
+        """
+        SELECT catalog_key, name, source, description, content_sha, distributable
+        FROM skills_catalog WHERE catalog_key=?
+        """,
+        (catalog_key,),
+    ).fetchone()
+    if row is None:
+        return None, False
+    retired = conn.execute(
+        "SELECT 1 FROM skill_lifecycle WHERE skill_name=? AND state='retired'",
+        (row["name"],),
+    ).fetchone() is not None
+    return dict(row), retired
+
+
+def _mark_vector_transition(
+    conn,
+    catalog_key: str,
+    old_target,
+    new_target,
+) -> None:
+    if old_target == new_target:
+        return
+    from xskill.recommend.vector_dirty import mark_catalog_vector_dirty_on_connection
+
+    mark_catalog_vector_dirty_on_connection(
+        conn,
+        catalog_key,
+        operation="upsert" if new_target is not None else "delete",
+        content_sha=new_target[0] if new_target is not None else "",
+    )
+
+
+def _upsert_row(conn, row: dict, *, mark_vector: bool = True) -> None:
     from xskill.recommend.skill_vector_store import content_sha_for_text
 
     description = row["description"]
     content_sha = row.get("content_sha") or (
         content_sha_for_text(description) if description else ""
     )
+    old_row = old_retired = None
+    if mark_vector:
+        old_row, old_retired = _stored_vector_row(conn, row["catalog_key"])
     conn.execute(
         """
         INSERT INTO skills_catalog(
@@ -335,6 +394,18 @@ def _upsert_row(conn, row: dict) -> None:
             content_sha,
         ),
     )
+    if mark_vector:
+        retired = conn.execute(
+            "SELECT 1 FROM skill_lifecycle WHERE skill_name=? AND state='retired'",
+            (row["name"],),
+        ).fetchone() is not None
+        new_row = {**row, "content_sha": content_sha}
+        _mark_vector_transition(
+            conn,
+            row["catalog_key"],
+            _vector_target(old_row, retired=bool(old_retired)),
+            _vector_target(new_row, retired=retired),
+        )
 
 
 _BACKFILL_WAIT_TIMEOUT_SECONDS = 120.0
@@ -381,10 +452,19 @@ def delete_native_skill(name: str, *, db_path: Path) -> None:
     if db_path is None:
         raise TypeError("skills_catalog delete requires explicit db_path")
     with pooled_connection(Path(db_path)) as conn:
+        catalog_key = _native_catalog_key(name)
+        old_row, old_retired = _stored_vector_row(conn, catalog_key)
         conn.execute(
             "DELETE FROM skills_catalog WHERE catalog_key=?",
-            (_native_catalog_key(name),),
+            (catalog_key,),
         )
+        if old_row is not None:
+            _mark_vector_transition(
+                conn,
+                catalog_key,
+                _vector_target(old_row, retired=old_retired),
+                None,
+            )
         conn.commit()
 
 
@@ -393,6 +473,12 @@ def delete_all_native(*, root_key: str = "", db_path: Path) -> int:
     if db_path is None:
         raise TypeError("skills_catalog wipe requires explicit db_path")
     with pooled_connection(Path(db_path)) as conn:
+        where = "source=? AND root_key=?" if root_key else "source=?"
+        params = (_SOURCE_NATIVE, root_key) if root_key else (_SOURCE_NATIVE,)
+        old_rows = conn.execute(
+            f"SELECT catalog_key FROM skills_catalog WHERE {where}",  # noqa: S608
+            params,
+        ).fetchall()
         if root_key:
             cursor = conn.execute(
                 "DELETE FROM skills_catalog WHERE source=? AND root_key=?",
@@ -402,6 +488,11 @@ def delete_all_native(*, root_key: str = "", db_path: Path) -> int:
             cursor = conn.execute(
                 "DELETE FROM skills_catalog WHERE source=?",
                 (_SOURCE_NATIVE,),
+            )
+        from xskill.recommend.vector_dirty import mark_catalog_vector_dirty_on_connection
+        for row in old_rows:
+            mark_catalog_vector_dirty_on_connection(
+                conn, row["catalog_key"], operation="delete",
             )
         conn.commit()
         return int(cursor.rowcount or 0)
@@ -421,10 +512,19 @@ def rename_native_skill(
         raise FileNotFoundError(f"skill path not found for catalog rename: {path}")
     row = _read_native_row(path)
     with pooled_connection(Path(db_path)) as conn:
+        old_key = _native_catalog_key(old_name)
+        old_row, old_retired = _stored_vector_row(conn, old_key)
         conn.execute(
             "DELETE FROM skills_catalog WHERE catalog_key=?",
-            (_native_catalog_key(old_name),),
+            (old_key,),
         )
+        if old_row is not None:
+            _mark_vector_transition(
+                conn,
+                old_key,
+                _vector_target(old_row, retired=old_retired),
+                None,
+            )
         _upsert_row(conn, row)
         conn.commit()
 
@@ -574,13 +674,44 @@ def backfill_skills_catalog(
     skillhub_key = _skillhub_fingerprint(skillhub)
     rows = scan_skills_catalog(skill_dir, skillhub=skillhub)
     with pooled_connection(db_path) as conn:
+        old_rows = conn.execute(
+            """
+            SELECT catalog_key, name, source, description, content_sha, distributable
+            FROM skills_catalog WHERE root_key=?
+            """,
+            (root,),
+        ).fetchall()
+        retired = {
+            row["skill_name"] for row in conn.execute(
+                "SELECT skill_name FROM skill_lifecycle WHERE state='retired'"
+            ).fetchall()
+        }
+        old_targets = {
+            row["catalog_key"]: _vector_target(
+                dict(row), retired=row["name"] in retired,
+            )
+            for row in old_rows
+        }
         conn.execute(
             "DELETE FROM skills_catalog WHERE root_key=?",
             (root,),
         )
         for row in rows:
             row["root_key"] = root
-            _upsert_row(conn, row)
+            _upsert_row(conn, row, mark_vector=False)
+        new_targets = {
+            row["catalog_key"]: _vector_target(
+                row, retired=row["name"] in retired,
+            )
+            for row in rows
+        }
+        for catalog_key in old_targets.keys() | new_targets.keys():
+            _mark_vector_transition(
+                conn,
+                catalog_key,
+                old_targets.get(catalog_key),
+                new_targets.get(catalog_key),
+            )
         conn.execute(
             """
             INSERT INTO skills_catalog_meta(root_key, backfilled_at, skillhub_key)
