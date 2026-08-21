@@ -91,7 +91,7 @@ class DirectoryWatcher:
 
     与 v1 (meta-level) 的差异：
     - splitting 阶段调 TaskAgent 拆 AtomTask，落盘到 ``<traj_root>/<traj_id>/tasks/``
-    - indexed 阶段以 AtomTask 为单位整批重建 ``<traj_root>/index.pkl``
+    - indexed 阶段增量维护 Atom SQLite 向量投影；``index.pkl`` 仅作发现标记
     - cluster 阶段**跨轨迹池化**：把所有 indexed 轨迹里尚未落地的 atom 汇成一池，
       按 ``cluster.batch_size`` 分批，提交给全局 cluster pool。
     - indexed → done 由 ``_reconcile_indexed_atoms`` 标：一条轨迹的 atom 全部落进某个
@@ -2498,9 +2498,18 @@ class DirectoryWatcher:
         # ── 提交 embed 任务（split_done → indexed，整批一个任务） ──
         if self.embed_client is not None:
             split_done_files = get_trajs_by_status(wd_id, "split_done", **kw)
-            if split_done_files and not any(
+            store = self._store_for(dir_path)
+            embed_in_flight = any(
                 i["stage"] == "embed" and i["wd_id"] == wd_id for i in self._futures.values()
-            ):
+            )
+            split_in_flight = any(
+                i["stage"] == "split" and i["wd_id"] == wd_id
+                for i in self._futures.values()
+            )
+            reconcile_due = (
+                not split_in_flight and store.vector_index_reconcile_due()
+            )
+            if (split_done_files or reconcile_due) and not embed_in_flight:
                 fut = self._pools["embed"].submit(
                     self._do_atom_index,
                     dir_path,

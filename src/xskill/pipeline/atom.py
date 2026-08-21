@@ -4,9 +4,11 @@
 每个 ``AtomTask`` 是一段 multi-chat-turn（1-10 轮），由 ``TaskAgent`` 从
 轨迹按"用户意图切换"切出来。内容落盘到
 ``<root>/<traj_id>/tasks/atom_*.json``，``watcher`` 用 ``last_offset`` 决定
-增量起点；隐藏 SQLite 只保存可重建的 Atom→路径定位投影，不保存业务内容。
+增量起点；隐藏 SQLite 保存可重建的 Atom→路径定位和向量检索投影，JSON 始终
+是业务事实源。
 
-向量索引（基于 atom 的 ``summary or intent`` 嵌入）持久化在 ``<root>/index.pkl``。
+向量索引（基于 atom 的 ``summary or intent`` 嵌入）持久化在隐藏 SQLite；
+``<root>/index.pkl`` 仅保留兼容旧发现路径的小型标记。
 ``HybridSearch`` (在 ``xskill.utils.search``) 把本模块的 ``vector_search`` 跟
 BM25 关键字检索做 union+dedup。
 
@@ -31,6 +33,7 @@ from typing import Iterator
 import numpy as np
 
 from xskill._sqlite_connect import connect_with_lock
+from xskill.pipeline.atom_vector_index import VECTOR_DB_FILE, AtomVectorProjection
 
 logger = logging.getLogger("xskill.ux_score")
 
@@ -88,19 +91,18 @@ class AtomTask:
 
 
 class AtomTaskStore:
-    """文件系统存储：``<root>/<traj_id>/tasks/atom_*.json`` + ``<root>/index.pkl``。
+    """JSON 事实源 + Atom 定位/向量 SQLite 投影 + 小型 ``index.pkl`` 标记。
 
     设计取舍：
-    - **JSON 是事实源**: 文件读写直接、调试方便；SQLite 仅作可重建定位投影。
+    - **JSON 是事实源**: 文件读写直接、调试方便；SQLite 仅作可重建投影。
     - **每 traj 一个子目录**: 让 watcher 按 traj 粒度做增量处理，``list_by_traj``
       不需要全表扫。
-    - **向量索引增量重建**: TaskAgent 每给一条 traj 拆出新 atom 后由 watcher
-      触发一次 ``rebuild_vector_index``；按 ``atom_id`` 复用旧 index.pkl 中同
-      模型的向量，只对新原子调 embedding（换模型则整体重算，护栏见方法内），
-      避免攒了上万原子的 client 新增几条就全量重 embed。
+    - **向量索引增量维护**: ``save_many`` 只登记变化 Atom，watcher 只 embed / 写
+      这些行；模型变化和低频一致性核对才从 JSON 原子重建。
     """
 
     INDEX_FILE = "index.pkl"
+    VECTOR_INDEX_FILE = VECTOR_DB_FILE
     LOCATION_INDEX_FILE = ".atom_locations.sqlite3"
     _LOCATION_SCHEMA = """
     CREATE TABLE IF NOT EXISTS atom_locations (
@@ -124,6 +126,10 @@ class AtomTaskStore:
         self._location_lock = _location_lock_for(self.root)
         self._location_schema_ready = False
         self._location_index_complete: bool | None = None
+        self._vector_projection = AtomVectorProjection(
+            self.root,
+            self._location_lock,
+        )
 
     # ── paths ─────────────────────────────────────────────────────
 
@@ -319,9 +325,12 @@ class AtomTaskStore:
         return count
 
     def remove_locations_for_trajs(self, traj_ids) -> None:
-        """Atom 文件删除/reset 后同步清理对应轨迹的定位行。"""
+        """Atom 文件删除/reset 后同步清理对应轨迹的定位行与向量行。"""
         ids = sorted({str(traj_id) for traj_id in traj_ids if traj_id})
-        if not ids or not self._location_index_path().is_file():
+        if not ids:
+            return
+        self._vector_projection.remove_trajs(ids)
+        if not self._location_index_path().is_file():
             return
         try:
             connection = self._location_connection()
@@ -382,6 +391,15 @@ class AtomTaskStore:
             logger.warning(
                 "atom location projection batch update failed: %s",
                 [str(path) for path, _traj_id in saved],
+                exc_info=True,
+            )
+        try:
+            self._vector_projection.record_atoms(atoms)
+        except (OSError, sqlite3.DatabaseError):
+            # JSON 是事实源；向量投影失败不回滚事实写，后续 rebuild/低频核对修复。
+            logger.warning(
+                "atom vector projection batch update failed: %s",
+                [atom.atom_id for atom in atoms],
                 exc_info=True,
             )
         return [path for path, _traj_id in saved]
@@ -561,73 +579,37 @@ class AtomTaskStore:
 
     # ── vector index ──────────────────────────────────────────────
 
-    def _load_vector_cache(self, model: str) -> dict:
-        """增量 embedding 复用源：``{atom_id: 归一化向量(D,)}``。
+    def rebuild_vector_index(self, embed_client, *, force_full: bool = False) -> dict:
+        """消费增量向量行；模型变化、显式请求或低频到期时原子全量重建。"""
+        return self._vector_projection.rebuild(
+            embed_client,
+            force_full=force_full,
+        )
 
-        仅当已落盘 index.pkl 的 ``model`` 字段与当前 ``model`` 一致才返回缓存
-        （换 embedding 模型 → 旧向量与当前模型不同源作废，返回空 dict 强制整体
-        重算，护栏在此不混用不同模型的向量）。无索引文件 / 结构缺字段 → 空 dict。
-        """
-        p = self._index_path()
-        if not p.is_file():
-            return {}
-        with open(p, "rb") as f:
-            data = pickle.load(f)
-        if (data.get("model") or "") != (model or ""):
-            return {}
-        atom_ids = data.get("atom_ids") or []
-        embeddings = data.get("embeddings")
-        if embeddings is None:
-            return {}
-        return {
-            aid: embeddings[i]
-            for i, aid in enumerate(atom_ids)
-            if i < len(embeddings) and aid
-        }
-
-    def rebuild_vector_index(self, embed_client) -> None:
-        """增量重建索引：复用旧 index.pkl 中同模型的向量，只对新原子调 embedding。
-
-        - 旧索引 ``model`` 与当前 ``embed_client.model`` 一致时，按 ``atom_id``
-          复用其向量（atom 内容随 id 不可变，复用安全）；换模型则整体重算。
-        - 只对**没在缓存里的** atom_id 调 ``encode_batch``，其余复用缓存向量。
-        - 新索引只含当前 ``all_atoms()`` 的原子——被删除/reset 的原子自然不残留。
-        - 复用向量本就归一化落盘；新算向量照旧 L2 归一。最终 embeddings 行顺序
-          与 atom_ids、与 ``all_atoms()`` 顺序严格对齐。
-
-        无 atom 时直接返回（不写空索引文件——``vector_search`` 自己处理无索引情况）。
-        """
-        atoms = list(self.all_atoms())
-        if not atoms:
-            return
-        model = getattr(embed_client, "model", "")
-        cache = self._load_vector_cache(model)
-        missing = [a for a in atoms if a.atom_id not in cache]
-        if missing:
-            texts = [a.summary or a.intent for a in missing]
-            fresh = np.asarray(embed_client.encode_batch(texts))
-            norms = np.linalg.norm(fresh, axis=1, keepdims=True)
-            norms[norms == 0] = 1
-            fresh = fresh / norms
-            cache = dict(cache)
-            for a, v in zip(missing, fresh):
-                cache[a.atom_id] = v
-        vecs = np.asarray([cache[a.atom_id] for a in atoms])
-        self.root.mkdir(parents=True, exist_ok=True)
-        with open(self._index_path(), "wb") as f:
-            pickle.dump({
-                "atom_ids": [a.atom_id for a in atoms],
-                "embeddings": vecs,
-                "model": model,
-                "dim": int(vecs.shape[1]),
-            }, f)
+    def vector_index_reconcile_due(self) -> bool:
+        """空闲 watcher 是否需执行启动迁移或低频事实源一致性核对。"""
+        return self._vector_projection.reconcile_due()
 
     def vector_search(self, query: str, embed_client, top_k: int = 5) -> list[dict]:
+        if top_k <= 0:
+            return []
+        projected = self._vector_projection.search(
+            query,
+            embed_client,
+            top_k=top_k,
+        )
+        if projected is not None:
+            return projected
+        # 升级期间、首次 watcher 对账前兼容旧 index.pkl。
         p = self._index_path()
         if not p.is_file():
             return []
         with open(p, "rb") as f:
             data = pickle.load(f)
+        if data.get("format") or (
+            data.get("model") or ""
+        ) != (getattr(embed_client, "model", "") or ""):
+            return []
         q = embed_client.encode(query)
         qn = np.linalg.norm(q)
         if qn > 0:

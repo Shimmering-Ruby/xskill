@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -308,10 +309,31 @@ class _SpyEmbed(_FakeEmbed):
         return super().encode_batch(texts)
 
 
-def _read_index(tmp_path: Path) -> dict:
-    import pickle
-    with open(tmp_path / "cc-sessions" / "index.pkl", "rb") as f:
-        return pickle.load(f)
+def _read_index(tmp_path: Path, store_name: str = "cc-sessions") -> dict:
+    path = tmp_path / store_name / AtomTaskStore.VECTOR_INDEX_FILE
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT atom_id, embedding, dim FROM atom_vectors
+            WHERE embedding IS NOT NULL ORDER BY traj_id, atom_id
+            """
+        ).fetchall()
+        meta = connection.execute(
+            "SELECT model FROM atom_vector_meta WHERE singleton=1"
+        ).fetchone()
+    finally:
+        connection.close()
+    vectors = [
+        np.frombuffer(row["embedding"], dtype=np.float32, count=int(row["dim"]))
+        for row in rows
+    ]
+    return {
+        "atom_ids": [row["atom_id"] for row in rows],
+        "embeddings": np.stack(vectors) if vectors else np.empty((0, 0)),
+        "model": meta["model"] if meta else "",
+    }
 
 
 class TestVectorIndexIncremental:
@@ -366,9 +388,7 @@ class TestVectorIndexIncremental:
                                  offset_start=i * 10, offset_end=(i + 1) * 10,
                                  summary=f"do thing {i}"))
         ref_store.rebuild_vector_index(_SpyEmbed())
-        import pickle
-        with open(tmp_path / "ref" / "index.pkl", "rb") as f:
-            full = pickle.load(f)["embeddings"]
+        full = _read_index(tmp_path, "ref")["embeddings"]
         assert np.allclose(incremental, full)
 
     def test_model_change_reembeds_all(self, tmp_path):
@@ -395,7 +415,7 @@ class TestVectorIndexIncremental:
         (tmp_path / "cc-sessions" / "t" / "tasks" /
          "atom_t_0001.json").unlink()
         embed = _SpyEmbed()
-        store.rebuild_vector_index(embed)
+        store.rebuild_vector_index(embed, force_full=True)
         idx = _read_index(tmp_path)
         assert idx["atom_ids"] == ["atom_t_0000", "atom_t_0002"]
         # 复用命中，无需再 embed 任何原子
