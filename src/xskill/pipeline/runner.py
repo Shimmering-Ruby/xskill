@@ -628,10 +628,13 @@ class DirectoryWatcher:
                     self.skill_dir,
                     **self._db_kw(),
                 )
-                self._last_skill_edit_reconcile_ts = now
             except Exception:
                 # YAML/skill 目录是真相源；队列投影失败不能阻断其余流水线。
                 logger.exception("skill_edit dirty reconciliation failed")
+            finally:
+                # 持续的文件系统/DB 故障不应让每个快速 poll 都退化成全量
+                # skill_dir 扫描；下一次周期对账仍会继续修复投影。
+                self._last_skill_edit_reconcile_ts = now
         try:
             dirty_rows = list_skill_edit_dirty(
                 self.skill_dir,
@@ -2992,6 +2995,32 @@ class DirectoryWatcher:
     # ux_score
     # ───────────────────────────────────────────────────────────
 
+    def _notify_skill_edit_ux_change(self, skill_path: Path, **kw) -> None:
+        """自有 skill 新增 UX 分数后立即重新检查 SkillEdit 门控。
+
+        SkillHub 目录不属于本 watcher 的 SkillEdit 状态机，不能写入自有
+        ``skill_edit_dirty`` root。通知失败只影响触发时效；低频盘→库对账仍会
+        从事实源修复。
+        """
+        if self.skill_dir is None or Path(skill_path).parent != self.skill_dir:
+            return
+        registry_db_path = kw.get("db_path") or self.db_path
+        if registry_db_path is None:
+            return
+        try:
+            from xskill.pipeline.registry import mark_skill_edit_dirty
+
+            mark_skill_edit_dirty(
+                skill_path,
+                reason="ux_score",
+                db_path=registry_db_path,
+            )
+        except Exception:
+            logger.exception(
+                "skill_edit dirty UX notification failed: %s",
+                Path(skill_path).name,
+            )
+
     def _score_atoms_for_traj(self, wd_id, fname, atoms=None, **kw):
         """对一条已跑完 cluster 的 traj 扫所有 atom 打 ux_score。
 
@@ -3059,6 +3088,8 @@ class DirectoryWatcher:
         # check_and_decide 不再绑在打分链路里——移到 watcher 周期性
         # _check_canary_decisions() 独立轮询，保证灰度系统自治不依赖
         # traj 触发。这里只负责打分落盘。
+        if new_scores:
+            self._notify_skill_edit_ux_change(skill_sub, **kw)
         mark_skill_used(wd_id, fname, skill_name, side, **kw)
         if new_scores:
             self._emit_feedback_event(
@@ -3154,7 +3185,13 @@ class DirectoryWatcher:
                     ):
                         entry = new_by_skill.setdefault(
                             skill_name,
-                            {"scores": [], "side": side, "sha": sha})
+                            {
+                                "scores": [],
+                                "side": side,
+                                "sha": sha,
+                                "skill_path": skill_sub,
+                            },
+                        )
                         entry["scores"].append(float(atom.ux_score))
                     self._stats["scores"] += 1
                     used_any = True
@@ -3162,6 +3199,7 @@ class DirectoryWatcher:
                     logger.exception("CS score_atom failed: %s/%s/%s",
                                      fname, atom.atom_id, skill_name)
         for skill_name, entry in new_by_skill.items():
+            self._notify_skill_edit_ux_change(entry["skill_path"], **kw)
             self._emit_feedback_event(
                 wd_id, fname, skill_name=skill_name, traj_id=traj_id,
                 scores=entry["scores"], side=entry["side"],

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import Future
 from pathlib import Path
@@ -130,6 +131,36 @@ def test_idle_round_does_not_rescan_skill_directories_or_candidates(
         watcher.stop()
 
 
+def test_failed_reconciliation_is_throttled_until_next_interval(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from xskill.pipeline import runner as runner_module
+
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    watcher = _make_watcher(tmp_path, skill_root)
+    watcher.full_reconcile_interval = 60
+    calls: list[Path] = []
+
+    def fail_reconcile(path, *, db_path=None):
+        calls.append(Path(path))
+        raise sqlite3.OperationalError("registry unavailable")
+
+    monkeypatch.setattr(reg, "reconcile_skill_edit_dirty", fail_reconcile)
+    monkeypatch.setattr(reg, "list_skill_edit_dirty", lambda *_a, **_kw: [])
+    times = iter((100.0, 120.0, 161.0))
+    monkeypatch.setattr(runner_module.time, "monotonic", lambda: next(times))
+    try:
+        watcher._check_pending_skill_edits()
+        watcher._check_pending_skill_edits()
+        watcher._check_pending_skill_edits()
+    finally:
+        watcher.stop()
+
+    assert calls == [skill_root, skill_root]
+
+
 def test_candidate_change_only_checks_and_schedules_the_changed_skill(
     tmp_path: Path,
     monkeypatch,
@@ -169,6 +200,62 @@ def test_candidate_change_only_checks_and_schedules_the_changed_skill(
 
         assert loaded == ["alpha"]
         assert submitted == ["alpha"]
+    finally:
+        watcher.stop()
+
+
+def test_new_main_ux_score_requeues_a_waiting_skill(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from xskill.skill.git import commit_baby_to_main_branch
+
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    skill_path = _seed_baby(skill_root, "waiting-for-ux", score=10)
+    assert commit_baby_to_main_branch(str(skill_path), "graduate for UX gate")
+    watcher = _make_watcher(tmp_path, skill_root)
+    db = tmp_path / "registry.db"
+    try:
+        # 候选已达阈值但还没有 main UX 证据，本轮应确认脏项并等待评分事件。
+        watcher._check_pending_skill_edits()
+        assert reg.list_skill_edit_dirty(skill_root, db_path=db) == []
+
+        (skill_path / ".ux_scores.jsonl").write_text(
+            json.dumps({"side": "main", "score": 8}) + "\n",
+            encoding="utf-8",
+        )
+        watcher._notify_skill_edit_ux_change(skill_path, db_path=db)
+        rows = reg.list_skill_edit_dirty(skill_root, db_path=db)
+        assert [(row["skill"], row["reason"]) for row in rows] == [
+            ("waiting-for-ux", "ux_score"),
+        ]
+
+        submitted: list[str] = []
+
+        def capture_submit(_callable, path, **_kwargs):
+            submitted.append(Path(path).name)
+            return Future()
+
+        monkeypatch.setattr(watcher._pools["edit"], "submit", capture_submit)
+        watcher._check_pending_skill_edits()
+        assert submitted == ["waiting-for-ux"]
+    finally:
+        watcher.stop()
+
+
+def test_skillhub_ux_score_does_not_enter_the_native_dirty_queue(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "skills"
+    skill_root.mkdir()
+    hub_skill = tmp_path / "skillhub" / "external"
+    hub_skill.mkdir(parents=True)
+    watcher = _make_watcher(tmp_path, skill_root)
+    db = tmp_path / "registry.db"
+    try:
+        watcher._notify_skill_edit_ux_change(hub_skill, db_path=db)
+        assert reg.list_skill_edit_dirty(skill_root, db_path=db) == []
     finally:
         watcher.stop()
 
