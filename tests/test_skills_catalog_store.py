@@ -4,7 +4,11 @@ from __future__ import annotations
 import pytest
 
 from xskill.skill import catalog_store
-from xskill.skill.git import commit_baby_to_main_branch, init_skill_repo_on_baby
+from xskill.skill.git import (
+    commit_baby_to_main_branch,
+    commit_to_staging_branch,
+    init_skill_repo_on_baby,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +22,16 @@ def _isolate_registry(tmp_path, monkeypatch):
         "xskill.pipeline.registry.get_registry_db_path",
         lambda: registry,
     )
+
+
+def _init_repo_for_catalog(path):
+    init_skill_repo_on_baby(
+        str(path),
+        name=path.name,
+        description=f"{path.name} description",
+    )
+    assert commit_baby_to_main_branch(str(path), "graduate")
+    return path
 
 
 def test_init_and_graduate_upsert_native_row(tmp_path):
@@ -80,6 +94,68 @@ def test_backfill_replaces_stale_native_and_hub(tmp_path):
     )
     assert [row["name"] for row in rows] == ["keep", "hub-skill"]
     assert rows[1]["use_count"] == 2
+
+
+def test_canary_reconcile_preserves_skillhub_and_lists_only_staging(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    registry = tmp_path / "registry.db"
+    main = _init_repo_for_catalog(root / "main-only")
+    staged = _init_repo_for_catalog(root / "active")
+    (staged / ".git" / "refs" / "heads" / "staging").write_text(
+        "b" * 40 + "\n",
+        encoding="ascii",
+    )
+    hub = [{
+        "display_name": "hub-skill",
+        "source_path": "team/x",
+        "skill_id": "hub-skill@1",
+        "description": "from hub",
+    }]
+    catalog_store.backfill_skills_catalog(root, skillhub=hub, db_path=registry)
+
+    assert catalog_store.reconcile_native_canary_catalog(
+        root,
+        db_path=registry,
+    ) == 1
+    assert catalog_store.list_active_native_canaries(
+        root,
+        db_path=registry,
+    ) == ["active"]
+    rows = catalog_store.list_skills_catalog(
+        root,
+        skillhub=hub,
+        db_path=registry,
+    )
+    assert {row["name"] for row in rows} == {
+        main.name,
+        staged.name,
+        "hub-skill",
+    }
+
+
+def test_staging_write_hook_immediately_enters_active_projection(tmp_path):
+    from xskill.agents import agent_tools
+
+    root = tmp_path / "skills"
+    root.mkdir()
+    registry = tmp_path / "registry.db"
+    skill = _init_repo_for_catalog(root / "new-canary")
+    context = agent_tools.create_agent_tool_context(
+        skill_dir=root,
+        atom_skill_dir=root,
+        registry_db_path=registry,
+    )
+    catalog_store.reconcile_native_canary_catalog(root, db_path=registry)
+    (skill / "SKILL.md").write_text("staging body", encoding="utf-8")
+
+    with agent_tools.use_agent_tool_context(context):
+        assert commit_to_staging_branch(str(skill), "create staging")
+
+    assert catalog_store.list_active_native_canaries(
+        root,
+        db_path=registry,
+    ) == ["new-canary"]
 
 
 def test_candidates_notify_uses_count_not_reread(tmp_path, monkeypatch):

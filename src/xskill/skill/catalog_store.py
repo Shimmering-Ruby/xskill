@@ -407,6 +407,129 @@ def delete_all_native(*, root_key: str = "", db_path: Path) -> int:
         return int(cursor.rowcount or 0)
 
 
+def reconcile_native_canary_catalog(
+    skill_dir: Path | str,
+    *,
+    db_path: Path,
+) -> int:
+    """低频从 Git refs 修复自产 skill 的 Canary 状态投影。
+
+    已有行只刷新分支状态与 SHA，避免为了 Canary 对账重复解析全部
+    ``SKILL.md`` 和 ``.candidates.yml``。新目录仍完整建行，消失的目录从
+    投影删除；SkillHub 行不受影响。
+    """
+    root_path = Path(skill_dir)
+    root = _root_key(root_path)
+    paths = []
+    if root_path.is_dir():
+        paths = [
+            path
+            for path in sorted(root_path.iterdir())
+            if path.is_dir() and not path.name.startswith(".")
+        ]
+    names = {path.name for path in paths}
+    active = 0
+    with pooled_connection(Path(db_path)) as conn:
+        existing = {
+            row["name"]: dict(row)
+            for row in conn.execute(
+                """
+                SELECT name, state, main_sha, staging_sha, distributable
+                FROM skills_catalog
+                WHERE source=? AND root_key=?
+                """,
+                (_SOURCE_NATIVE, root),
+            ).fetchall()
+        }
+        for path in paths:
+            branches = _branch_names(path)
+            state = (
+                "staging" if "staging" in branches
+                else "main" if "main" in branches
+                else "baby" if "baby" in branches
+                else "unknown"
+            )
+            if state == "staging":
+                active += 1
+            if path.name not in existing:
+                row = _read_native_row(path)
+                row["root_key"] = root
+                _upsert_row(conn, row)
+                continue
+            current_main_sha = _ref_sha(path, "main")
+            current_staging_sha = _ref_sha(path, "staging")
+            distributable = int(
+                state in ("main", "staging")
+                and (path / "SKILL.md").is_file()
+            )
+            stored = existing[path.name]
+            if (
+                stored["state"] == state
+                and stored["main_sha"] == current_main_sha
+                and stored["staging_sha"] == current_staging_sha
+                and int(stored["distributable"]) == distributable
+            ):
+                continue
+            conn.execute(
+                """
+                UPDATE skills_catalog
+                SET state=?, main_sha=?, staging_sha=?, distributable=?,
+                    updated_at=datetime('now')
+                WHERE catalog_key=? AND source=? AND root_key=?
+                """,
+                (
+                    state,
+                    current_main_sha,
+                    current_staging_sha,
+                    distributable,
+                    _native_catalog_key(path.name),
+                    _SOURCE_NATIVE,
+                    root,
+                ),
+            )
+        removed = set(existing) - names
+        if removed:
+            conn.executemany(
+                """
+                DELETE FROM skills_catalog
+                WHERE catalog_key=? AND source=? AND root_key=?
+                """,
+                [
+                    (_native_catalog_key(name), _SOURCE_NATIVE, root)
+                    for name in sorted(removed)
+                ],
+            )
+        conn.execute(
+            """
+            INSERT INTO skills_catalog_meta(root_key, backfilled_at, skillhub_key)
+            VALUES (?, datetime('now'), ?)
+            ON CONFLICT(root_key) DO UPDATE SET backfilled_at=datetime('now')
+            """,
+            (root, _skillhub_fingerprint(None)),
+        )
+        conn.commit()
+    return active
+
+
+def list_active_native_canaries(
+    skill_dir: Path | str,
+    *,
+    db_path: Path,
+) -> list[str]:
+    """从可重建 catalog 投影返回当前有 staging 的自产 skill 名。"""
+    root = _root_key(skill_dir)
+    with pooled_connection(Path(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT name FROM skills_catalog
+            WHERE source=? AND root_key=? AND state='staging'
+            ORDER BY name
+            """,
+            (_SOURCE_NATIVE, root),
+        ).fetchall()
+    return [row["name"] for row in rows]
+
+
 def rename_native_skill(
     old_name: str,
     new_skill_path: Path | str,

@@ -228,6 +228,8 @@ class DirectoryWatcher:
         # 单机 canary 轮转节流：上次真跑 _reconcile_skill_sides 的时间戳。
         # None = 从未跑过（首轮 scan 必跑一次）。
         self._last_rotate_ts: float | None = None
+        # Canary 正常轮询读 catalog 活跃集；该时间戳控制低频磁盘事实源对账。
+        self._last_canary_catalog_reconcile_ts: float | None = None
         self._stats = {
             "polls": 0, "new_trajs": 0,
             "atoms_extracted": 0,    # v2: 累计 atom 数（替代 meta_extracted）
@@ -1312,6 +1314,83 @@ class DirectoryWatcher:
             except Exception:
                 logger.exception("user edit absorb failed: %s", d.name)
 
+    def _active_canary_skill_paths(self, *, history, target: str) -> list[Path]:
+        """返回 staging 或待恢复事务对应的 skill 路径。
+
+        正常轮询只查 ``skills_catalog``；启动和低频周期从 Git refs 修复投影。
+        没有显式 registry DB 的测试/嵌入调用保持旧的全目录扫描语义。
+        """
+        if self.skill_dir is None or not self.skill_dir.is_dir():
+            return []
+        if self.db_path is None:
+            return [
+                path
+                for path in sorted(self.skill_dir.iterdir())
+                if path.is_dir() and not path.name.startswith(".")
+            ]
+        from xskill.skill.catalog_store import (
+            list_active_native_canaries,
+            reconcile_native_canary_catalog,
+        )
+
+        now = time.monotonic()
+        reconcile_due = (
+            self._last_canary_catalog_reconcile_ts is None
+            or self.full_reconcile_interval == 0
+            or now - self._last_canary_catalog_reconcile_ts
+            >= self.full_reconcile_interval
+        )
+        try:
+            if reconcile_due:
+                reconcile_native_canary_catalog(
+                    self.skill_dir,
+                    db_path=Path(self.db_path),
+                )
+                self._last_canary_catalog_reconcile_ts = now
+            names = set(list_active_native_canaries(
+                self.skill_dir,
+                db_path=Path(self.db_path),
+            ))
+        except Exception:  # pylint: disable=broad-exception-caught
+            # 投影只是可重建加速层；损坏或暂时不可用时回退磁盘事实源。
+            logger.exception("canary catalog unavailable; falling back to disk scan")
+            names = {
+                path.name
+                for path in self.skill_dir.iterdir()
+                if path.is_dir() and not path.name.startswith(".")
+            }
+        names.update(history.pending_recovery_skills(target))
+        unsafe_names = {
+            name
+            for name in names
+            if (
+                not name
+                or name in (".", "..")
+                or "/" in name
+                or "\\" in name
+            )
+        }
+        if unsafe_names:
+            logger.error(
+                "canary catalog contains %d unsafe skill identities",
+                len(unsafe_names),
+            )
+            names.difference_update(unsafe_names)
+        return [self.skill_dir / name for name in sorted(names)]
+
+    def _refresh_canary_catalog_skill(self, skill_path: Path) -> None:
+        """事务成功后立刻按磁盘真相更新单条 Canary 投影。"""
+        if self.db_path is None:
+            return
+        from xskill.skill.catalog_store import (
+            notify_native_delete,
+            notify_native_upsert,
+        )
+        if skill_path.is_dir():
+            notify_native_upsert(skill_path, db_path=Path(self.db_path))
+        else:
+            notify_native_delete(skill_path.name, db_path=Path(self.db_path))
+
     def _check_canary_decisions(self):
         """灰度判定独立轮询：对每个有 staging 分支的 skill 调 check_and_decide。
 
@@ -1334,12 +1413,6 @@ class DirectoryWatcher:
         )
         from xskill.pipeline.registry import model_share
         from xskill.skill.git import run_git
-        canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
-        # 模型分桶权重:使用量 top-N 模型的人口占比(unknown 等已被排除)。
-        # 有合格模型 → 按模型加权裁决;一个都没有(全 unknown)→ None = 单桶均分,
-        # 不让纯 unknown 部署的灰度永远卡住。
-        weights = eligible_models(model_share(**self._db_kw()),
-                                  canary_cfg.scope_top_n) or None
         history = self._install_history()
         target_root = self._resolve_target_root()
         claude_code_detected = (
@@ -1353,10 +1426,24 @@ class DirectoryWatcher:
             if claude_code_detected
             else "canary_state" if self.server_mode else "working_tree"
         )
-        for d in sorted(self.skill_dir.iterdir()):
-            if not d.is_dir() or d.name.startswith("."):
+        active_paths = self._active_canary_skill_paths(
+            history=history,
+            target=target,
+        )
+        if not active_paths:
+            return
+        canary_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
+        # 模型分桶权重:使用量 top-N 模型的人口占比(unknown 等已被排除)。
+        # 有合格模型 → 按模型加权裁决;一个都没有(全 unknown)→ None = 单桶均分,
+        # 不让纯 unknown 部署的灰度永远卡住。
+        weights = eligible_models(model_share(**self._db_kw()),
+                                  canary_cfg.scope_top_n) or None
+        for d in active_paths:
+            if not d.is_dir():
+                self._refresh_canary_catalog_skill(d)
                 continue
             if not (d / ".git").is_dir():
+                self._refresh_canary_catalog_skill(d)
                 continue
             code, _, _ = run_git(["rev-parse", "--verify", "staging"], cwd=str(d))
             if code != 0:
@@ -1373,6 +1460,8 @@ class DirectoryWatcher:
                             "terminal transaction recovery failed: %s",
                             d.name,
                         )
+                        continue
+                self._refresh_canary_catalog_skill(d)
                 continue  # 无 staging，跳过
             try:
                 expected_generation = canary_generation(d)
@@ -1553,6 +1642,7 @@ class DirectoryWatcher:
                     recovery_candidate=recovery_telemetry,
                 )
                 if action in ("promoted", "rejected", "timeout_discarded"):
+                    self._refresh_canary_catalog_skill(d)
                     logger.info("canary decision %s: %s — %s",
                                 d.name, action, decision)
             except Exception:
