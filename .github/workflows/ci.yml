@@ -52,10 +52,16 @@ jobs:
       - name: Install package with dev extras
         run: pip install -e .[dev]
       - name: Run UT + IT
+        if: runner.os != 'Windows'
         # Excludes tests under tests/e2e/ (covered by smoke-e2e job in P4).
         # ``nightly`` 标记的负载/平台时序敏感测试移出 PR 矩阵，
         # 由 nightly-control-plane-stress.yml 的 nightly-flaky _job 按平台跑。
         run: pytest tests/ --ignore=tests/e2e -q -m "not nightly"
+      - name: Run UT + IT
+        if: runner.os == 'Windows'
+        # Windows runner 的时钟分辨率和线程调度会把短睡眠、SQLite 锁变成
+        # 偶发失败（#251）。只对失败用例重试，Linux / macOS 保持一次即红。
+        run: pytest tests/ --ignore=tests/e2e -q -m "not nightly" --reruns 2 --reruns-delay 1
 
   skill-edit-bdd:
     name: skill-edit BDD (aimock)
