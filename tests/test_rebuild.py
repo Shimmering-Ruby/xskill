@@ -110,6 +110,34 @@ def test_reset_deletes_stale_index_pkl(tmp_path, db_path):
     assert not idx.exists(), "reset 应删陈旧 index.pkl"
 
 
+def test_reset_deletes_atom_location_projection_rows(tmp_path, db_path):
+    from xskill.pipeline.atom import AtomTask, AtomTaskStore
+
+    directory, _wid = _seed_done_traj(tmp_path, db_path)
+    store = AtomTaskStore(directory)
+    atom = AtomTask(
+        atom_id="atom_traj_ng_x_0001",
+        traj_id="traj_ng_x",
+        offset_start=1,
+        offset_end=2,
+        intent="intent",
+        summary="summary",
+    )
+    store.save(atom)
+
+    reset_trajectories(eco="ngagent", db_path=db_path)
+
+    connection = store._location_connection()
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM atom_locations WHERE traj_id=?",
+            ("traj_ng_x",),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 0
+
+
 def test_reset_requeues_not_fit_and_clears_interest_fields(tmp_path, db_path):
     directory_path, watch_dir_id = _seed_done_traj(tmp_path, db_path)
     mark_not_fit(

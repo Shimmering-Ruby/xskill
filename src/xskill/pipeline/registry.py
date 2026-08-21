@@ -2190,6 +2190,7 @@ def reset_not_fit_for_interest_change(
             ),
         ).fetchall()
         directories_seen: set[str] = set()
+        trajectories_by_directory: dict[str, set[str]] = {}
         for row in rows:
             conn.execute(
                 "UPDATE trajectories SET status=?, process_action=NULL, "
@@ -2209,7 +2210,15 @@ def reset_not_fit_for_interest_change(
                 for atom_file in tasks_directory.glob("atom_*.json"):
                     atom_file.unlink()
             directories_seen.add(row["path"])
+            trajectories_by_directory.setdefault(row["path"], set()).add(
+                trajectory_stem,
+            )
         conn.commit()
+        from xskill.pipeline.atom import AtomTaskStore
+        for directory_path, trajectory_ids in trajectories_by_directory.items():
+            AtomTaskStore(Path(directory_path)).remove_locations_for_trajs(
+                trajectory_ids,
+            )
         for directory_path in directories_seen:
             index_path = Path(directory_path) / "index.pkl"
             if index_path.is_file():
@@ -2259,6 +2268,7 @@ def reset_trajectories(
         trajectory_rows = conn.execute(query_text, query_parameters).fetchall()
 
         directories_seen: set[str] = set()
+        trajectories_by_directory: dict[str, set[str]] = {}
         for trajectory_row in trajectory_rows:
             conn.execute(
                 "UPDATE trajectories SET status='discovered', process_action=NULL, "
@@ -2284,7 +2294,16 @@ def reset_trajectories(
             conn.execute("DELETE FROM atom_adoption WHERE atom_id GLOB ?",
                          (f"atom_{trajectory_stem}_*",))
             directories_seen.add(trajectory_row["path"])
+            trajectories_by_directory.setdefault(
+                trajectory_row["path"],
+                set(),
+            ).add(trajectory_stem)
         conn.commit()
+        from xskill.pipeline.atom import AtomTaskStore
+        for directory_path, trajectory_ids in trajectories_by_directory.items():
+            AtomTaskStore(Path(directory_path)).remove_locations_for_trajs(
+                trajectory_ids,
+            )
         # 清各目录的陈旧向量索引（AtomTaskStore.INDEX_FILE = "index.pkl"）。
         for directory_path in directories_seen:
             index_path = Path(directory_path) / "index.pkl"
