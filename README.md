@@ -86,7 +86,7 @@ xskill是一套无监督的skill蒸馏方案，其不需要构建数据集就可
 
 <p align="center">
   <sub><strong>Setup:</strong> <code>DeepSeek-V4-Flash</code> · <code>Claude Code</code> · <code>single</code> mode<br>
-  <strong>Pipeline:</strong> SkillOpt built-in evaluation pipeline · Official data split</sub>
+  <strong>Pipeline:</strong> SkillOpt built-in evaluation pipeline · Historical downstream split</sub>
 </p>
 
 <table align="center">
@@ -124,7 +124,7 @@ xskill是一套无监督的skill蒸馏方案，其不需要构建数据集就可
   </tbody>
 </table>
 
-<p align="center"><sub>¹ 表内数值为测试集通过率(%)，Mean 为三项基准的算术平均。Spreadsheet 与 ALFWorld 使用官方全量测试集，OfficeQA 使用官方划分的 1/4 子集。</sub></p>
+<p align="center"><sub>¹ 表内数值为测试集通过率(%)，Mean 为三项基准的算术平均。OfficeQA 上游没有“官方 1/4”划分；这里保留的是历史下游子集结果，原始样本清单和运行产物尚未归档，因此不能作为可独立复现的官方 Full 成绩。来源与复现边界见 <a href="benchmarks/officeqa/README.md">OfficeQA 评测说明</a>。</sub></p>
 
 
 在目前已完成的三项评测中，xskill 均高于 SkillOpt，平均分领先 5.58。
