@@ -169,6 +169,7 @@ class DirectoryWatcher:
         # watch_dir_id -> ((device, inode, directory mtime ns), last full scan)
         # Only the watcher thread reads/writes this map.
         self._discovery_snapshots: dict[int, tuple[tuple[int, int, int], float]] = {}
+        self._last_cluster_catalog_reconcile: float | None = None
         self.max_retries = max_retries
         self.db_path = db_path
         # 每轮 _loop 在 _scan_once 之前调一次的钩子，用来让 server 端的"生态
@@ -2739,6 +2740,9 @@ class DirectoryWatcher:
 
     def _submit_cluster_batches(self) -> None:
         """Fill the cluster pool without ever waiting in the watcher thread."""
+        if not self.pending_atoms or self._pools["cluster"].available_capacity <= 0:
+            return
+        self._reconcile_cluster_catalog_if_due()
         while self.pending_atoms:
             batch_size = min(self.cluster_batch_size, len(self.pending_atoms))
             atom_ids = list(self.pending_atoms)[:batch_size]
@@ -2756,6 +2760,34 @@ class DirectoryWatcher:
                 "atom_ids": atom_ids,
             }
             self.cluster_futures.add(future)
+
+    def _reconcile_cluster_catalog_if_due(self) -> None:
+        """低频修复磁盘→catalog 投影漂移；正常 batch 只读 generation 快照。"""
+        if self.db_path is None or self.skill_dir is None:
+            return
+        now = time.monotonic()
+        due = (
+            self._last_cluster_catalog_reconcile is None
+            or self.full_reconcile_interval == 0
+            or now - self._last_cluster_catalog_reconcile
+            >= self.full_reconcile_interval
+        )
+        if not due:
+            return
+        try:
+            from xskill.skill.catalog_store import reconcile_native_skills_catalog
+
+            stats = reconcile_native_skills_catalog(
+                self.skill_dir,
+                db_path=self.db_path,
+            )
+            if stats["changed"]:
+                logger.info("cluster catalog reconciled: %s", stats)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning("cluster catalog reconciliation failed", exc_info=True)
+        finally:
+            # Avoid hammering a broken filesystem/DB on every fast watcher poll.
+            self._last_cluster_catalog_reconcile = now
 
     def _atom_consumed(self, atom, consumed_index) -> bool:
         """atom 是否已被 cluster 消费。耐久标记 ``clustered`` 为主（O(1)，扛得住
@@ -3263,6 +3295,7 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
         agno_agent_factory=agno_agent_factory,
         llm_cfg=config.get("llm", {}),
         logs_dir=logs_dir,
+        db_path=db_path,
         tools=[
             agent_tools.atom_task_read, agent_tools.read_traj,
             agent_tools.skill_read, agent_tools.read_skill_tasks,
@@ -3400,6 +3433,7 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
         agno_agent_factory=agno_agent_factory,
         llm_cfg=config.get("llm", {}),
         logs_dir=logs_dir,
+        db_path=db_path,
         tools=[
             agent_tools.atom_task_read, agent_tools.read_traj,
             agent_tools.skill_read, agent_tools.read_skill_tasks,
