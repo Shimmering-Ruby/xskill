@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from unittest.mock import Mock
 
 import pytest
@@ -108,6 +109,32 @@ def test_reset_deletes_stale_index_pkl(tmp_path, db_path):
     reset_trajectories(eco="ngagent", db_path=db_path)
 
     assert not idx.exists(), "reset 应删陈旧 index.pkl"
+
+
+def test_reset_removes_only_target_trajectory_from_vector_projection(tmp_path, db_path):
+    from tests.test_atom_task_store import _FakeEmbed
+    from xskill.pipeline.atom import AtomTaskStore
+
+    directory, _watch_dir_id = _seed_done_traj(
+        tmp_path, db_path, with_atoms=True,
+    )
+    store = AtomTaskStore(directory)
+    store.rebuild_vector_index(_FakeEmbed())
+    connection = sqlite3.connect(directory / store.VECTOR_INDEX_FILE)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM atom_vectors").fetchone()[0]
+    finally:
+        connection.close()
+
+    reset_trajectories(traj_id="traj_ng_x", db_path=db_path)
+    connection = sqlite3.connect(directory / store.VECTOR_INDEX_FILE)
+    try:
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM atom_vectors WHERE traj_id='traj_ng_x'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert remaining == 0
 
 
 def test_reset_deletes_atom_location_projection_rows(tmp_path, db_path):

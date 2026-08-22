@@ -2252,8 +2252,8 @@ def reset_trajectories(
     而不删 atom 文件 → ``last_offset ≥ EOF`` → TaskAgent 直接返回空 → 重拆失效
     （0.6.1a1 的洞）。因此本函数**必删 atom 文件**，这才是真正触发重拆的动作。
 
-    同时删该目录的 ``index.pkl``（atom 的向量索引）——否则 atom 已删而索引仍留
-    陈旧 embedding，cluster 阶段向量检索会命中已不存在的 atom。
+    同时删对应的 Atom 向量投影行和该目录的 ``index.pkl`` 兼容标记——否则
+    cluster 阶段向量检索可能命中已不存在的 atom。
 
     DB ``status`` 翻回 ``discovered`` 让 watcher 下轮重新排 split；轨迹级
     skill / canary / UX 派生字段一并清空，避免 rebuild 后看板继续挂旧 skill。
@@ -2316,7 +2316,7 @@ def reset_trajectories(
             AtomTaskStore(Path(directory_path)).remove_locations_for_trajs(
                 trajectory_ids,
             )
-        # 清各目录的陈旧向量索引（AtomTaskStore.INDEX_FILE = "index.pkl"）。
+        # 向量投影行已按轨迹清理；再删兼容发现标记，等待重拆后重新发布。
         for directory_path in directories_seen:
             index_path = Path(directory_path) / "index.pkl"
             if index_path.is_file():
