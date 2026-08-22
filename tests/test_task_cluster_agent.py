@@ -11,6 +11,7 @@ from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.agents.task_cluster_agent import (
     TaskClusterAgent,
     _clear_catalog_block_cache,
+    _format_skill_catalog_block,
     build_skill_catalog_block,
 )
 
@@ -75,23 +76,19 @@ class TestSkillCatalogBudget:
         assert "a-skill[main]: deals with A" in block
         assert "b-skill[main]: deals with B" in block
 
-    def test_overflow_truncates_descriptions(self, tmp_path):
-        skill_dir = tmp_path / "skill"
+    def test_overflow_truncates_descriptions(self):
         # 100 skills, desc 100 chars 各，约 10k chars desc；预算 4000 强制截断
-        for i in range(100):
-            _make_skill(skill_dir, f"s-{i:03d}", "x" * 100)
-        block = build_skill_catalog_block(skill_dir, max_chars=4000)
+        entries = [(f"s-{i:03d}", "main", "x" * 100) for i in range(100)]
+        block = _format_skill_catalog_block(entries, max_chars=4000)
         for i in range(100):
             assert f"s-{i:03d}" in block
         # 不允许完整 100 字 desc
         assert "x" * 100 not in block
 
-    def test_extreme_overflow_drops_all_descriptions(self, tmp_path):
-        skill_dir = tmp_path / "skill"
+    def test_extreme_overflow_drops_all_descriptions(self):
         # 500 skills, 200 字 desc → 100k 字 desc，预算 5000 → per_desc 远 < 75
-        for i in range(500):
-            _make_skill(skill_dir, f"big-{i:04d}", "y" * 200)
-        block = build_skill_catalog_block(skill_dir, max_chars=5000)
+        entries = [(f"big-{i:04d}", "main", "y" * 200) for i in range(500)]
+        block = _format_skill_catalog_block(entries, max_chars=5000)
         for i in range(500):
             assert f"big-{i:04d}" in block
         # 该模式下不留 desc
