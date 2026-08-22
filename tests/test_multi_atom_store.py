@@ -11,6 +11,8 @@ import logging
 import os
 from pathlib import Path
 
+import pytest
+
 from xskill.pipeline.atom import AtomTask, AtomTaskStore, MultiAtomTaskStore
 from xskill.agents import agent_tools
 
@@ -48,6 +50,7 @@ def _set_mtime(path: Path, ts: int) -> None:
 
 
 class TestMultiStoreRouting:
+    @pytest.mark.performance_contract
     def test_load_does_not_scan_any_store_trajectory_directories(
         self,
         tmp_path,

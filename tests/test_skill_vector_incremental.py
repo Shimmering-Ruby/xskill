@@ -130,6 +130,7 @@ def _write_native_skill(root: Path, name: str, description: str) -> Path:
     return skill
 
 
+@pytest.mark.performance_contract
 def test_idle_tick_does_not_scan_vector_index(registry_db):
     index = CountingIndex()
     _store_catalog(registry_db, _catalog_row("native:alpha", "alpha"))
@@ -177,6 +178,7 @@ def test_upgrade_bootstrap_reuses_matching_legacy_vectors(registry_db):
     assert embeds == []
 
 
+@pytest.mark.performance_contract
 def test_one_dirty_skill_only_updates_that_key(registry_db):
     index = CountingIndex()
     _store_catalog(registry_db, _catalog_row("native:alpha", "alpha"))

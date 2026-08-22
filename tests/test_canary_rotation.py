@@ -176,6 +176,7 @@ def _make_watcher(skill_dir: Path, tmp_path: Path, *, probability: float):
 
 
 class TestRotateCanarySide:
+    @pytest.mark.performance_contract
     def test_canary_decisions_probe_only_projected_active_skills(
         self,
         tmp_path,

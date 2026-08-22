@@ -55,6 +55,7 @@ def _seed(store: AtomTaskStore, count: int, *, traj_id: str = "t") -> None:
     ])
 
 
+@pytest.mark.performance_contract
 def test_incremental_add_reads_no_historical_json(tmp_path, monkeypatch):
     store = _store(tmp_path)
     _seed(store, 100)
@@ -276,6 +277,7 @@ def test_force_full_repairs_in_place_json_change(tmp_path):
     assert embed.batches == [["externally changed"]]
 
 
+@pytest.mark.performance_contract
 def test_embedding_batches_have_a_fixed_memory_bound(tmp_path, monkeypatch):
     store = _store(tmp_path)
     _seed(store, 7)

@@ -146,6 +146,7 @@ class TestSkillCatalogBudget:
         block = build_skill_catalog_block(skill_dir, max_chars=10000)
         assert "no skills" in block.lower()
 
+    @pytest.mark.performance_contract
     def test_projection_snapshot_singleflights_until_generation_changes(
         self, tmp_path, monkeypatch,
     ):
