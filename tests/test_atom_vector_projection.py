@@ -135,6 +135,28 @@ def test_projection_batch_failure_rolls_back_without_losing_json(
 
     assert len(store.list_by_traj("t")) == 3
     assert _vector_rows(store) == []
+    assert store.vector_index_reconcile_due()
+
+
+def test_projection_write_failure_after_complete_index_stays_due(
+    tmp_path, monkeypatch,
+):
+    store = _store(tmp_path)
+    _seed(store, 2)
+    store.rebuild_vector_index(_SpyEmbed())
+    assert not store.vector_index_reconcile_due()
+
+    def fail(_connection, _target):
+        raise sqlite3.OperationalError("injected projection failure")
+
+    monkeypatch.setattr(store._vector_projection, "_upsert_target", fail)
+    store.save(_atom(
+        atom_id="atom_t_0002", traj_id="t", offset_start=20,
+        offset_end=30, summary="late",
+    ))
+
+    assert store.load("atom_t_0002").summary == "late"
+    assert store.vector_index_reconcile_due()
 
 
 def test_text_change_invalidates_only_one_vector(tmp_path):

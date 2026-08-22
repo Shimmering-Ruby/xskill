@@ -90,6 +90,10 @@ class AtomVectorProjection:
         self._pending_hint = False
         self._next_reconcile_at: float | None = None
 
+    def mark_rebuild_needed(self) -> None:
+        """投影写入失败后强制 watcher 在下一轮重建，避免干等 24h 对账。"""
+        self._pending_hint = True
+
     @property
     def path(self) -> Path:
         return self.root / VECTOR_DB_FILE
@@ -175,6 +179,9 @@ class AtomVectorProjection:
                     "SELECT 1 FROM atom_vectors WHERE embedding IS NULL LIMIT 1"
                 ).fetchone() is not None
                 connection.commit()
+            except Exception:
+                self._pending_hint = True
+                raise
             finally:
                 connection.close()
 

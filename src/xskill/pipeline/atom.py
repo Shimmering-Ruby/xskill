@@ -396,7 +396,9 @@ class AtomTaskStore:
         try:
             self._vector_projection.record_atoms(atoms)
         except (OSError, sqlite3.DatabaseError):
-            # JSON 是事实源；向量投影失败不回滚事实写，后续 rebuild/低频核对修复。
+            # JSON 是事实源；向量投影失败不回滚事实写，但必须立刻标 dirty
+            # 否则 complete 索引会干等 24h 才把新 atom 补进检索。
+            self._vector_projection.mark_rebuild_needed()
             logger.warning(
                 "atom vector projection batch update failed: %s",
                 [atom.atom_id for atom in atoms],
