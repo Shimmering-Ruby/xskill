@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_NATIVE = "native"
 _SOURCE_SKILLHUB = "skillhub"
+_CATALOG_COMPARE_COLUMNS = (
+    "root_key", "name", "repo_name", "source", "state", "description",
+    "version", "candidates_count", "main_sha", "staging_sha",
+    "distributable", "search_id", "hub", "skill_id", "use_count",
+    "content_sha",
+)
+_CATALOG_INTEGER_COLUMNS = frozenset({
+    "version", "candidates_count", "distributable", "use_count",
+})
 
 _STATE_ORDER_SQL = """
 CASE state
@@ -408,6 +417,31 @@ def _upsert_row(conn, row: dict, *, mark_vector: bool = True) -> None:
         )
 
 
+def _bump_catalog_generation(conn, root_key: str) -> None:
+    """推进已初始化 root 的目录版本；未 backfill 的 root 留给 ensure 初始化。"""
+    if not root_key:
+        return
+    conn.execute(
+        """
+        UPDATE skills_catalog_meta
+        SET generation=generation + 1
+        WHERE root_key=?
+        """,
+        (root_key,),
+    )
+
+
+def _catalog_row_matches(stored, row: dict) -> bool:
+    """比较会影响 Cluster 路由的稳定字段，忽略 ``updated_at``。"""
+    for column in _CATALOG_COMPARE_COLUMNS:
+        expected = row[column]
+        if column in _CATALOG_INTEGER_COLUMNS:
+            expected = int(expected or 0)
+        if stored[column] != expected:
+            return False
+    return True
+
+
 _BACKFILL_WAIT_TIMEOUT_SECONDS = 120.0
 
 
@@ -444,7 +478,18 @@ def upsert_native_skill(
         raise FileNotFoundError(f"skill path not found for catalog upsert: {path}")
     row = _read_native_row(path, candidates_count=candidates_count)
     with pooled_connection(Path(db_path)) as conn:
+        existing = conn.execute(
+            "SELECT * FROM skills_catalog WHERE catalog_key=?",
+            (row["catalog_key"],),
+        ).fetchone()
+        if existing is not None and _catalog_row_matches(existing, row):
+            return
         _upsert_row(conn, row)
+        affected_roots = {row["root_key"]}
+        if existing is not None:
+            affected_roots.add(existing["root_key"])
+        for affected_root in affected_roots:
+            _bump_catalog_generation(conn, affected_root)
         conn.commit()
 
 
@@ -453,8 +498,12 @@ def delete_native_skill(name: str, *, db_path: Path) -> None:
         raise TypeError("skills_catalog delete requires explicit db_path")
     with pooled_connection(Path(db_path)) as conn:
         catalog_key = _native_catalog_key(name)
+        existing = conn.execute(
+            "SELECT root_key FROM skills_catalog WHERE catalog_key=?",
+            (catalog_key,),
+        ).fetchone()
         old_row, old_retired = _stored_vector_row(conn, catalog_key)
-        conn.execute(
+        cursor = conn.execute(
             "DELETE FROM skills_catalog WHERE catalog_key=?",
             (catalog_key,),
         )
@@ -465,6 +514,8 @@ def delete_native_skill(name: str, *, db_path: Path) -> None:
                 _vector_target(old_row, retired=old_retired),
                 None,
             )
+        if cursor.rowcount > 0 and existing is not None:
+            _bump_catalog_generation(conn, existing["root_key"])
         conn.commit()
 
 
@@ -480,11 +531,19 @@ def delete_all_native(*, root_key: str = "", db_path: Path) -> int:
             params,
         ).fetchall()
         if root_key:
+            affected_roots = [root_key]
             cursor = conn.execute(
                 "DELETE FROM skills_catalog WHERE source=? AND root_key=?",
                 (_SOURCE_NATIVE, root_key),
             )
         else:
+            affected_roots = [
+                row["root_key"] for row in conn.execute(
+                    "SELECT DISTINCT root_key FROM skills_catalog WHERE source=?",
+                    (_SOURCE_NATIVE,),
+                ).fetchall()
+                if row["root_key"]
+            ]
             cursor = conn.execute(
                 "DELETE FROM skills_catalog WHERE source=?",
                 (_SOURCE_NATIVE,),
@@ -494,8 +553,134 @@ def delete_all_native(*, root_key: str = "", db_path: Path) -> int:
             mark_catalog_vector_dirty_on_connection(
                 conn, row["catalog_key"], operation="delete",
             )
+        if cursor.rowcount > 0:
+            for affected_root in affected_roots:
+                _bump_catalog_generation(conn, affected_root)
         conn.commit()
         return int(cursor.rowcount or 0)
+
+
+def reconcile_native_canary_catalog(
+    skill_dir: Path | str,
+    *,
+    db_path: Path,
+) -> int:
+    """低频从 Git refs 修复自产 skill 的 Canary 状态投影。
+
+    已有行只刷新分支状态与 SHA，避免为了 Canary 对账重复解析全部
+    ``SKILL.md`` 和 ``.candidates.yml``。新目录仍完整建行，消失的目录从
+    投影删除；SkillHub 行不受影响。
+    """
+    root_path = Path(skill_dir)
+    root = _root_key(root_path)
+    paths = []
+    if root_path.is_dir():
+        paths = [
+            path
+            for path in sorted(root_path.iterdir())
+            if path.is_dir() and not path.name.startswith(".")
+        ]
+    names = {path.name for path in paths}
+    active = 0
+    with pooled_connection(Path(db_path)) as conn:
+        existing = {
+            row["name"]: dict(row)
+            for row in conn.execute(
+                """
+                SELECT name, state, main_sha, staging_sha, distributable
+                FROM skills_catalog
+                WHERE source=? AND root_key=?
+                """,
+                (_SOURCE_NATIVE, root),
+            ).fetchall()
+        }
+        for path in paths:
+            branches = _branch_names(path)
+            state = (
+                "staging" if "staging" in branches
+                else "main" if "main" in branches
+                else "baby" if "baby" in branches
+                else "unknown"
+            )
+            if state == "staging":
+                active += 1
+            if path.name not in existing:
+                row = _read_native_row(path)
+                row["root_key"] = root
+                _upsert_row(conn, row)
+                continue
+            current_main_sha = _ref_sha(path, "main")
+            current_staging_sha = _ref_sha(path, "staging")
+            distributable = int(
+                state in ("main", "staging")
+                and (path / "SKILL.md").is_file()
+            )
+            stored = existing[path.name]
+            if (
+                stored["state"] == state
+                and stored["main_sha"] == current_main_sha
+                and stored["staging_sha"] == current_staging_sha
+                and int(stored["distributable"]) == distributable
+            ):
+                continue
+            conn.execute(
+                """
+                UPDATE skills_catalog
+                SET state=?, main_sha=?, staging_sha=?, distributable=?,
+                    updated_at=datetime('now')
+                WHERE catalog_key=? AND source=? AND root_key=?
+                """,
+                (
+                    state,
+                    current_main_sha,
+                    current_staging_sha,
+                    distributable,
+                    _native_catalog_key(path.name),
+                    _SOURCE_NATIVE,
+                    root,
+                ),
+            )
+        removed = set(existing) - names
+        if removed:
+            conn.executemany(
+                """
+                DELETE FROM skills_catalog
+                WHERE catalog_key=? AND source=? AND root_key=?
+                """,
+                [
+                    (_native_catalog_key(name), _SOURCE_NATIVE, root)
+                    for name in sorted(removed)
+                ],
+            )
+        conn.execute(
+            """
+            INSERT INTO skills_catalog_meta(root_key, backfilled_at, skillhub_key)
+            VALUES (?, datetime('now'), ?)
+            ON CONFLICT(root_key) DO UPDATE SET backfilled_at=datetime('now')
+            """,
+            (root, _skillhub_fingerprint(None)),
+        )
+        conn.commit()
+    return active
+
+
+def list_active_native_canaries(
+    skill_dir: Path | str,
+    *,
+    db_path: Path,
+) -> list[str]:
+    """从可重建 catalog 投影返回当前有 staging 的自产 skill 名。"""
+    root = _root_key(skill_dir)
+    with pooled_connection(Path(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT name FROM skills_catalog
+            WHERE source=? AND root_key=? AND state='staging'
+            ORDER BY name
+            """,
+            (_SOURCE_NATIVE, root),
+        ).fetchall()
+    return [row["name"] for row in rows]
 
 
 def rename_native_skill(
@@ -513,6 +698,10 @@ def rename_native_skill(
     row = _read_native_row(path)
     with pooled_connection(Path(db_path)) as conn:
         old_key = _native_catalog_key(old_name)
+        existing = conn.execute(
+            "SELECT root_key FROM skills_catalog WHERE catalog_key=?",
+            (old_key,),
+        ).fetchone()
         old_row, old_retired = _stored_vector_row(conn, old_key)
         conn.execute(
             "DELETE FROM skills_catalog WHERE catalog_key=?",
@@ -526,6 +715,11 @@ def rename_native_skill(
                 None,
             )
         _upsert_row(conn, row)
+        affected_roots = {row["root_key"]}
+        if existing is not None:
+            affected_roots.add(existing["root_key"])
+        for affected_root in affected_roots:
+            _bump_catalog_generation(conn, affected_root)
         conn.commit()
 
 
@@ -538,16 +732,24 @@ def update_native_candidates_count(
     """热路径：只改 ``candidates_count``，不重读 SKILL.md / yaml / refs。"""
     if db_path is None:
         raise TypeError("skills_catalog candidates update requires explicit db_path")
-    name = Path(skill_path).name
+    path = Path(skill_path)
+    name = path.name
     with pooled_connection(Path(db_path)) as conn:
-        conn.execute(
+        existing = conn.execute(
+            "SELECT root_key FROM skills_catalog WHERE catalog_key=?",
+            (_native_catalog_key(name),),
+        ).fetchone()
+        count = int(candidates_count)
+        cursor = conn.execute(
             """
             UPDATE skills_catalog
             SET candidates_count=?, updated_at=datetime('now')
-            WHERE catalog_key=?
+            WHERE catalog_key=? AND candidates_count<>?
             """,
-            (int(candidates_count), _native_catalog_key(name)),
+            (count, _native_catalog_key(name), count),
         )
+        if cursor.rowcount > 0 and existing is not None:
+            _bump_catalog_generation(conn, existing["root_key"])
         conn.commit()
 
 
@@ -714,11 +916,14 @@ def backfill_skills_catalog(
             )
         conn.execute(
             """
-            INSERT INTO skills_catalog_meta(root_key, backfilled_at, skillhub_key)
-            VALUES (?, datetime('now'), ?)
+            INSERT INTO skills_catalog_meta(
+                root_key, backfilled_at, skillhub_key, generation
+            )
+            VALUES (?, datetime('now'), ?, 1)
             ON CONFLICT(root_key) DO UPDATE SET
                 backfilled_at=datetime('now'),
-                skillhub_key=excluded.skillhub_key
+                skillhub_key=excluded.skillhub_key,
+                generation=skills_catalog_meta.generation + 1
             """,
             (root, skillhub_key),
         )
@@ -727,6 +932,142 @@ def backfill_skills_catalog(
         "skills_catalog backfill: root=%s rows=%d", root, len(rows),
     )
     return len(rows)
+
+
+def reconcile_native_skills_catalog(
+    skill_dir: Path | str,
+    *,
+    db_path: Path,
+) -> dict[str, int]:
+    """低频磁盘→投影对账；generation fence 防止旧扫描覆盖并发写入。"""
+    if db_path is None:
+        raise TypeError("skills_catalog reconcile requires explicit db_path")
+    skill_dir = Path(skill_dir)
+    root = _root_key(skill_dir)
+
+    # 先确保 generation 存在。这里只补 meta，不碰 catalog 行，因而不会误删同
+    # root 的 SkillHub 投影。之后所有正常写出口都会 bump，供扫描后的 fence 检查。
+    with pooled_connection(Path(db_path)) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO skills_catalog_meta(
+                root_key, backfilled_at, skillhub_key, generation
+            ) VALUES (?, datetime('now'), 'none', 1)
+            ON CONFLICT(root_key) DO NOTHING
+            """,
+            (root,),
+        )
+        meta_created = cursor.rowcount > 0
+        start_generation = int(conn.execute(
+            "SELECT generation FROM skills_catalog_meta WHERE root_key=?",
+            (root,),
+        ).fetchone()["generation"])
+        conn.commit()
+
+    rows = scan_skills_catalog(skill_dir)
+    wanted = {row["catalog_key"]: row for row in rows}
+    with pooled_connection(Path(db_path)) as conn:
+        # 锁内先验 generation 必须仍等于扫描前版本。若期间有写出口推进版本，
+        # 本轮旧快照直接放弃；写出口已经把新行写入，低频对账下轮再补外部漂移。
+        conn.execute("BEGIN IMMEDIATE")
+        current_generation = int(conn.execute(
+            "SELECT generation FROM skills_catalog_meta WHERE root_key=?",
+            (root,),
+        ).fetchone()["generation"])
+        if current_generation != start_generation:
+            conn.rollback()
+            return {"upserted": 0, "deleted": 0, "changed": 0, "skipped": 1}
+
+        existing_rows = conn.execute(
+            f"""
+            SELECT catalog_key, {', '.join(_CATALOG_COMPARE_COLUMNS)}
+            FROM skills_catalog
+            WHERE root_key=? AND source=?
+            """,
+            (root, _SOURCE_NATIVE),
+        ).fetchall()
+        existing = {row["catalog_key"]: dict(row) for row in existing_rows}
+        upserted = 0
+        for key, row in wanted.items():
+            current = existing.get(key)
+            if current is not None and _catalog_row_matches(current, row):
+                continue
+            _upsert_row(conn, row)
+            upserted += 1
+
+        stale = set(existing) - set(wanted)
+        if stale:
+            placeholders = ",".join("?" for _ in stale)
+            conn.execute(
+                f"DELETE FROM skills_catalog WHERE catalog_key IN ({placeholders})",
+                tuple(sorted(stale)),
+            )
+
+        changed = bool(upserted or stale)
+        if changed:
+            _bump_catalog_generation(conn, root)
+        conn.commit()
+    return {
+        "upserted": upserted,
+        "deleted": len(stale),
+        "changed": int(changed or meta_created),
+        "skipped": 0,
+    }
+
+
+def _ensure_native_catalog_ready(skill_dir: Path | str, *, db_path: Path) -> None:
+    """只要该 root 已有任意 catalog backfill 即可读 native 投影。"""
+    root = _root_key(skill_dir)
+    with pooled_connection(Path(db_path)) as conn:
+        ready = conn.execute(
+            "SELECT 1 FROM skills_catalog_meta WHERE root_key=?",
+            (root,),
+        ).fetchone()
+    if ready is None:
+        ensure_skills_catalog(skill_dir, db_path=Path(db_path))
+
+
+def native_catalog_generation(skill_dir: Path | str, *, db_path: Path) -> int:
+    """返回 native 路由目录的跨进程失效版本。"""
+    if db_path is None:
+        raise TypeError("skills_catalog generation requires explicit db_path")
+    root = _root_key(skill_dir)
+    with pooled_connection(Path(db_path)) as conn:
+        row = conn.execute(
+            "SELECT generation FROM skills_catalog_meta WHERE root_key=?",
+            (root,),
+        ).fetchone()
+    if row is None:
+        ensure_skills_catalog(skill_dir, db_path=Path(db_path))
+        with pooled_connection(Path(db_path)) as conn:
+            row = conn.execute(
+                "SELECT generation FROM skills_catalog_meta WHERE root_key=?",
+                (root,),
+            ).fetchone()
+    return int(row["generation"] if row is not None else 0)
+
+
+def list_native_cluster_catalog(
+    skill_dir: Path | str,
+    *,
+    db_path: Path,
+) -> list[dict]:
+    """按旧 Cluster 路由顺序读取 native 投影；不改写 SkillHub fingerprint。"""
+    if db_path is None:
+        raise TypeError("native cluster catalog requires explicit db_path")
+    _ensure_native_catalog_ready(skill_dir, db_path=Path(db_path))
+    root = _root_key(skill_dir)
+    with pooled_connection(Path(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT name, state, description, candidates_count
+            FROM skills_catalog
+            WHERE root_key=? AND source=?
+            ORDER BY name
+            """,
+            (root, _SOURCE_NATIVE),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def ensure_skills_catalog(
