@@ -1525,6 +1525,19 @@ def add_tasks_to_skill(
     return _run_cluster_mutation(mutate)
 
 
+def _mark_atom_profile_dirty(atom_path: Path, reason: str) -> None:
+    """Team Atom 画像旁路事件；本地 store/投影故障不阻断工具主操作。"""
+    try:
+        from xskill.recommend.profile_dirty import mark_profile_dirty_for_store
+        mark_profile_dirty_for_store(
+            atom_path.parents[2],
+            reason=reason,
+            db_path=agent_tool_config.registry_db_path,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.debug("profile dirty mark failed after %s", reason, exc_info=True)
+
+
 @tool(name="score_task")
 def score_task(atom_id: str, score: int) -> str:
     """覆盖 AtomTask 的 ux_score（手动修正 / 灰度链路使用）。"""
@@ -1543,7 +1556,8 @@ def score_task(atom_id: str, score: int) -> str:
         except FileNotFoundError as error:
             return f"error: {error}"
         atom.ux_score = sc
-        store.save(atom)
+        atom_path = store.save(atom)
+        _mark_atom_profile_dirty(atom_path, "atom_score_changed")
         return f"scored: {atom_id} → {sc}"
 
     return _run_cluster_mutation(mutate)
@@ -1572,7 +1586,8 @@ def add_task(
         pre_atom_id=None, post_atom_id=None,
         context_prefix="", raw_segment="",
     )
-    store.save(atom)
+    atom_path = store.save(atom)
+    _mark_atom_profile_dirty(atom_path, "atom_added")
     return f"added: {atom_id}"
 
 

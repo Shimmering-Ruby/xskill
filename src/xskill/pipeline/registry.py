@@ -301,6 +301,23 @@ CREATE TABLE IF NOT EXISTS catalog_vector_sync_meta (
     reconciled_at      REAL NOT NULL DEFAULT 0
 );
 
+-- 用户画像脏队列：generation 让“计算期间又发生变化”不会被旧任务误清。
+CREATE TABLE IF NOT EXISTS profile_dirty (
+    user_key    TEXT PRIMARY KEY,
+    generation  INTEGER NOT NULL DEFAULT 1,
+    reason      TEXT NOT NULL DEFAULT '',
+    marked_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_profile_dirty_marked
+    ON profile_dirty(marked_at, user_key);
+
+-- 画像算法/embedding 输入版本与低频全量对账水位。
+CREATE TABLE IF NOT EXISTS profile_refresh_meta (
+    singleton          INTEGER PRIMARY KEY CHECK(singleton=1),
+    input_fingerprint  TEXT NOT NULL DEFAULT '',
+    reconciled_at      REAL NOT NULL DEFAULT 0
+);
+
 -- P3-3.1 events:四类既有事实源的消费者(D7),通知+世界消息共用。
 -- kind: feedback(他人触发+ux打分) / push_edit(修改分支) / canary(裁决) / pin。
 -- targets 单独成表:一条事件可通知多个贡献者;世界消息 feed 直接读 events。
@@ -2404,7 +2421,7 @@ def reset_not_fit_for_interest_change(
         return 0
     with pooled_connection(db_path) as conn:
         rows = conn.execute(
-            "SELECT t.id, t.filename, w.path FROM trajectories t "
+            "SELECT t.id, t.filename, t.user_key, w.path FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id "
             "WHERE t.status=? AND t.process_action=? "
             "AND (t.interest_fingerprint IS NULL OR t.interest_fingerprint != ?)",
@@ -2415,6 +2432,7 @@ def reset_not_fit_for_interest_change(
             ),
         ).fetchall()
         directories_seen: set[str] = set()
+        profile_store_roots: set[str] = set()
         trajectories_by_directory: dict[str, set[str]] = {}
         for row in rows:
             conn.execute(
@@ -2435,9 +2453,22 @@ def reset_not_fit_for_interest_change(
                 for atom_file in tasks_directory.glob("atom_*.json"):
                     atom_file.unlink()
             directories_seen.add(row["path"])
+            if row["user_key"]:
+                profile_store_roots.add(row["path"])
             trajectories_by_directory.setdefault(row["path"], set()).add(
                 trajectory_stem,
             )
+        if profile_store_roots:
+            from xskill.recommend.profile_dirty import (
+                mark_profile_dirty_on_connection,
+                profile_user_key_for_store_root,
+            )
+            for store_root in profile_store_roots:
+                mark_profile_dirty_on_connection(
+                    conn,
+                    profile_user_key_for_store_root(store_root),
+                    reason="atom_reset",
+                )
         conn.commit()
         from xskill.pipeline.atom import AtomTaskStore
         for directory_path, trajectory_ids in trajectories_by_directory.items():
@@ -2480,7 +2511,7 @@ def reset_trajectories(
     """
     with pooled_connection(db_path) as conn:
         query_text = (
-            "SELECT t.id, t.filename, w.path FROM trajectories t "
+            "SELECT t.id, t.filename, t.user_key, w.path FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id WHERE 1=1"
         )
         query_parameters: list = []
@@ -2493,6 +2524,7 @@ def reset_trajectories(
         trajectory_rows = conn.execute(query_text, query_parameters).fetchall()
 
         directories_seen: set[str] = set()
+        profile_store_roots: set[str] = set()
         trajectories_by_directory: dict[str, set[str]] = {}
         for trajectory_row in trajectory_rows:
             conn.execute(
@@ -2519,10 +2551,23 @@ def reset_trajectories(
             conn.execute("DELETE FROM atom_adoption WHERE atom_id GLOB ?",
                          (f"atom_{trajectory_stem}_*",))
             directories_seen.add(trajectory_row["path"])
+            if trajectory_row["user_key"]:
+                profile_store_roots.add(trajectory_row["path"])
             trajectories_by_directory.setdefault(
                 trajectory_row["path"],
                 set(),
             ).add(trajectory_stem)
+        if profile_store_roots:
+            from xskill.recommend.profile_dirty import (
+                mark_profile_dirty_on_connection,
+                profile_user_key_for_store_root,
+            )
+            for store_root in profile_store_roots:
+                mark_profile_dirty_on_connection(
+                    conn,
+                    profile_user_key_for_store_root(store_root),
+                    reason="atom_reset",
+                )
         conn.commit()
         from xskill.pipeline.atom import AtomTaskStore
         for directory_path, trajectory_ids in trajectories_by_directory.items():
