@@ -169,6 +169,7 @@ class DirectoryWatcher:
         # watch_dir_id -> ((device, inode, directory mtime ns), last full scan)
         # Only the watcher thread reads/writes this map.
         self._discovery_snapshots: dict[int, tuple[tuple[int, int, int], float]] = {}
+        self._last_skill_edit_reconcile_ts: float | None = None
         self._last_cluster_catalog_reconcile: float | None = None
         self.max_retries = max_retries
         self.db_path = db_path
@@ -430,7 +431,7 @@ class DirectoryWatcher:
             self._stop.wait(self.poll_interval)
 
     def _scan_once(self):
-        """一次扫描：收割 → 发现 → 提交任务 → 独立扫 pending skill edits。"""
+        """一次扫描：收割 → 发现 → 提交任务 → 调度 pending skill edits。"""
         self._last_poll = time.time()
         self._stats["polls"] += 1
         kw = self._db_kw()
@@ -468,9 +469,9 @@ class DirectoryWatcher:
         # 先于自动 SkillEdit 提交，避免后台整理把用户任务挤到池外。
         self._submit_generate_jobs()
 
-        # ── Step 5: 独立扫所有 skill 目录的 candidates buffer ──
-        # 这步与具体 atom 处理解耦：即便某些 atom cluster 失败，buffer
-        # 已满阈值的 skill 仍能在每轮 scan 中被检出 + 触发 SkillEdit。
+        # ── Step 5: 从持久脏队列调度 candidates buffer ──
+        # 这步与具体 atom 处理解耦：候选落盘会把所属 skill 标脏；低频全量
+        # reconciliation 兜住进程重启、外部写入和时间型 jam gate。
         # 不放在 _scan_dir 内是因为 skill_dir 不是 watch_dir，跟 wd 循环
         # 无关——每个 watcher 只有一个全局 skill_dir。
         self._run_skill_edit_step()
@@ -596,7 +597,7 @@ class DirectoryWatcher:
         cold_start_signal.consume()
 
     def _check_pending_skill_edits(self, threshold=None):
-        """遍历每个 skill 目录调 SkillEditAgent.maybe_run()。
+        """从持久脏队列选出 skill，调 ``SkillEditAgent.maybe_run()``。
 
         ``threshold``：None 时各 skill 用默认 ATOM_PROMOTION_THRESHOLD；cold
         start 显式传同一个常量，避免在配置里散落另一套数值。
@@ -611,8 +612,204 @@ class DirectoryWatcher:
         """
         if self.skill_dir is None or not self.skill_dir.is_dir():
             return
+        from xskill.pipeline.registry import (
+            acknowledge_skill_edit_dirty,
+            list_skill_edit_dirty,
+            reconcile_skill_edit_dirty,
+        )
+
+        now = time.monotonic()
+        reconcile_due = (
+            self._last_skill_edit_reconcile_ts is None
+            or self.full_reconcile_interval == 0
+            or now - self._last_skill_edit_reconcile_ts
+            >= self.full_reconcile_interval
+        )
+        if reconcile_due:
+            try:
+                reconcile_skill_edit_dirty(
+                    self.skill_dir,
+                    **self._db_kw(),
+                )
+            except Exception:
+                # YAML/skill 目录是真相源；队列投影失败不能阻断其余流水线。
+                logger.exception("skill_edit dirty reconciliation failed")
+            finally:
+                # 持续的文件系统/DB 故障不应让每个快速 poll 都退化成全量
+                # skill_dir 扫描；下一次周期对账仍会继续修复投影。
+                self._last_skill_edit_reconcile_ts = now
+        try:
+            dirty_rows = list_skill_edit_dirty(
+                self.skill_dir,
+                **self._db_kw(),
+            )
+        except Exception:
+            logger.exception("skill_edit dirty queue read failed")
+            return
+        if not dirty_rows:
+            return
+
+        def _acknowledge_dirty(skill: str, generation: int) -> bool:
+            try:
+                return acknowledge_skill_edit_dirty(
+                    self.skill_dir,
+                    skill,
+                    generation,
+                    **self._db_kw(),
+                )
+            except Exception:
+                logger.exception(
+                    "skill_edit dirty acknowledgement failed: %s",
+                    skill,
+                )
+                return False
+
+        dirty_skills: list[tuple[Path, int]] = []
+        for row in dirty_rows:
+            skill_path = self.skill_dir / str(row["skill"])
+            generation = int(row["generation"])
+            if (
+                not skill_path.is_dir()
+                or skill_path.name.startswith(".")
+            ):
+                _acknowledge_dirty(skill_path.name, generation)
+                continue
+            dirty_skills.append((skill_path, generation))
+        if not dirty_skills:
+            return
+
+        skill_edit_in_flight = {
+            info.get("skill_dir") for info in self._futures.values()
+            if info.get("stage") in ("skill_edit", "skill_scripting")
+        }
+        dirty_skills = [
+            item for item in dirty_skills if item[0] not in skill_edit_in_flight
+        ]
+        if not dirty_skills:
+            return
+
         from xskill.agents.skill_edit_agent import SkillEditAgent
         from xskill.canary import CanaryConfig
+        # ── 跨技能并行写正文，且不阻塞扫描循环 ──
+        # 每个 skill 文件夹是独立 git 仓（skill/git.py 各自 git init），仓锁
+        # _repo_lock_for(repo_dir) 是 per-skill 的 → 不同技能 = 不同锁 = 零冲突，
+        # 跨技能并发安全。每个 future 显式绑定自己的不可变 AgentToolContext；
+        # write_file / commit_baby_to_main / commit_to_staging / skill_read 都从
+        # 当前 task context 取根目录，不共享进程级可变路径。
+        #
+        # 不在这里 as_completed 等待：SkillEditAgent 现在支持多轮渐进式消化，
+        # 单个 skill 的 maybe_run() 可能跑到小时级（buffer 攒了几十上百批候选
+        # 时）。像 split/cluster 一样把每个 skill 的 maybe_run() 提交进
+        # self._futures（stage="skill_edit"），本方法立即返回；结果由
+        # ``_harvest``（每轮 scan 开头）收割 + 做 _stats 自增/即时 install。
+        # 同一个 skill 同时只允许一个 skill_edit future 在飞，避免同一 skill
+        # 被并发跑两个 maybe_run（第二个进来时前一个多半仍在改 candidates/git）。
+        from xskill.skill import candidates as candidate_buffer
+        from xskill.skill.git import current_branch, run_git
+        from xskill.canary import evaluate_jam_gates, load_ux_scores
+        from xskill.skill.importer import is_imported_skill
+
+        jam_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
+        edit_threshold = (
+            int(threshold)
+            if threshold is not None
+            else candidate_buffer.ATOM_PROMOTION_THRESHOLD
+        )
+
+        def _skill_edit_actionable(
+            skill_path: Path,
+        ) -> tuple[bool | None, int]:
+            """与 maybe_run 守门对齐：不会开 LLM 的 skill 不进 edit 池。
+
+            单目录异常只排除该 skill，禁止拖垮整轮 edit submit。
+            无 ``.git`` 的目录仍返回 True：交由 worker 侧 ``_run_one`` /
+            ``maybe_run`` 吞错（与过滤前提交语义一致），避免 listcomp 里
+            ``current_branch`` 抛穿扫描；也不把「脏目录」误当成可过滤的
+            伪 skill 状态机。
+            """
+            try:
+                data = candidate_buffer.load_candidates(skill_path)
+                candidates = list(data.get("candidates") or [])
+                pending_count = len(candidates)
+                if not (skill_path / ".git").exists():
+                    logger.warning(
+                        "SkillEdit schedule: %s has no .git; submit and let "
+                        "worker isolate failures",
+                        skill_path.name,
+                    )
+                    return True, pending_count
+                total_ws = 0
+                for item in candidates:
+                    try:
+                        total_ws += int(item.get("weightscore") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                staging_exists = run_git(
+                    ["rev-parse", "--verify", "staging"],
+                    cwd=str(skill_path),
+                )[0] == 0
+                # jam：age ∧ plateau ∧ ws 三条件合取（见 evaluate_jam_gates）
+                jam = False
+                if staging_exists:
+                    gates = evaluate_jam_gates(
+                        skill_path, total_ws=total_ws, config=jam_cfg,
+                    )
+                    jam = bool(gates.get("ok"))
+                    if not jam:
+                        return False, pending_count
+                if jam:
+                    return True, pending_count
+                ready = bool(
+                    candidate_buffer.ready_for_promotion_v2(
+                        data, threshold=edit_threshold,
+                    )
+                )
+                baby_checkpoint = run_git(
+                    ["rev-parse", "baby~1"],
+                    cwd=str(skill_path),
+                )[0] == 0
+                branch = current_branch(str(skill_path)) or ""
+                if branch == "baby":
+                    return baby_checkpoint or ready, pending_count
+                if branch == "main":
+                    if not ready:
+                        return False, pending_count
+                    try:
+                        scores = load_ux_scores(skill_path)
+                    except Exception:
+                        logger.exception(
+                            "load_ux_scores failed during skill_edit "
+                            "filter: %s",
+                            skill_path.name,
+                        )
+                        return None, pending_count
+                    return (
+                        any(score.get("side") == "main" for score in scores),
+                        pending_count,
+                    )
+                if "_turn" in branch:
+                    return baby_checkpoint or ready, pending_count
+                return False, pending_count
+            except Exception:
+                logger.exception(
+                    "skill_edit actionable check failed: %s",
+                    skill_path.name,
+                )
+                return None, 0
+
+        actionable_skills: list[tuple[Path, int]] = []
+        for skill_path, generation in dirty_skills:
+            actionable, pending_count = _skill_edit_actionable(skill_path)
+            if actionable is None:
+                # 读取/门控异常保留脏项，下一轮沿用现有重试行为。
+                continue
+            if not actionable:
+                _acknowledge_dirty(skill_path.name, generation)
+                continue
+            actionable_skills.append((skill_path, pending_count))
+        if not actionable_skills:
+            return
+
         factory = self._factory()
         # store 选哪个：edit agent 工具 (atom_task_read/read_traj) 需要 store +
         # traj_root 才能读到 atom 原文。单机只有一个 watch_dir（cc_sessions）。
@@ -653,138 +850,12 @@ class DirectoryWatcher:
             usage_ledger=self.usage_ledger,
             registry_db_path=self.db_path,
         )
-        # ── 跨技能并行写正文，且不阻塞扫描循环 ──
-        # 每个 skill 文件夹是独立 git 仓（skill/git.py 各自 git init），仓锁
-        # _repo_lock_for(repo_dir) 是 per-skill 的 → 不同技能 = 不同锁 = 零冲突，
-        # 跨技能并发安全。每个 future 显式绑定自己的不可变 AgentToolContext；
-        # write_file / commit_baby_to_main / commit_to_staging / skill_read 都从
-        # 当前 task context 取根目录，不共享进程级可变路径。
-        #
-        # 不在这里 as_completed 等待：SkillEditAgent 现在支持多轮渐进式消化，
-        # 单个 skill 的 maybe_run() 可能跑到小时级（buffer 攒了几十上百批候选
-        # 时）。像 split/cluster 一样把每个 skill 的 maybe_run() 提交进
-        # self._futures（stage="skill_edit"），本方法立即返回；结果由
-        # ``_harvest``（每轮 scan 开头）收割 + 做 _stats 自增/即时 install。
-        # 同一个 skill 同时只允许一个 skill_edit future 在飞，避免同一 skill
-        # 被并发跑两个 maybe_run（第二个进来时前一个多半仍在改 candidates/git）。
-        from xskill.skill import candidates as candidate_buffer
-        from xskill.skill.git import current_branch, run_git
-        from xskill.canary import evaluate_jam_gates, load_ux_scores
-        from xskill.skill.importer import is_imported_skill
-
-        skill_dirs = [
-            d for d in self.skill_dir.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-        ]
-        if not skill_dirs:
-            return
-
-        jam_cfg = CanaryConfig.from_dict(self.config.get("canary", {}))
-        edit_threshold = (
-            int(threshold)
-            if threshold is not None
-            else candidate_buffer.ATOM_PROMOTION_THRESHOLD
-        )
-
-        def _pending_atom_count(skill_path: Path) -> int:
-            try:
-                data = candidate_buffer.load_candidates(skill_path)
-            except Exception:
-                logger.exception(
-                    "failed to load candidates for skill_edit sort: %s",
-                    skill_path.name,
-                )
-                raise
-            return len(data.get("candidates") or [])
-
-        def _skill_edit_actionable(skill_path: Path) -> bool:
-            """与 maybe_run 守门对齐：不会开 LLM 的 skill 不进 edit 池。
-
-            单目录异常只排除该 skill，禁止拖垮整轮 edit submit。
-            无 ``.git`` 的目录仍返回 True：交由 worker 侧 ``_run_one`` /
-            ``maybe_run`` 吞错（与过滤前提交语义一致），避免 listcomp 里
-            ``current_branch`` 抛穿扫描；也不把「脏目录」误当成可过滤的
-            伪 skill 状态机。
-            """
-            if not (skill_path / ".git").exists():
-                logger.warning(
-                    "SkillEdit schedule: %s has no .git; submit and let "
-                    "worker isolate failures",
-                    skill_path.name,
-                )
-                return True
-            try:
-                data = candidate_buffer.load_candidates(skill_path)
-                candidates = list(data.get("candidates") or [])
-                total_ws = 0
-                for item in candidates:
-                    try:
-                        total_ws += int(item.get("weightscore") or 0)
-                    except (TypeError, ValueError):
-                        pass
-                staging_exists = run_git(
-                    ["rev-parse", "--verify", "staging"],
-                    cwd=str(skill_path),
-                )[0] == 0
-                # jam：age ∧ plateau ∧ ws 三条件合取（见 evaluate_jam_gates）
-                jam = False
-                if staging_exists:
-                    gates = evaluate_jam_gates(
-                        skill_path, total_ws=total_ws, config=jam_cfg,
-                    )
-                    jam = bool(gates.get("ok"))
-                    if not jam:
-                        return False
-                if jam:
-                    return True
-                ready = bool(
-                    candidate_buffer.ready_for_promotion_v2(
-                        data, threshold=edit_threshold,
-                    )
-                )
-                baby_checkpoint = run_git(
-                    ["rev-parse", "baby~1"],
-                    cwd=str(skill_path),
-                )[0] == 0
-                branch = current_branch(str(skill_path)) or ""
-                if branch == "baby":
-                    return baby_checkpoint or ready
-                if branch == "main":
-                    if not ready:
-                        return False
-                    try:
-                        scores = load_ux_scores(skill_path)
-                    except Exception:
-                        logger.exception(
-                            "load_ux_scores failed during skill_edit "
-                            "filter: %s",
-                            skill_path.name,
-                        )
-                        return False
-                    return any(
-                        score.get("side") == "main" for score in scores
-                    )
-                if "_turn" in branch:
-                    return baby_checkpoint or ready
-                return False
-            except Exception:
-                logger.exception(
-                    "skill_edit actionable check failed: %s",
-                    skill_path.name,
-                )
-                return False
-
-        skill_dirs = [
-            path for path in skill_dirs if _skill_edit_actionable(path)
-        ]
-        if not skill_dirs:
-            return
 
         # 错误少优先；已纳入且已达触发条件的 skill 先于自动蒸馏；
         # 有候选优先于空 buffer；再 lean-first。
         # 无 .git 等「仍提交」的空目录靠 empty-last 避免抢窗。
-        def _skill_edit_sort_key(path: Path):
-            pending = _pending_atom_count(path)
+        def _skill_edit_sort_key(item: tuple[Path, int]):
+            path, pending = item
             return (
                 self._skill_edit_error_counts.get(path, 0),
                 0 if is_imported_skill(path) else 1,
@@ -793,7 +864,7 @@ class DirectoryWatcher:
                 path.name,
             )
 
-        skill_dirs.sort(key=_skill_edit_sort_key)
+        actionable_skills.sort(key=_skill_edit_sort_key)
 
         base_llm_cfg = self.config.get("llm", {}) or {}
         skill_llm_override = self.config.get("llm_skill", {}) or {}
@@ -838,13 +909,7 @@ class DirectoryWatcher:
                         self.skill_edit_batch_size,
                     )
 
-        skill_edit_in_flight = {
-            info.get("skill_dir") for info in self._futures.values()
-            if info.get("stage") in ("skill_edit", "skill_scripting")
-        }
-        for d in skill_dirs:
-            if d in skill_edit_in_flight:
-                continue
+        for d, _pending_count in actionable_skills:
             fut = self._pools["edit"].submit(
                 _run_one,
                 d,
@@ -925,6 +990,35 @@ class DirectoryWatcher:
                     self._skill_edit_n1_fail_counts[d] = fails
         if not ok:
             return
+        # 成功且 buffer 已空时立即确认观察到的脏版本。若此处与 cluster 并发写入，
+        # candidate 落盘钩子会递增 generation，compare-and-delete 自然失败，
+        # 新候选仍留给下一轮调度。
+        try:
+            from xskill.pipeline.registry import (
+                acknowledge_skill_edit_dirty,
+                skill_edit_dirty_generation,
+            )
+            from xskill.skill.candidates import load_candidates
+
+            dirty_generation = skill_edit_dirty_generation(
+                d,
+                **self._db_kw(),
+            )
+            if (
+                dirty_generation is not None
+                and not (load_candidates(d).get("candidates") or [])
+            ):
+                acknowledge_skill_edit_dirty(
+                    d.parent,
+                    d.name,
+                    dirty_generation,
+                    **self._db_kw(),
+                )
+        except Exception:
+            logger.exception(
+                "failed to acknowledge completed skill_edit: %s",
+                d.name,
+            )
         self._stats["skills_edited"] += 1
         logger.info("SkillEditAgent promoted: %s", d.name)
         # 即时 install 让 Claude Code 立刻看到新生成的 SKILL.md，不必等
@@ -3032,6 +3126,32 @@ class DirectoryWatcher:
     # ux_score
     # ───────────────────────────────────────────────────────────
 
+    def _notify_skill_edit_ux_change(self, skill_path: Path, **kw) -> None:
+        """自有 skill 新增 UX 分数后立即重新检查 SkillEdit 门控。
+
+        SkillHub 目录不属于本 watcher 的 SkillEdit 状态机，不能写入自有
+        ``skill_edit_dirty`` root。通知失败只影响触发时效；低频盘→库对账仍会
+        从事实源修复。
+        """
+        if self.skill_dir is None or Path(skill_path).parent != self.skill_dir:
+            return
+        registry_db_path = kw.get("db_path") or self.db_path
+        if registry_db_path is None:
+            return
+        try:
+            from xskill.pipeline.registry import mark_skill_edit_dirty
+
+            mark_skill_edit_dirty(
+                skill_path,
+                reason="ux_score",
+                db_path=registry_db_path,
+            )
+        except Exception:
+            logger.exception(
+                "skill_edit dirty UX notification failed: %s",
+                Path(skill_path).name,
+            )
+
     def _score_atoms_for_traj(self, wd_id, fname, atoms=None, **kw):
         """对一条已跑完 cluster 的 traj 扫所有 atom 打 ux_score。
 
@@ -3099,6 +3219,8 @@ class DirectoryWatcher:
         # check_and_decide 不再绑在打分链路里——移到 watcher 周期性
         # _check_canary_decisions() 独立轮询，保证灰度系统自治不依赖
         # traj 触发。这里只负责打分落盘。
+        if new_scores:
+            self._notify_skill_edit_ux_change(skill_sub, **kw)
         mark_skill_used(wd_id, fname, skill_name, side, **kw)
         if new_scores:
             self._emit_feedback_event(
@@ -3194,7 +3316,13 @@ class DirectoryWatcher:
                     ):
                         entry = new_by_skill.setdefault(
                             skill_name,
-                            {"scores": [], "side": side, "sha": sha})
+                            {
+                                "scores": [],
+                                "side": side,
+                                "sha": sha,
+                                "skill_path": skill_sub,
+                            },
+                        )
                         entry["scores"].append(float(atom.ux_score))
                     self._stats["scores"] += 1
                     used_any = True
@@ -3202,6 +3330,7 @@ class DirectoryWatcher:
                     logger.exception("CS score_atom failed: %s/%s/%s",
                                      fname, atom.atom_id, skill_name)
         for skill_name, entry in new_by_skill.items():
+            self._notify_skill_edit_ux_change(entry["skill_path"], **kw)
             self._emit_feedback_event(
                 wd_id, fname, skill_name=skill_name, traj_id=traj_id,
                 scores=entry["scores"], side=entry["side"],

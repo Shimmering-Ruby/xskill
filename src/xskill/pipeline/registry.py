@@ -377,6 +377,17 @@ CREATE TABLE IF NOT EXISTS atom_candidate_pending_meta (
     backfilled_at TEXT NOT NULL
 );
 
+-- SkillEdit 持久脏队列：候选写入只合并同一 skill 的 generation；watcher
+-- 以 compare-and-delete 确认已观察版本，避免编辑期间的新写入被旧任务误清。
+CREATE TABLE IF NOT EXISTS skill_edit_dirty (
+    root_key   TEXT NOT NULL,
+    skill      TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 1,
+    reason     TEXT NOT NULL DEFAULT '',
+    marked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (root_key, skill)
+);
+
 -- 纳入 / generate 发起人。首次写入生效，供自动灰度对象（与用量最多的用户取并）。
 CREATE TABLE IF NOT EXISTS skill_origin (
     skill_name TEXT PRIMARY KEY,
@@ -1294,6 +1305,7 @@ def sync_atom_candidate_pending_for_skill(
     candidates: list,
     *,
     db_path: Optional[Path] = None,
+    dirty_root_key: str | None = None,
 ) -> None:
     """按某 skill 当前 candidates 快照替换其 pending 投影行。
 
@@ -1322,6 +1334,13 @@ def sync_atom_candidate_pending_for_skill(
                 """,
                 rows,
             )
+        if dirty_root_key is not None:
+            _mark_skill_edit_dirty_conn(
+                conn,
+                root_key=dirty_root_key,
+                skill=skill,
+                reason="candidates",
+            )
         conn.commit()
 
 
@@ -1329,11 +1348,19 @@ def delete_atom_candidate_pending_for_skill(
     skill: str,
     *,
     db_path: Optional[Path] = None,
+    dirty_root_key: str | None = None,
 ) -> None:
     with pooled_connection(db_path) as conn:
         conn.execute(
             "DELETE FROM atom_candidate_pending WHERE skill=?", (skill,),
         )
+        if dirty_root_key is not None:
+            _mark_skill_edit_dirty_conn(
+                conn,
+                root_key=dirty_root_key,
+                skill=skill,
+                reason="candidates_missing",
+            )
         conn.commit()
 
 
@@ -1354,7 +1381,10 @@ def notify_atom_pending_sync(
             )
             return
         sync_atom_candidate_pending_for_skill(
-            Path(skill_path).name, candidates, db_path=resolved,
+            Path(skill_path).name,
+            candidates,
+            db_path=resolved,
+            dirty_root_key=_atom_pending_root_key(Path(skill_path).parent),
         )
     except Exception:  # pylint: disable=broad-exception-caught
         logger.exception(
@@ -1381,6 +1411,129 @@ def notify_atom_pending_delete(
         logger.exception(
             "atom_candidate_pending delete failed: %s", skill,
         )
+
+
+def _mark_skill_edit_dirty_conn(
+    conn: sqlite3.Connection,
+    *,
+    root_key: str,
+    skill: str,
+    reason: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO skill_edit_dirty(root_key, skill, generation, reason)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT(root_key, skill) DO UPDATE SET
+            generation=skill_edit_dirty.generation + 1,
+            reason=excluded.reason,
+            marked_at=datetime('now')
+        """,
+        (root_key, skill, reason),
+    )
+
+
+def mark_skill_edit_dirty(
+    skill_path: Path | str,
+    *,
+    reason: str = "candidates",
+    db_path: Optional[Path] = None,
+) -> None:
+    """持久标记一个 skill；重复标记只递增 generation，不增加队列行。"""
+    path = Path(skill_path)
+    with pooled_connection(db_path) as conn:
+        _mark_skill_edit_dirty_conn(
+            conn,
+            root_key=_atom_pending_root_key(path.parent),
+            skill=path.name,
+            reason=reason,
+        )
+        conn.commit()
+
+
+def list_skill_edit_dirty(
+    skill_dir: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """返回一个 skill root 当前待检查的持久脏项。"""
+    root_key = _atom_pending_root_key(skill_dir)
+    with pooled_connection(db_path) as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT skill, generation, reason, marked_at "
+                "FROM skill_edit_dirty WHERE root_key=? ORDER BY skill",
+                (root_key,),
+            ).fetchall()
+        ]
+
+
+def skill_edit_dirty_generation(
+    skill_path: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> int | None:
+    """读取一个 skill 当前 generation；无脏项返回 ``None``。"""
+    path = Path(skill_path)
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT generation FROM skill_edit_dirty "
+            "WHERE root_key=? AND skill=?",
+            (_atom_pending_root_key(path.parent), path.name),
+        ).fetchone()
+    return None if row is None else int(row["generation"])
+
+
+def acknowledge_skill_edit_dirty(
+    skill_dir: Path | str,
+    skill: str,
+    generation: int,
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """仅确认仍是所观察 generation 的脏项，避免吞掉并发候选写入。"""
+    root_key = _atom_pending_root_key(skill_dir)
+    with pooled_connection(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM skill_edit_dirty "
+            "WHERE root_key=? AND skill=? AND generation=?",
+            (root_key, skill, int(generation)),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def reconcile_skill_edit_dirty(
+    skill_dir: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> int:
+    """低频扫一次 skill root，为缺失的脏项补行；已有行不改 generation。"""
+    root = Path(skill_dir)
+    if not root.is_dir():
+        return 0
+    skill_names = sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+    if not skill_names:
+        return 0
+    root_key = _atom_pending_root_key(root)
+    with pooled_connection(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT INTO skill_edit_dirty(root_key, skill, generation, reason)
+            VALUES (?, ?, 1, 'reconcile')
+            ON CONFLICT(root_key, skill) DO NOTHING
+            """,
+            ((root_key, skill) for skill in skill_names),
+        )
+        inserted = conn.total_changes - before
+        conn.commit()
+    return inserted
 
 
 _ATOM_PENDING_BACKFILL_LOCK = threading.Lock()
