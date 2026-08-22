@@ -253,6 +253,167 @@ def test_cleanup_removes_skill_not_in_manifest(server_app, tmp_path):
     assert (tmp_path / "client_home" / ".xskill" / "skill" / "fix-foo").is_dir()   # manifest 里的保留
 
 
+def test_colocated_client_does_not_delete_server_skills(tmp_path, monkeypatch):
+    """本机既是 server 又 connect 时，不得按派发清单清空自有仓。"""
+    from xskill.team.shared.protocol import SyncResponse
+
+    xhome = tmp_path / ".xskill"
+    canonical = xhome / "skill"
+    keep = canonical / "unassigned"
+    keep.mkdir(parents=True)
+    (keep / "SKILL.md").write_text("# keep\n", encoding="utf-8")
+    (xhome / "team_server.json").write_text('{"join_token": "t"}', encoding="utf-8")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
+    monkeypatch.setattr(
+        "xskill.config.get_team_server_state_path",
+        lambda: xhome / "team_server.json",
+    )
+    monkeypatch.setattr("xskill.config.get_skill_dir", lambda: canonical)
+
+    tc = TeamClient(
+        state=ClientState(
+            server_url="http://testserver", client_id="c", join_token="t",
+        ),
+        http=SimpleNamespace(),
+        skill_dir=canonical,
+        cursor_path=tmp_path / "cursor.json",
+        history_path=tmp_path / "history.jsonl",
+        home_root=tmp_path / "home",
+        min_change_interval=0,
+    )
+    assert tc.skill_dir == xhome / "client_skill"
+    empty = SyncResponse(slots=[], server_time=1.0)
+    tc.cleanup(empty)
+    assert keep.is_dir()
+
+    # 强行将 skill_dir 指回 canonical 验证防御拦截
+    tc.skill_dir = canonical
+    tc.cleanup(empty)
+    assert keep.is_dir()
+
+
+def test_refuse_canonical_skill_dir_guards_and_self_heals(tmp_path, monkeypatch):
+    """若 client 的 skill_dir 指向 server 权威仓，动态自愈重定向并在不可自愈时安全拦截。"""
+    from xskill.team.shared.protocol import SyncResponse, SkillSlot
+
+    xhome = tmp_path / ".xskill"
+    canonical = xhome / "skill"
+    canonical.mkdir(parents=True)
+    (xhome / "team_server.json").write_text('{"join_token": "t"}', encoding="utf-8")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
+    monkeypatch.setattr(
+        "xskill.config.get_team_server_state_path",
+        lambda: xhome / "team_server.json",
+    )
+    monkeypatch.setattr("xskill.config.get_skill_dir", lambda **kw: canonical)
+
+    tc = TeamClient(
+        state=ClientState(
+            server_url="http://testserver", client_id="c", join_token="t",
+        ),
+        http=SimpleNamespace(),
+        skill_dir=xhome / "client_skill",
+        cursor_path=tmp_path / "cursor.json",
+        history_path=tmp_path / "history.jsonl",
+        home_root=tmp_path / "home",
+        min_change_interval=0,
+    )
+    # 正常 client_skill 目录不拦截
+    assert tc._refuse_canonical_skill_dir("test") is False
+
+    # 误设为 canonical 目录时动态自愈至 client_skill
+    tc.skill_dir = canonical
+    assert tc._refuse_canonical_skill_dir("test") is False
+    assert tc.skill_dir == xhome / "client_skill"
+
+    # 若无法自愈（如重定向仍返回 canonical），则主动安全拒绝
+    tc.skill_dir = canonical
+    monkeypatch.setattr("xskill.config.resolve_team_client_skill_dir", lambda *a, **kw: canonical)
+    assert tc._refuse_canonical_skill_dir("test") is True
+
+
+def test_startup_race_client_before_server_self_heals(tmp_path, monkeypatch):
+    """验证 Client 早于 Server 启动时，后续 Server 启动后 Client 能够自动自愈重定向。"""
+    xhome = tmp_path / ".xskill"
+    canonical = xhome / "skill"
+    canonical.mkdir(parents=True)
+    server_skill = canonical / "server-prod-skill"
+    server_skill.mkdir()
+    (server_skill / "SKILL.md").write_text("# Prod", encoding="utf-8")
+
+    server_state_file = xhome / "team_server.json"
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
+    monkeypatch.setattr(
+        "xskill.config.get_team_server_state_path",
+        lambda: server_state_file,
+    )
+    monkeypatch.setattr("xskill.config.get_skill_dir", lambda **kw: canonical)
+
+    # 1. 此时 Server 尚未启动，team_server.json 不存在
+    tc = TeamClient(
+        state=ClientState(server_url="http://testserver", client_id="c", join_token="t"),
+        http=SimpleNamespace(get=lambda *a, **kw: SimpleNamespace(status_code=200, content=b"")),
+        skill_dir=canonical,
+        cursor_path=tmp_path / "cursor.json",
+        history_path=tmp_path / "history.jsonl",
+        home_root=tmp_path / "home",
+        min_change_interval=0,
+    )
+    assert tc.skill_dir == canonical
+
+    # 2. 随后 Server 启动并写入 team_server.json
+    server_state_file.write_text("{}", encoding="utf-8")
+
+    # 3. 运行 tick 同步操作，自动触发自愈重定向
+    assert tc._refuse_canonical_skill_dir("reconcile") is False
+    assert tc.skill_dir == xhome / "client_skill"
+
+    # 4. 执行 cleanup，验证 Server 技能库完好无损
+    from xskill.team.shared.protocol import SyncResponse
+    tc.cleanup(SyncResponse(slots=[], server_time=1.0))
+    assert server_skill.is_dir()
+
+
+def test_cleanup_reaps_stale_server_ecosystem_links(tmp_path, monkeypatch):
+    """验证同机 Client 在 cleanup 时，跨模式切换遗留在 IDE 中的 Server 母本软链能被正常收割。"""
+    import os
+    from xskill.team.shared.protocol import SyncResponse
+
+    xhome = tmp_path / ".xskill"
+    canonical = xhome / "skill"
+    canonical.mkdir(parents=True)
+    home_dir = tmp_path / "home"
+    cursor_skills = home_dir / ".cursor" / "skills"
+    cursor_skills.mkdir(parents=True)
+
+    # 建立指向 Server 母本的软链
+    stale_skill = canonical / "stale-skill"
+    stale_skill.mkdir()
+    (stale_skill / "SKILL.md").write_text("# Stale", encoding="utf-8")
+    os.symlink(str(stale_skill), str(cursor_skills / "stale-skill"))
+
+    (xhome / "team_server.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
+    monkeypatch.setattr("xskill.config.get_team_server_state_path", lambda: xhome / "team_server.json")
+    monkeypatch.setattr("xskill.config.get_skill_dir", lambda **kw: canonical)
+
+    tc = TeamClient(
+        state=ClientState(server_url="http://testserver", client_id="c", join_token="t"),
+        http=SimpleNamespace(),
+        skill_dir=canonical,
+        cursor_path=tmp_path / "cursor.json",
+        history_path=tmp_path / "history.jsonl",
+        home_root=home_dir,
+        min_change_interval=0,
+    )
+    tc.cleanup(SyncResponse(slots=[], server_time=1.0))
+
+    # IDE 软链被收割，Server 母本仍完好
+    assert not (cursor_skills / "stale-skill").exists()
+    assert (canonical / "stale-skill").is_dir()
+
+
+
 def test_cleanup_reaps_orphaned_ecosystem_links(server_app, tmp_path):
     """cleanup 按生态目录反向收孤儿 link:工作副本被 out-of-band 删除后残留、
     指向 xskill 工作副本根、且不在 manifest 的 dangling link 要收掉;第三方 link /

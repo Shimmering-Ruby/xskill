@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -1093,6 +1094,79 @@ def get_registry_db_path(
 def get_team_server_state_path() -> Path:
     """server join token 落盘位置（~/.xskill/team_server.json，0600）。"""
     return XSKILL_HOME / "team_server.json"
+
+
+def _norm_path_key(p: Path | str) -> str:
+    """内部路径规范化键（跨平台绝对路径 + Windows 大小写折叠 + UNC 剥离）。"""
+    resolved = str(Path(p).expanduser().resolve(strict=False))
+    if os.name == "nt":
+        if resolved.startswith("\\\\?\\UNC\\"):
+            resolved = "\\\\" + resolved[8:]
+        elif resolved.startswith("\\\\?\\"):
+            resolved = resolved[4:]
+    return os.path.normcase(os.path.abspath(resolved))
+
+
+def _canonical_server_skill_dir(xskill_home: Optional[Path] = None) -> Path:
+    """Server 端的标准自有仓目录。瘦客户端没有 config.yaml 时回退到默认 ~/.xskill/skill/。"""
+    state_root = (
+        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    ).expanduser().resolve()
+    cfg_file = state_root / "config.yaml"
+    if cfg_file.is_file():
+        try:
+            cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+            raw = cfg.get("skill_dir")
+            if raw and isinstance(raw, str) and raw.strip():
+                p = Path(raw).expanduser()
+                return p if p.is_absolute() else state_root / p
+        except Exception:
+            pass
+    return state_root / "skill"
+
+
+def is_team_server_canonical_skill_dir(
+    skill_dir: Path | str,
+    *,
+    xskill_home: Optional[Path] = None,
+) -> bool:
+    """判断给定目录是否等于本机 team server 的标准自有仓。
+
+    本机既 ``serve --server`` 又 ``connect`` 时，client 默认也会指向
+    ``~/.xskill/skill/``。cleanup 会按派发清单删仓，把自有仓收成只剩
+    分给这个 client 的那几十上百个。
+    """
+    state_root = (
+        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    ).expanduser().resolve()
+    if not (state_root / "team_server.json").is_file():
+        return False
+    try:
+        req_key = _norm_path_key(skill_dir)
+        canon_key = _norm_path_key(_canonical_server_skill_dir(state_root))
+        return req_key == canon_key
+    except (OSError, RuntimeError):
+        return False
+
+
+def resolve_team_client_skill_dir(
+    skill_dir: Path | str,
+    *,
+    xskill_home: Optional[Path] = None,
+) -> Path:
+    """client 工作副本目录。与 server 自有仓撞车时改放到 ``client_skill/``。"""
+    state_root = (
+        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    ).expanduser().resolve()
+    requested = Path(skill_dir)
+    if not is_team_server_canonical_skill_dir(requested, xskill_home=state_root):
+        return requested
+    relocated = state_root / "client_skill"
+    logger.warning(
+        "team client colocated with team server; using %s instead of %s",
+        relocated, requested,
+    )
+    return relocated
 
 
 def get_team_clients_db_path() -> Path:
