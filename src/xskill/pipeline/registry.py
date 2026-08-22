@@ -261,7 +261,8 @@ CREATE INDEX IF NOT EXISTS idx_skills_catalog_root_state
 CREATE TABLE IF NOT EXISTS skills_catalog_meta (
     root_key      TEXT PRIMARY KEY,
     backfilled_at TEXT NOT NULL,
-    skillhub_key  TEXT NOT NULL DEFAULT ''
+    skillhub_key  TEXT NOT NULL DEFAULT '',
+    generation    INTEGER NOT NULL DEFAULT 0
 );
 
 -- 预计算推荐结果：/sync 只读；重活进程写入（脏算）。
@@ -691,6 +692,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "content_sha" not in sc_cols:
         conn.execute(
             "ALTER TABLE skills_catalog ADD COLUMN content_sha TEXT NOT NULL DEFAULT ''"
+        )
+
+    # skills_catalog_meta.generation：Cluster 路由表的跨进程失效键。必须先补列，
+    # 后续 catalog 写出口才能在同一事务内 bump；旧库从 0 起步，下一次目录
+    # 语义变化会推进版本。
+    cur = conn.execute("PRAGMA table_info(skills_catalog_meta)")
+    scm_cols = {row[1] for row in cur.fetchall()}
+    if "generation" not in scm_cols:
+        conn.execute(
+            "ALTER TABLE skills_catalog_meta"
+            " ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
         )
 
     # skill_prefs.side：pin 时可钉灰度侧（空=自动分流）
