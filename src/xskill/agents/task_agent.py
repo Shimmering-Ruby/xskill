@@ -425,10 +425,9 @@ class TaskAgent:
         if prior_atom is not None:
             new_atoms[0].pre_atom_id = prior_atom.atom_id
             prior_atom.post_atom_id = new_atoms[0].atom_id
-            self.store.save(prior_atom)
-
-        for a in new_atoms:
-            self.store.save(a)
+        self.store.save_many(
+            ([prior_atom] if prior_atom is not None else []) + new_atoms
+        )
 
         self._assert_eof_coverage(traj_id, resume_line=resume_line,
                                   total_lines=total_lines)

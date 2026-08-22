@@ -128,6 +128,146 @@ class TestPaths:
                 "atom_y_0001.json").is_file()
 
 
+class TestAtomLocationProjection:
+    def test_save_many_updates_projection_in_one_batch(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        store = _store(tmp_path)
+        store.root.mkdir(parents=True)
+        store.ensure_location_index()
+        atoms = [
+            _atom(atom_id=f"atom_batch_{index:04d}", traj_id="batch")
+            for index in range(3)
+        ]
+        original = store._upsert_atom_locations
+        batches = []
+
+        def record_batch(locations):
+            batches.append(list(locations))
+            original(locations)
+
+        monkeypatch.setattr(store, "_upsert_atom_locations", record_batch)
+
+        paths = store.save_many(atoms)
+
+        assert len(batches) == 1
+        assert len(batches[0]) == 3
+        assert [store.load(atom.atom_id) for atom in atoms] == atoms
+        assert all(path.is_file() for path in paths)
+
+    def test_legacy_store_is_fully_projected_on_first_lookup(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        store = _store(tmp_path)
+        atoms = [
+            _atom(atom_id=f"atom_legacy_{index:04d}", traj_id=f"legacy-{index}")
+            for index in range(2)
+        ]
+        for atom in atoms:
+            atom_path = store._path(atom)
+            atom_path.parent.mkdir(parents=True)
+            atom_path.write_text(atom.to_json(), encoding="utf-8")
+
+        assert store.load(atoms[0].atom_id) == atoms[0]
+        restarted = AtomTaskStore(store.root)
+        original_iterdir = Path.iterdir
+
+        def reject_root_scan(path):
+            if path == store.root:
+                raise AssertionError("complete legacy projection rescanned root")
+            return original_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", reject_root_scan)
+        assert restarted.load(atoms[1].atom_id) == atoms[1]
+
+    def test_restart_lookup_uses_projection_without_scanning_traj_dirs(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        store = _store(tmp_path)
+        for index in range(50):
+            (store.root / f"empty-{index:02d}").mkdir(parents=True)
+        atom = _atom(atom_id="atom_last_0001", traj_id="zz-last")
+        expected = store.save(atom)
+        restarted = AtomTaskStore(store.root)
+        original_iterdir = Path.iterdir
+
+        def reject_root_scan(path):
+            if path == store.root:
+                raise AssertionError("location lookup scanned trajectory root")
+            return original_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", reject_root_scan)
+
+        assert restarted.path_for_atom(atom.atom_id) == expected
+        assert restarted.load(atom.atom_id) == atom
+
+    def test_legacy_miss_scans_once_then_repairs_projection(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        store = _store(tmp_path)
+        atom = _atom(atom_id="atom_legacy_0001", traj_id="legacy")
+        atom_path = store._path(atom)
+        atom_path.parent.mkdir(parents=True)
+        atom_path.write_text(atom.to_json(), encoding="utf-8")
+
+        assert store.path_for_atom(atom.atom_id) == atom_path
+        original_iterdir = Path.iterdir
+
+        def reject_root_scan(path):
+            if path == store.root:
+                raise AssertionError("repaired lookup rescanned trajectory root")
+            return original_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", reject_root_scan)
+        assert store.path_for_atom(atom.atom_id) == atom_path
+
+    def test_stale_path_falls_back_and_repairs_external_move(self, tmp_path):
+        store = _store(tmp_path)
+        atom = _atom(atom_id="atom_move_0001", traj_id="before")
+        old_path = store.save(atom)
+        new_path = store.root / "after" / "tasks" / old_path.name
+        new_path.parent.mkdir(parents=True)
+        old_path.replace(new_path)
+
+        assert store.path_for_atom(atom.atom_id) == new_path
+        restarted = AtomTaskStore(store.root)
+        assert restarted.path_for_atom(atom.atom_id) == new_path
+
+    def test_corrupt_projection_is_rebuilt_from_atom_json(self, tmp_path):
+        store = _store(tmp_path)
+        atom = _atom(atom_id="atom_rebuild_0001", traj_id="rebuild")
+        atom_path = store.save(atom)
+        store._location_index_path().write_bytes(b"not sqlite")
+        restarted = AtomTaskStore(store.root)
+
+        assert restarted.path_for_atom(atom.atom_id) == atom_path
+        assert restarted.rebuild_location_index() == 1
+
+    def test_missing_atom_clears_stale_projection_row(self, tmp_path):
+        store = _store(tmp_path)
+        atom = _atom(atom_id="atom_deleted_0001", traj_id="deleted")
+        store.save(atom).unlink()
+
+        assert store.path_for_atom(atom.atom_id) is None
+        connection = store._location_connection()
+        try:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM atom_locations WHERE atom_id=?",
+                (atom.atom_id,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert count == 0
+
+
 class TestVectorIndex:
     def test_build_then_query_returns_top_k(self, tmp_path):
         store = _store(tmp_path)
