@@ -73,21 +73,41 @@ def compute_recommend_for_user(
     if not profile_centers:
         save_recommend_slots(user_key, [], fingerprint="no_profile", db_path=db_path)
         return []
+
+    # 每个中心独立召回，再按中心轮询取一个未出现过的技能。直接把第一个
+    # 中心的结果填满 top_k 会让后续兴趣永远没有机会进入推荐槽位。
+    center_hits = [
+        vector_index.search(center, top_k=top_k)
+        for center in profile_centers
+    ]
+    positions = [0] * len(center_hits)
     names: list[str] = []
     seen: set[str] = set()
-    for center in profile_centers:
-        for catalog_key, _score in vector_index.search(center, top_k=top_k):
-            name = _skill_name_from_index(vector_index, catalog_key)
-            if name in seen:
-                continue
-            seen.add(name)
-            names.append(name)
+    source_centers: list[int] = []
+    while len(names) < top_k:
+        progress = False
+        for center_index, hits in enumerate(center_hits):
+            while positions[center_index] < len(hits):
+                catalog_key, _score = hits[positions[center_index]]
+                positions[center_index] += 1
+                name = _skill_name_from_index(vector_index, catalog_key)
+                if name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+                source_centers.append(center_index)
+                progress = True
+                break
             if len(names) >= top_k:
                 break
-        if len(names) >= top_k:
+        if not progress:
             break
+    fingerprint = (
+        f"centers={len(profile_centers)};fusion=round_robin_v1;"
+        f"sources={','.join(map(str, source_centers))}"
+    )
     save_recommend_slots(
-        user_key, names, fingerprint=f"centers={len(profile_centers)}", db_path=db_path,
+        user_key, names, fingerprint=fingerprint, db_path=db_path,
     )
     return names
 
