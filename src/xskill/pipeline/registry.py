@@ -281,6 +281,43 @@ CREATE TABLE IF NOT EXISTS recommend_dirty (
     marked_at  TEXT NOT NULL
 );
 
+-- skills_catalog → vector index 增量同步队列。generation 是消费 fence：
+-- worker 只能清理自己实际处理的版本，并发晚到写入会保留到下一轮。
+CREATE TABLE IF NOT EXISTS catalog_vector_dirty (
+    catalog_key TEXT PRIMARY KEY,
+    generation  INTEGER NOT NULL DEFAULT 1,
+    dirty       INTEGER NOT NULL DEFAULT 1 CHECK(dirty IN (0,1)),
+    operation   TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
+    content_sha TEXT NOT NULL DEFAULT '',
+    marked_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_catalog_vector_dirty_marked
+    ON catalog_vector_dirty(dirty, marked_at, catalog_key);
+
+-- 全量向量对账水位：首次升级、模型/算法变化和低频修复时更新。
+CREATE TABLE IF NOT EXISTS catalog_vector_sync_meta (
+    singleton          INTEGER PRIMARY KEY CHECK(singleton=1),
+    model_fingerprint  TEXT NOT NULL DEFAULT '',
+    reconciled_at      REAL NOT NULL DEFAULT 0
+);
+
+-- 用户画像脏队列：generation 让“计算期间又发生变化”不会被旧任务误清。
+CREATE TABLE IF NOT EXISTS profile_dirty (
+    user_key    TEXT PRIMARY KEY,
+    generation  INTEGER NOT NULL DEFAULT 1,
+    reason      TEXT NOT NULL DEFAULT '',
+    marked_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_profile_dirty_marked
+    ON profile_dirty(marked_at, user_key);
+
+-- 画像算法/embedding 输入版本与低频全量对账水位。
+CREATE TABLE IF NOT EXISTS profile_refresh_meta (
+    singleton          INTEGER PRIMARY KEY CHECK(singleton=1),
+    input_fingerprint  TEXT NOT NULL DEFAULT '',
+    reconciled_at      REAL NOT NULL DEFAULT 0
+);
+
 -- P3-3.1 events:四类既有事实源的消费者(D7),通知+世界消息共用。
 -- kind: feedback(他人触发+ux打分) / push_edit(修改分支) / canary(裁决) / pin。
 -- targets 单独成表:一条事件可通知多个贡献者;世界消息 feed 直接读 events。
@@ -375,6 +412,17 @@ CREATE INDEX IF NOT EXISTS idx_acp_skill ON atom_candidate_pending(skill);
 CREATE TABLE IF NOT EXISTS atom_candidate_pending_meta (
     root_key      TEXT PRIMARY KEY,
     backfilled_at TEXT NOT NULL
+);
+
+-- SkillEdit 持久脏队列：候选写入只合并同一 skill 的 generation；watcher
+-- 以 compare-and-delete 确认已观察版本，避免编辑期间的新写入被旧任务误清。
+CREATE TABLE IF NOT EXISTS skill_edit_dirty (
+    root_key   TEXT NOT NULL,
+    skill      TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 1,
+    reason     TEXT NOT NULL DEFAULT '',
+    marked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (root_key, skill)
 );
 
 -- 纳入 / generate 发起人。首次写入生效，供自动灰度对象（与用量最多的用户取并）。
@@ -1201,12 +1249,28 @@ def retire_skill(*, skill_name: str, set_by: str,
                  db_path: Optional[Path] = None) -> None:
     """下线:停止分发与推荐,数据与 git 历史保留。幂等。"""
     with pooled_connection(db_path) as conn:
+        already_retired = conn.execute(
+            "SELECT 1 FROM skill_lifecycle WHERE skill_name=? AND state='retired'",
+            (skill_name,),
+        ).fetchone() is not None
         conn.execute(
             "INSERT INTO skill_lifecycle(skill_name,state,set_by) VALUES(?,?,?)"
             " ON CONFLICT(skill_name) DO UPDATE SET state='retired',"
             " set_by=excluded.set_by, ts=datetime('now')",
             (skill_name, "retired", set_by),
         )
+        if not already_retired:
+            rows = conn.execute(
+                "SELECT catalog_key FROM skills_catalog WHERE name=?",
+                (skill_name,),
+            ).fetchall()
+            from xskill.recommend.vector_dirty import (
+                mark_catalog_vector_dirty_on_connection,
+            )
+            for row in rows:
+                mark_catalog_vector_dirty_on_connection(
+                    conn, row["catalog_key"], operation="delete",
+                )
         conn.commit()
 
 
@@ -1215,6 +1279,30 @@ def unretire_skill(*, skill_name: str, db_path: Optional[Path] = None) -> bool:
     with pooled_connection(db_path) as conn:
         cur = conn.execute(
             "DELETE FROM skill_lifecycle WHERE skill_name=?", (skill_name,))
+        if cur.rowcount > 0:
+            from xskill.recommend.skill_vector_store import (
+                catalog_row_is_indexable,
+            )
+            from xskill.recommend.vector_dirty import (
+                mark_catalog_vector_dirty_on_connection,
+            )
+            rows = conn.execute(
+                """
+                SELECT catalog_key, name, source, description, content_sha,
+                       distributable
+                FROM skills_catalog WHERE name=?
+                """,
+                (skill_name,),
+            ).fetchall()
+            for row in rows:
+                stored = dict(row)
+                if catalog_row_is_indexable(stored):
+                    mark_catalog_vector_dirty_on_connection(
+                        conn,
+                        row["catalog_key"],
+                        operation="upsert",
+                        content_sha=row["content_sha"] or "",
+                    )
         conn.commit()
         return cur.rowcount > 0
 
@@ -1294,6 +1382,7 @@ def sync_atom_candidate_pending_for_skill(
     candidates: list,
     *,
     db_path: Optional[Path] = None,
+    dirty_root_key: str | None = None,
 ) -> None:
     """按某 skill 当前 candidates 快照替换其 pending 投影行。
 
@@ -1322,6 +1411,13 @@ def sync_atom_candidate_pending_for_skill(
                 """,
                 rows,
             )
+        if dirty_root_key is not None:
+            _mark_skill_edit_dirty_conn(
+                conn,
+                root_key=dirty_root_key,
+                skill=skill,
+                reason="candidates",
+            )
         conn.commit()
 
 
@@ -1329,11 +1425,19 @@ def delete_atom_candidate_pending_for_skill(
     skill: str,
     *,
     db_path: Optional[Path] = None,
+    dirty_root_key: str | None = None,
 ) -> None:
     with pooled_connection(db_path) as conn:
         conn.execute(
             "DELETE FROM atom_candidate_pending WHERE skill=?", (skill,),
         )
+        if dirty_root_key is not None:
+            _mark_skill_edit_dirty_conn(
+                conn,
+                root_key=dirty_root_key,
+                skill=skill,
+                reason="candidates_missing",
+            )
         conn.commit()
 
 
@@ -1354,7 +1458,10 @@ def notify_atom_pending_sync(
             )
             return
         sync_atom_candidate_pending_for_skill(
-            Path(skill_path).name, candidates, db_path=resolved,
+            Path(skill_path).name,
+            candidates,
+            db_path=resolved,
+            dirty_root_key=_atom_pending_root_key(Path(skill_path).parent),
         )
     except Exception:  # pylint: disable=broad-exception-caught
         logger.exception(
@@ -1381,6 +1488,129 @@ def notify_atom_pending_delete(
         logger.exception(
             "atom_candidate_pending delete failed: %s", skill,
         )
+
+
+def _mark_skill_edit_dirty_conn(
+    conn: sqlite3.Connection,
+    *,
+    root_key: str,
+    skill: str,
+    reason: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO skill_edit_dirty(root_key, skill, generation, reason)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT(root_key, skill) DO UPDATE SET
+            generation=skill_edit_dirty.generation + 1,
+            reason=excluded.reason,
+            marked_at=datetime('now')
+        """,
+        (root_key, skill, reason),
+    )
+
+
+def mark_skill_edit_dirty(
+    skill_path: Path | str,
+    *,
+    reason: str = "candidates",
+    db_path: Optional[Path] = None,
+) -> None:
+    """持久标记一个 skill；重复标记只递增 generation，不增加队列行。"""
+    path = Path(skill_path)
+    with pooled_connection(db_path) as conn:
+        _mark_skill_edit_dirty_conn(
+            conn,
+            root_key=_atom_pending_root_key(path.parent),
+            skill=path.name,
+            reason=reason,
+        )
+        conn.commit()
+
+
+def list_skill_edit_dirty(
+    skill_dir: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> list[dict]:
+    """返回一个 skill root 当前待检查的持久脏项。"""
+    root_key = _atom_pending_root_key(skill_dir)
+    with pooled_connection(db_path) as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT skill, generation, reason, marked_at "
+                "FROM skill_edit_dirty WHERE root_key=? ORDER BY skill",
+                (root_key,),
+            ).fetchall()
+        ]
+
+
+def skill_edit_dirty_generation(
+    skill_path: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> int | None:
+    """读取一个 skill 当前 generation；无脏项返回 ``None``。"""
+    path = Path(skill_path)
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT generation FROM skill_edit_dirty "
+            "WHERE root_key=? AND skill=?",
+            (_atom_pending_root_key(path.parent), path.name),
+        ).fetchone()
+    return None if row is None else int(row["generation"])
+
+
+def acknowledge_skill_edit_dirty(
+    skill_dir: Path | str,
+    skill: str,
+    generation: int,
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """仅确认仍是所观察 generation 的脏项，避免吞掉并发候选写入。"""
+    root_key = _atom_pending_root_key(skill_dir)
+    with pooled_connection(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM skill_edit_dirty "
+            "WHERE root_key=? AND skill=? AND generation=?",
+            (root_key, skill, int(generation)),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def reconcile_skill_edit_dirty(
+    skill_dir: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+) -> int:
+    """低频扫一次 skill root，为缺失的脏项补行；已有行不改 generation。"""
+    root = Path(skill_dir)
+    if not root.is_dir():
+        return 0
+    skill_names = sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+    if not skill_names:
+        return 0
+    root_key = _atom_pending_root_key(root)
+    with pooled_connection(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT INTO skill_edit_dirty(root_key, skill, generation, reason)
+            VALUES (?, ?, 1, 'reconcile')
+            ON CONFLICT(root_key, skill) DO NOTHING
+            """,
+            ((root_key, skill) for skill in skill_names),
+        )
+        inserted = conn.total_changes - before
+        conn.commit()
+    return inserted
 
 
 _ATOM_PENDING_BACKFILL_LOCK = threading.Lock()
@@ -2191,7 +2421,7 @@ def reset_not_fit_for_interest_change(
         return 0
     with pooled_connection(db_path) as conn:
         rows = conn.execute(
-            "SELECT t.id, t.filename, w.path FROM trajectories t "
+            "SELECT t.id, t.filename, t.user_key, w.path FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id "
             "WHERE t.status=? AND t.process_action=? "
             "AND (t.interest_fingerprint IS NULL OR t.interest_fingerprint != ?)",
@@ -2202,6 +2432,7 @@ def reset_not_fit_for_interest_change(
             ),
         ).fetchall()
         directories_seen: set[str] = set()
+        profile_store_roots: set[str] = set()
         trajectories_by_directory: dict[str, set[str]] = {}
         for row in rows:
             conn.execute(
@@ -2222,9 +2453,22 @@ def reset_not_fit_for_interest_change(
                 for atom_file in tasks_directory.glob("atom_*.json"):
                     atom_file.unlink()
             directories_seen.add(row["path"])
+            if row["user_key"]:
+                profile_store_roots.add(row["path"])
             trajectories_by_directory.setdefault(row["path"], set()).add(
                 trajectory_stem,
             )
+        if profile_store_roots:
+            from xskill.recommend.profile_dirty import (
+                mark_profile_dirty_on_connection,
+                profile_user_key_for_store_root,
+            )
+            for store_root in profile_store_roots:
+                mark_profile_dirty_on_connection(
+                    conn,
+                    profile_user_key_for_store_root(store_root),
+                    reason="atom_reset",
+                )
         conn.commit()
         from xskill.pipeline.atom import AtomTaskStore
         for directory_path, trajectory_ids in trajectories_by_directory.items():
@@ -2252,8 +2496,8 @@ def reset_trajectories(
     而不删 atom 文件 → ``last_offset ≥ EOF`` → TaskAgent 直接返回空 → 重拆失效
     （0.6.1a1 的洞）。因此本函数**必删 atom 文件**，这才是真正触发重拆的动作。
 
-    同时删该目录的 ``index.pkl``（atom 的向量索引）——否则 atom 已删而索引仍留
-    陈旧 embedding，cluster 阶段向量检索会命中已不存在的 atom。
+    同时删对应的 Atom 向量投影行和该目录的 ``index.pkl`` 兼容标记——否则
+    cluster 阶段向量检索可能命中已不存在的 atom。
 
     DB ``status`` 翻回 ``discovered`` 让 watcher 下轮重新排 split；轨迹级
     skill / canary / UX 派生字段一并清空，避免 rebuild 后看板继续挂旧 skill。
@@ -2267,7 +2511,7 @@ def reset_trajectories(
     """
     with pooled_connection(db_path) as conn:
         query_text = (
-            "SELECT t.id, t.filename, w.path FROM trajectories t "
+            "SELECT t.id, t.filename, t.user_key, w.path FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id WHERE 1=1"
         )
         query_parameters: list = []
@@ -2280,6 +2524,7 @@ def reset_trajectories(
         trajectory_rows = conn.execute(query_text, query_parameters).fetchall()
 
         directories_seen: set[str] = set()
+        profile_store_roots: set[str] = set()
         trajectories_by_directory: dict[str, set[str]] = {}
         for trajectory_row in trajectory_rows:
             conn.execute(
@@ -2306,17 +2551,30 @@ def reset_trajectories(
             conn.execute("DELETE FROM atom_adoption WHERE atom_id GLOB ?",
                          (f"atom_{trajectory_stem}_*",))
             directories_seen.add(trajectory_row["path"])
+            if trajectory_row["user_key"]:
+                profile_store_roots.add(trajectory_row["path"])
             trajectories_by_directory.setdefault(
                 trajectory_row["path"],
                 set(),
             ).add(trajectory_stem)
+        if profile_store_roots:
+            from xskill.recommend.profile_dirty import (
+                mark_profile_dirty_on_connection,
+                profile_user_key_for_store_root,
+            )
+            for store_root in profile_store_roots:
+                mark_profile_dirty_on_connection(
+                    conn,
+                    profile_user_key_for_store_root(store_root),
+                    reason="atom_reset",
+                )
         conn.commit()
         from xskill.pipeline.atom import AtomTaskStore
         for directory_path, trajectory_ids in trajectories_by_directory.items():
             AtomTaskStore(Path(directory_path)).remove_locations_for_trajs(
                 trajectory_ids,
             )
-        # 清各目录的陈旧向量索引（AtomTaskStore.INDEX_FILE = "index.pkl"）。
+        # 向量投影行已按轨迹清理；再删兼容发现标记，等待重拆后重新发布。
         for directory_path in directories_seen:
             index_path = Path(directory_path) / "index.pkl"
             if index_path.is_file():
