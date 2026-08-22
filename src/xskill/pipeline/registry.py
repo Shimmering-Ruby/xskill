@@ -281,6 +281,26 @@ CREATE TABLE IF NOT EXISTS recommend_dirty (
     marked_at  TEXT NOT NULL
 );
 
+-- skills_catalog → vector index 增量同步队列。generation 是消费 fence：
+-- worker 只能清理自己实际处理的版本，并发晚到写入会保留到下一轮。
+CREATE TABLE IF NOT EXISTS catalog_vector_dirty (
+    catalog_key TEXT PRIMARY KEY,
+    generation  INTEGER NOT NULL DEFAULT 1,
+    dirty       INTEGER NOT NULL DEFAULT 1 CHECK(dirty IN (0,1)),
+    operation   TEXT NOT NULL CHECK(operation IN ('upsert','delete')),
+    content_sha TEXT NOT NULL DEFAULT '',
+    marked_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_catalog_vector_dirty_marked
+    ON catalog_vector_dirty(dirty, marked_at, catalog_key);
+
+-- 全量向量对账水位：首次升级、模型/算法变化和低频修复时更新。
+CREATE TABLE IF NOT EXISTS catalog_vector_sync_meta (
+    singleton          INTEGER PRIMARY KEY CHECK(singleton=1),
+    model_fingerprint  TEXT NOT NULL DEFAULT '',
+    reconciled_at      REAL NOT NULL DEFAULT 0
+);
+
 -- P3-3.1 events:四类既有事实源的消费者(D7),通知+世界消息共用。
 -- kind: feedback(他人触发+ux打分) / push_edit(修改分支) / canary(裁决) / pin。
 -- targets 单独成表:一条事件可通知多个贡献者;世界消息 feed 直接读 events。
@@ -1212,12 +1232,28 @@ def retire_skill(*, skill_name: str, set_by: str,
                  db_path: Optional[Path] = None) -> None:
     """下线:停止分发与推荐,数据与 git 历史保留。幂等。"""
     with pooled_connection(db_path) as conn:
+        already_retired = conn.execute(
+            "SELECT 1 FROM skill_lifecycle WHERE skill_name=? AND state='retired'",
+            (skill_name,),
+        ).fetchone() is not None
         conn.execute(
             "INSERT INTO skill_lifecycle(skill_name,state,set_by) VALUES(?,?,?)"
             " ON CONFLICT(skill_name) DO UPDATE SET state='retired',"
             " set_by=excluded.set_by, ts=datetime('now')",
             (skill_name, "retired", set_by),
         )
+        if not already_retired:
+            rows = conn.execute(
+                "SELECT catalog_key FROM skills_catalog WHERE name=?",
+                (skill_name,),
+            ).fetchall()
+            from xskill.recommend.vector_dirty import (
+                mark_catalog_vector_dirty_on_connection,
+            )
+            for row in rows:
+                mark_catalog_vector_dirty_on_connection(
+                    conn, row["catalog_key"], operation="delete",
+                )
         conn.commit()
 
 
@@ -1226,6 +1262,30 @@ def unretire_skill(*, skill_name: str, db_path: Optional[Path] = None) -> bool:
     with pooled_connection(db_path) as conn:
         cur = conn.execute(
             "DELETE FROM skill_lifecycle WHERE skill_name=?", (skill_name,))
+        if cur.rowcount > 0:
+            from xskill.recommend.skill_vector_store import (
+                catalog_row_is_indexable,
+            )
+            from xskill.recommend.vector_dirty import (
+                mark_catalog_vector_dirty_on_connection,
+            )
+            rows = conn.execute(
+                """
+                SELECT catalog_key, name, source, description, content_sha,
+                       distributable
+                FROM skills_catalog WHERE name=?
+                """,
+                (skill_name,),
+            ).fetchall()
+            for row in rows:
+                stored = dict(row)
+                if catalog_row_is_indexable(stored):
+                    mark_catalog_vector_dirty_on_connection(
+                        conn,
+                        row["catalog_key"],
+                        operation="upsert",
+                        content_sha=row["content_sha"] or "",
+                    )
         conn.commit()
         return cur.rowcount > 0
 
