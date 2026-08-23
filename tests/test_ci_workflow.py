@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -9,6 +10,23 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CI_PATH = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_WORKFLOW_PATHS = tuple(
+    sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml"))
+)
+_OFFICIAL_ACTION_MAJORS = {
+    "actions/checkout": "v7",
+    "actions/setup-node": "v7",
+    "actions/setup-python": "v7",
+    "actions/upload-artifact": "v7",
+}
+_OFFICIAL_ACTION_COUNTS = Counter(
+    {
+        "actions/checkout": 13,
+        "actions/setup-python": 12,
+        "actions/upload-artifact": 2,
+        "actions/setup-node": 1,
+    }
+)
 
 
 def _jobs() -> dict:
@@ -17,6 +35,26 @@ def _jobs() -> dict:
 
 def _run_steps(job: dict) -> list[str]:
     return [str(step["run"]) for step in job["steps"] if "run" in step]
+
+
+def test_official_javascript_actions_use_node24_majors() -> None:
+    counts: Counter[str] = Counter()
+
+    for workflow_path in _WORKFLOW_PATHS:
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        for job in workflow["jobs"].values():
+            for step in job.get("steps", []):
+                uses = str(step.get("uses", ""))
+                action, separator, version = uses.partition("@")
+                if action not in _OFFICIAL_ACTION_MAJORS:
+                    continue
+                assert separator and version == _OFFICIAL_ACTION_MAJORS[action], (
+                    f"{workflow_path.name}: expected {action}"
+                    f"@{_OFFICIAL_ACTION_MAJORS[action]}, got {uses}"
+                )
+                counts[action] += 1
+
+    assert counts == _OFFICIAL_ACTION_COUNTS
 
 
 def test_ut_matrix_covers_each_supported_risk_axis_once() -> None:
