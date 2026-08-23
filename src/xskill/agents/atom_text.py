@@ -38,8 +38,25 @@ _PATH_TOKEN_RE = re.compile(
     r"swift|c|cc|cpp|h|hpp)(?!\w)",
     re.IGNORECASE,
 )
+_TECHNICAL_IDENTIFIER_RE = re.compile(
+    r"\b(?:"
+    r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|"
+    r"[A-Z][A-Z0-9_]{1,}|"
+    r"[A-Za-z]+(?:[A-Z][A-Za-z0-9]*)+"
+    r")\b"
+)
 _EN_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+_ZH_PROSE_CUE_RE = re.compile(
+    r"请|帮(?:我|忙)?|把|将|需要|能否|是否|如何|怎么|为什么|"
+    r"修复|优化|增加|添加|删除|修改|更新|检查|支持|实现|保持|"
+    r"改成|调整|继续|完成|生成|这个|那个|的"
+)
+_EN_PROSE_CUE_RE = re.compile(
+    r"\b(?:please|can|could|would|should|fix|create|update|add|remove|"
+    r"change|implement|improve|keep|continue|need|want|the|this|that)\b",
+    re.IGNORECASE,
+)
 
 # Keep this list intentionally small: it normalizes grammatical filler and the
 # generic verbs/nouns that produced the known #21 utility/helper duplicate.  It
@@ -55,6 +72,7 @@ _EN_STOPWORDS = {
     "of",
     "on",
     "requested",
+    "reusable",
     "same",
     "task",
     "the",
@@ -80,9 +98,9 @@ _EN_CANONICAL = {
     "written": "create",
     "writing": "create",
 }
-_CONTINUATION_RE = re.compile(
-    r"(?:\b(?:continue|it|keep|still|that|the\s+(?:helper|utility)|this)\b|"
-    r"这个|那个|它|继续|还是|仍然|刚才|刚刚|同一个|不要另|补充|再完善)",
+_STRONG_CONTINUATION_RE = re.compile(
+    r"(?:\b(?:continue|keep|still|same|the\s+(?:helper|utility))\b|"
+    r"继续|还是|仍然|刚才|刚刚|同一个|不要另|补充|再完善)",
     re.IGNORECASE,
 )
 
@@ -90,7 +108,7 @@ _CONTINUATION_RE = re.compile(
 # ``en-near-duplicate-observation`` case plus distinct CSV/JSON and
 # login/logout controls in the unit tests.
 _MIN_INTENT_TOKENS = 3
-_INTENT_CONTAINMENT_MIN = 0.80
+_INTENT_CONTAINMENT_MIN = 1.0
 _COMBINED_CONTAINMENT_MIN = 0.75
 _INTENT_JACCARD_MIN = 0.70
 
@@ -108,10 +126,11 @@ def strip_technical_text(text: str) -> str:
 def detect_source_language(text: str) -> str:
     """Return ``zh``, ``en``, or ``unknown`` for natural-language text.
 
-    CJK characters carry more lexical information than individual Latin letters,
-    so the same 20% CJK threshold used by the offline replay baseline is applied.
+    Code-like identifiers are ignored and common prose cues disambiguate mixed
+    technical requests before falling back to the replay baseline's 20% CJK
+    threshold.
     """
-    natural = strip_technical_text(text)
+    natural = _TECHNICAL_IDENTIFIER_RE.sub(" ", strip_technical_text(text))
     cjk = sum(
         "\u3400" <= char <= "\u4dbf" or "\u4e00" <= char <= "\u9fff" for char in natural
     )
@@ -122,11 +141,17 @@ def detect_source_language(text: str) -> str:
         and not ("\u3400" <= char <= "\u4dbf" or "\u4e00" <= char <= "\u9fff")
         for char in natural
     )
-    if other > max(cjk, latin):
+    if other > max(cjk, latin) or (
+        other > 0 and other * 2 >= cjk and other >= latin
+    ):
         return "unknown"
     total = cjk + latin
     if total == 0:
         return "unknown"
+    zh_cue = bool(_ZH_PROSE_CUE_RE.search(natural))
+    en_cue = bool(_EN_PROSE_CUE_RE.search(natural))
+    if zh_cue != en_cue:
+        return "zh" if zh_cue else "en"
     return "zh" if cjk / total >= 0.20 else "en"
 
 
@@ -183,9 +208,9 @@ def adjacent_atoms_are_near_duplicates(
     """High-precision lexical duplicate check for adjacent submitted Atoms.
 
     The check requires substantial intent and combined intent/summary containment.
-    A lower lexical-Jaccard shape is only accepted when the new user turn contains
-    an explicit continuation/reference cue.  This avoids merging merely related
-    sibling tasks such as CSV vs JSON utilities.
+    The smaller intent must be fully contained by the larger one and the new user
+    turn must carry a strong continuation cue.  This avoids silently merging
+    merely related sibling tasks that differ by one domain term.
     """
     previous_intent = _lexical_tokens(str(previous.get("intent") or ""))
     current_intent = _lexical_tokens(str(current.get("intent") or ""))
@@ -203,9 +228,9 @@ def adjacent_atoms_are_near_duplicates(
     if _containment(previous_combined, current_combined) < _COMBINED_CONTAINMENT_MIN:
         return False
 
-    return _jaccard(previous_intent, current_intent) >= _INTENT_JACCARD_MIN or bool(
-        _CONTINUATION_RE.search(strip_technical_text(current_user_text))
-    )
+    if not _STRONG_CONTINUATION_RE.search(strip_technical_text(current_user_text)):
+        return False
+    return _jaccard(previous_intent, current_intent) >= _INTENT_JACCARD_MIN
 
 
 def stable_union(left: Iterable[Any], right: Iterable[Any]) -> list[str]:

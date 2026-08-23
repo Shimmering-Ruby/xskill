@@ -607,8 +607,44 @@ class TestSubmitValidation:
         assert atoms[0].intent == "Deploy the service"
         assert "source_language: en" in factory.captured["user_msg"]
 
+    def test_chinese_request_with_technical_identifiers_stays_chinese(self, tmp_path):
+        traj_dir = tmp_path / "cc-sessions"
+        traj_dir.mkdir()
+        traj_path = traj_dir / "traj_technical.md"
+        traj_path.write_text(
+            "## User\n\n"
+            "请把 atom_candidate_pending 的 PRIMARY KEY 改成 atom_id 和 skill。\n\n"
+            "## Assistant\n\n已完成。\n",
+            encoding="utf-8",
+        )
+        store = AtomTaskStore(root=traj_dir)
+        factory = _scripted_factory([
+            dict(
+                start_line=1,
+                intent="修改待处理 Atom 的联合主键",
+                summary="将待处理关联改为 Atom 与 Skill 的联合主键。",
+                ux_score=8,
+            ),
+        ])
+
+        atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
+            traj_id="traj_technical", traj_path=traj_path)
+
+        assert factory.captured["results"] == [
+            "ok: 已记录 atom #1 (start_line=1)"
+        ]
+        assert "source_language: zh" in factory.captured["user_msg"]
+        assert len(atoms) == 1
+
     def test_adjacent_near_duplicates_merge_metadata_and_ranges(self, tmp_path):
         traj_path, store = self._setup(tmp_path)
+        traj_path.write_text(
+            _TRAJ_MD.replace(
+                "Now redesign the frontend.",
+                "Keep improving the same Python file helper.",
+            ),
+            encoding="utf-8",
+        )
         factory = _scripted_factory([
             dict(
                 start_line=5,
@@ -663,6 +699,45 @@ class TestSubmitValidation:
 
         assert len(atoms) == 2
         assert atoms[0].offset_end == atoms[1].offset_start == 17
+
+    def test_merged_submission_still_advances_start_line_guard(self, tmp_path):
+        traj_path, store = self._setup(tmp_path)
+        traj_path.write_text(
+            _TRAJ_MD.replace(
+                "Now redesign the frontend.",
+                "Keep improving the same Python file helper.",
+            ),
+            encoding="utf-8",
+        )
+        factory = _scripted_factory([
+            dict(
+                start_line=5,
+                intent="Create a Python file utility",
+                summary="Write the requested reusable file helper.",
+                ux_score=8,
+            ),
+            dict(
+                start_line=17,
+                intent="Build a reusable Python file helper",
+                summary="The later turns continue the same file-helper task.",
+                ux_score=7,
+            ),
+            dict(
+                start_line=5,
+                intent="Create a JSON parser utility",
+                summary="Parse JSON payloads in a separate utility.",
+                ux_score=8,
+            ),
+        ])
+
+        atoms = TaskAgent(agno_agent_factory=factory, store=store).run(
+            traj_id="traj_e", traj_path=traj_path)
+
+        assert factory.captured["results"][1].startswith("ok:")
+        assert "已合并" in factory.captured["results"][1]
+        assert factory.captured["results"][2].startswith("error:")
+        assert "上一条 (17)" in factory.captured["results"][2]
+        assert len(atoms) == 1
 
 
 # ────────────────────────────────────────────────────────────────────

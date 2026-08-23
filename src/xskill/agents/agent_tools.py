@@ -1617,6 +1617,7 @@ def make_task_agent_tools(
     valid = set(valid_lines)
     ordered_valid = sorted(valid_lines)
     source_user_blocks = dict(user_blocks or {})
+    last_valid_start_line: int | None = None
 
     @tool(name="submit_atom")
     def submit_atom(start_line: int, intent: str, summary: str,
@@ -1633,6 +1634,7 @@ def make_task_agent_tools(
             used_skills: agent 实际触发的 skill 名列表,没有传 []。
             ux_score: 1~10 整数。
         """
+        nonlocal last_valid_start_line
         if not_fit_reasons:
             return (
                 "error: 已调用 mark_not_fit，不能再调用 submit_atom；"
@@ -1648,9 +1650,9 @@ def make_task_agent_tools(
         if sl < resume_line:
             return (f"error: start_line {sl} < 续接点 {resume_line}；"
                     "只能拆续接点之后的新增内容")
-        if submitted and sl <= submitted[-1]["start_line"]:
+        if last_valid_start_line is not None and sl <= last_valid_start_line:
             return (f"error: start_line 必须严格大于上一条 "
-                    f"({submitted[-1]['start_line']})，本次 {sl}")
+                    f"({last_valid_start_line})，本次 {sl}")
         normalized_intent = (intent or "").strip()
         normalized_summary = (summary or "").strip()
         if not normalized_intent or not normalized_summary:
@@ -1677,6 +1679,10 @@ def make_task_agent_tools(
                             if str(s).strip()],
             "ux_score": ux_score,
         }
+        # A merged candidate is still a consumed boundary proposal.  Track it
+        # separately from ``submitted`` so a later out-of-order call cannot slip
+        # behind the merged line and corrupt derived ranges.
+        last_valid_start_line = sl
         if submitted and adjacent_atoms_are_near_duplicates(
             submitted[-1],
             candidate,

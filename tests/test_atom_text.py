@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from xskill.agents.atom_text import (
     detect_source_language,
     output_language_matches,
 )
+from scripts.bench.algorithm_replay.evaluate import evaluate_suite
 
 
 @pytest.mark.parametrize(
@@ -23,7 +25,14 @@ from xskill.agents.atom_text import (
         ("```bash\npytest tests/test_agent.py\n```", "unknown"),
         ("```bash\npytest tests/test_agent.py", "unknown"),
         ("Make the user interface responsive.", "en"),
+        (
+            "请把 atom_candidate_pending 的 PRIMARY KEY 改成 atom_id 和 skill。",
+            "zh",
+        ),
+        ("请优化 ContextManager token cache performance。", "zh"),
+        ("Fix 登录 API", "en"),
         ("このテストを修正してください。", "unknown"),
+        ("日本語のテストを修正", "unknown"),
     ],
 )
 def test_source_language_ignores_code_paths_and_commands(text, expected):
@@ -34,6 +43,9 @@ def test_opposite_output_language_is_rejected_but_technical_text_is_allowed():
     assert output_language_matches("Create a reusable helper.", "en")
     assert not output_language_matches("创建可复用工具。", "en")
     assert output_language_matches("`src/xskill/agents/task_agent.py`", "en")
+    assert output_language_matches(
+        "请优化 ContextManager token cache performance。", "zh"
+    )
 
 
 def test_replay_near_duplicate_is_detected_without_model_calls():
@@ -60,6 +72,39 @@ def test_replay_near_duplicate_is_detected_without_model_calls():
     )
 
 
+def test_replay_duplicate_merge_improves_segmentation_without_coverage_loss():
+    fixture = (
+        Path(__file__).parent.parent
+        / "scripts"
+        / "bench"
+        / "algorithm_replay"
+        / "fixtures"
+        / "baseline_v1.json"
+    )
+    suite = json.loads(fixture.read_text(encoding="utf-8"))
+    before = evaluate_suite(deepcopy(suite))["metrics"]
+    case = next(
+        case
+        for case in suite["cases"]
+        if case["case_id"] == "en-near-duplicate-observation"
+    )
+    previous, current = case["predicted_atoms"]
+    merged = {
+        **previous,
+        "end_line": max(previous["end_line"], current["end_line"]),
+    }
+    case["predicted_atoms"] = [merged]
+
+    after = evaluate_suite(suite)["metrics"]
+
+    assert after["duplicate_rate"] < before["duplicate_rate"]
+    assert after["overlap_rate"] < before["overlap_rate"]
+    assert after["segmentation"]["pk"] < before["segmentation"]["pk"]
+    assert after["segmentation"]["window_diff"] < before["segmentation"]["window_diff"]
+    assert after["coverage"] == before["coverage"] == 1.0
+    assert after["language_consistency"] == before["language_consistency"] == 1.0
+
+
 @pytest.mark.parametrize(
     ("previous", "current", "user_text"),
     [
@@ -72,6 +117,28 @@ def test_replay_near_duplicate_is_detected_without_model_calls():
             {"intent": "Fix login validation", "summary": "Validate login."},
             {"intent": "Fix logout validation", "summary": "Validate logout."},
             "Now fix logout validation.",
+        ),
+        (
+            {
+                "intent": "Create password reset email template",
+                "summary": "Create the email template for password reset requests.",
+            },
+            {
+                "intent": "Create password reset email endpoint",
+                "summary": "Create the email endpoint for password reset requests.",
+            },
+            "Now implement this endpoint.",
+        ),
+        (
+            {
+                "intent": "Create password reset HTML email template",
+                "summary": "Create an HTML email template for password resets.",
+            },
+            {
+                "intent": "Create password reset SMS email template",
+                "summary": "Create an SMS email template for password resets.",
+            },
+            "Continue with this SMS variant.",
         ),
     ],
 )

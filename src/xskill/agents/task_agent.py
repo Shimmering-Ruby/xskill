@@ -406,6 +406,11 @@ class TaskAgent:
 
         prior_atoms = self.store.list_by_traj(traj_id)
         prior_atom = prior_atoms[-1] if prior_atoms else None
+        # Do not feed ``prior_atom`` into the in-run deduper.  A persisted Atom
+        # may already have been embedded, clustered, and consumed by SkillEdit;
+        # mutating it here would require an explicit downstream invalidation and
+        # replay transaction.  This PR only compacts adjacent submissions within
+        # one TaskAgent run.
         valid_lines = [ln for ln, _ in new_queries]
 
         submitted = self._run_agent(
