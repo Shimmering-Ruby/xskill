@@ -188,12 +188,25 @@ def build_chat_model(
                              connect=min(connect_timeout, request_timeout))
     client_max_retries = int(llm_cfg.get("client_max_retries", 0) or 0)
 
+    # Keep the agentic Agno path aligned with ``LLMClient`` and the public
+    # config template.  Previously these documented settings were silently
+    # dropped, so providers used their own temperature/output defaults.
+    max_tokens = int(llm_cfg.get("max_tokens", 10000))
+    if max_tokens <= 0:
+        raise ValueError("llm.max_tokens must be a positive integer")
+    temperature = float(llm_cfg.get("temperature", 0.0))
+    extra_body = llm_cfg.get("extra_body")
+    if extra_body is not None and not isinstance(extra_body, dict):
+        raise ValueError("llm.extra_body must be a mapping")
+
     common_kwargs = dict(
         id=model_id,
         base_url=llm_cfg.get("base_url", ""),
         api_key=api_key,
         timeout=timeout,
         max_retries=client_max_retries,
+        max_tokens=max_tokens,
+        temperature=temperature,
         role_map={
             "system": "system",
             "user": "user",
@@ -202,6 +215,12 @@ def build_chat_model(
             "model": "assistant",
         },
     )
+    if extra_body is not None:
+        # ``extra_body`` is the OpenAI SDK's explicit extension point for
+        # provider-owned options (for example llama.cpp/Qwen chat-template
+        # flags).  Copy the top-level mapping so model construction cannot
+        # mutate the caller's config object.
+        common_kwargs["extra_body"] = dict(extra_body)
 
     if "api.deepseek.com" in base_url:
         from agno.models.deepseek import DeepSeek
