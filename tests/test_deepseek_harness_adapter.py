@@ -301,6 +301,8 @@ class TestIngest:
 
         monkeypatch.setattr(builtins, "__import__", _no_zstd)
         monkeypatch.setattr(dsh_mod, "_ZSTD_MISSING_WARNED", False)
+        monkeypatch.setattr(dsh_mod, "ensure_zstandard_for_dsh", lambda *_a, **_k: False)
+        monkeypatch.setattr(dsh_mod, "zstandard_available", lambda: False)
 
         z1 = tmp_path / ".dsh" / "sessions" / "--p--" / "z1"
         z2 = tmp_path / ".dsh" / "sessions" / "--p--" / "z2"
