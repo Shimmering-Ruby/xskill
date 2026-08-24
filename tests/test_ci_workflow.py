@@ -95,6 +95,17 @@ def test_smoke_runs_all_contracts_once_per_platform_without_agent_clis() -> None
     assert "opencode-ai" not in commands
 
 
+def test_team_lifecycle_job_runs_connect_and_team_cs_e2e_together() -> None:
+    job = _jobs()["connect-lifecycle-e2e"]
+    test_commands = [command for command in _run_steps(job) if "pytest " in command]
+
+    assert "if" not in job
+    assert len(test_commands) == 1
+    command = test_commands[0]
+    assert "tests/e2e/test_connect_lifecycle_e2e.py" in command
+    assert "tests/e2e/test_team_cs_e2e.py" in command
+
+
 def test_live_agent_trigger_scope_and_cli_versions_are_explicit() -> None:
     job = _jobs()["live-agent-e2e"]
     matrix = job["strategy"]["matrix"]

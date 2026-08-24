@@ -9,7 +9,7 @@
 | **UT + IT** | 纯逻辑、状态机、持久化与模块协作 | ❌ | ❌ | Ubuntu × Python 3.9–3.12，macOS / Windows × Python 3.11，共 6 jobs |
 | **SkillEdit BDD** | 通过本地 aimock 验证 SkillEdit 行为场景 | ❌ | ❌ | Ubuntu × Python 3.11，共 1 job |
 | **Smoke E2E** | fixture 轨迹 → ingester → installer，验证三种生态路径 | ❌ | ❌ | 三个平台各运行完整测试文件，共 3 jobs |
-| **Connect lifecycle E2E** | 本地 stub 下的 connect 生命周期 | ❌ | ❌ | Ubuntu × Python 3.11，共 1 job |
+| **Team lifecycle E2E** | 本地 fake LLM 下的 connect 生命周期与 Team C/S 完整闭环 | ❌ | ❌ | Ubuntu × Python 3.11，共 1 job |
 | **Live-agent E2E** | mock LLM 驱动真实 Codex / OpenCode 进程并采集会话 | ❌ | ✅ | PR/main 为 Ubuntu × 2 agents，共 2 jobs |
 | **Real-LLM E2E** | 用 DeepSeek 验证真实模型边界 | ✅ | ❌ | 非 PR 事件的 Linux job；无密钥时安全跳过 |
 | **Control-plane stress** | 300×300 压力与 nightly 标记用例 | ❌ | ❌ | 独立 nightly workflow，不阻塞常规 PR |
@@ -26,7 +26,7 @@
 
 ### 触发表
 
-| 事件 | UT + IT | BDD | Smoke / Connect | Live-agent | Real-LLM | Build |
+| 事件 | UT + IT | BDD | Smoke / Team lifecycle | Live-agent | Real-LLM | Build |
 | --- | :--: | :--: | :--: | :--: | :--: | :--: |
 | `pull_request` to main | ✅ 6 | ✅ 1 | ✅ 3 + 1 | ✅ Ubuntu × 2 | ❌ | ✅ 1 |
 | `push` to main | ✅ 6 | ✅ 1 | ✅ 3 + 1 | ✅ Ubuntu × 2 | ✅ 1 | ✅ 1 |
@@ -97,7 +97,7 @@ pytest tests/ --ignore=tests/e2e --ignore=tests/bdd -q -m "not nightly" --durati
 ```bash
 XSKILL_AIMOCK_E2E=1 pytest tests/bdd -v --timeout=120 --durations=25
 pytest tests/e2e/test_smoke.py -v --durations=25
-pytest tests/e2e/test_connect_lifecycle_e2e.py -v --durations=25
+pytest tests/e2e/test_connect_lifecycle_e2e.py tests/e2e/test_team_cs_e2e.py -v --durations=25
 ```
 
 涉及 ingestion、install 或 daemon 的代码改动还必须按贡献指南运行 `make e2e`。live-agent 测试需要本机安装对应 CLI，并显式覆盖 pytest 的默认 `tests/live` 忽略设置。
