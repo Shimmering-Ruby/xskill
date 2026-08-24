@@ -24,6 +24,7 @@ v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
@@ -206,6 +207,16 @@ class DirectoryWatcher:
             name: BoundedExecutor(name, int(self.pool_config[name]["workers"]))
             for name in ("split", "cluster", "edit", "embed")
         }
+        # TaskScope writes are intentionally serialized: generation publication,
+        # override replay and SQLite projection share one transaction boundary.
+        self._task_graph_pool = BoundedExecutor("task_graph", 1)
+        from xskill.tasks.service import TaskGraphService
+        self._task_graph_service = TaskGraphService(
+            state_root=xskill_state_root,
+            db_path=Path(db_path) if db_path is not None else None,
+            server_mode=self.server_mode,
+            config=self.config,
+        )
         self.cluster_write_queue = ClusterWriteQueue()
         self._futures: dict[Future, dict] = {}
         # Only the watcher thread mutates these scheduling collections.
@@ -239,6 +250,7 @@ class DirectoryWatcher:
             "atoms_clustered": 0,    # v2: 累计 cluster 调用次数
             "skills_edited": 0,      # v2: 触发的 SkillEdit 次数
             "scores": 0, "errors": 0, "retries": 0,
+            "task_graph_generations": 0,
         }
         # generate 与 SkillEdit 共用 edit 池；完成/失败单独记，给流水线第四栏。
         self._generate_completed = 0
@@ -262,6 +274,7 @@ class DirectoryWatcher:
         # SHUTTING_DOWN 事件叫停（agno_factory 重试循环），不在这里等。
         for pool in self._pools.values():
             pool.shutdown(wait=False, cancel_futures=True)
+        self._task_graph_pool.shutdown(wait=False, cancel_futures=True)
         self.cluster_write_queue.shutdown(wait=False)
         logger.info("watcher stopped")
 
@@ -302,6 +315,10 @@ class DirectoryWatcher:
             "heartbeat_at": time.time(),
             "watcher": self.stats,
             "pools": {name: pool.status for name, pool in self._pools.items()},
+            "task_graph": {
+                "enabled": self._task_graph_service.enabled,
+                **self._task_graph_pool.status,
+            },
             # 看板「流水线」页配置 chip 的展示值（席位/配额比/批量）；
             # 配置键不变，热更在 P1 另行评审。
             "pool_config": {
@@ -464,6 +481,7 @@ class DirectoryWatcher:
         # 全部 watch_dir 共用一个 pending/claimed 队列；持续提交到 cluster 池满。
         # 最后不足 batch_size 的尾批也立即提交。
         self._submit_cluster_batches()
+        self._submit_task_graph()
 
         # ── Step 5a: 用户点名的 generate 入队到 SkillEdit 同一线程池 ──
         # 先于自动 SkillEdit 提交，避免后台整理把用户任务挤到池外。
@@ -501,6 +519,35 @@ class DirectoryWatcher:
         # CS 模式的分桶在 client 的 reconcile_skill_sides 里按 client_id 做。
         if not self.server_mode:
             self._reconcile_skill_sides()
+
+    def _submit_task_graph(self) -> None:
+        """Run the durable semantic branch without delaying Atom→Skill work."""
+        if not self._task_graph_service.enabled:
+            return
+        if any(info.get("stage") == "task_graph" for info in self._futures.values()):
+            return
+        try:
+            from xskill.tasks.projection import (
+                list_dirty_task_scopes,
+                list_dirty_sources,
+            )
+            self._task_graph_service.ensure_backfill_enqueued()
+            if (
+                not list_dirty_sources(limit=1, db_path=self.db_path)
+                and not list_dirty_task_scopes(
+                    limit=1, db_path=self.db_path,
+                )
+            ):
+                return
+        except Exception:
+            logger.warning("Task Graph dirty reconciliation failed", exc_info=True)
+            return
+        future = self._task_graph_pool.submit(
+            self._task_graph_service.process_dirty,
+            task={"kind": "task_graph_rebuild"},
+        )
+        if future is not None:
+            self._futures[future] = {"stage": "task_graph"}
 
     def _submit_generate_jobs(self):
         """把 web 进程入队的 generate 任务提交到 SkillEdit 同一线程池。
@@ -2562,6 +2609,21 @@ class DirectoryWatcher:
                     from xskill.team.server import generate_jobs as gen_jobs
                     gen_jobs.finish_claim(self.logs_dir, job_id)
                 continue
+            if stage == "task_graph":
+                try:
+                    result = fut.result(timeout=0)
+                    self._stats["task_graph_generations"] += int(
+                        result.get("scopes", 0)
+                    )
+                    self._stats["errors"] += len(
+                        result.get("failed_scopes") or ()
+                    )
+                except Exception:
+                    self._stats["errors"] += 1
+                    logger.exception(
+                        "Task Graph rebuild failed; durable dirty sources remain queued"
+                    )
+                continue
             if stage == "skill_edit":
                 # SkillEditAgent.maybe_run() 自己吞异常返回 (d, False)——正常
                 # 不会走到 except，这里兜底仅防池化层面的意外（cancel 等）。
@@ -2667,6 +2729,7 @@ class DirectoryWatcher:
                         self._do_split,
                         dir_path,
                         fname,
+                        wd_id,
                         task={
                             "kind": "traj",
                             "traj_id": (dir_path / fname).stem,
@@ -2794,7 +2857,7 @@ class DirectoryWatcher:
 
     # v2 流水线任务：split / atom_index / cluster
 
-    def _do_split(self, dir_path, fname):
+    def _do_split(self, dir_path, fname, wd_id=None):
         """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id, err)。
 
         v2.3: TaskAgent 走 agentic 工具调用（submit_atom/readfile/grep），用
@@ -2836,16 +2899,43 @@ class DirectoryWatcher:
             usage_ledger=self.usage_ledger,
             registry_db_path=self.db_path,
         )
+        usage_scope = {}
+        if wd_id is not None and self._task_graph_service.enabled:
+            try:
+                from xskill.tasks.projection import live_source_row
+                source_row = live_source_row(
+                    int(wd_id), fname, db_path=self.db_path,
+                )
+                if source_row is not None:
+                    watch_dir, trajectory = source_row
+                    scope = self._task_graph_service.resolver.resolve(
+                        watch_dir=watch_dir, trajectory=trajectory,
+                    )
+                    usage_scope = {
+                        "tenant_id": scope.tenant_id,
+                        "task_scope_id": scope.task_scope_id,
+                        "source_scope_id": scope.source_scope_id,
+                        "traj_id": traj_id,
+                        "allocation_mode": "direct",
+                    }
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.debug("split usage scope unavailable", exc_info=True)
+        from xskill.usage import use_processing_scope
         try:
-            with agent_tools.use_agent_tool_context(tool_context):
-                atoms = TaskAgent(
-                    agno_agent_factory=self._factory(),
-                    store=store,
-                    traj_root=dir_path,
-                    skill_dir=self.skill_dir,
-                    interests=current_interests,
-                    logs_dir=self.logs_dir,
-                ).run(traj_id=traj_id, traj_path=md_path)
+            scope_context = (
+                use_processing_scope(**usage_scope)
+                if usage_scope else contextlib.nullcontext()
+            )
+            with scope_context:
+                with agent_tools.use_agent_tool_context(tool_context):
+                    atoms = TaskAgent(
+                        agno_agent_factory=self._factory(),
+                        store=store,
+                        traj_root=dir_path,
+                        skill_dir=self.skill_dir,
+                        interests=current_interests,
+                        logs_dir=self.logs_dir,
+                    ).run(traj_id=traj_id, traj_path=md_path)
         except TrajectoryNotFit as not_fit_error:
             logger.info(
                 "⊘ split not_fit %s（interest_fingerprint=%s）: %s",
@@ -3073,6 +3163,16 @@ class DirectoryWatcher:
             tasks_extracted=total_atoms, **kw,
         )
         self._stats["atoms_extracted"] += n_atoms
+        if wd_id is not None:
+            try:
+                self._task_graph_service.mark_dirty(
+                    wd_id, fname, reason="atom_split",
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Task Graph dirty mark failed after split %s", fname,
+                    exc_info=True,
+                )
         if n_atoms:
             try:
                 from xskill.recommend.profile_dirty import (
