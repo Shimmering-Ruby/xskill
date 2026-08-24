@@ -1057,6 +1057,91 @@ def test_retry_inside_one_atom_creates_line_scoped_attempts(tmp_path):
     ) == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize(
+    "correction_text",
+    (
+        "不对，根因是缺少数据库索引，请回退超时改动",
+        "错了，请回退刚才的修改并添加数据库索引",
+        "刚才的方向有误，请改为添加数据库索引",
+    ),
+)
+def test_correction_inside_one_atom_creates_line_scoped_attempts(
+    tmp_path, correction_text,
+):
+    db_path = tmp_path / "registry.db"
+    source = _add_source(
+        tmp_path,
+        db_path,
+        source_name="intra-atom-correction",
+        atoms=[{"intent": "修复登录问题", "summary": "纠正方案后完成修复"}],
+    )
+    raw_segment = (
+        "## User\n修复登录问题\n\n"
+        "## Assistant\n把请求超时改成 30 秒\n\n"
+        f"## User\n{correction_text}\n\n"
+        "## Assistant\n已回退并添加索引\n"
+    )
+    atom_store = AtomTaskStore(tmp_path / "trajectories")
+    atom = atom_store.list_by_traj("traj_intra-atom-correction")[0]
+    atom.raw_segment = raw_segment
+    atom.offset_start = 1
+    atom.offset_end = len(raw_segment.splitlines()) + 1
+    atom_store.save(atom)
+
+    service = _build(tmp_path, db_path, [source])
+    tenant_id = service.resolver.tenant_id
+    task = list_logical_tasks(tenant_id, db_path=db_path)[0]
+    detail = get_logical_task(
+        tenant_id, task["task_scope_id"], task["task_id"], db_path=db_path,
+    )
+
+    assert len(detail["attempts"]) == 2
+    assert len(detail["evidence_ranges"]) == 2
+    assert len(detail["attempt_relations"]) == 1
+    assert detail["attempt_relations"][0]["relation_type"] == "correction_of"
+    assert detail["attempt_relations"][0]["decision"] == "confirmed"
+
+
+@pytest.mark.parametrize(
+    "ordinary_text",
+    (
+        "使用不对称加密保护登录凭据",
+        "检查这个答案对不对",
+        "如果结果不对，请保留诊断日志",
+    ),
+)
+def test_non_correction_phrases_do_not_split_attempts(tmp_path, ordinary_text):
+    db_path = tmp_path / "registry.db"
+    source = _add_source(
+        tmp_path,
+        db_path,
+        source_name="not-a-correction",
+        atoms=[{"intent": "完善登录安全", "summary": "检查安全方案"}],
+    )
+    raw_segment = (
+        "## User\n完善登录安全\n\n"
+        "## Assistant\n开始检查\n\n"
+        f"## User\n{ordinary_text}\n\n"
+        "## Assistant\n检查完成\n"
+    )
+    atom_store = AtomTaskStore(tmp_path / "trajectories")
+    atom = atom_store.list_by_traj("traj_not-a-correction")[0]
+    atom.raw_segment = raw_segment
+    atom.offset_start = 1
+    atom.offset_end = len(raw_segment.splitlines()) + 1
+    atom_store.save(atom)
+
+    service = _build(tmp_path, db_path, [source])
+    tenant_id = service.resolver.tenant_id
+    task = list_logical_tasks(tenant_id, db_path=db_path)[0]
+    detail = get_logical_task(
+        tenant_id, task["task_scope_id"], task["task_id"], db_path=db_path,
+    )
+
+    assert len(detail["attempts"]) == 1
+    assert detail["attempt_relations"] == []
+
+
 def test_failed_attempt_does_not_close_logical_task(tmp_path):
     db_path = tmp_path / "registry.db"
     source = _add_source(

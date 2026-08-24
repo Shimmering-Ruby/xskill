@@ -40,7 +40,12 @@ _RETRY_RE = re.compile(
     r"(?:重试|再试|重新执行|重新跑|retry|try\s+again|rerun)", re.IGNORECASE,
 )
 _CORRECTION_RE = re.compile(
-    r"(?:纠正|更正|修正|改一下|不是.+是|correction|correct|fix\s+that)", re.IGNORECASE,
+    r"(?:纠正|更正|修正|改一下|不是.+是|"
+    r"(?:^|[。！？!?\n]\s*)(?:(?<!对)不对(?!称)|错了|搞错了|有误)|"
+    r"(?:刚才|前面|之前|上一个|这个).{0,20}"
+    r"(?:(?<!对)不对(?!称)|错了|有误)|"
+    r"correction|correct|fix\s+that)",
+    re.IGNORECASE,
 )
 _STOP_TERMS = frozenset((
     "the", "a", "an", "to", "of", "and", "or", "is", "are", "in", "on",
