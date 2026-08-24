@@ -29,6 +29,7 @@ from xskill.tasks.models import (
 from xskill.tasks.projection import (
     acknowledge_dirty_task_scopes,
     acknowledge_dirty_sources,
+    enqueue_changed_generator_scopes,
     enqueue_untracked_sources,
     list_dirty_task_scopes,
     list_dirty_sources,
@@ -182,6 +183,13 @@ class TaskGraphService:
         if not self.enabled or self._backfill_enqueued:
             return 0
         queued = enqueue_untracked_sources(db_path=self.db_path)
+        tenant_id = self.resolver.existing_tenant_id
+        if tenant_id is not None:
+            queued += enqueue_changed_generator_scopes(
+                tenant_id,
+                self.linker.generator_descriptor(),
+                db_path=self.db_path,
+            )
         self._backfill_enqueued = True
         return queued
 
@@ -468,6 +476,7 @@ class TaskGraphService:
             previous is not None
             and previous.source_revision == source_revision
             and previous.base_override_seq == (overrides[-1].override_seq if overrides else 0)
+            and previous.generator == self.linker.generator_descriptor()
         ):
             generation = previous
             should_publish = False
@@ -653,15 +662,6 @@ class TaskGraphService:
                 task_scope_id,
                 reason="manual_override_retry",
                 db_path=self.db_path,
-            )
-        states = source_states_for_scope(
-            current.tenant_id, task_scope_id, db_path=self.db_path,
-        )
-        if states:
-            first = states[0]
-            mark_task_graph_dirty(
-                int(first["watch_dir_id"]), f"{first['traj_id']}.md",
-                reason="manual_override", db_path=self.db_path,
             )
         self._rebuild_scope(current.tenant_id, task_scope_id, {})
         acknowledge_dirty_task_scopes(

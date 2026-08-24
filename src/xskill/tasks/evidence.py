@@ -262,7 +262,6 @@ def _normalize_usage_event(
     session_ref: SessionRef,
     default_model: dict,
     default_harness: dict,
-    observed_at: str,
 ) -> ExecutionUsageEvent:
     usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else raw
     prompt = _first_number(usage, (
@@ -338,7 +337,7 @@ def _normalize_usage_event(
         measurement_quality=measurement_quality,
         estimation_method=estimation_method,
         unavailable_reason=unavailable_reason,
-        observed_at=str(raw.get("observed_at") or observed_at),
+        observed_at=str(raw.get("observed_at") or "unavailable"),
     )
 
 
@@ -348,7 +347,6 @@ def _usage_events(
     session_ref: SessionRef,
     model: dict,
     harness: dict,
-    observed_at: str,
 ) -> tuple[ExecutionUsageEvent, ...]:
     raw_events = metadata.get("execution_usage_events")
     if not isinstance(raw_events, list):
@@ -365,7 +363,6 @@ def _usage_events(
             session_ref=session_ref,
             default_model=model,
             default_harness=harness,
-            observed_at=observed_at,
         )
         record = event.to_record()
         previous = seen.get(event.usage_event_id)
@@ -389,7 +386,6 @@ def _usage_events(
             session_ref=session_ref,
             default_model=model,
             default_harness=harness,
-            observed_at=observed_at,
         ))
     return tuple(events)
 
@@ -481,7 +477,6 @@ def collect_trajectory_evidence(
         atoms=tuple(atoms),
         usage_events=_usage_events(
             metadata, session_ref=session_ref, model=model, harness=harness,
-            observed_at=observed_at,
         ),
         explicit_outcome=_explicit_outcome(metadata),
     )

@@ -121,6 +121,8 @@ Task 与 Attempt relation 在写入 override log 前完成唯一 parent、同 Ta
 
 首次启用会把已有 `split_done`、`indexed` 和 `done` 轨迹加入持久回填队列，并按 `max_scopes_per_run` 分批处理。
 
+worker 启动时会比较已投影 generation 与当前 linker 版本及有界候选参数，算法或参数变化的 TaskScope 会自动加入重建队列。
+
 关闭开关只停止新增 Task Graph 处理，已投影来源的变化仍以轻量脏记录保留供后续重新启用时追平，从未投影的来源由首次启用回填扫描发现，同时不会删除 Session、Atom、usage ledger、generation、override 或 SQLite 投影。
 
 `xskill rebuild --force` 会清理可重建 Task 投影和 generation source state，但保留已经发生且付费的原始 usage ledger。

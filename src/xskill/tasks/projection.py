@@ -16,6 +16,16 @@ def _json(value) -> str:
     )
 
 
+def _generator_json(value: dict) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
 def mark_task_graph_dirty(
     watch_dir_id: int,
     filename: str,
@@ -93,6 +103,30 @@ def enqueue_untracked_sources(*, db_path: Path | None = None) -> int:
             queued += max(0, cursor.rowcount)
         connection.commit()
         return queued
+
+
+def enqueue_changed_generator_scopes(
+    tenant_id: str,
+    generator: dict,
+    *,
+    db_path: Path | None = None,
+) -> int:
+    """Queue projected scopes whose deterministic generator has changed."""
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("tenant_id must be a non-empty string")
+    generator_json = _generator_json(generator)
+    with pooled_connection(db_path) as connection:
+        cursor = connection.execute(
+            "INSERT INTO task_graph_dirty_scopes("
+            "tenant_id,task_scope_id,generation,reason,marked_at)"
+            " SELECT tenant_id,task_scope_id,1,'generator_changed',datetime('now')"
+            " FROM task_graph_generations"
+            " WHERE tenant_id=? AND generator_json<>?"
+            " ON CONFLICT(tenant_id,task_scope_id) DO NOTHING",
+            (tenant_id, generator_json),
+        )
+        connection.commit()
+        return max(0, cursor.rowcount)
 
 
 def list_dirty_sources(
@@ -360,19 +394,22 @@ def project_generation(
                 )
             connection.execute(
                 "INSERT INTO task_graph_generations("
-                "tenant_id,task_scope_id,generation_id,source_revision,"
+                "tenant_id,task_scope_id,generation_id,source_revision,generator_json,"
                 "base_override_seq,created_at,task_count,atom_count,candidate_count,"
-                "model_judgement_count) VALUES(?,?,?,?,?,?,?,?,?,?)"
+                "model_judgement_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(tenant_id,task_scope_id) DO UPDATE SET"
                 " generation_id=excluded.generation_id,"
                 " source_revision=excluded.source_revision,"
+                " generator_json=excluded.generator_json,"
                 " base_override_seq=excluded.base_override_seq,"
                 " created_at=excluded.created_at,task_count=excluded.task_count,"
                 " atom_count=excluded.atom_count,candidate_count=excluded.candidate_count,"
                 " model_judgement_count=excluded.model_judgement_count",
                 (
                     tenant_id, task_scope_id, generation.generation_id,
-                    generation.source_revision, generation.base_override_seq,
+                    generation.source_revision,
+                    _generator_json(generation.generator),
+                    generation.base_override_seq,
                     generation.created_at, generation.metrics.get("task_count", 0),
                     generation.metrics.get("atom_count", 0),
                     generation.metrics.get("candidate_count", 0),

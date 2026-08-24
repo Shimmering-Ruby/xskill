@@ -168,6 +168,16 @@ class BoundedTaskLinker:
         self.recent_k = recent_k
         self.posting_cap = posting_cap
 
+    def generator_descriptor(self) -> dict:
+        """Return every input that can change deterministic linker output."""
+        return {
+            "name": GENERATOR_NAME,
+            "version": ALGORITHM_VERSION,
+            "top_k": self.top_k,
+            "recent_k": self.recent_k,
+            "posting_cap": self.posting_cap,
+        }
+
     def build(
         self,
         *,
@@ -433,13 +443,7 @@ class BoundedTaskLinker:
             tenant_id=tenant_id,
             task_scope_id=task_scope_id,
             source_revision=source_revision,
-            generator={
-                "name": GENERATOR_NAME,
-                "version": ALGORITHM_VERSION,
-                "top_k": self.top_k,
-                "recent_k": self.recent_k,
-                "posting_cap": self.posting_cap,
-            },
+            generator=self.generator_descriptor(),
             base_override_seq=watermark,
             created_at=now,
             tasks=tuple(sorted(

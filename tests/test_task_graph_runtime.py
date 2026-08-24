@@ -6,13 +6,22 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from xskill.dashboard.auth import (
+    build_auth_router,
+    configure_auth,
+    ensure_dashboard_secret,
+)
+from xskill.dashboard.router import build_dashboard_router
 from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.pipeline.registry import (
     discover_trajectories,
     get_connection,
     pooled_connection,
     register_dir,
+    unregister_dir,
 )
 from xskill.tasks.models import stable_ref_key
 from xskill.tasks.projection import (
@@ -163,6 +172,61 @@ def test_runtime_projects_task_attempt_evidence_and_conserved_usage(tmp_path):
     assert overview["execution_tokens"] == 100
 
 
+def test_task_graph_dashboard_routes_require_admin_and_apply_override(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "registry.db"
+    source = _add_source(
+        tmp_path,
+        db_path,
+        source_name="dashboard-admin",
+        atoms=[{"intent": "审核任务状态", "summary": "等待管理员修正"}],
+    )
+    service = _build(tmp_path, db_path, [source])
+    tenant_id = service.resolver.tenant_id
+    task = list_logical_tasks(tenant_id, db_path=db_path)[0]
+    monkeypatch.setattr(
+        "xskill.config.get_config",
+        lambda: {"task_graph": {"enabled": True}},
+    )
+    configure_auth(
+        secret=ensure_dashboard_secret(tmp_path / "dashboard-secret.json"),
+        admins=["reviewer"],
+        admin_password="secret",
+    )
+    app = FastAPI()
+    app.include_router(build_auth_router())
+    app.include_router(build_dashboard_router(db_path=db_path))
+
+    anonymous = TestClient(app)
+    assert anonymous.get(
+        "/api/v1/dashboard/task-graph/overview",
+    ).status_code == 401
+    admin = TestClient(app)
+    login = admin.post(
+        "/api/v1/dashboard/login",
+        json={"user_name": "reviewer", "secret": "secret"},
+    )
+    assert login.status_code == 200
+    assert admin.get(
+        "/api/v1/dashboard/task-graph/overview",
+    ).json()["tasks"] == 1
+    response = admin.post(
+        "/api/v1/dashboard/task-graph/override",
+        json={
+            "task_scope_id": task["task_scope_id"],
+            "operation": "set_task_state",
+            "target_id": task["task_id"],
+            "payload": {"lifecycle": "blocked"},
+        },
+    )
+    assert response.status_code == 200
+    current = service.store_for_scope(task["task_scope_id"]).load_current()
+    assert next(
+        item for item in current.tasks if item.task_id == task["task_id"]
+    ).lifecycle == "blocked"
+
+
 def test_explicit_retry_reuses_task_and_creates_attempt_relation(tmp_path):
     db_path = tmp_path / "registry.db"
     source = _add_source(
@@ -261,6 +325,35 @@ def test_stable_ids_and_bounded_candidates_on_unchanged_rebuild(tmp_path):
     second = service.store_for_scope(store.name).load_current()
     assert {task.task_id for task in first.tasks} == {task.task_id for task in second.tasks}
     assert second.generation_id == first.generation_id
+
+
+def test_changed_linker_config_forces_a_new_generation(tmp_path):
+    db_path = tmp_path / "registry.db"
+    source = _add_source(
+        tmp_path,
+        db_path,
+        source_name="generator-change",
+        atoms=[{"intent": "检查生成器版本", "summary": "重建派生图"}],
+    )
+    service = _build(tmp_path, db_path, [source])
+    tenant_id = service.resolver.tenant_id
+    task = list_logical_tasks(tenant_id, db_path=db_path)[0]
+    first = service.store_for_scope(task["task_scope_id"]).load_current()
+
+    changed = TaskGraphService(
+        state_root=tmp_path,
+        db_path=db_path,
+        config={"task_graph": {"enabled": True, "top_k": 3}},
+    )
+    result = changed.process_dirty()
+    second = changed.store_for_scope(task["task_scope_id"]).load_current()
+
+    assert result["failed_scopes"] == []
+    assert second.generation_id != first.generation_id
+    assert second.generator["top_k"] == 3
+    assert {item.task_id for item in second.tasks} == {
+        item.task_id for item in first.tasks
+    }
 
 
 def test_restart_reloads_manifest_shards_and_preserves_generation(tmp_path):
@@ -482,6 +575,44 @@ def test_idempotent_override_retry_rebuilds_an_unmaterialized_event(
     assert next(
         item for item in current.tasks if item.task_id == task["task_id"]
     ).lifecycle == "blocked"
+    assert list_dirty_sources(db_path=db_path) == []
+    assert list_dirty_task_scopes(db_path=db_path) == []
+
+
+def test_unregister_dir_reconciles_the_removed_source(tmp_path):
+    db_path = tmp_path / "registry.db"
+    source = _add_source(
+        tmp_path,
+        db_path,
+        source_name="unregister",
+        atoms=[{"intent": "注销轨迹目录", "summary": "清理派生任务"}],
+    )
+    service = _build(tmp_path, db_path, [source])
+    tenant_id = service.resolver.tenant_id
+    task = list_logical_tasks(tenant_id, db_path=db_path)[0]
+
+    assert unregister_dir(tmp_path / "trajectories", db_path=db_path)
+    dirty = list_dirty_sources(db_path=db_path)
+    assert len(dirty) == 1
+    assert dirty[0]["deleted"] == 1
+    assert dirty[0]["task_scope_id"] == task["task_scope_id"]
+
+    restarted = TaskGraphService(
+        state_root=tmp_path,
+        db_path=db_path,
+        config={"task_graph": {"enabled": True}},
+    )
+    result = restarted.process_dirty()
+
+    assert result["failed_scopes"] == []
+    assert result["sources"] == 1
+    assert list_dirty_sources(db_path=db_path) == []
+    assert list_logical_tasks(tenant_id, db_path=db_path) == []
+    historical = list_logical_tasks(
+        tenant_id, include_tombstones=True, db_path=db_path,
+    )
+    assert len(historical) == 1
+    assert historical[0]["task_id"] == task["task_id"]
 
 
 def test_override_scope_queue_recovers_without_any_live_source(
@@ -625,10 +756,22 @@ def test_registry_migration_preserves_legacy_usage_without_inventing_scope(tmp_p
         "id INTEGER PRIMARY KEY AUTOINCREMENT,ts TEXT,step TEXT,model TEXT,"
         "prompt INTEGER DEFAULT 0,completion INTEGER DEFAULT 0,"
         "total INTEGER DEFAULT 0,cost_usd REAL DEFAULT 0,price_source TEXT);"
+        "CREATE TABLE task_graph_generations("
+        "tenant_id TEXT NOT NULL,task_scope_id TEXT NOT NULL,"
+        "generation_id TEXT NOT NULL,source_revision TEXT NOT NULL,"
+        "base_override_seq INTEGER NOT NULL,created_at TEXT NOT NULL,"
+        "task_count INTEGER NOT NULL DEFAULT 0,atom_count INTEGER NOT NULL DEFAULT 0,"
+        "candidate_count INTEGER NOT NULL DEFAULT 0,"
+        "model_judgement_count INTEGER NOT NULL DEFAULT 0,"
+        "PRIMARY KEY(tenant_id,task_scope_id));"
         "INSERT INTO watch_dirs(path,label,auto_index,ecosystem)"
         " VALUES('/legacy/path','legacy',1,'manual');"
         "INSERT INTO llm_usage(step,model,prompt,completion,total,cost_usd,price_source)"
         " VALUES('split','legacy-model',10,2,12,0.1,'static');"
+        "INSERT INTO task_graph_generations("
+        "tenant_id,task_scope_id,generation_id,source_revision,base_override_seq,"
+        "created_at) VALUES('ten_legacy','tsc_legacy','gen_legacy','rev_legacy',0,"
+        "'2026-01-01T00:00:00Z');"
     )
     connection.commit()
     connection.close()
@@ -640,6 +783,9 @@ def test_registry_migration_preserves_legacy_usage_without_inventing_scope(tmp_p
         "SELECT usage_event_id,usage_plane,measurement_quality,tenant_id,"
         "total,cost_usd,legacy FROM llm_usage",
     ).fetchone()
+    generation = migrated.execute(
+        "SELECT generator_json FROM task_graph_generations",
+    ).fetchone()
     migrated.close()
     assert watch_dir["source_scope_id"].startswith("src_")
     assert usage["usage_event_id"].startswith("xsp_legacy_")
@@ -649,6 +795,7 @@ def test_registry_migration_preserves_legacy_usage_without_inventing_scope(tmp_p
     assert usage["total"] == 12
     assert usage["cost_usd"] == pytest.approx(0.1)
     assert usage["legacy"] == 1
+    assert generation["generator_json"] == "{}"
 
 
 def test_structured_harness_success_finishes_attempt_without_verifying_task(tmp_path):
@@ -808,6 +955,37 @@ def test_changed_usage_event_does_not_publish_a_conflicting_generation(tmp_path)
     assert result["failed_scopes"] == [task["task_scope_id"]]
     assert store.load_current().generation_id == generation_id
     assert len(list_dirty_sources(db_path=db_path)) == 1
+
+
+def test_session_append_without_usage_reuses_the_unavailable_fact(tmp_path):
+    db_path = tmp_path / "registry.db"
+    source = _add_source(
+        tmp_path,
+        db_path,
+        source_name="append-without-usage",
+        atoms=[{"intent": "持续处理任务", "summary": "等待后续消息"}],
+    )
+    service = _build(tmp_path, db_path, [source])
+    trajectory_path = tmp_path / "trajectories" / "traj_append-without-usage.md"
+    trajectory_path.write_text(
+        trajectory_path.read_text(encoding="utf-8") + "\n追加一轮消息\n",
+        encoding="utf-8",
+    )
+
+    service.mark_dirty(*source, reason="session_appended")
+    result = service.process_dirty()
+
+    assert result["failed_scopes"] == []
+    assert result["sources"] == 1
+    assert list_dirty_sources(db_path=db_path) == []
+    with pooled_connection(db_path) as connection:
+        events = connection.execute(
+            "SELECT observed_at,measurement_quality"
+            " FROM execution_usage_events",
+        ).fetchall()
+    assert [(row["observed_at"], row["measurement_quality"]) for row in events] == [
+        ("unavailable", "unavailable")
+    ]
 
 
 def test_atom_content_skill_and_score_updates_do_not_change_task_identity(tmp_path):

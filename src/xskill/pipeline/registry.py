@@ -456,6 +456,7 @@ CREATE TABLE IF NOT EXISTS task_graph_generations (
     task_scope_id      TEXT NOT NULL,
     generation_id     TEXT NOT NULL,
     source_revision    TEXT NOT NULL,
+    generator_json    TEXT NOT NULL DEFAULT '{}',
     base_override_seq  INTEGER NOT NULL,
     created_at         TEXT NOT NULL,
     task_count         INTEGER NOT NULL DEFAULT 0,
@@ -1078,6 +1079,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE execution_usage_events"
             " ADD COLUMN estimation_method TEXT NOT NULL DEFAULT ''"
+        )
+    task_generation_columns = {
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info(task_graph_generations)"
+        ).fetchall()
+    }
+    if "generator_json" not in task_generation_columns:
+        conn.execute(
+            "ALTER TABLE task_graph_generations"
+            " ADD COLUMN generator_json TEXT NOT NULL DEFAULT '{}'"
         )
 
     # skills_catalog.content_sha：与 Milvus 向量索引对齐的一致性键
