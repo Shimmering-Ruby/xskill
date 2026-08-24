@@ -62,7 +62,7 @@ dependencies = [
 # 大库上会更慢。team server 建议：pip install 'xskill[milvus]'。
 # 不进主依赖——pymilvus 体积大、部分环境装不上，曾阻断 client 自动更新。
 milvus = [
-    "pymilvus>=2.4.2",
+    "pymilvus[milvus_lite]>=2.4.2",
 ]
 dev = [
     "pytest>=7",
