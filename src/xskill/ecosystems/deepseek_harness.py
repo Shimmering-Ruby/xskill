@@ -264,6 +264,10 @@ def _adapt_deepseek_harness_session_jsonl(
     session_id = ""
     cwd = ""
     agent_preset = ""
+    execution_usage_events: list[dict] = []
+    source_model = ""
+    source_provider = ""
+    assistant_message_ordinal = 0
     t = 0
 
     for raw_line in content.splitlines():
@@ -313,7 +317,34 @@ def _adapt_deepseek_harness_session_jsonl(
             role = "assistant"
             message = data.get("message")
             if isinstance(message, dict):
+                assistant_message_ordinal += 1
                 body = _text_from_message_content(message.get("content"))
+                source = message.get("source")
+                response = (
+                    (source.get("replayState") or {}).get("response")
+                    if isinstance(source, dict) else None
+                )
+                response = response if isinstance(response, dict) else {}
+                source_model = str(
+                    response.get("model") or source_model
+                )
+                source_provider = str(
+                    response.get("provider") or source_provider
+                )
+                usage = data.get("usage") or message.get("usage")
+                if isinstance(usage, dict):
+                    execution_usage_events.append({
+                        "source_event_id": str(
+                            response.get("responseId") or message.get("id")
+                            or f"assistant-message-{assistant_message_ordinal}"
+                        ),
+                        "usage": usage,
+                        "model": {
+                            "provider": source_provider or "unavailable",
+                            "model_id": source_model or "unavailable",
+                        },
+                        "observed_at": record.get("time"),
+                    })
         elif rtype == "tool/call":
             role = "assistant"
             name = str(data.get("name") or "tool")
@@ -353,6 +384,12 @@ def _adapt_deepseek_harness_session_jsonl(
         meta.setdefault("cwd", cwd)
     if agent_preset:
         meta.setdefault("agent_preset", agent_preset)
+    if source_model:
+        meta.setdefault("model", source_model)
+    if source_provider:
+        meta.setdefault("provider", source_provider)
+    if execution_usage_events:
+        meta["execution_usage_events"] = execution_usage_events
     meta["timeline"] = timeline
     meta["tool_names"] = tool_names
     meta["total_turns"] = len(timeline)
