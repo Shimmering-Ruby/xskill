@@ -32,6 +32,19 @@ xskill 当前有两层与轨迹处理有关的数据：
 
 Session 和 Atom 仍是证据层；LogicalTask 和 TaskAttempt 是可追溯、可修正的语义层。Skill 路由与 Task 归组是正交关系：一个 Atom 可以继续支撑多个 Skill，但其主 Task 归属遵守下文的唯一性规则。
 
+### 对现有 Atom → Skill 流程的影响
+
+本 ADR 合并时不改变现有生产数据流，也不为 `AtomTask` 增加 Task 或 Attempt 字段。当前路径仍是 `Session → TaskAgent → AtomTask → TaskClusterAgent → candidate → SkillEditAgent → Skill`；`used_skills`、`ux_score`、每个 `(atom_id, skill)` 关联上的 `weightscore`、candidate 写入和 SkillEdit 触发语义均保持不变。
+
+后续 Task Graph 实现会在 Atom 形成后建立一条独立的语义与评测支路，而不是插入或取代现有 Skill 路由：
+
+```text
+Session → Atom ─┬─→ TaskClusterAgent → candidate → SkillEditAgent → Skill
+                └─→ TaskAtomMembership → LogicalTask → TaskAttempt → outcome / usage attribution
+```
+
+`TaskAtomMembership` 是独立关系，`TaskAttempt` 通过 `EvidenceRange` 引用 Session 或 Atom 中的执行证据；两者都不是 Atom 内嵌属性，也不能作为 candidate 去重键或限制一个 Atom 只能支撑一个 Skill。Task/Attempt 对 `Atom → Skill` 的作用仅是让 Skill 使用、执行结果和成本能够在目标与尝试粒度被观测和归因；若未来希望 Task 上下文参与 Skill 路由，必须由独立算法设计和生产 PR 明确输入、回退及评测，不由本 ADR 隐式引入。
+
 ### 1. 身份与作用域
 
 所有引用都必须带作用域，不能把裸 `traj_id` 或 `atom_id` 当作全局唯一键，也不能把“有权读取同一批数据”误当成“属于同一个用户任务”：
