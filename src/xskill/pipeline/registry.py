@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
 import zlib
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
@@ -125,6 +127,7 @@ CREATE TABLE IF NOT EXISTS watch_dirs (
     label      TEXT DEFAULT '',
     auto_index INTEGER DEFAULT 1,
     ecosystem  TEXT DEFAULT 'manual',
+    source_scope_id TEXT UNIQUE,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -162,7 +165,20 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     completion   INTEGER DEFAULT 0,
     total        INTEGER DEFAULT 0,
     cost_usd     REAL DEFAULT 0,
-    price_source TEXT
+    price_source TEXT,
+    usage_event_id TEXT UNIQUE,
+    usage_plane TEXT DEFAULT 'xskill_processing',
+    measurement_quality TEXT,
+    allocation_mode TEXT DEFAULT 'unattributed',
+    estimation_method TEXT,
+    unavailable_reason TEXT,
+    tenant_id TEXT,
+    task_scope_id TEXT,
+    source_scope_id TEXT,
+    traj_id TEXT,
+    atom_id TEXT,
+    generation_id TEXT,
+    legacy INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(ts);
 
@@ -433,6 +449,260 @@ CREATE TABLE IF NOT EXISTS skill_origin (
     ts         TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_skill_origin_user ON skill_origin(user_key);
+
+-- Logical Task 事实源位于 task_graph/scopes；下列表均为可重建查询投影。
+CREATE TABLE IF NOT EXISTS task_graph_generations (
+    tenant_id          TEXT NOT NULL,
+    task_scope_id      TEXT NOT NULL,
+    generation_id     TEXT NOT NULL,
+    source_revision    TEXT NOT NULL,
+    base_override_seq  INTEGER NOT NULL,
+    created_at         TEXT NOT NULL,
+    task_count         INTEGER NOT NULL DEFAULT 0,
+    atom_count         INTEGER NOT NULL DEFAULT 0,
+    candidate_count    INTEGER NOT NULL DEFAULT 0,
+    model_judgement_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, task_scope_id)
+);
+
+CREATE TABLE IF NOT EXISTS logical_tasks (
+    tenant_id          TEXT NOT NULL,
+    task_scope_id      TEXT NOT NULL,
+    task_id            TEXT NOT NULL,
+    generation_id      TEXT NOT NULL,
+    title              TEXT NOT NULL DEFAULT '',
+    summary            TEXT NOT NULL DEFAULT '',
+    lifecycle          TEXT NOT NULL,
+    outcome            TEXT NOT NULL,
+    verification       TEXT NOT NULL,
+    user_disposition   TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    tombstoned         INTEGER NOT NULL DEFAULT 0,
+    aliases_json       TEXT NOT NULL DEFAULT '[]',
+    decisions_json     TEXT NOT NULL DEFAULT '[]',
+    primary_atom_count INTEGER NOT NULL DEFAULT 0,
+    attempt_count      INTEGER NOT NULL DEFAULT 0,
+    execution_tokens   INTEGER,
+    execution_cost_usd REAL,
+    PRIMARY KEY (tenant_id, task_scope_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_logical_tasks_scope_state
+    ON logical_tasks(tenant_id, task_scope_id, tombstoned, created_at, task_id);
+CREATE INDEX IF NOT EXISTS idx_logical_tasks_tenant_state
+    ON logical_tasks(tenant_id, tombstoned, created_at, task_id);
+
+CREATE TABLE IF NOT EXISTS task_atom_memberships (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    membership_id   TEXT NOT NULL,
+    generation_id   TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    source_scope_id TEXT NOT NULL,
+    traj_id          TEXT NOT NULL,
+    atom_id          TEXT NOT NULL,
+    role             TEXT NOT NULL,
+    decision         TEXT NOT NULL,
+    confidence       REAL,
+    decided_by       TEXT NOT NULL,
+    algorithm_version TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+    observed_at      TEXT NOT NULL,
+    stale            INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, task_scope_id, membership_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_membership_atom
+    ON task_atom_memberships(
+        tenant_id, task_scope_id, source_scope_id, traj_id, atom_id, decision, role
+    );
+CREATE INDEX IF NOT EXISTS idx_task_membership_task
+    ON task_atom_memberships(tenant_id, task_scope_id, task_id, decision, role);
+CREATE INDEX IF NOT EXISTS idx_task_membership_session
+    ON task_atom_memberships(
+        tenant_id, source_scope_id, traj_id, atom_id, decision, role
+    );
+
+CREATE TABLE IF NOT EXISTS task_relations (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    relation_id     TEXT NOT NULL,
+    generation_id   TEXT NOT NULL,
+    from_task_id    TEXT NOT NULL,
+    to_task_id      TEXT NOT NULL,
+    relation_type   TEXT NOT NULL,
+    decision        TEXT NOT NULL,
+    confidence      REAL,
+    decided_by      TEXT NOT NULL,
+    algorithm_version TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+    observed_at     TEXT NOT NULL,
+    stale           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, task_scope_id, relation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_relations_from
+    ON task_relations(tenant_id, task_scope_id, from_task_id, decision);
+CREATE INDEX IF NOT EXISTS idx_task_relations_to
+    ON task_relations(tenant_id, task_scope_id, to_task_id, decision);
+
+CREATE TABLE IF NOT EXISTS task_attempts (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    attempt_id       TEXT NOT NULL,
+    generation_id   TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    started_at       TEXT NOT NULL,
+    ended_at         TEXT,
+    lifecycle        TEXT NOT NULL,
+    outcome          TEXT NOT NULL,
+    verification     TEXT NOT NULL,
+    user_disposition TEXT NOT NULL,
+    decisions_json   TEXT NOT NULL DEFAULT '[]',
+    execution_identity_json TEXT NOT NULL DEFAULT '{}',
+    evidence_count   INTEGER NOT NULL DEFAULT 0,
+    execution_tokens INTEGER,
+    execution_cost_usd REAL,
+    PRIMARY KEY (tenant_id, task_scope_id, attempt_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_attempts_task
+    ON task_attempts(tenant_id, task_scope_id, task_id, started_at, attempt_id);
+
+CREATE TABLE IF NOT EXISTS task_evidence_ranges (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    evidence_id      TEXT NOT NULL,
+    generation_id   TEXT NOT NULL,
+    attempt_id       TEXT NOT NULL,
+    source_scope_id TEXT NOT NULL,
+    traj_id          TEXT NOT NULL,
+    atom_id          TEXT,
+    locator_kind     TEXT NOT NULL,
+    locator_start    TEXT NOT NULL,
+    locator_end      TEXT NOT NULL,
+    content_hash     TEXT NOT NULL,
+    atom_hash        TEXT NOT NULL DEFAULT '',
+    stale            INTEGER NOT NULL DEFAULT 0,
+    model_json       TEXT NOT NULL DEFAULT '{}',
+    harness_json     TEXT NOT NULL DEFAULT '{}',
+    skills_json      TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (tenant_id, task_scope_id, evidence_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_evidence_session
+    ON task_evidence_ranges(tenant_id, task_scope_id, source_scope_id, traj_id);
+CREATE INDEX IF NOT EXISTS idx_task_evidence_attempt
+    ON task_evidence_ranges(tenant_id, task_scope_id, attempt_id);
+
+CREATE TABLE IF NOT EXISTS task_attempt_relations (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    relation_id      TEXT NOT NULL,
+    generation_id    TEXT NOT NULL,
+    from_attempt_id  TEXT NOT NULL,
+    to_attempt_id    TEXT NOT NULL,
+    relation_type    TEXT NOT NULL,
+    decision         TEXT NOT NULL,
+    confidence       REAL,
+    decided_by       TEXT NOT NULL,
+    algorithm_version TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+    observed_at      TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, task_scope_id, relation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_attempt_relations_from
+    ON task_attempt_relations(tenant_id, task_scope_id, from_attempt_id);
+CREATE INDEX IF NOT EXISTS idx_task_attempt_relations_to
+    ON task_attempt_relations(tenant_id, task_scope_id, to_attempt_id);
+
+-- 原 Harness execution usage 是不可由 Atom 重建的 append-only 事实。
+CREATE TABLE IF NOT EXISTS execution_usage_events (
+    usage_event_id      TEXT PRIMARY KEY,
+    usage_plane         TEXT NOT NULL CHECK(usage_plane='execution'),
+    source_event_id     TEXT NOT NULL,
+    tenant_id           TEXT NOT NULL,
+    task_scope_id       TEXT NOT NULL,
+    source_scope_id     TEXT NOT NULL,
+    traj_id             TEXT NOT NULL,
+    model_json          TEXT NOT NULL DEFAULT '{}',
+    harness_json        TEXT NOT NULL DEFAULT '{}',
+    prompt_tokens       INTEGER,
+    completion_tokens   INTEGER,
+    total_tokens        INTEGER,
+    cache_read_tokens   INTEGER,
+    cost_usd            REAL,
+    measurement_quality TEXT NOT NULL,
+    estimation_method   TEXT NOT NULL DEFAULT '',
+    unavailable_reason  TEXT NOT NULL DEFAULT '',
+    observed_at         TEXT NOT NULL,
+    ingested_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_execution_usage_session
+    ON execution_usage_events(
+        tenant_id, task_scope_id, source_scope_id, traj_id, observed_at
+    );
+
+CREATE TABLE IF NOT EXISTS task_usage_allocations (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    allocation_id   TEXT NOT NULL,
+    generation_id   TEXT NOT NULL,
+    usage_event_id  TEXT NOT NULL,
+    usage_plane     TEXT NOT NULL,
+    allocation_mode TEXT NOT NULL,
+    fraction        REAL NOT NULL,
+    task_id         TEXT,
+    attempt_id      TEXT,
+    processing_step TEXT,
+    prompt_tokens   INTEGER,
+    completion_tokens INTEGER,
+    total_tokens    INTEGER,
+    cache_read_tokens INTEGER,
+    cost_usd        REAL,
+    method          TEXT NOT NULL DEFAULT '',
+    method_version  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant_id, task_scope_id, allocation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_usage_task
+    ON task_usage_allocations(tenant_id, task_scope_id, task_id, usage_plane);
+CREATE INDEX IF NOT EXISTS idx_task_usage_event
+    ON task_usage_allocations(usage_plane, usage_event_id);
+
+CREATE TABLE IF NOT EXISTS task_graph_source_state (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    source_scope_id TEXT NOT NULL,
+    watch_dir_id     INTEGER NOT NULL,
+    traj_id          TEXT NOT NULL,
+    source_revision  TEXT NOT NULL,
+    generation_id    TEXT NOT NULL,
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_scope_id, traj_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_source_scope
+    ON task_graph_source_state(tenant_id, task_scope_id);
+
+CREATE TABLE IF NOT EXISTS task_graph_dirty_sources (
+    watch_dir_id     INTEGER NOT NULL,
+    filename         TEXT NOT NULL,
+    source_scope_id TEXT,
+    tenant_id        TEXT,
+    task_scope_id    TEXT,
+    deleted          INTEGER NOT NULL DEFAULT 0,
+    generation       INTEGER NOT NULL DEFAULT 1,
+    reason           TEXT NOT NULL DEFAULT '',
+    marked_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (watch_dir_id, filename)
+);
+CREATE INDEX IF NOT EXISTS idx_task_dirty_marked
+    ON task_graph_dirty_sources(marked_at, watch_dir_id, filename);
+
+CREATE TABLE IF NOT EXISTS task_graph_dirty_scopes (
+    tenant_id        TEXT NOT NULL,
+    task_scope_id    TEXT NOT NULL,
+    generation       INTEGER NOT NULL DEFAULT 1,
+    reason           TEXT NOT NULL DEFAULT '',
+    marked_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tenant_id, task_scope_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_dirty_scope_marked
+    ON task_graph_dirty_scopes(marked_at, tenant_id, task_scope_id);
 """
 
 _WATCH_STATUS_INDEX_SQL = """
@@ -722,6 +992,93 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
         # 已有行历史上都是用户手动 register，标 'manual'
         conn.execute("UPDATE watch_dirs SET ecosystem='manual' WHERE ecosystem IS NULL")
+    if "source_scope_id" not in wd_cols:
+        conn.execute("ALTER TABLE watch_dirs ADD COLUMN source_scope_id TEXT")
+    missing_source_scopes = conn.execute(
+        "SELECT id, path FROM watch_dirs"
+        " WHERE source_scope_id IS NULL OR source_scope_id=''"
+    ).fetchall()
+    for watch_dir_row in missing_source_scopes:
+        conn.execute(
+            "UPDATE watch_dirs SET source_scope_id=? WHERE id=?",
+            (f"src_{uuid.uuid4().hex}", watch_dir_row["id"]),
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_dirs_source_scope"
+        " ON watch_dirs(source_scope_id)"
+        " WHERE source_scope_id IS NOT NULL AND source_scope_id != ''"
+    )
+
+    # Logical Task usage identity.  Historical rows intentionally retain their
+    # original numeric values without inventing measurement quality or scope.
+    cur = conn.execute("PRAGMA table_info(llm_usage)")
+    usage_cols = {row[1] for row in cur.fetchall()}
+    usage_migrations = [
+        ("usage_event_id", "TEXT"),
+        ("usage_plane", "TEXT DEFAULT 'xskill_processing'"),
+        ("measurement_quality", "TEXT"),
+        ("allocation_mode", "TEXT DEFAULT 'unattributed'"),
+        ("estimation_method", "TEXT"),
+        ("unavailable_reason", "TEXT"),
+        ("tenant_id", "TEXT"),
+        ("task_scope_id", "TEXT"),
+        ("source_scope_id", "TEXT"),
+        ("traj_id", "TEXT"),
+        ("atom_id", "TEXT"),
+        ("generation_id", "TEXT"),
+        ("legacy", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for column_name, column_type in usage_migrations:
+        if column_name not in usage_cols:
+            conn.execute(
+                f"ALTER TABLE llm_usage ADD COLUMN {column_name} {column_type}"
+            )
+    conn.execute(
+        "UPDATE llm_usage SET usage_event_id='xsp_legacy_' || id,"
+        " usage_plane='xskill_processing', allocation_mode='unattributed',"
+        " legacy=1 WHERE usage_event_id IS NULL OR usage_event_id=''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_usage_event"
+        " ON llm_usage(usage_event_id) WHERE usage_event_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_llm_usage_scope"
+        " ON llm_usage(tenant_id, task_scope_id, usage_plane)"
+    )
+    task_usage_columns = {
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info(task_usage_allocations)"
+        ).fetchall()
+    }
+    if "cache_read_tokens" not in task_usage_columns:
+        conn.execute(
+            "ALTER TABLE task_usage_allocations"
+            " ADD COLUMN cache_read_tokens INTEGER"
+        )
+    task_evidence_columns = {
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info(task_evidence_ranges)"
+        ).fetchall()
+    }
+    if "atom_hash" not in task_evidence_columns:
+        conn.execute(
+            "ALTER TABLE task_evidence_ranges"
+            " ADD COLUMN atom_hash TEXT NOT NULL DEFAULT ''"
+        )
+    execution_usage_columns = {
+        row[1]
+        for row in conn.execute(
+            "PRAGMA table_info(execution_usage_events)"
+        ).fetchall()
+    }
+    if "estimation_method" not in execution_usage_columns:
+        conn.execute(
+            "ALTER TABLE execution_usage_events"
+            " ADD COLUMN estimation_method TEXT NOT NULL DEFAULT ''"
+        )
 
     # skills_catalog.content_sha：与 Milvus 向量索引对齐的一致性键
     cur = conn.execute("PRAGMA table_info(skills_catalog)")
@@ -776,18 +1133,91 @@ def _migrate(conn: sqlite3.Connection) -> None:
 # LLM usage / cost accounting  (Issue #43)  —— 唯一"无家可归"数据的持久化
 # ---------------------------------------------------------------------------
 
-def record_usage(*, step: str, model: str, prompt: int, completion: int,
-                 total: int, cost_usd: float, price_source: str,
-                 db_path: Optional[Path] = None) -> None:
+def record_usage(*, step: str, model: str, prompt: Optional[int],
+                 completion: Optional[int], total: Optional[int],
+                 cost_usd: Optional[float], price_source: str,
+                 usage_event_id: Optional[str] = None,
+                 measurement_quality: str = "measured",
+                 allocation_mode: str = "unattributed",
+                 estimation_method: Optional[str] = None,
+                 unavailable_reason: Optional[str] = None,
+                 tenant_id: Optional[str] = None,
+                 task_scope_id: Optional[str] = None,
+                 source_scope_id: Optional[str] = None,
+                 traj_id: Optional[str] = None,
+                 atom_id: Optional[str] = None,
+                 generation_id: Optional[str] = None,
+                 db_path: Optional[Path] = None) -> str:
     """追加一条 LLM/embedding 调用的 token+成本记录。旁路 telemetry。"""
+    if measurement_quality not in ("measured", "estimated", "unavailable"):
+        raise ValueError("invalid measurement_quality")
+    if allocation_mode not in ("direct", "shared", "unattributed"):
+        raise ValueError("invalid allocation_mode")
+    if usage_event_id is None:
+        event_id = f"xsp_{uuid.uuid4().hex}"
+    elif not isinstance(usage_event_id, str) or not usage_event_id.strip():
+        raise ValueError("usage_event_id must be a non-empty string")
+    else:
+        event_id = usage_event_id.strip()
+    if len(event_id) > 200:
+        raise ValueError("usage_event_id is limited to 200 characters")
+
+    def non_negative_number(value, name: str, *, integer: bool):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be numeric or None")
+        if integer:
+            if not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer or None")
+            normalized = value
+        else:
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be numeric or None")
+            normalized = float(value)
+        if not math.isfinite(float(normalized)) or normalized < 0:
+            raise ValueError(f"{name} must be non-negative")
+        return normalized
+
+    prompt_value = non_negative_number(prompt, "prompt", integer=True)
+    completion_value = non_negative_number(
+        completion, "completion", integer=True,
+    )
+    total_value = non_negative_number(total, "total", integer=True)
+    cost_value = non_negative_number(cost_usd, "cost_usd", integer=False)
+    if measurement_quality == "estimated" and not str(
+        estimation_method or ""
+    ).strip():
+        raise ValueError("estimated usage requires estimation_method")
+    if measurement_quality == "unavailable":
+        if not str(unavailable_reason or "").strip():
+            raise ValueError("unavailable usage requires unavailable_reason")
+        prompt_value = completion_value = total_value = cost_value = None
+    elif all(
+        value is None
+        for value in (
+            prompt_value, completion_value, total_value, cost_value,
+        )
+    ):
+        raise ValueError("measured or estimated usage requires a numeric value")
     with pooled_connection(db_path) as conn:
         conn.execute(
-            "INSERT INTO llm_usage(step,model,prompt,completion,total,cost_usd,price_source)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (step, model, int(prompt), int(completion), int(total),
-             float(cost_usd), price_source),
+            "INSERT INTO llm_usage("
+            "step,model,prompt,completion,total,cost_usd,price_source,"
+            "usage_event_id,usage_plane,measurement_quality,allocation_mode,"
+            "estimation_method,unavailable_reason,tenant_id,task_scope_id,"
+            "source_scope_id,traj_id,atom_id,generation_id,legacy)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+            (
+                step, model, prompt_value, completion_value, total_value,
+                cost_value, price_source, event_id, "xskill_processing",
+                measurement_quality, allocation_mode, estimation_method,
+                unavailable_reason, tenant_id, task_scope_id, source_scope_id,
+                traj_id, atom_id, generation_id,
+            ),
         )
         conn.commit()
+    return event_id
 
 
 # ---------------------------------------------------------------------------
@@ -1777,6 +2207,15 @@ def clear_rebuild_derived_state(
         deleted_counts["canary_decision"] = cursor.rowcount
         cursor = connection.execute("DELETE FROM skill_trigger_eval")
         deleted_counts["skill_trigger_eval"] = cursor.rowcount
+        for table_name in (
+            "task_usage_allocations", "task_attempt_relations",
+            "task_evidence_ranges", "task_attempts", "task_relations",
+            "task_atom_memberships", "logical_tasks", "task_graph_generations",
+            "task_graph_source_state",
+            "task_graph_dirty_sources",
+            "task_graph_dirty_scopes",
+        ):
+            connection.execute(f"DELETE FROM {table_name}")
         connection.commit()
         return deleted_counts
 
@@ -1916,18 +2355,49 @@ def register_dir(
     """
     dir_path = str(Path(dir_path).resolve())
     with pooled_connection(db_path) as conn:
+        source_scope_id = f"src_{uuid.uuid4().hex}"
         conn.execute(
-            "INSERT INTO watch_dirs (path, label, auto_index, ecosystem)"
-            " VALUES (?, ?, ?, ?)"
+            "INSERT INTO watch_dirs (path, label, auto_index, ecosystem, source_scope_id)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(path) DO UPDATE SET"
             "   label=excluded.label,"
             "   auto_index=excluded.auto_index,"
             "   ecosystem=excluded.ecosystem",
-            (dir_path, label, int(auto_index), ecosystem),
+            (dir_path, label, int(auto_index), ecosystem, source_scope_id),
         )
         conn.commit()
         row = conn.execute("SELECT id FROM watch_dirs WHERE path=?", (dir_path,)).fetchone()
         return row["id"]
+
+
+def ensure_watch_dir_source_scope(
+    watch_dir_id: int, *, db_path: Optional[Path] = None,
+) -> str:
+    """Return the persisted opaque ingestion namespace for one watch dir."""
+    if isinstance(watch_dir_id, bool) or not isinstance(watch_dir_id, int):
+        raise ValueError("watch_dir_id must be an integer")
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT source_scope_id FROM watch_dirs WHERE id=?",
+            (watch_dir_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"watch_dir id={watch_dir_id} does not exist")
+        existing = str(row["source_scope_id"] or "").strip()
+        if existing:
+            return existing
+        source_scope_id = f"src_{uuid.uuid4().hex}"
+        conn.execute(
+            "UPDATE watch_dirs SET source_scope_id=?"
+            " WHERE id=? AND (source_scope_id IS NULL OR source_scope_id='')",
+            (source_scope_id, watch_dir_id),
+        )
+        conn.commit()
+        resolved = conn.execute(
+            "SELECT source_scope_id FROM watch_dirs WHERE id=?",
+            (watch_dir_id,),
+        ).fetchone()["source_scope_id"]
+        return str(resolved)
 
 
 def unregister_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> bool:
@@ -1938,17 +2408,40 @@ def unregister_dir(dir_path: str | Path, *, db_path: Optional[Path] = None) -> b
     """
     dir_path = str(Path(dir_path).resolve())
     with pooled_connection(db_path) as conn:
-        stems = [
-            (r["filename"][:-3] if r["filename"].endswith(".md") else r["filename"])
-            for r in conn.execute(
-                "SELECT t.filename FROM trajectories t"
-                " JOIN watch_dirs w ON t.watch_dir_id=w.id WHERE w.path=?",
-                (dir_path,),
-            ).fetchall()
-        ]
-        for stem in stems:
+        source_rows = conn.execute(
+            "SELECT t.watch_dir_id,t.filename,w.source_scope_id"
+            " FROM trajectories t JOIN watch_dirs w ON t.watch_dir_id=w.id"
+            " WHERE w.path=?",
+            (dir_path,),
+        ).fetchall()
+        for source_row in source_rows:
+            stem = (
+                source_row["filename"][:-3]
+                if source_row["filename"].endswith(".md")
+                else source_row["filename"]
+            )
             conn.execute("DELETE FROM atom_adoption WHERE atom_id GLOB ?",
                          (f"atom_{stem}_*",))
+            state = conn.execute(
+                "SELECT tenant_id,task_scope_id FROM task_graph_source_state"
+                " WHERE source_scope_id=? AND traj_id=?",
+                (source_row["source_scope_id"], stem),
+            ).fetchone()
+            if state is not None:
+                conn.execute(
+                    "INSERT INTO task_graph_dirty_sources("
+                    "watch_dir_id,filename,source_scope_id,tenant_id,task_scope_id,"
+                    "deleted,generation,reason,marked_at)"
+                    " VALUES(?,?,?,?,?,1,1,'watch_dir_removed',datetime('now'))"
+                    " ON CONFLICT(watch_dir_id,filename) DO UPDATE SET"
+                    " deleted=1,generation=generation+1,reason='watch_dir_removed',"
+                    " marked_at=datetime('now')",
+                    (
+                        source_row["watch_dir_id"], source_row["filename"],
+                        source_row["source_scope_id"], state["tenant_id"],
+                        state["task_scope_id"],
+                    ),
+                )
         cur = conn.execute("DELETE FROM watch_dirs WHERE path=?", (dir_path,))
         conn.commit()
         return cur.rowcount > 0
@@ -2511,7 +3004,8 @@ def reset_trajectories(
     """
     with pooled_connection(db_path) as conn:
         query_text = (
-            "SELECT t.id, t.filename, t.user_key, w.path FROM trajectories t "
+            "SELECT t.id, t.watch_dir_id, t.filename, t.user_key, w.path,"
+            " w.source_scope_id FROM trajectories t "
             "JOIN watch_dirs w ON t.watch_dir_id = w.id WHERE 1=1"
         )
         query_parameters: list = []
@@ -2550,6 +3044,28 @@ def reset_trajectories(
             # 否则采纳率分子留历史累计、分母归零后比率虚高（审计 P1-7）。
             conn.execute("DELETE FROM atom_adoption WHERE atom_id GLOB ?",
                          (f"atom_{trajectory_stem}_*",))
+            source_state = conn.execute(
+                "SELECT tenant_id,task_scope_id FROM task_graph_source_state"
+                " WHERE source_scope_id=? AND traj_id=?",
+                (trajectory_row["source_scope_id"], trajectory_stem),
+            ).fetchone()
+            if source_state is not None:
+                conn.execute(
+                    "INSERT INTO task_graph_dirty_sources("
+                    "watch_dir_id,filename,source_scope_id,tenant_id,task_scope_id,"
+                    "deleted,generation,reason,marked_at)"
+                    " VALUES(?,?,?,?,?,1,1,'atom_reset',datetime('now'))"
+                    " ON CONFLICT(watch_dir_id,filename) DO UPDATE SET"
+                    " deleted=1,generation=generation+1,reason='atom_reset',"
+                    " marked_at=datetime('now')",
+                    (
+                        trajectory_row["watch_dir_id"],
+                        trajectory_row["filename"],
+                        trajectory_row["source_scope_id"],
+                        source_state["tenant_id"],
+                        source_state["task_scope_id"],
+                    ),
+                )
             directories_seen.add(trajectory_row["path"])
             if trajectory_row["user_key"]:
                 profile_store_roots.add(trajectory_row["path"])
