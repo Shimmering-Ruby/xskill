@@ -36,10 +36,7 @@ def test_extract_usage_missing_usage():
 
 def _agno_response(**metrics_kwargs):
     """构造真实 agno ModelResponse —— agent LLM 记账点的实际传入形态。"""
-    try:
-        from agno.metrics import MessageMetrics
-    except ImportError:  # agno < 3
-        from agno.models.metrics import MessageMetrics
+    from agno.metrics import MessageMetrics
     from agno.models.response import ModelResponse
 
     resp = ModelResponse()
