@@ -209,6 +209,16 @@ watcher:
   full_reconcile_interval: 60   # idle polls only stat the directory; this
                                 # periodic full scan catches in-place rewrites
 
+# ===== Logical Task Graph =====
+# Deterministic semantic branch above Session/Atom; it never changes Atom→Skill routing, and uncertain links remain proposed without consuming LLM tokens.
+task_graph:
+  enabled: false                 # enable after ADR/replay-baseline review
+  top_k: 8                      # hard bound on classified candidates per Atom
+  recent_k: 6                   # same-Session recent Task candidates
+  posting_cap: 64               # bounded inverted-index posting list
+  max_scopes_per_run: 4         # fairness bound for one background pass
+  source_cache_size: 128        # bounded in-memory cache for unchanged source evidence
+
 # ===== Persistent agent worker =====
 # Every pool has an automatic waiting capacity of workers * 2. Running plus
 # waiting capacity is workers * 3; a full pool never blocks the watcher.
@@ -342,6 +352,26 @@ def normalize_runtime_config(config_data: dict) -> dict:
     watcher.pop("max_concurrent", None)
     watcher.pop("cluster_batch_size", None)
     runtime_config["watcher"] = watcher
+
+    task_graph = runtime_config.get("task_graph")
+    if task_graph is None:
+        task_graph = {}
+    if not isinstance(task_graph, dict):
+        raise ValueError("task_graph 必须是 mapping")
+    task_graph = dict(task_graph)
+    enabled = task_graph.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("task_graph.enabled 必须是布尔")
+    task_graph["enabled"] = enabled
+    for field_name, default in (
+        ("top_k", 8), ("recent_k", 6),
+        ("posting_cap", 64), ("max_scopes_per_run", 4),
+        ("source_cache_size", 128),
+    ):
+        task_graph[field_name] = _positive_int_or_default(
+            task_graph.get(field_name), f"task_graph.{field_name}", default,
+        )
+    runtime_config["task_graph"] = task_graph
 
     worker = runtime_config.get("agent_worker")
     if worker is None:
