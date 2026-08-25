@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from xskill import cli
-from xskill.ecosystems.install_ledger import get_default_ledger
+from xskill.ecosystems.install_ledger import dest_key, get_default_ledger
 from xskill.ecosystems.installation import (
     CopyBaselineRepairStatus,
     read_install_metadata,
@@ -286,7 +286,7 @@ def test_active_target_listing_does_not_decode_baseline_json(tmp_path):
         conn.execute(
             "UPDATE installations SET file_fingerprints_json=? "
             "WHERE dest_key=?",
-            ("not-json", str(dest)),
+            ("not-json", dest_key(dest)),
         )
         conn.commit()
     finally:
@@ -296,7 +296,7 @@ def test_active_target_listing_does_not_decode_baseline_json(tmp_path):
         mode="copy", skill_name="demo",
     )
 
-    assert targets == [{"dest_key": str(dest), "skill_name": "demo"}]
+    assert targets == [{"dest_key": dest_key(dest), "skill_name": "demo"}]
 
 
 def test_copy_baseline_cas_rejects_reinstalled_generation(tmp_path):
