@@ -2,10 +2,11 @@
 # 本机起 Phoenix 面板收 OTLP。用仓库 venv 里的 arize-phoenix，不拉镜像
 # （本机连 registry-1.docker.io 会被 TLS 拦）。
 #
-#   ./serve_phoenix.sh            # 6006 收 OTLP，界面同口
-#   PHOENIX_PORT=8873 ./serve_phoenix.sh
+#   ./serve_phoenix.sh
+#   PHOENIX_PORT=6006 ./serve_phoenix.sh
 #
-# 起来之后 run.sh 会自动探到 127.0.0.1:6006，并让容器走网桥网关送 span。
+# 起来之后把 XSKILL_OTEL_ENDPOINT 指到这个口。公网入口自己设
+# XSKILL_OTEL_PUBLIC_BASE，脚本不写死地址。
 set -euo pipefail
 
 PYTHON="${PYTHON:-/home/admin/xskill/.venv/bin/python}"
@@ -13,8 +14,7 @@ ROOT="${GOBS_ROOT:-$HOME/xskill-generate-obs}"
 
 export PHOENIX_WORKING_DIR="${PHOENIX_WORKING_DIR:-$ROOT/phoenix}"
 export PHOENIX_HOST="${PHOENIX_HOST:-0.0.0.0}"
-# 默认 8873：本机防火墙只放行了这个口，别另开端口。
-export PHOENIX_PORT="${PHOENIX_PORT:-8873}"
+export PHOENIX_PORT="${PHOENIX_PORT:-6006}"
 export PHOENIX_TELEMETRY_ENABLED="${PHOENIX_TELEMETRY_ENABLED:-false}"
 mkdir -p "$PHOENIX_WORKING_DIR"
 

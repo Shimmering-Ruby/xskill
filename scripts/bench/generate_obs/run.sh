@@ -98,13 +98,13 @@ if [[ "$BUILD" -eq 1 ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 # ── Phoenix 端点 ────────────────────────────────────────────────
-# 不给就探一下本机 6006（serve_phoenix.sh 的默认口）。容器里走 docker
-# 网桥网关回到宿主机。
+# 不给就探本机端口。默认只探 Phoenix 自己的 6006；要探别的口设
+# GOBS_PHOENIX_PORTS。容器里走 docker 网桥网关回到宿主机。
+# 公网面板地址只认 XSKILL_OTEL_PUBLIC_BASE / GOBS_PHOENIX_PUBLIC，不写死。
 if [[ -z "$PHOENIX_ENDPOINT" ]]; then
   GATEWAY="$(docker network inspect bridge \
     --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
-  # 8873 在前：本机长期跑着一个 Phoenix 在这个口，且它是已放行的端口。
-  for port in ${GOBS_PHOENIX_PORTS:-8873 6006}; do
+  for port in ${GOBS_PHOENIX_PORTS:-6006}; do
     if curl -sf -m 2 -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null; then
       if [[ -n "$GATEWAY" ]]; then
         PHOENIX_ENDPOINT="http://$GATEWAY:$port"
@@ -132,7 +132,10 @@ DOCKER_ARGS=(
 )
 if [[ -n "$PHOENIX_ENDPOINT" ]]; then
   DOCKER_ARGS+=(-e "XSKILL_OTEL_ENDPOINT=$PHOENIX_ENDPOINT")
-  DOCKER_ARGS+=(-e "XSKILL_OTEL_PUBLIC_BASE=${GOBS_PHOENIX_PUBLIC:-http://8.219.96.11:8873}")
+fi
+PHOENIX_PUBLIC="${GOBS_PHOENIX_PUBLIC:-${XSKILL_OTEL_PUBLIC_BASE:-}}"
+if [[ -n "$PHOENIX_PUBLIC" ]]; then
+  DOCKER_ARGS+=(-e "XSKILL_OTEL_PUBLIC_BASE=$PHOENIX_PUBLIC")
 fi
 
 # ── mock 数据 ───────────────────────────────────────────────────

@@ -201,7 +201,12 @@ def resolve_phoenix_link(
                     result["span_gid"] = root.get("id") or ""
                 break
             if result["project_gid"] and result["session_gid"] and result["trace_id"]:
-                public = public_base.rstrip("/")
+                public = (public_base or endpoint).rstrip("/")
+                if public.endswith("/v1/traces"):
+                    public = public[: -len("/v1/traces")]
+                if not public:
+                    result["error"] = "没有面板地址：请设 XSKILL_OTEL_PUBLIC_BASE"
+                    return result
                 session_q = quote(result["session_gid"], safe="")
                 url = (
                     f"{public}/projects/{result['project_gid']}"
@@ -384,14 +389,13 @@ def main() -> int:
         "answer_chars": len(answer or ""),
         "error": error,
     }
+    collector = os.environ.get("XSKILL_OTEL_ENDPOINT", "")
     phoenix = resolve_phoenix_link(
         job=args.job,
         project=os.environ.get("XSKILL_OTEL_PROJECT") or "xskill-generate",
         out_dir=out_dir,
-        endpoint=os.environ.get("XSKILL_OTEL_ENDPOINT", ""),
-        public_base=os.environ.get(
-            "XSKILL_OTEL_PUBLIC_BASE", "http://8.219.96.11:8873"
-        ),
+        endpoint=collector,
+        public_base=os.environ.get("XSKILL_OTEL_PUBLIC_BASE") or collector,
     )
     run_meta["phoenix"] = phoenix
     (out_dir / "run.json").write_text(

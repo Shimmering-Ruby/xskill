@@ -182,6 +182,24 @@ def get_used_tokens() -> int:
     return int(getattr(_STATE, "used_tokens", 0))
 
 
+def bind_context_hooks(
+    *,
+    compact_wrapper: Callable[..., bool] | None = None,
+    spill_hook: Callable[[], None] | None = None,
+) -> None:
+    """本线程 compact/spill 旁路。Generate 观测用，其他 agent 不绑。"""
+    if compact_wrapper is None:
+        if hasattr(_STATE, "compact_wrapper"):
+            delattr(_STATE, "compact_wrapper")
+    else:
+        _STATE.compact_wrapper = compact_wrapper
+    if spill_hook is None:
+        if hasattr(_STATE, "spill_hook"):
+            delattr(_STATE, "spill_hook")
+    else:
+        _STATE.spill_hook = spill_hook
+
+
 def resolve_max_context(llm_cfg: dict) -> int:
     """配置优先解析 max_context；缺省 200K 并打 warning（spec §4.5）。"""
     raw = (llm_cfg or {}).get("max_context")
@@ -1214,70 +1232,11 @@ class ContextManager:
 
         return invoke
 
-    def _estimate_tokens(self, messages: list) -> int:
-        return _estimate_history_tokens(
-            messages,
-            cjk_rate=self.cjk_rate,
-            calibration=self._calibration,
-            cache=self._est_cache,
-        )
-
-    def _compact_until_success(
+    def _run_compact(
         self,
         messages: list,
         compact_fn: Callable[[str], str],
         prefix_box: dict,
-    ) -> bool:
-        """压缩这一次工作记忆。所有 compact 都从这里出发。
-
-        ``XSKILL_OTEL=1`` 时在外面套一个 ``context.compact`` span 并记一次
-        compact 计数——"这趟 compact 了几次"就是从这里数出来的。关掉时直接
-        进重试循环，不多算 token、不建 span。
-        """
-        from xskill import obs
-        if not obs.is_enabled():
-            return self._compact_attempt_loop(messages, compact_fn, prefix_box)
-
-        progress: dict = {"attempts": 0}
-        tokens_before = self._estimate_tokens(messages)
-        started = time.perf_counter()
-        compacted = False
-        with obs.span(
-            "context.compact",
-            **{
-                obs.SPAN_KIND: obs.KIND_CHAIN,
-                "xskill.tokens_before": tokens_before,
-                "xskill.compact_token_limit": self.compact_token_limit,
-                "xskill.max_context": self.max_context,
-            },
-        ) as sp:
-            try:
-                compacted = self._compact_attempt_loop(
-                    messages, compact_fn, prefix_box, progress=progress,
-                )
-                return compacted
-            finally:
-                tokens_after = self._estimate_tokens(messages)
-                sp.set_attributes({
-                    "xskill.tokens_after": tokens_after,
-                    "xskill.compact_attempts": progress["attempts"],
-                    "xskill.compacted": compacted,
-                })
-                obs.collector().note_compact(
-                    seconds=time.perf_counter() - started,
-                    tokens_before=tokens_before,
-                    tokens_after=tokens_after,
-                    attempts=progress["attempts"],
-                    ok=compacted,
-                )
-
-    def _compact_attempt_loop(
-        self,
-        messages: list,
-        compact_fn: Callable[[str], str],
-        prefix_box: dict,
-        *,
-        progress: dict | None = None,
     ) -> bool:
         """Retry compact. Do not swallow the last failure.
 
@@ -1289,8 +1248,6 @@ class ContextManager:
         """
         last_exc: Exception | None = None
         for attempt in range(1, self.compact_max_retries + 1):
-            if progress is not None:
-                progress["attempts"] = attempt
             try:
                 compacted = _compact_history_in_place(
                     messages,
@@ -1350,6 +1307,28 @@ class ContextManager:
             ) from last_exc
         return False
 
+    def _compact_until_success(
+        self,
+        messages: list,
+        compact_fn: Callable[[str], str],
+        prefix_box: dict,
+    ) -> bool:
+        """Retry compact. Do not swallow the last failure.
+
+        Compact is inside context_mgmt, so it does not inherit the outer LLM
+        retry wrapper. First failure used to dump a full OpenAI traceback and
+        look like a crash; intermediate attempts now log one line. Exhaustion
+        raises CompactFailedError (not the raw timeout) so the outer retry
+        wrapper does not multiply 8×8 timed-out compact calls.
+
+        本线程若绑了 ``compact_wrapper``（只有 Generate 观测会绑），把整次
+        compact 交给它包一层。其他 agent 不绑，路径与主线相同。
+        """
+        wrapper = getattr(_STATE, "compact_wrapper", None)
+        if wrapper is not None:
+            return wrapper(self, messages, compact_fn, prefix_box)
+        return self._run_compact(messages, compact_fn, prefix_box)
+
     def wrap(self, original_invoke, invoke_stream=None):
         """返回包好上下文自管理的 invoke。
 
@@ -1387,9 +1366,9 @@ class ContextManager:
                     cache=self._est_cache,
                 )
                 if trimmed:
-                    from xskill import obs
-                    if obs.is_enabled():
-                        obs.collector().note_spill()
+                    spill_hook = getattr(_STATE, "spill_hook", None)
+                    if spill_hook is not None:
+                        spill_hook()
                     after_spill = _estimate_history_tokens(
                         messages,
                         cjk_rate=self.cjk_rate,

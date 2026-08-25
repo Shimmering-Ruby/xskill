@@ -1,13 +1,15 @@
 """obs 层：默认关、开了才记，以及特征口径对不对。
 
-重点覆盖三件事：
-1. ``XSKILL_OTEL`` 没设时所有埋点是空操作，产品行为一点不变
+重点覆盖：
+1. ``XSKILL_OTEL`` 没设时所有埋点是空操作
 2. 特征口径：compact 次数、工具调用次数、读到的轨迹 id 列表
-3. compact 埋点挂在真实的 ``ContextManager`` 上，数得出触发次数
+3. compact 旁路只在 Generate 这趟绑上；共用 factory 不挂 OTel
+4. OpenTelemetry / Phoenix 不进主依赖
 """
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -63,8 +65,14 @@ def test_disabled_span_is_noop():
 
 
 def test_disabled_tool_hooks_are_empty(monkeypatch):
+    from xskill.obs.generate import generate_tool_hooks
+    assert generate_tool_hooks() == []
+
+
+def test_shared_factory_has_no_otel_hooks():
     from xskill.agents import agno_factory
-    assert agno_factory.otel_tool_hooks() == []
+    assert not hasattr(agno_factory, "otel_tool_hooks")
+    assert not hasattr(agno_factory, "_wrap_with_otel")
 
 
 # ── 轨迹 id 抽取 ────────────────────────────────────────────────
@@ -201,8 +209,8 @@ def test_span_body_exception_is_not_swallowed(tmp_path, monkeypatch):
 
 def test_tool_hook_counts_and_passes_arguments(tmp_path, monkeypatch):
     _enable(monkeypatch, tmp_path)
-    from xskill.agents import agno_factory
-    hooks = agno_factory.otel_tool_hooks()
+    from xskill.obs.generate import generate_tool_hooks
+    hooks = generate_tool_hooks()
     assert len(hooks) == 1
 
     seen = {}
@@ -224,8 +232,8 @@ def test_tool_hook_counts_and_passes_arguments(tmp_path, monkeypatch):
 
 def test_tool_hook_records_failure_and_reraises(tmp_path, monkeypatch):
     _enable(monkeypatch, tmp_path)
-    from xskill.agents import agno_factory
-    hook = agno_factory.otel_tool_hooks()[0]
+    from xskill.obs.generate import generate_tool_hooks
+    hook = generate_tool_hooks()[0]
 
     def boom(**kwargs):
         del kwargs
@@ -271,6 +279,7 @@ def _static_invoke(messages, **kwargs):
 def test_context_manager_compact_is_counted(tmp_path, monkeypatch):
     _enable(monkeypatch, tmp_path, job="compact-job")
     from xskill.agents.context_budget import ContextManager
+    from xskill.obs.generate import attach_generate_context_hooks
 
     compact_calls = []
 
@@ -287,7 +296,8 @@ def test_context_manager_compact_is_counted(tmp_path, monkeypatch):
     invoke = manager.wrap(_static_invoke)
     # 8 轮 × 4000 字符 ≈ 8000+ token，远超 1000 的阈值
     messages = _history(turns=8, chars=4_000)
-    invoke(messages)
+    with attach_generate_context_hooks():
+        invoke(messages)
 
     assert compact_calls, "compact_fn 应该被调用"
     snapshot = obs.collector().as_dict()
@@ -295,12 +305,12 @@ def test_context_manager_compact_is_counted(tmp_path, monkeypatch):
     event = snapshot["compact_events"][0]
     assert event["ok"] is True
     assert event["tokens_before"] > event["tokens_after"]
-    assert event["attempts"] == 1
 
 
 def test_context_manager_no_compact_when_under_limit(tmp_path, monkeypatch):
     _enable(monkeypatch, tmp_path)
     from xskill.agents.context_budget import ContextManager
+    from xskill.obs.generate import attach_generate_context_hooks
 
     manager = ContextManager(
         200_000,
@@ -309,8 +319,100 @@ def test_context_manager_no_compact_when_under_limit(tmp_path, monkeypatch):
         compact_fn=lambda prompt: "summary",
     )
     invoke = manager.wrap(_static_invoke)
-    invoke(_history(turns=2, chars=200))
+    with attach_generate_context_hooks():
+        invoke(_history(turns=2, chars=200))
     assert obs.collector().as_dict()["compact_count"] == 0
+
+
+def test_compact_not_counted_without_generate_hook(tmp_path, monkeypatch):
+    """XSKILL_OTEL 开着，但不是 Generate 这趟，compact 不记账。"""
+    _enable(monkeypatch, tmp_path)
+    from xskill.agents.context_budget import ContextManager
+
+    compact_calls = []
+    manager = ContextManager(
+        200_000,
+        compact_token_limit=1_000,
+        compact_keep_recent_messages=2,
+        compact_fn=lambda prompt: compact_calls.append(prompt) or "summary",
+    )
+    invoke = manager.wrap(_static_invoke)
+    invoke(_history(turns=8, chars=4_000))
+    assert compact_calls, "没绑 Generate 旁路不该挡住 compact 本身"
+    assert obs.collector().as_dict()["compact_count"] == 0
+
+
+def test_wrap_factory_is_identity_when_disabled():
+    from xskill.obs.generate import wrap_generate_factory
+
+    def factory(*, instructions, tools, **kwargs):
+        del instructions, tools, kwargs
+        return "agent"
+
+    assert wrap_generate_factory(factory, {}) is factory
+
+
+def test_wrap_factory_adds_tool_hooks_when_enabled(tmp_path, monkeypatch):
+    _enable(monkeypatch, tmp_path)
+    from xskill.obs.generate import wrap_generate_factory
+
+    seen = {}
+
+    class _Model:
+        def invoke(self, messages, **kwargs):
+            del messages, kwargs
+            return _Resp()
+
+    class _Agent:
+        def __init__(self):
+            self.model = _Model()
+
+    def factory(*, instructions, tools, **kwargs):
+        seen["hooks"] = kwargs.get("tool_hooks")
+        return _Agent()
+
+    wrapped = wrap_generate_factory(factory, {"model": "test"})
+    agent = wrapped(instructions=["x"], tools=[])
+    assert seen["hooks"], "Generate factory 应该挂上工具 hook"
+    assert agent.model.invoke.__name__ == "observed_invoke"
+
+
+def test_pyproject_keeps_otel_optional_only():
+    from pathlib import Path
+
+    text = Path("pyproject.toml").read_text(encoding="utf-8")
+    deps_start = text.index("dependencies = [")
+    extras_start = text.index("[project.optional-dependencies]")
+    deps_block = text[deps_start:extras_start]
+    assert "opentelemetry" not in deps_block
+    assert "arize-phoenix" not in deps_block
+    extras = text[extras_start:]
+    assert "opentelemetry-api>=1.20" in extras
+    assert "arize-phoenix>=7" in extras
+
+
+def test_prepare_generate_obs_fills_job_and_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("XSKILL_OTEL", "1")
+    monkeypatch.delenv("XSKILL_OTEL_JOB", raising=False)
+    monkeypatch.delenv("XSKILL_OTEL_SESSION", raising=False)
+    monkeypatch.delenv("XSKILL_OTEL_OUT", raising=False)
+    from xskill.team.server.generate_jobs import _prepare_generate_obs
+
+    job = {"job_id": "abc123", "user_id": "alice"}
+    _prepare_generate_obs(job, tmp_path)
+    assert os.environ["XSKILL_OTEL_JOB"] == "abc123"
+    out = tmp_path / "agents" / "generate_agents" / "alice" / "obs" / "abc123"
+    assert os.environ["XSKILL_OTEL_OUT"] == str(out)
+    assert out.is_dir()
+
+
+def test_prepare_generate_obs_noop_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("XSKILL_OTEL", raising=False)
+    monkeypatch.delenv("XSKILL_OTEL_OUT", raising=False)
+    from xskill.team.server.generate_jobs import _prepare_generate_obs
+
+    _prepare_generate_obs({"job_id": "x", "user_id": "u"}, tmp_path)
+    assert not os.environ.get("XSKILL_OTEL_OUT")
 
 
 def test_compact_not_counted_when_obs_disabled(tmp_path, monkeypatch):

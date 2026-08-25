@@ -45,11 +45,12 @@ cd scripts/bench/generate_obs
 看面板（可选）：
 
 ```bash
-./serve_phoenix.sh          # 默认 8873，已经有实例在跑就直接复用
+./serve_phoenix.sh          # 默认 6006；换口设 PHOENIX_PORT
 ```
 
-`run.sh` 会自己探 8873 和 6006，探到就把 span 送进去，项目名
-`xskill-generate`。探不到也不影响，`spans.jsonl` 照写。
+`run.sh` 会探本机 `GOBS_PHOENIX_PORTS`（默认 6006），探到就把 span 送进去，
+项目名 `xskill-generate`。探不到也不影响，`spans.jsonl` 照写。对外分享面板
+链接时自己设 `XSKILL_OTEL_PUBLIC_BASE`，脚本不写死地址。
 
 ## 数据从哪来
 
@@ -109,12 +110,14 @@ cd scripts/bench/generate_obs
 export XSKILL_OTEL=1
 export XSKILL_OTEL_JOB=my-job
 export XSKILL_OTEL_OUT=/tmp/my-job
-export XSKILL_OTEL_ENDPOINT=http://127.0.0.1:8873   # 可选，送 Phoenix
+export XSKILL_OTEL_ENDPOINT=http://127.0.0.1:6006   # 可选，送 Phoenix
+export XSKILL_OTEL_PUBLIC_BASE=http://127.0.0.1:6006  # 可选，拼面板链接
 export XSKILL_OTEL_CAPTURE_CONTENT=1                # 可选，记截断后的提示词正文
 ```
 
 默认不记提示词正文、不记工具返回内容、不记 API key；span 属性只有工具名、
 计数、轨迹 id 和短参数。
 
-依赖：`pip install 'xskill[obs]'`（面板另装 `xskill[phoenix]`）。缺这几个
-包时 obs 层自动退回无埋点，不影响正常跑。
+依赖只给 server / 观测机装：`pip install 'xskill[obs]'`（面板另装
+`xskill[phoenix]`）。不进主依赖，客户端自动更新不会拉到。缺这几个包时
+obs 层退回无埋点，不影响正常跑。

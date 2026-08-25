@@ -9,11 +9,14 @@
 usage 记的是 token 和钱，看不见"读完就 compact"这种行为模式。这里补的
 是可聚合的那一份。
 
-用法（产品代码里）::
+产品入口只在 ``GenerateAgent`` 和 ``obs.generate``。共用的
+``agno_factory`` / SkillEdit / TaskAgent 不挂这层。
 
-    from xskill import obs
+用法（Generate 自己）::
 
-    with obs.agent_run("generate", job="baseline-01"):
+    from xskill.obs.generate import observe_generate_run
+
+    with observe_generate_run(...):
         agent.run(user_msg)
 
 用法（实验脚本里）：设 ``XSKILL_OTEL=1``、``XSKILL_OTEL_JOB=<job 名>``、

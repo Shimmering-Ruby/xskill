@@ -133,7 +133,9 @@ class GenerateAgent:
             agent_tools.new_skill_folder,
             agent_tools.commit_generate_main,
         ]
-        agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
+        from xskill.obs.generate import observe_generate_run, wrap_generate_factory
+        factory = wrap_generate_factory(self.agno_agent_factory, self.llm_cfg)
+        agent = factory(instructions=[sysprompt], tools=tools)
         max_context = int(
             (self.llm_cfg or {}).get("max_context") or DEFAULT_MAX_CONTEXT
         )
@@ -165,14 +167,11 @@ class GenerateAgent:
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ), obs.agent_run(
-            "generate",
-            **{
-                "xskill.user_id": user_id,
-                "xskill.job_id": job_id,
-                "xskill.read_roots": len(self.extra_read_roots),
-                "input.value": obs.clip(user_msg),
-            },
+        ), observe_generate_run(
+            user_id=user_id,
+            job_id=job_id,
+            read_roots=len(self.extra_read_roots),
+            user_msg=user_msg,
         ) as root:
             result = agent.run(user_msg)
             content = getattr(result, "content", "") or ""

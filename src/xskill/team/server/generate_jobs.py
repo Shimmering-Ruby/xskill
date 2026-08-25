@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -482,6 +483,29 @@ def run_claimed_generate_job(
         _update_job(job_id, status="failed", error=str(error))
 
 
+def _prepare_generate_obs(job: dict[str, Any], logs_dir: Path) -> None:
+    """Server 上若已经开了 XSKILL_OTEL，补上这趟 generate job 的名字和输出目录。
+
+    这里不打开开关。客户端自动更新只装主依赖，走不到这条函数。
+    """
+    flag = str(os.environ.get("XSKILL_OTEL") or "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return
+    os.environ.setdefault("XSKILL_OTEL_JOB", str(job["job_id"]))
+    os.environ.setdefault("XSKILL_OTEL_SESSION", str(job["job_id"]))
+    if not (os.environ.get("XSKILL_OTEL_OUT") or "").strip():
+        out = (
+            Path(logs_dir)
+            / "agents"
+            / "generate_agents"
+            / job["user_id"]
+            / "obs"
+            / job["job_id"]
+        )
+        out.mkdir(parents=True, exist_ok=True)
+        os.environ["XSKILL_OTEL_OUT"] = str(out)
+
+
 def _run_generate_job_body(
     job: dict[str, Any],
     *,
@@ -504,6 +528,7 @@ def _run_generate_job_body(
     )
     extra_roots = exclude_blocked_read_roots(extra_roots, blocked_roots)
     logs_dir = Path(logs_dir) if logs_dir is not None else get_logs_dir()
+    _prepare_generate_obs(job, logs_dir)
     spill_root = (
         logs_dir / "agents" / "generate_agents" / job["user_id"] / "spill" / job["job_id"]
     )
