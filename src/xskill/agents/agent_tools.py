@@ -95,6 +95,8 @@ class AgentToolContext:
     extra_read_roots: tuple[Path, ...] = ()
     generate_user_id: str | None = None
     blocked_read_roots: tuple[Path, ...] = ()
+    # Generate 会话证据 wiki。只有 Generate job 会设；其他 agent 保持 None。
+    wiki_root: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -112,6 +114,8 @@ class AgentToolContext:
         object.__setattr__(self, "extra_read_roots", extra)
         blocked = tuple(Path(p) for p in (self.blocked_read_roots or ()))
         object.__setattr__(self, "blocked_read_roots", blocked)
+        if self.wiki_root is not None:
+            object.__setattr__(self, "wiki_root", Path(self.wiki_root))
 
 
 _EMPTY_AGENT_TOOL_CONTEXT = AgentToolContext()
@@ -142,6 +146,7 @@ def create_agent_tool_context(
     extra_read_roots=(),
     generate_user_id=None,
     blocked_read_roots=(),
+    wiki_root=None,
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -183,6 +188,7 @@ def create_agent_tool_context(
         blocked_read_roots=tuple(
             Path(p) for p in (blocked_read_roots or ())
         ),
+        wiki_root=Path(wiki_root) if wiki_root is not None else None,
     )
 
 
@@ -308,6 +314,7 @@ class AgentToolConfig:
             "extra_read_roots": current.extra_read_roots,
             "generate_user_id": current.generate_user_id,
             "blocked_read_roots": current.blocked_read_roots,
+            "wiki_root": current.wiki_root,
         }
 
     def restore(self, snapshot: dict) -> None:
@@ -329,6 +336,7 @@ class AgentToolConfig:
             extra_read_roots=snapshot.get("extra_read_roots") or (),
             generate_user_id=snapshot.get("generate_user_id"),
             blocked_read_roots=snapshot.get("blocked_read_roots") or (),
+            wiki_root=snapshot.get("wiki_root"),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()

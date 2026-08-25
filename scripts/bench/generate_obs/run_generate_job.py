@@ -290,6 +290,10 @@ def main() -> int:
     spill_root.mkdir(parents=True, exist_ok=True)
 
     extra_roots = collect_read_roots(skill_dir, traj_root, db_path=registry_db)
+    from xskill.agents.llm_wiki import seed_generate_wiki
+
+    wiki_root = seed_generate_wiki(out_dir / "wiki")
+    extra_roots = list(extra_roots) + [wiki_root]
     sessions_dirs = sorted(
         p for p in traj_root.glob("clients/*/sessions") if p.is_dir()
     )
@@ -325,6 +329,7 @@ def main() -> int:
         generate_user_id=args.user_id,
         registry_db_path=registry_db,
         blocked_read_roots=(),
+        wiki_root=wiki_root,
     )
     llm_cfg = {**llm_section, **(config.get("llm_skill") or {})}
     factory = make_default_factory(config, spill_root=spill_root)

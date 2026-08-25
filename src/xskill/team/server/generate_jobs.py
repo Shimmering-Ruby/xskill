@@ -506,6 +506,20 @@ def _prepare_generate_obs(job: dict[str, Any], logs_dir: Path) -> None:
         os.environ["XSKILL_OTEL_OUT"] = str(out)
 
 
+def _prepare_generate_wiki(job: dict[str, Any], logs_dir: Path) -> Path:
+    """本趟 generate 的会话证据 wiki。只给 Generate 用，不进其他 agent。"""
+    from xskill.agents.llm_wiki import seed_generate_wiki
+
+    return seed_generate_wiki(
+        Path(logs_dir)
+        / "agents"
+        / "generate_agents"
+        / job["user_id"]
+        / "wiki"
+        / job["job_id"]
+    )
+
+
 def _run_generate_job_body(
     job: dict[str, Any],
     *,
@@ -533,6 +547,8 @@ def _run_generate_job_body(
         logs_dir / "agents" / "generate_agents" / job["user_id"] / "spill" / job["job_id"]
     )
     spill_root.mkdir(parents=True, exist_ok=True)
+    wiki_root = _prepare_generate_wiki(job, logs_dir)
+    extra_roots = list(extra_roots) + [wiki_root]
     resolved_db = Path(db_path) if db_path is not None else get_registry_db_path()
     agent_tools.reset_generate_session()
     tool_context = agent_tools.create_agent_tool_context(
@@ -546,6 +562,7 @@ def _run_generate_job_body(
         generate_user_id=job["user_id"],
         registry_db_path=resolved_db,
         blocked_read_roots=blocked_roots,
+        wiki_root=wiki_root,
     )
     llm_cfg = {**(config.get("llm") or {}), **(config.get("llm_skill") or {})}
     factory = make_default_factory(
