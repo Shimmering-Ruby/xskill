@@ -428,9 +428,9 @@ class TestInstallToOpenClawProtectsPendingDestEdits:
         dest_md = install_to_openclaw(sk, target_root=home)
 
         # 让 reverse_sync 跳过静默检查（测试用，免等 3 分钟）
-        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest as _orig
+        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest_result as _orig
         monkeypatch.setattr(
-            "xskill.agents.user_edit_absorb_agent.reverse_sync_openclaw_dest",
+            "xskill.agents.user_edit_absorb_agent.reverse_sync_openclaw_dest_result",
             lambda d, s, **_k: _orig(d, s, quiet_seconds=0),
         )
 

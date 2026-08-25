@@ -117,13 +117,18 @@ def install_to_openclaw(
     if dest.is_dir() and not dest.is_symlink():
         from xskill.agents.user_edit_absorb_agent import (
             ReverseSyncStatus,
-            reverse_sync_openclaw_dest,
+            reverse_sync_openclaw_dest_result,
         )
-        reverse_status = reverse_sync_openclaw_dest(dest, skill_path)
+        reverse_result = reverse_sync_openclaw_dest_result(
+            dest, skill_path,
+        )
+        reverse_status = reverse_result.status
         if reverse_status == ReverseSyncStatus.RECENT_EDIT:
             raise InstallSafetyError("REVERSE_SYNC_RECENT_EDIT") from None
         if reverse_status == ReverseSyncStatus.FAILED:
-            raise InstallSafetyError("REVERSE_SYNC_FAILED") from None
+            raise InstallSafetyError(
+                reverse_result.error_type or "REVERSE_SYNC_FAILED",
+            ) from None
 
     # 强制 copy + auto_reset 一站式：
     # 1. ``_maybe_reverse_sync_before_overwrite`` —— 二次回流保护（默认

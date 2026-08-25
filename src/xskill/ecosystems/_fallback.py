@@ -177,12 +177,17 @@ def _maybe_reverse_sync_before_overwrite(
     if meta is not None and meta.get("mode") != "copy":
         raise InstallSafetyError("REVERSE_SYNC_STATE_FAILED") from None
     # 延迟 import 避免 _fallback ↔ user_edit_absorb_agent 循环
-    from xskill.agents.user_edit_absorb_agent import reverse_sync_copy_dest
-    reverse_status = reverse_sync_copy_dest(dest, source)
+    from xskill.agents.user_edit_absorb_agent import (
+        reverse_sync_copy_dest_result,
+    )
+    reverse_result = reverse_sync_copy_dest_result(dest, source)
+    reverse_status = reverse_result.status
     if reverse_status == ReverseSyncStatus.RECENT_EDIT:
         raise InstallSafetyError("REVERSE_SYNC_RECENT_EDIT") from None
     if reverse_status == ReverseSyncStatus.FAILED:
-        raise InstallSafetyError("REVERSE_SYNC_FAILED") from None
+        raise InstallSafetyError(
+            reverse_result.error_type or "REVERSE_SYNC_FAILED",
+        ) from None
     return reverse_status
 
 

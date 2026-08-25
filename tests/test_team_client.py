@@ -130,8 +130,11 @@ def test_push_user_edits_stops_after_reverse_sync_failure(
     tc.reconcile_skill_sides(manifest)
     monkeypatch.setattr(
         user_absorb,
-        "reverse_sync_openclaw_dest",
-        lambda *_args, **_kwargs: user_absorb.ReverseSyncStatus.FAILED,
+        "reverse_sync_openclaw_dest_result",
+        lambda *_args, **_kwargs: user_absorb.ReverseSyncResult(
+            user_absorb.ReverseSyncStatus.FAILED,
+            "REVERSE_SYNC_CONTENT_CONFLICT",
+        ),
     )
 
     def fail_if_git_status_runs(*_args, **_kwargs):
