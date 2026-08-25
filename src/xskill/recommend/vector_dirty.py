@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from xskill.pipeline.registry import pooled_connection
 
@@ -52,6 +52,85 @@ def list_catalog_vector_dirty(
             (max(1, int(limit)),),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def count_catalog_vector_dirty(*, db_path: Optional[Path] = None) -> int:
+    """当前积压的脏项数——用来判断「要不要播种全量对账」和向状态文件报告进度。"""
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM catalog_vector_dirty WHERE dirty=1"
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def _row_indexable_from_light_columns(
+    *, content_sha: str, source: str, distributable, retired,
+) -> bool:
+    """``catalog_row_is_indexable`` 的窄列版本：只用 ``content_sha`` 的
+    非空性代表「有正文」，不读 description 原文——避免播种全量对账时把
+    全表文本一次性摊进内存（issue #328）。``content_sha`` 只在
+    description 非空时才非空（见 ``catalog_store.py`` 写入逻辑），可以
+    安全地当「有没有正文」的代理，不需要重复两边的判定逻辑本体。
+    """
+    if retired:
+        return False
+    if not (content_sha or "").strip():
+        return False
+    return source == "skillhub" or bool(
+        distributable if distributable is not None else 1
+    )
+
+
+def seed_full_catalog_vector_sweep(
+    *,
+    db_path: Optional[Path] = None,
+    existing_index_keys: Iterable[str] = (),
+) -> dict:
+    """把当前全部可索引 catalog 行标脏，交给增量消费循环分批处理（issue #328）。
+
+    调用方只应在「没有正在进行中的积压」时播种一次——重复播种会把已经
+    处理过、已经从脏表清掉的 key 重新标脏，抹掉上一轮已经取得的进度。
+    之后每轮只消费一批（``limit`` 条），天然把一次性的全量重建拆成多轮，
+    不会因为没装持久索引就在单轮里把整份 catalog 的正文和向量都摊进内存。
+
+    ``existing_index_keys``：当前索引里已有、但按最新 catalog 状态已不
+    再可索引（被 retire、被删）的 key 会被标记 delete，交由消费循环把
+    它们从索引里清掉，行为与旧的全量对账一致。
+    """
+    with pooled_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT c.catalog_key, c.content_sha, c.source, c.distributable,
+                   CASE WHEN l.state='retired' THEN 1 ELSE 0 END AS retired
+            FROM skills_catalog AS c
+            LEFT JOIN skill_lifecycle AS l ON l.skill_name=c.name
+            """
+        ).fetchall()
+        indexable_keys: set[str] = set()
+        seeded_upsert = 0
+        for row in rows:
+            if not _row_indexable_from_light_columns(
+                content_sha=row["content_sha"], source=row["source"],
+                distributable=row["distributable"], retired=row["retired"],
+            ):
+                continue
+            indexable_keys.add(row["catalog_key"])
+            mark_catalog_vector_dirty_on_connection(
+                conn, row["catalog_key"], operation="upsert",
+                content_sha=row["content_sha"] or "",
+            )
+            seeded_upsert += 1
+        stale = set(existing_index_keys) - indexable_keys
+        for catalog_key in stale:
+            mark_catalog_vector_dirty_on_connection(
+                conn, catalog_key, operation="delete",
+            )
+        conn.commit()
+    return {
+        "total_indexable": len(indexable_keys),
+        "seeded_upsert": seeded_upsert,
+        "seeded_delete": len(stale),
+    }
 
 
 def list_all_catalog_vector_generations(

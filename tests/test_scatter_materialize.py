@@ -217,6 +217,29 @@ def test_service_event_trigger_submits_both_methods(tmp_path):
         assert service.stop(timeout=3)
 
 
+def test_scatter_failure_does_not_block_profile_completion(tmp_path):
+    """issue #328 回归：散点子系统本就在独立线程/进程池里跑，画像刷新的
+    完成条件（``wait_idle``）只看画像 worker 状态，不等散点——即便散点
+    每次都报错，画像刷新仍应正常收尾（对应 /sync 仍能读到已算好的槽）。"""
+    engine = _FakeEngine(tmp_path / "team_profile.db")
+    service = ProfileRefreshService(engine, workers=1, queue_size=4)
+
+    def _always_raises(_user_key, _method):
+        raise RuntimeError("boom: scatter always fails in this test")
+
+    service._recompute_scatter = _always_raises
+    try:
+        assert service.request("client-x")
+        # wait_idle 只等画像 worker，不等散点派发线程；即便散点必炸，这里
+        # 也不应该超时或抛出。
+        assert service.wait_idle(timeout=3)
+        assert engine.calls == ["client-x"]
+        # 派发线程仍然存活、没有被未捕获异常打挂。
+        assert service._scatter_thread is None or service._scatter_thread.is_alive()
+    finally:
+        assert service.stop(timeout=3)
+
+
 def test_service_submit_scatter_dedup(tmp_path):
     engine = _FakeEngine(tmp_path / "team_profile.db")
     service = ProfileRefreshService(engine, workers=1, queue_size=4, autostart=False)

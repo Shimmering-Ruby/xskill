@@ -109,7 +109,6 @@ def _store_catalog(db: Path, row: dict, *, mark: bool = True) -> None:
 def _sync(db: Path, index, *, model: str = "model-a", now: float = 100.0, embed=None):
     return run_vector_sync(
         db_path=db,
-        vector_db_path=db.parent / "vectors.db",
         index=index,
         embed=embed or (lambda text: fake_embed(text, DEFAULT_DIM)),
         model_fingerprint=f"test:{model}:{DEFAULT_DIM}",
@@ -418,3 +417,132 @@ def test_milvus_dimension_change_recreates_projection(monkeypatch):
         if _args and _args[0] == "vector"
     ]
     assert vector_fields[0]["dim"] == DEFAULT_DIM
+
+
+# ─────────────────────────────────────────────────────────────────
+# 全量对账分批（issue #328）：没有积压时播种，之后按 limit 分批消费，
+# 大目录天然拆成多轮；持久索引（这里用可跨调用复用的内存索引模拟）
+# 跨轮次真正累积覆盖，进度通过 remaining 字段体现。
+# ─────────────────────────────────────────────────────────────────
+
+def _store_many(db: Path, n: int, *, prefix: str = "native:k") -> None:
+    for i in range(n):
+        _store_catalog(
+            db, _catalog_row(f"{prefix}{i}", f"desc-{i}"), mark=False,
+        )
+
+
+class TestFullSweepBatching:
+    def test_large_catalog_spreads_across_multiple_rounds(self, registry_db):
+        """25 条、每轮 limit=10：分 3 轮才追平，期间索引跨轮累积覆盖。"""
+        _store_many(registry_db, 25)
+        index = CountingIndex()
+
+        r1 = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=100.0, limit=10,
+        )
+        assert r1["mode"] == "full"
+        assert r1["reason"] == "bootstrap"
+        assert r1["upserted"] == 10
+        assert r1["remaining"] == 15
+        assert len(index.list_keys()) == 10
+
+        r2 = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=101.0, limit=10,
+        )
+        assert r2["mode"] == "full"
+        assert r2["remaining"] == 5
+        assert len(index.list_keys()) == 20
+
+        r3 = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=102.0, limit=10,
+        )
+        assert r3["mode"] == "full"
+        assert r3["remaining"] == 0
+        assert len(index.list_keys()) == 25
+
+        # 追平之后再来一轮：不再是「full」，纯增量且没有任何积压。
+        r4 = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=103.0, limit=10,
+        )
+        assert r4["mode"] == "incremental"
+        assert r4["upserted"] == 0
+
+    def test_mid_sweep_does_not_reseed_and_lose_progress(self, registry_db):
+        """还在消化上一次播种的积压时，再次触发 full 原因不应该重新播种
+        （否则已经清掉的 key 会被重新标脏，进度被抹掉，永远追不平）。"""
+        _store_many(registry_db, 12)
+        index = CountingIndex()
+
+        run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=100.0, limit=5,
+        )
+        from xskill.recommend.vector_dirty import count_catalog_vector_dirty
+        assert count_catalog_vector_dirty(db_path=registry_db) == 7
+
+        # 第二轮：queue 里还有 7 条积压，不应该被重新播种成 12 条。
+        run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=101.0, limit=5,
+        )
+        assert count_catalog_vector_dirty(db_path=registry_db) == 2
+
+        run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=102.0, limit=5,
+        )
+        assert count_catalog_vector_dirty(db_path=registry_db) == 0
+        assert len(index.list_keys()) == 12
+
+    def test_sweep_deletes_stale_keys_no_longer_indexable(self, registry_db):
+        """索引里有、但 catalog 里已经不可索引（被删）的 key 会被播种成
+        delete 并在消费时清掉——和旧的全量对账行为一致。"""
+        index = CountingIndex()
+        index.upsert(
+            "native:gone", fake_embed("gone", DEFAULT_DIM),
+            content_sha="gone", source="native", name="gone",
+        )
+        _store_catalog(registry_db, _catalog_row("native:alpha", "alpha"), mark=False)
+
+        stats = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=100.0, limit=256,
+        )
+        assert stats["deleted"] == 1
+        assert stats["remaining"] == 0
+        assert index.get("native:gone") is None
+        assert index.get("native:alpha") is not None
+
+    def test_ephemeral_reason_force_upserts_without_reuse(self, registry_db):
+        """ephemeral（无持久索引）强制重新 embed，即便 content_sha 没变——
+        旧向量可能是别的模型算的，复用会用错模型的向量。"""
+        index = CountingIndex()
+        row = _catalog_row("native:alpha", "alpha")
+        _store_catalog(registry_db, row, mark=False)
+        index.upsert(
+            row["catalog_key"], fake_embed("alpha", DEFAULT_DIM),
+            content_sha=row["content_sha"], source=row["source"], name=row["name"],
+        )
+        embeds = []
+        stats = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: embeds.append(text) or fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=100.0, limit=256,
+            force_full=True,
+        )
+        assert stats["reason"] == "ephemeral"
+        assert stats["upserted"] == 1
+        assert embeds == ["alpha"]

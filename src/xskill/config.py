@@ -198,6 +198,8 @@ server:
   profile_refresh_timeout: 1800    # 单轮画像子进程硬上限(秒;冷启动大量 client 兜底)
   ux_scores_sync_interval: 30      # 盘上 .ux_scores.jsonl → registry.db 同步周期(秒)
   ux_scores_sync_timeout: 300      # 单轮 UX 同步子进程硬上限(秒)
+  vector_sync_batch_limit: 256     # 向量对账单轮最多处理的 catalog_key 数(issue #328;万级目录靠这个拆成多轮)
+  recommend_heavy_memory_budget_mb: 1024 # recommend-heavy 单轮峰值 RSS 软上限(MiB);超了本轮提前中止,留给下一轮
 
 # ===== Watcher (scan scheduling only) =====
 watcher:
@@ -936,6 +938,39 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
         "shutdown_timeout": float(shutdown_timeout),
         "interval": float(interval),
         "timeout": float(timeout),
+    }
+
+
+def recommend_heavy_config(cfg: Optional[dict] = None) -> dict:
+    """recommend-heavy 重活单轮的批大小与内存预算（issue #328）。
+
+    ``vector_sync_batch_limit``：全量/增量向量对账单次调用最多处理多少
+    ``catalog_key``——万级目录时全量重建会被这个上限拆成多轮，而不是
+    一轮吃掉整份 catalog。``memory_budget_mb``：单轮峰值 RSS 软上限，
+    超过就中止本轮剩余批次（已处理的部分正常生效），留给下一轮继续；
+    默认给一个对 16 GiB 主机安全、能跟 Docker/看板/客户端共存的值。
+    """
+    section = (cfg or {}).get("server") or {}
+    batch_limit = section.get("vector_sync_batch_limit", 256)
+    memory_budget_mb = section.get("recommend_heavy_memory_budget_mb", 1024)
+
+    if not isinstance(batch_limit, int) or isinstance(batch_limit, bool) or batch_limit < 1:
+        raise ValueError(
+            f"server.vector_sync_batch_limit 必须是正整数，got {batch_limit!r}"
+        )
+    if (
+        not isinstance(memory_budget_mb, (int, float))
+        or isinstance(memory_budget_mb, bool)
+        or not math.isfinite(memory_budget_mb)
+        or memory_budget_mb <= 0
+    ):
+        raise ValueError(
+            "server.recommend_heavy_memory_budget_mb 必须是正数，"
+            f"got {memory_budget_mb!r}"
+        )
+    return {
+        "batch_limit": batch_limit,
+        "memory_budget_mb": float(memory_budget_mb),
     }
 
 

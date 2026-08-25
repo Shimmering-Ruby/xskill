@@ -401,7 +401,7 @@ def run_recommend_heavy_once() -> int:
     替代原先仅跑 profile-refresh 的短命子进程；Web /sync 只读
     ``client_recommend_slots``，不再请求内 ``get_skill_for_client``。
     """
-    from xskill.config import XSKILL_HOME, load_config
+    from xskill.config import XSKILL_HOME, load_config, recommend_heavy_config
     from xskill.recommend.heavy_worker import run_recommend_heavy_once as _heavy_tick
     from xskill.team.server.engine_factory import build_recommend_engine
     from xskill.utils.status_file import PROFILE_STATUS_FILE, write_status_file
@@ -409,14 +409,33 @@ def run_recommend_heavy_once() -> int:
     status_path = XSKILL_HOME / PROFILE_STATUS_FILE
     try:
         config = load_config()
+        heavy_cfg = recommend_heavy_config(config)
         engine = build_recommend_engine(config)
         profile_rc = run_profile_refresh_once(engine=engine)
-        heavy = _heavy_tick(engine=engine)
+        heavy = _heavy_tick(
+            engine=engine,
+            vector_sync_batch_limit=heavy_cfg["batch_limit"],
+            memory_budget_mb=heavy_cfg["memory_budget_mb"],
+        )
+        vector_stats = heavy.get("vector", {})
         metrics = {
             "profile_rc": profile_rc,
-            "vector_upserted": heavy.get("vector", {}).get("upserted", 0),
-            "vector_deleted": heavy.get("vector", {}).get("deleted", 0),
+            "vector_upserted": vector_stats.get("upserted", 0),
+            "vector_deleted": vector_stats.get("deleted", 0),
+            "vector_skipped": vector_stats.get("skipped", 0),
+            "vector_mode": vector_stats.get("mode", ""),
+            "vector_reason": vector_stats.get("reason", ""),
+            # 全量对账（bootstrap/model_changed/periodic/ephemeral）还剩多少
+            # catalog_key 没追平；0 表示这一轮之后已经追平，不是「查询侧还没
+            # 收敛」——full 模式下该字段随每轮增量收敛，供看板/日志观察进度。
+            "vector_remaining": vector_stats.get("remaining"),
+            # 只在这一轮真播种了全量对账时才有值；平时纯增量运转不需要
+            # 每轮都数一遍 catalog 有多少行。
+            "vector_total_indexable": vector_stats.get("total_indexable"),
+            "vector_budget_aborted": vector_stats.get("budget_aborted", False),
             "recommends": heavy.get("recommends", 0),
+            "index_kind": heavy.get("index_kind", ""),
+            "rss_peak_mb": heavy.get("rss_peak_mb", 0.0),
         }
         write_status_file(status_path, metrics, ok=profile_rc == 0)
         return 0 if profile_rc == 0 else profile_rc
