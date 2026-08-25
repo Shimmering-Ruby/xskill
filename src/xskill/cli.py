@@ -1951,6 +1951,100 @@ def cmd_rebuild(args, _xskill) -> int:
     return 0
 
 
+def cmd_repair_baselines(args) -> int:
+    """审计并安全重算已有 copy 安装基线。"""
+    import hashlib
+    import json as _json
+    from pathlib import Path
+
+    from xskill.ecosystems.install_ledger import get_default_ledger
+    from xskill.ecosystems.installation import (
+        CopyBaselineRepairStatus,
+        repair_copy_install_baseline,
+    )
+
+    try:
+        installs = get_default_ledger().list_active_install_targets(
+            mode="copy", skill_name=args.skill,
+        )
+    except Exception as ledger_error:  # noqa: BLE001
+        logger.error(
+            "copy baseline repair ledger read failed error_type=%s",
+            type(ledger_error).__name__,
+        )
+        print("error: 无法读取本机安装账本", file=sys.stderr)
+        return 1
+
+    results: list[dict[str, str]] = []
+    for install in installs:
+        dest_key = install.get("dest_key")
+        skill_name = install.get("skill_name")
+        if not isinstance(dest_key, str) or not isinstance(skill_name, str):
+            results.append({
+                "skill": (
+                    skill_name
+                    if isinstance(skill_name, str)
+                    else "<invalid>"
+                ),
+                "target_id": "",
+                "status": CopyBaselineRepairStatus.INVALID.value,
+            })
+            continue
+        status = repair_copy_install_baseline(
+            Path(dest_key), apply=not args.dry_run,
+        )
+        results.append({
+            "skill": skill_name,
+            "target_id": hashlib.sha256(
+                dest_key.encode("utf-8", errors="surrogatepass"),
+            ).hexdigest()[:16],
+            "status": status.value,
+        })
+
+    counts = {
+        status.value: sum(
+            result["status"] == status.value for result in results
+        )
+        for status in CopyBaselineRepairStatus
+    }
+    if args.json:
+        print(_json.dumps(
+            {
+                "dry_run": bool(args.dry_run),
+                "counts": counts,
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif not results:
+        print("没有匹配的 active copy 安装。")
+    else:
+        labels = {
+            CopyBaselineRepairStatus.CURRENT.value: "无需修复",
+            CopyBaselineRepairStatus.REPAIRABLE.value: "可安全修复",
+            CopyBaselineRepairStatus.REPAIRED.value: "已修复",
+            CopyBaselineRepairStatus.DIVERGED.value: "已跳过：source 与安装副本存在分叉",
+            CopyBaselineRepairStatus.INVALID.value: "已跳过：安装身份或元数据无效",
+            CopyBaselineRepairStatus.CONCURRENT.value: "已跳过：安装在检查期间发生换代",
+            CopyBaselineRepairStatus.FAILED.value: "修复失败：文件在检查期间变化或不可安全读取",
+        }
+        for result in results:
+            print(
+                f"{result['skill']} [{result['target_id']}]: "
+                f"{labels[result['status']]}"
+            )
+
+    safe_statuses = {
+        CopyBaselineRepairStatus.CURRENT.value,
+        CopyBaselineRepairStatus.REPAIRABLE.value,
+        CopyBaselineRepairStatus.REPAIRED.value,
+    }
+    return 0 if all(
+        result["status"] in safe_statuses for result in results
+    ) else 1
+
+
 # ═══════════════════════════════════════════════════════════════
 # argparse
 # ═══════════════════════════════════════════════════════════════
@@ -2184,6 +2278,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="跳过'daemon 模型≠config 模型'护栏，用当前运行的模型重跑",
     )
 
+    p_repair_baselines = sub.add_parser(
+        "repair-baselines",
+        help="安全审计并重算历史 copy 安装基线",
+    )
+    p_repair_baselines.add_argument(
+        "--skill", default=None,
+        help="只处理指定 skill 名（默认处理全部 active copy 安装）",
+    )
+    p_repair_baselines.add_argument(
+        "--dry-run", action="store_true",
+        help="只审计并报告可修复项，不写安装账本",
+    )
+    p_repair_baselines.add_argument(
+        "--json", action="store_true", help="机读 JSON 输出",
+    )
+
     return p
 
 
@@ -2275,6 +2385,8 @@ def main() -> int:
         return cmd_read(args, None)
     if args.command == "rebuild":
         return cmd_rebuild(args, None)
+    if args.command == "repair-baselines":
+        return cmd_repair_baselines(args)
 
     # team 客户端的 `registry list`：本机是 client（有 team_client.json）且没有
     # standalone 数据（watch_dirs 为空）时，改走现算视图。放在 config/facade

@@ -14,6 +14,7 @@ import secrets
 import stat
 import tempfile
 import time
+from enum import Enum
 from operator import attrgetter
 from pathlib import Path
 from typing import Literal, NoReturn
@@ -66,6 +67,18 @@ class InstallSafetyError(RuntimeError):
     def __init__(self, error_type: str):
         self.error_type = error_type
         super().__init__("安装安全检查失败，已保留现有目标目录")
+
+
+class CopyBaselineRepairStatus(str, Enum):
+    """显式 copy 基线审计/修复的无歧义结果。"""
+
+    CURRENT = "current"
+    REPAIRABLE = "repairable"
+    REPAIRED = "repaired"
+    DIVERGED = "diverged"
+    INVALID = "invalid"
+    CONCURRENT = "concurrent"
+    FAILED = "failed"
 
 
 def _path_hash(path: Path) -> str:
@@ -726,7 +739,12 @@ def _hash_verified_copy_file(
             os.close(directory_descriptor)
 
 
-def _safe_copy_file_fingerprints(dest: Path) -> dict[str, str]:
+def _safe_copy_file_fingerprints(
+    dest: Path,
+    *,
+    exclude_root_names: frozenset[str] = frozenset(),
+    exclude_root_prefixes: tuple[str, ...] = (),
+) -> dict[str, str]:
     fingerprints: dict[str, str] = {}
     pending_directories: list[tuple[Path, Path]] = [(dest, Path())]
     root_stat = dest.lstat()
@@ -749,7 +767,14 @@ def _safe_copy_file_fingerprints(dest: Path) -> dict[str, str]:
                 relative_path = relative_directory / entry.name
                 if (
                     relative_directory == Path()
-                    and entry.name == COPY_INSTALL_MARKER_NAME
+                    and (
+                        entry.name == COPY_INSTALL_MARKER_NAME
+                        or entry.name in exclude_root_names
+                        or any(
+                            entry.name.startswith(prefix)
+                            for prefix in exclude_root_prefixes
+                        )
+                    )
                 ):
                     continue
                 # Windows 的 DirEntry.stat() 可能直接使用 WIN32_FIND_DATA
@@ -1104,6 +1129,181 @@ def refresh_copy_install_baseline(dest: Path) -> bool:
         file_fingerprints=file_fingerprints,
         baseline_identity=baseline_identity,
     )
+
+
+_COPY_REPAIR_SOURCE_EXCLUDE = frozenset({
+    ".git",
+    ".xskill-install-meta.json",
+})
+
+
+def _copy_repair_source_fingerprints(root: Path) -> dict[str, str]:
+    return _safe_copy_file_fingerprints(
+        root,
+        exclude_root_names=_COPY_REPAIR_SOURCE_EXCLUDE,
+        exclude_root_prefixes=(_INSTALL_META_PREFIX,),
+    )
+
+
+def _copy_repair_dest_user_fingerprints(
+    fingerprints: dict[str, str],
+) -> dict[str, str]:
+    return {
+        relative_name: file_hash
+        for relative_name, file_hash in fingerprints.items()
+        if relative_name.partition("/")[0]
+        not in _COPY_REPAIR_SOURCE_EXCLUDE
+    }
+
+
+def repair_copy_install_baseline(
+    dest: Path,
+    *,
+    apply: bool = True,
+) -> CopyBaselineRepairStatus:
+    """仅在 source 与 copy dest 完全一致时安全重算一条存量基线。
+
+    该入口不会用当前 dest 无条件覆盖账本：任何待回流用户编辑、source 前进、
+    特殊文件、身份不匹配或并发安装换代都会拒绝。写入使用安装世代、安装 ID
+    与旧基线身份做 CAS；写后复核若发现外部竞态，则尽力回滚旧基线。
+    """
+    from xskill.ecosystems.install_ledger import get_default_ledger
+    from xskill.skill.git import skill_repo_lock
+
+    dest = Path(dest)
+    ledger = get_default_ledger()
+    try:
+        metadata = ledger.read_install(dest)
+        if metadata is None:
+            return CopyBaselineRepairStatus.INVALID
+        metadata = _validate_metadata(metadata, dest)
+    except (InstallationMetadataError, OSError, ValueError):
+        return CopyBaselineRepairStatus.INVALID
+    raw_source = metadata.get("source")
+    old_fingerprints = metadata.get("file_fingerprints")
+    old_baseline_identity = metadata.get("baseline_identity")
+    generation = metadata.get("generation")
+    installation_id = metadata.get("installation_id")
+    if (
+        metadata.get("mode") != "copy"
+        or not isinstance(raw_source, str)
+        or not Path(raw_source).is_absolute()
+        or not isinstance(old_fingerprints, dict)
+        or not isinstance(old_baseline_identity, str)
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or not isinstance(installation_id, str)
+        or not copy_install_identity_matches(
+            dest, Path(raw_source), metadata=metadata,
+        )
+    ):
+        return CopyBaselineRepairStatus.INVALID
+    source = Path(raw_source)
+    baseline_written = False
+    new_baseline_identity = ""
+    try:
+        with skill_repo_lock(source, use_git_write_limit=False):
+            dest_fingerprints = _safe_copy_file_fingerprints(dest)
+            new_baseline_identity = _copy_baseline_identity(
+                dest_fingerprints,
+            )
+            if (
+                dest_fingerprints == old_fingerprints
+                and new_baseline_identity == old_baseline_identity
+            ):
+                return CopyBaselineRepairStatus.CURRENT
+            source_user_fingerprints = _copy_repair_source_fingerprints(
+                source,
+            )
+            dest_user_fingerprints = (
+                _copy_repair_dest_user_fingerprints(dest_fingerprints)
+            )
+            if (
+                "SKILL.md" not in source_user_fingerprints
+                or "SKILL.md" not in dest_user_fingerprints
+            ):
+                return CopyBaselineRepairStatus.INVALID
+            if source_user_fingerprints != dest_user_fingerprints:
+                return CopyBaselineRepairStatus.DIVERGED
+            if not apply:
+                return CopyBaselineRepairStatus.REPAIRABLE
+            if not ledger.compare_and_swap_copy_baseline(
+                dest,
+                expected_generation=generation,
+                expected_installation_id=installation_id,
+                expected_baseline_identity=old_baseline_identity,
+                file_fingerprints=dest_fingerprints,
+                baseline_identity=new_baseline_identity,
+            ):
+                return CopyBaselineRepairStatus.CONCURRENT
+            baseline_written = True
+            verified_dest = _safe_copy_file_fingerprints(dest)
+            verified_source_user = _copy_repair_source_fingerprints(
+                source,
+            )
+            verified_dest_user = _copy_repair_dest_user_fingerprints(
+                verified_dest,
+            )
+            current_metadata = ledger.read_install(dest)
+            ledger_still_matches = (
+                current_metadata is not None
+                and current_metadata.get("generation") == generation
+                and current_metadata.get("installation_id")
+                == installation_id
+                and current_metadata.get("baseline_identity")
+                == new_baseline_identity
+            )
+            if not ledger_still_matches:
+                baseline_written = False
+                return CopyBaselineRepairStatus.CONCURRENT
+            if (
+                verified_dest == dest_fingerprints
+                and verified_source_user == source_user_fingerprints
+                and verified_dest_user == dest_user_fingerprints
+            ):
+                baseline_written = False
+                return CopyBaselineRepairStatus.REPAIRED
+            rolled_back = ledger.compare_and_swap_copy_baseline(
+                dest,
+                expected_generation=generation,
+                expected_installation_id=installation_id,
+                expected_baseline_identity=new_baseline_identity,
+                file_fingerprints=old_fingerprints,
+                baseline_identity=old_baseline_identity,
+            )
+            baseline_written = not rolled_back
+            return (
+                CopyBaselineRepairStatus.FAILED
+                if rolled_back
+                else CopyBaselineRepairStatus.CONCURRENT
+            )
+    except Exception as repair_error:  # pylint: disable=broad-exception-caught
+        rollback_ok = False
+        if baseline_written:
+            try:
+                rollback_ok = ledger.compare_and_swap_copy_baseline(
+                    dest,
+                    expected_generation=generation,
+                    expected_installation_id=installation_id,
+                    expected_baseline_identity=new_baseline_identity,
+                    file_fingerprints=old_fingerprints,
+                    baseline_identity=old_baseline_identity,
+                )
+            except Exception as rollback_error:  # pylint: disable=broad-exception-caught
+                logger.error(
+                    "copy baseline repair rollback failed path_hash=%s "
+                    "error_type=%s",
+                    _path_hash(dest),
+                    type(rollback_error).__name__,
+                )
+        logger.warning(
+            "copy baseline repair failed path_hash=%s error_type=%s "
+            "rollback_ok=%s",
+            _path_hash(dest),
+            type(repair_error).__name__,
+            rollback_ok,
+        )
+        return CopyBaselineRepairStatus.FAILED
 
 
 def is_link_or_junction(path: Path) -> bool:
