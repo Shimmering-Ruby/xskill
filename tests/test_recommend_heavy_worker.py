@@ -217,10 +217,16 @@ class TestWorkersWiring:
 # ─────────────────────────────────────────────────────────────────
 
 class TestMemoryBudgetReviewFinding:
-    def test_tiny_budget_small_batch_still_aborts(self, tmp_path):
+    def test_tiny_budget_small_batch_still_aborts(self, tmp_path, monkeypatch):
         """review 复现：memory_budget_mb=1、批量 10 条。旧的检查步长是
         20，10 条的批次永远凑不到一次检查点，budget 形同虚设，10 条会
-        被全部处理。"""
+        被全部处理。
+
+        ``current_rss_mb`` 打桩成固定值而不是依赖真实 RSS——``current_rss_mb``
+        在 Windows 上没有 ``resource`` 模块，恒为 0.0，用真实 RSS 断言在
+        Windows CI 上必然失败；同文件里 ``TestMemoryBudget`` 的两个既有测试
+        已经是这个打桩写法。
+        """
         db = tmp_path / "registry.db"
         from xskill.pipeline.registry import get_connection
         get_connection(db).close()
@@ -229,12 +235,15 @@ class TestMemoryBudgetReviewFinding:
         seed_full_catalog_vector_sweep(db_path=db, existing_index_keys=set())
         assert count_catalog_vector_dirty(db_path=db) == 10
 
+        monkeypatch.setattr(
+            "xskill.recommend.heavy_worker.current_rss_mb", lambda: 9999.0,
+        )
         index = MemorySkillVectorIndex(dim=DEFAULT_DIM)
         stats = _drain_full_sweep_batch(
             db_path=db, index=index,
             embed=lambda text: fake_embed(text, DEFAULT_DIM),
             limit=10, force_upsert=False,
-            memory_budget_mb=1.0,  # 任何真实进程的 RSS 都会超过 1 MiB
+            memory_budget_mb=1.0,
         )
         assert stats["budget_aborted"] is True
         assert stats["upserted"] == 0  # 一条都不该处理
