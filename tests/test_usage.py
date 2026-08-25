@@ -94,10 +94,7 @@ def test_record_usage_rejects_numeric_event_id(tmp_path):
 
 def _agno_response(**metrics_kwargs):
     """构造真实 agno ModelResponse —— agent LLM 记账点的实际传入形态。"""
-    try:
-        from agno.metrics import MessageMetrics
-    except ImportError:  # pragma: no cover - Agno < 3 compatibility
-        from agno.models.metrics import MessageMetrics
+    from agno.metrics import MessageMetrics
     from agno.models.response import ModelResponse
 
     resp = ModelResponse()
