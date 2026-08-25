@@ -1,0 +1,936 @@
+{
+  "cases": [
+    {
+      "case_id": "single-task-cross-session-attempt",
+      "errors": [],
+      "metrics": {
+        "attempt_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "attempt_outcome": {
+          "accuracy": 1.0,
+          "by_outcome": {
+            "succeeded": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            }
+          },
+          "macro_f1": 1.0
+        },
+        "confidence": {
+          "attempt_outcome": {
+            "brier": 0.01,
+            "count": 1,
+            "coverage": 1.0,
+            "ece": 0.1
+          },
+          "membership": {
+            "brier": 0.00625,
+            "count": 2,
+            "coverage": 1.0,
+            "ece": 0.075
+          }
+        },
+        "evidence_coverage": 1.0,
+        "relations": {
+          "by_type": {},
+          "macro": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "micro": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 0
+          }
+        },
+        "task_grouping": {
+          "b3": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "pairwise": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 1
+          }
+        },
+        "usage": {
+          "execution": {
+            "allocated_cost_usd": 0.01,
+            "allocated_total_tokens": 100,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 1,
+            "measured_events": 1,
+            "raw_cost_usd": 0.01,
+            "raw_total_tokens": 100,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          },
+          "xskill_processing": {
+            "allocated_cost_usd": 0.002,
+            "allocated_total_tokens": 20,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 1,
+            "measured_events": 1,
+            "raw_cost_usd": 0.002,
+            "raw_total_tokens": 20,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "a-b-a-and-attempt-over-split",
+      "errors": [
+        {
+          "atom_keys": [
+            "tenant-fixture\u001fscope-a-b-a\u001fsource-fixture\u001ftraj-1\u001fatom-a1",
+            "tenant-fixture\u001fscope-a-b-a\u001fsource-fixture\u001ftraj-1\u001fatom-a2"
+          ],
+          "type": "task_false_split"
+        },
+        {
+          "attempt_id": "pred-attempt-a2",
+          "type": "attempt_spurious"
+        }
+      ],
+      "metrics": {
+        "attempt_detection": {
+          "f1": 0.8,
+          "false_negative": 0,
+          "false_positive": 1,
+          "precision": 0.666667,
+          "recall": 1.0,
+          "true_positive": 2
+        },
+        "attempt_outcome": {
+          "accuracy": 1.0,
+          "by_outcome": {
+            "succeeded": {
+              "f1": 0.8,
+              "precision": 0.666667,
+              "recall": 1.0
+            }
+          },
+          "macro_f1": 0.8
+        },
+        "confidence": {
+          "attempt_outcome": {
+            "brier": 0.136667,
+            "count": 3,
+            "coverage": 1.0,
+            "ece": 0.3
+          },
+          "membership": {
+            "brier": 0.13125,
+            "count": 4,
+            "coverage": 1.0,
+            "ece": 0.3
+          }
+        },
+        "evidence_coverage": 0.666667,
+        "relations": {
+          "by_type": {},
+          "macro": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "micro": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 0
+          }
+        },
+        "task_grouping": {
+          "b3": {
+            "f1": 0.8,
+            "precision": 1.0,
+            "recall": 0.666667
+          },
+          "pairwise": {
+            "f1": 0.0,
+            "false_negative": 1,
+            "false_positive": 0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "true_positive": 0
+          }
+        },
+        "usage": {
+          "execution": {
+            "allocated_cost_usd": 0.012,
+            "allocated_total_tokens": 120,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 1,
+            "measured_events": 1,
+            "raw_cost_usd": 0.012,
+            "raw_total_tokens": 120,
+            "shared_fraction": 1.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          },
+          "xskill_processing": {
+            "allocated_cost_usd": 0.0,
+            "allocated_total_tokens": 0,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 0,
+            "measured_events": 0,
+            "raw_cost_usd": 0.0,
+            "raw_total_tokens": 0,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "retry-with-outcome-mismatch",
+      "errors": [
+        {
+          "attempt_id": "gold-attempt-c2",
+          "gold": "succeeded",
+          "predicted": "partially_succeeded",
+          "type": "attempt_outcome_mismatch"
+        }
+      ],
+      "metrics": {
+        "attempt_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 2
+        },
+        "attempt_outcome": {
+          "accuracy": 0.5,
+          "by_outcome": {
+            "failed": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            },
+            "partially_succeeded": {
+              "f1": 0.0,
+              "precision": 0.0,
+              "recall": 0.0
+            },
+            "succeeded": {
+              "f1": 0.0,
+              "precision": 0.0,
+              "recall": 0.0
+            }
+          },
+          "macro_f1": 0.333333
+        },
+        "confidence": {
+          "attempt_outcome": {
+            "brier": 0.25625,
+            "count": 2,
+            "coverage": 1.0,
+            "ece": 0.425
+          },
+          "membership": {
+            "brier": 0.01625,
+            "count": 2,
+            "coverage": 1.0,
+            "ece": 0.125
+          }
+        },
+        "evidence_coverage": 1.0,
+        "relations": {
+          "by_type": {
+            "attempt:retry_of": {
+              "f1": 1.0,
+              "false_negative": 0,
+              "false_positive": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "true_positive": 1
+            }
+          },
+          "macro": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "micro": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 1
+          }
+        },
+        "task_grouping": {
+          "b3": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "pairwise": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 1
+          }
+        },
+        "usage": {
+          "execution": {
+            "allocated_cost_usd": 0.012,
+            "allocated_total_tokens": 120,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 1,
+            "measured_events": 1,
+            "raw_cost_usd": 0.012,
+            "raw_total_tokens": 120,
+            "shared_fraction": 1.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          },
+          "xskill_processing": {
+            "allocated_cost_usd": 0.003,
+            "allocated_total_tokens": 30,
+            "conservation_rate": 1.0,
+            "estimated_events": 1,
+            "events": 1,
+            "measured_events": 0,
+            "raw_cost_usd": 0.003,
+            "raw_total_tokens": 30,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "parent-subtask-and-unavailable-usage",
+      "errors": [
+        {
+          "relation": [
+            "task:parent",
+            [
+              "tenant-fixture\u001fscope-parent\u001fsource-fixture\u001ftraj-1\u001fatom-parent"
+            ],
+            [
+              "tenant-fixture\u001fscope-parent\u001fsource-fixture\u001ftraj-1\u001fatom-child"
+            ]
+          ],
+          "type": "relation_missing"
+        },
+        {
+          "relation": [
+            "task:depends_on",
+            [
+              "tenant-fixture\u001fscope-parent\u001fsource-fixture\u001ftraj-1\u001fatom-parent"
+            ],
+            [
+              "tenant-fixture\u001fscope-parent\u001fsource-fixture\u001ftraj-1\u001fatom-child"
+            ]
+          ],
+          "type": "relation_spurious"
+        }
+      ],
+      "metrics": {
+        "attempt_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
+        "attempt_outcome": {
+          "accuracy": 1.0,
+          "by_outcome": {
+            "succeeded": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            }
+          },
+          "macro_f1": 1.0
+        },
+        "confidence": {
+          "attempt_outcome": {
+            "brier": 0.034167,
+            "count": 3,
+            "coverage": 1.0,
+            "ece": 0.183333
+          },
+          "membership": {
+            "brier": 0.04125,
+            "count": 4,
+            "coverage": 1.0,
+            "ece": 0.2
+          }
+        },
+        "evidence_coverage": 1.0,
+        "relations": {
+          "by_type": {
+            "task:depends_on": {
+              "f1": 0.0,
+              "false_negative": 0,
+              "false_positive": 1,
+              "precision": 0.0,
+              "recall": 0.0,
+              "true_positive": 0
+            },
+            "task:parent": {
+              "f1": 0.0,
+              "false_negative": 1,
+              "false_positive": 0,
+              "precision": 0.0,
+              "recall": 0.0,
+              "true_positive": 0
+            },
+            "task:subtask": {
+              "f1": 1.0,
+              "false_negative": 0,
+              "false_positive": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "true_positive": 1
+            }
+          },
+          "macro": {
+            "f1": 0.333333,
+            "precision": 0.333333,
+            "recall": 0.333333
+          },
+          "micro": {
+            "f1": 0.5,
+            "false_negative": 1,
+            "false_positive": 1,
+            "precision": 0.5,
+            "recall": 0.5,
+            "true_positive": 1
+          }
+        },
+        "task_grouping": {
+          "b3": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "pairwise": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 0
+          }
+        },
+        "usage": {
+          "execution": {
+            "allocated_cost_usd": 0.0,
+            "allocated_total_tokens": 0,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 1,
+            "measured_events": 0,
+            "raw_cost_usd": 0.0,
+            "raw_total_tokens": 0,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 1.0,
+            "unavailable_events": 1
+          },
+          "xskill_processing": {
+            "allocated_cost_usd": 0.001,
+            "allocated_total_tokens": 10,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 1,
+            "measured_events": 1,
+            "raw_cost_usd": 0.001,
+            "raw_total_tokens": 10,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.2,
+            "unavailable_events": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "continuation-correction-and-version-change",
+      "errors": [
+        {
+          "relation": [
+            "attempt:correction_of",
+            "gold-attempt-e3",
+            "gold-attempt-e2"
+          ],
+          "type": "relation_missing"
+        },
+        {
+          "relation": [
+            "attempt:supersedes",
+            "gold-attempt-e3",
+            "gold-attempt-e2"
+          ],
+          "type": "relation_spurious"
+        }
+      ],
+      "metrics": {
+        "attempt_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
+        "attempt_outcome": {
+          "accuracy": 1.0,
+          "by_outcome": {
+            "blocked": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            },
+            "failed": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            },
+            "succeeded": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            }
+          },
+          "macro_f1": 1.0
+        },
+        "confidence": {
+          "attempt_outcome": {
+            "brier": 0.03,
+            "count": 3,
+            "coverage": 1.0,
+            "ece": 0.166667
+          },
+          "membership": {
+            "brier": 0.024167,
+            "count": 3,
+            "coverage": 1.0,
+            "ece": 0.15
+          }
+        },
+        "evidence_coverage": 1.0,
+        "relations": {
+          "by_type": {
+            "attempt:continuation_of": {
+              "f1": 1.0,
+              "false_negative": 0,
+              "false_positive": 0,
+              "precision": 1.0,
+              "recall": 1.0,
+              "true_positive": 1
+            },
+            "attempt:correction_of": {
+              "f1": 0.0,
+              "false_negative": 1,
+              "false_positive": 0,
+              "precision": 0.0,
+              "recall": 0.0,
+              "true_positive": 0
+            },
+            "attempt:supersedes": {
+              "f1": 0.0,
+              "false_negative": 0,
+              "false_positive": 1,
+              "precision": 0.0,
+              "recall": 0.0,
+              "true_positive": 0
+            }
+          },
+          "macro": {
+            "f1": 0.333333,
+            "precision": 0.333333,
+            "recall": 0.333333
+          },
+          "micro": {
+            "f1": 0.5,
+            "false_negative": 1,
+            "false_positive": 1,
+            "precision": 0.5,
+            "recall": 0.5,
+            "true_positive": 1
+          }
+        },
+        "task_grouping": {
+          "b3": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "pairwise": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 3
+          }
+        },
+        "usage": {
+          "execution": {
+            "allocated_cost_usd": 0.0,
+            "allocated_total_tokens": 0,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 0,
+            "measured_events": 0,
+            "raw_cost_usd": 0.0,
+            "raw_total_tokens": 0,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          },
+          "xskill_processing": {
+            "allocated_cost_usd": 0.0,
+            "allocated_total_tokens": 0,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 0,
+            "measured_events": 0,
+            "raw_cost_usd": 0.0,
+            "raw_total_tokens": 0,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "terminal-states-and-cross-session-negative",
+      "errors": [],
+      "metrics": {
+        "attempt_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
+        "attempt_outcome": {
+          "accuracy": 1.0,
+          "by_outcome": {
+            "blocked": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            },
+            "cancelled": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            },
+            "partially_succeeded": {
+              "f1": 1.0,
+              "precision": 1.0,
+              "recall": 1.0
+            }
+          },
+          "macro_f1": 1.0
+        },
+        "confidence": {
+          "attempt_outcome": {
+            "brier": 0.04,
+            "count": 3,
+            "coverage": 1.0,
+            "ece": 0.2
+          },
+          "membership": {
+            "brier": 0.04,
+            "count": 3,
+            "coverage": 1.0,
+            "ece": 0.2
+          }
+        },
+        "evidence_coverage": 1.0,
+        "relations": {
+          "by_type": {},
+          "macro": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "micro": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 0
+          }
+        },
+        "task_grouping": {
+          "b3": {
+            "f1": 1.0,
+            "precision": 1.0,
+            "recall": 1.0
+          },
+          "pairwise": {
+            "f1": 1.0,
+            "false_negative": 0,
+            "false_positive": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "true_positive": 0
+          }
+        },
+        "usage": {
+          "execution": {
+            "allocated_cost_usd": 0.0,
+            "allocated_total_tokens": 0,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 0,
+            "measured_events": 0,
+            "raw_cost_usd": 0.0,
+            "raw_total_tokens": 0,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          },
+          "xskill_processing": {
+            "allocated_cost_usd": 0.0,
+            "allocated_total_tokens": 0,
+            "conservation_rate": 1.0,
+            "estimated_events": 0,
+            "events": 0,
+            "measured_events": 0,
+            "raw_cost_usd": 0.0,
+            "raw_total_tokens": 0,
+            "shared_fraction": 0.0,
+            "unattributed_fraction": 0.0,
+            "unavailable_events": 0
+          }
+        }
+      }
+    }
+  ],
+  "error_count": 7,
+  "metric_config": {
+    "ece_bins": 5,
+    "usage_numeric_tolerance": 1e-09
+  },
+  "metrics": {
+    "attempt_detection": {
+      "f1": 0.965517,
+      "false_negative": 0,
+      "false_positive": 1,
+      "precision": 0.933333,
+      "recall": 1.0,
+      "true_positive": 14
+    },
+    "attempt_outcome": {
+      "accuracy": 0.928571,
+      "by_outcome": {
+        "blocked": {
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "cancelled": {
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "failed": {
+          "f1": 1.0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "partially_succeeded": {
+          "f1": 0.666667,
+          "precision": 0.5,
+          "recall": 1.0
+        },
+        "succeeded": {
+          "f1": 0.875,
+          "precision": 0.875,
+          "recall": 0.875
+        }
+      },
+      "macro_f1": 0.908333
+    },
+    "confidence": {
+      "attempt_outcome": {
+        "brier": 0.083,
+        "count": 15,
+        "coverage": 1.0,
+        "ece": 0.233333
+      },
+      "membership": {
+        "brier": 0.051528,
+        "count": 18,
+        "coverage": 1.0,
+        "ece": 0.191667
+      }
+    },
+    "evidence_coverage": 0.9375,
+    "relations": {
+      "by_type": {
+        "attempt:continuation_of": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "attempt:correction_of": {
+          "f1": 0.0,
+          "false_negative": 1,
+          "false_positive": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "true_positive": 0
+        },
+        "attempt:retry_of": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        },
+        "attempt:supersedes": {
+          "f1": 0.0,
+          "false_negative": 0,
+          "false_positive": 1,
+          "precision": 0.0,
+          "recall": 0.0,
+          "true_positive": 0
+        },
+        "task:depends_on": {
+          "f1": 0.0,
+          "false_negative": 0,
+          "false_positive": 1,
+          "precision": 0.0,
+          "recall": 0.0,
+          "true_positive": 0
+        },
+        "task:parent": {
+          "f1": 0.0,
+          "false_negative": 1,
+          "false_positive": 0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "true_positive": 0
+        },
+        "task:subtask": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 1
+        }
+      },
+      "macro": {
+        "f1": 0.428571,
+        "precision": 0.428571,
+        "recall": 0.428571
+      },
+      "micro": {
+        "f1": 0.6,
+        "false_negative": 2,
+        "false_positive": 2,
+        "precision": 0.6,
+        "recall": 0.6,
+        "true_positive": 3
+      }
+    },
+    "task_grouping": {
+      "b3": {
+        "f1": 0.967742,
+        "precision": 1.0,
+        "recall": 0.9375
+      },
+      "pairwise": {
+        "f1": 0.909091,
+        "false_negative": 1,
+        "false_positive": 0,
+        "precision": 1.0,
+        "recall": 0.833333,
+        "true_positive": 5
+      }
+    },
+    "usage": {
+      "execution": {
+        "allocated_cost_usd": 0.034,
+        "allocated_total_tokens": 340,
+        "conservation_rate": 1.0,
+        "estimated_events": 0,
+        "events": 4,
+        "measured_events": 3,
+        "raw_cost_usd": 0.034,
+        "raw_total_tokens": 340,
+        "shared_fraction": 0.5,
+        "unattributed_fraction": 0.25,
+        "unavailable_events": 1
+      },
+      "xskill_processing": {
+        "allocated_cost_usd": 0.006,
+        "allocated_total_tokens": 60,
+        "conservation_rate": 1.0,
+        "estimated_events": 1,
+        "events": 3,
+        "measured_events": 2,
+        "raw_cost_usd": 0.006,
+        "raw_total_tokens": 60,
+        "shared_fraction": 0.0,
+        "unattributed_fraction": 0.066667,
+        "unavailable_events": 0
+      }
+    }
+  },
+  "report_sha256": "8d485521fc06647ec457345e7f21d802b3175e3c0a3ca9f82ad37c7728b1c9ef",
+  "run_manifest": {
+    "generated_at": "2026-08-25T00:00:00Z",
+    "harness": "offline-replay",
+    "model": "recorded-fixture",
+    "prompt_fingerprint": "sha256:3565cbdfde8bf0bf0aa8043f18dfb8db69d8e829e7831175b0875b60848834f1",
+    "repository_revision": "14f8f27d173e443e631248f873d158b2c34dc8d5",
+    "seed": 0
+  },
+  "schema_version": 1,
+  "suite_id": "logical-task-attempt-baseline-v1"
+}
