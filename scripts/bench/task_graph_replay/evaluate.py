@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import itertools
 import json
 import math
 import re
@@ -32,6 +31,14 @@ from xskill.tasks.models import (
 
 SCHEMA_VERSION = 1
 USAGE_PLANES = frozenset(("execution", "xskill_processing"))
+TOKEN_FIELDS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cache_read_tokens",
+)
+ATTRIBUTION_FIELDS = ("model", "harness", "skills", "execution_identity")
+ERROR_EXAMPLE_LIMIT = 100
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -369,7 +376,7 @@ def _validate_usage(
                 f"{item_context}: invalid measurement_quality"
             )
         numeric_values = []
-        for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        for name in TOKEN_FIELDS:
             value = event.get(name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, int)
@@ -493,18 +500,40 @@ def _clusters(graph: TaskGraphGeneration) -> tuple[dict[str, set[str]], dict[str
     return dict(clusters), assignment
 
 
-def _pairs(clusters: dict[str, set[str]]) -> set[tuple[str, str]]:
-    return {
-        tuple(sorted(pair))
-        for atoms in clusters.values()
-        for pair in itertools.combinations(sorted(atoms), 2)
-    }
+def _pair_count(clusters: dict[str, set[str]]) -> int:
+    return sum(len(atoms) * (len(atoms) - 1) // 2 for atoms in clusters.values())
 
 
-def _prf(gold: set[Any], predicted: set[Any]) -> dict[str, float | int]:
-    true_positive = len(gold & predicted)
-    false_positive = len(predicted - gold)
-    false_negative = len(gold - predicted)
+def _pair_error_examples(
+    primary_clusters: dict[str, set[str]],
+    secondary_assignment: dict[str, str],
+    *,
+    limit: int = ERROR_EXAMPLE_LIMIT,
+) -> list[tuple[str, str]]:
+    """Return bounded cross-partition pair examples without materializing all pairs."""
+    examples: list[tuple[str, str]] = []
+    for cluster_id in sorted(primary_clusters):
+        groups: dict[str, list[str]] = defaultdict(list)
+        for atom_key in sorted(primary_clusters[cluster_id]):
+            secondary_id = secondary_assignment.get(atom_key)
+            group_id = secondary_id or f"__missing__:{atom_key}"
+            groups[group_id].append(atom_key)
+        ordered_groups = [groups[group_id] for group_id in sorted(groups)]
+        for left_index, left_group in enumerate(ordered_groups):
+            for right_group in ordered_groups[left_index + 1 :]:
+                for left in left_group:
+                    for right in right_group:
+                        examples.append(tuple(sorted((left, right))))
+                        if len(examples) >= limit:
+                            return sorted(examples)
+    return sorted(examples)
+
+
+def _prf_counts(
+    true_positive: int,
+    false_positive: int,
+    false_negative: int,
+) -> dict[str, float | int]:
     precision, recall, f1 = prf(true_positive, false_positive, false_negative)
     return {
         "true_positive": true_positive,
@@ -514,6 +543,14 @@ def _prf(gold: set[Any], predicted: set[Any]) -> dict[str, float | int]:
         "recall": round(recall, 6),
         "f1": round(f1, 6),
     }
+
+
+def _prf(gold: set[Any], predicted: set[Any]) -> dict[str, float | int]:
+    return _prf_counts(
+        len(gold & predicted),
+        len(predicted - gold),
+        len(gold - predicted),
+    )
 
 
 def _safe_ratio(numerator: float, denominator: float, *, empty: float = 1.0) -> float:
@@ -534,21 +571,45 @@ def _grouping_counts(gold: TaskGraphGeneration, prediction: TaskGraphGeneration)
         overlap = len(gold_cluster & predicted_cluster)
         b3_precision_sum += overlap / len(predicted_cluster)
         b3_recall_sum += overlap / len(gold_cluster)
-    gold_pairs = _pairs(gold_clusters)
-    predicted_pairs = _pairs(predicted_clusters)
+    contingency: dict[tuple[str, str], int] = defaultdict(int)
+    for atom_key, gold_task in gold_assignment.items():
+        predicted_task = predicted_assignment.get(atom_key)
+        if predicted_task is not None:
+            contingency[(gold_task, predicted_task)] += 1
+    true_positive_pairs = sum(
+        count * (count - 1) // 2 for count in contingency.values()
+    )
+    gold_pairs = _pair_count(gold_clusters)
+    predicted_pairs = _pair_count(predicted_clusters)
+    false_split_count = gold_pairs - true_positive_pairs
+    false_merge_count = predicted_pairs - true_positive_pairs
     return {
-        "gold_pairs": gold_pairs,
-        "predicted_pairs": predicted_pairs,
+        "gold_pair_count": gold_pairs,
+        "predicted_pair_count": predicted_pairs,
+        "true_positive_pair_count": true_positive_pairs,
         "b3_precision_sum": b3_precision_sum,
         "b3_recall_sum": b3_recall_sum,
         "atom_count": len(gold_assignment),
-        "false_splits": sorted(gold_pairs - predicted_pairs),
-        "false_merges": sorted(predicted_pairs - gold_pairs),
+        "false_split_count": false_split_count,
+        "false_merge_count": false_merge_count,
+        "false_splits": _pair_error_examples(
+            gold_clusters,
+            predicted_assignment,
+        ),
+        "false_merges": _pair_error_examples(
+            predicted_clusters,
+            gold_assignment,
+        ),
     }
 
 
 def _public_grouping(counts: dict[str, Any]) -> dict[str, Any]:
-    pairwise = _prf(counts["gold_pairs"], counts["predicted_pairs"])
+    true_positive = counts["true_positive_pair_count"]
+    pairwise = _prf_counts(
+        true_positive,
+        counts["predicted_pair_count"] - true_positive,
+        counts["gold_pair_count"] - true_positive,
+    )
     precision = _safe_ratio(counts["b3_precision_sum"], counts["atom_count"])
     recall = _safe_ratio(counts["b3_recall_sum"], counts["atom_count"])
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
@@ -569,13 +630,19 @@ def _task_relations(graph: TaskGraphGeneration) -> set[tuple[str, tuple, tuple]]
     for relation in graph.relations:
         if relation.decision != "confirmed" or relation.stale:
             continue
-        source = tuple(sorted(clusters.get(relation.from_task_id, ())))
-        target = tuple(sorted(clusters.get(relation.to_task_id, ())))
+        source_id = relation.from_task_id
+        target_id = relation.to_task_id
+        relation_type = relation.relation_type
+        if relation_type == "subtask":
+            source_id, target_id = target_id, source_id
+            relation_type = "parent"
+        source = tuple(sorted(clusters.get(source_id, ())))
+        target = tuple(sorted(clusters.get(target_id, ())))
         if not source:
-            source = (f"__empty__:{relation.from_task_id}",)
+            source = (f"__empty__:{source_id}",)
         if not target:
-            target = (f"__empty__:{relation.to_task_id}",)
-        result.add((f"task:{relation.relation_type}", source, target))
+            target = (f"__empty__:{target_id}",)
+        result.add((f"task:{relation_type}", source, target))
     return result
 
 
@@ -761,7 +828,7 @@ def _calibration(samples: list[tuple[float, int]], bins: int) -> dict[str, Any]:
 def _membership_calibration(
     gold: TaskGraphGeneration,
     prediction: TaskGraphGeneration,
-) -> tuple[list[tuple[float, int]], int]:
+) -> tuple[list[tuple[float, int]], int, int]:
     gold_assignment = _confirmed_atom_assignment(gold)
     gold_clusters, _ = _clusters(gold)
     predicted_clusters, _ = _clusters(prediction)
@@ -776,19 +843,36 @@ def _membership_calibration(
         )
         task_alignment[task_id] = ranked[0][1] if ranked and ranked[0][0] else None
     samples = []
-    total = 0
+    covered_gold = set()
     for membership in prediction.memberships:
         if membership.stale or membership.role != "primary":
             continue
-        total += 1
         if membership.confidence is None:
             continue
+        atom_key = stable_ref_key(membership.atom_ref)
+        if atom_key in gold_assignment:
+            covered_gold.add(atom_key)
         target = int(
-            task_alignment.get(membership.task_id)
-            == gold_assignment.get(stable_ref_key(membership.atom_ref))
+            task_alignment.get(membership.task_id) == gold_assignment.get(atom_key)
         )
         samples.append((membership.confidence, target))
-    return samples, total
+    return samples, len(gold_assignment), len(covered_gold)
+
+
+def _membership_counts(
+    gold: TaskGraphGeneration,
+    prediction: TaskGraphGeneration,
+) -> dict[str, Any]:
+    gold_atoms = set(_confirmed_atom_assignment(gold))
+    predicted_atoms = set(_confirmed_atom_assignment(prediction))
+    missing = sorted(gold_atoms - predicted_atoms)
+    spurious = sorted(predicted_atoms - gold_atoms)
+    return {
+        "gold_atoms": gold_atoms,
+        "predicted_atoms": predicted_atoms,
+        "missing": missing,
+        "spurious": spurious,
+    }
 
 
 def _outcome_confidence(attempt: TaskAttempt) -> float | None:
@@ -826,6 +910,91 @@ def _outcome_calibration(
     return samples, len(gold_by_id), len(covered_gold)
 
 
+def _canonical_value(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _attempt_attribution(attempt: TaskAttempt, field: str) -> tuple[str, ...]:
+    if field == "execution_identity":
+        return (
+            (_canonical_value(attempt.execution_identity),)
+            if attempt.execution_identity
+            else ()
+        )
+    values = []
+    for evidence in sorted(
+        attempt.evidence_ranges,
+        key=lambda item: item.evidence_id,
+    ):
+        if evidence.stale:
+            continue
+        if field == "skills":
+            value = [
+                json.loads(item)
+                for item in sorted(_canonical_value(item) for item in evidence.skills)
+            ]
+        else:
+            value = getattr(evidence, field)
+        if value:
+            values.append(
+                _canonical_value(
+                    {
+                        "evidence_id": evidence.evidence_id,
+                        "value": value,
+                    }
+                )
+            )
+    return tuple(values)
+
+
+def _public_attribution(value: tuple[str, ...]) -> list[Any]:
+    return [json.loads(item) for item in value]
+
+
+def _execution_attribution_counts(
+    gold: TaskGraphGeneration,
+    prediction: TaskGraphGeneration,
+    alignment: dict[str, str],
+) -> tuple[dict[str, dict[str, int]], list[dict[str, Any]]]:
+    predicted_by_id = {item.attempt_id: item for item in prediction.attempts}
+    inverse = {gold_id: predicted_id for predicted_id, gold_id in alignment.items()}
+    counts = {
+        field: {"expected": 0, "present": 0, "correct": 0}
+        for field in ATTRIBUTION_FIELDS
+    }
+    errors = []
+    for gold_attempt in gold.attempts:
+        predicted_id = inverse.get(gold_attempt.attempt_id)
+        predicted_attempt = (
+            predicted_by_id.get(predicted_id) if predicted_id is not None else None
+        )
+        for field in ATTRIBUTION_FIELDS:
+            expected = _attempt_attribution(gold_attempt, field)
+            if not expected:
+                continue
+            counts[field]["expected"] += 1
+            actual = (
+                _attempt_attribution(predicted_attempt, field)
+                if predicted_attempt is not None
+                else ()
+            )
+            if actual:
+                counts[field]["present"] += 1
+            if actual == expected:
+                counts[field]["correct"] += 1
+                continue
+            errors.append(
+                {
+                    "type": "execution_attribution_mismatch",
+                    "attempt_id": gold_attempt.attempt_id,
+                    "field": field,
+                    "gold": _public_attribution(expected),
+                    "predicted": _public_attribution(actual),
+                }
+            )
+    return counts, errors
+
+
 def _usage_counts(
     events: dict[tuple[str, str], dict],
     prediction: TaskGraphGeneration,
@@ -843,8 +1012,8 @@ def _usage_counts(
             "measured_events": 0,
             "estimated_events": 0,
             "unavailable_events": 0,
-            "raw_total_tokens": 0,
-            "allocated_total_tokens": 0,
+            **{f"raw_{field}": 0 for field in TOKEN_FIELDS},
+            **{f"allocated_{field}": 0 for field in TOKEN_FIELDS},
             "raw_cost_usd": 0.0,
             "allocated_cost_usd": 0.0,
             "unattributed_fraction": 0.0,
@@ -869,18 +1038,25 @@ def _usage_counts(
             item.fraction for item in allocations if item.allocation_mode == "shared"
         )
         conserved = abs(fraction_sum - 1.0) <= tolerance
-        raw_tokens = event.get("total_tokens")
-        allocated_tokens = sum(
-            item.total_tokens for item in allocations if item.total_tokens is not None
-        )
+        token_deltas = {}
+        for field in TOKEN_FIELDS:
+            raw_value = event.get(field)
+            allocated_value = sum(
+                getattr(item, field)
+                for item in allocations
+                if getattr(item, field) is not None
+            )
+            if raw_value is None:
+                token_deltas[field] = None
+                continue
+            counts[f"raw_{field}"] += raw_value
+            counts[f"allocated_{field}"] += allocated_value
+            token_deltas[field] = allocated_value - raw_value
+            conserved = conserved and allocated_value == raw_value
         raw_cost = event.get("cost_usd")
         allocated_cost = sum(
             float(item.cost_usd) for item in allocations if item.cost_usd is not None
         )
-        if raw_tokens is not None:
-            counts["raw_total_tokens"] += raw_tokens
-            counts["allocated_total_tokens"] += allocated_tokens
-            conserved = conserved and allocated_tokens == raw_tokens
         if raw_cost is not None:
             counts["raw_cost_usd"] += float(raw_cost)
             counts["allocated_cost_usd"] += allocated_cost
@@ -894,9 +1070,7 @@ def _usage_counts(
                     "usage_plane": plane,
                     "usage_event_id": event_id,
                     "fraction_sum": round(fraction_sum, 9),
-                    "token_delta": (
-                        None if raw_tokens is None else allocated_tokens - raw_tokens
-                    ),
+                    "token_deltas": token_deltas,
                     "cost_delta": (
                         None
                         if raw_cost is None
@@ -917,8 +1091,14 @@ def _case_counts(case: dict, config: dict) -> dict[str, Any]:
         prediction, alignment
     )
     attempts = _attempt_counts(gold, prediction, alignment)
-    membership_samples, membership_total = _membership_calibration(gold, prediction)
+    memberships = _membership_counts(gold, prediction)
+    membership_samples, membership_total, membership_covered = _membership_calibration(
+        gold, prediction
+    )
     outcome_samples, outcome_total, outcome_covered = _outcome_calibration(
+        gold, prediction, alignment
+    )
+    attribution, attribution_errors = _execution_attribution_counts(
         gold, prediction, alignment
     )
     usage_events = _validate_usage(case, prediction, "case")
@@ -940,20 +1120,44 @@ def _case_counts(case: dict, config: dict) -> dict[str, Any]:
         {"type": "relation_spurious", "relation": list(item)}
         for item in sorted(predicted_relations - gold_relations)
     )
+    errors.extend(
+        {"type": "membership_missing", "atom_key": atom_key}
+        for atom_key in memberships["missing"]
+    )
+    errors.extend(
+        {"type": "membership_spurious", "atom_key": atom_key}
+        for atom_key in memberships["spurious"]
+    )
     errors.extend(attempts["errors"])
+    errors.extend(attribution_errors)
     errors.extend(usage_errors)
+    error_count = (
+        grouping["false_split_count"]
+        + grouping["false_merge_count"]
+        + len(gold_relations - predicted_relations)
+        + len(predicted_relations - gold_relations)
+        + len(memberships["missing"])
+        + len(memberships["spurious"])
+        + len(attempts["errors"])
+        + len(attribution_errors)
+        + len(usage_errors)
+    )
     return {
         "grouping": grouping,
+        "memberships": memberships,
         "gold_relations": gold_relations,
         "predicted_relations": predicted_relations,
         "attempts": attempts,
+        "attribution": attribution,
         "membership_samples": membership_samples,
         "membership_total": membership_total,
+        "membership_covered": membership_covered,
         "outcome_samples": outcome_samples,
         "outcome_total": outcome_total,
         "outcome_covered": outcome_covered,
         "usage": usage,
-        "errors": errors,
+        "error_count": error_count,
+        "errors": errors[:ERROR_EXAMPLE_LIMIT],
     }
 
 
@@ -961,7 +1165,7 @@ def _public_metrics(counts: dict[str, Any], bins: int) -> dict[str, Any]:
     attempts = counts["attempts"]
     membership = _calibration(counts["membership_samples"], bins)
     membership["coverage"] = _safe_ratio(
-        membership["count"], counts["membership_total"], empty=0.0
+        counts["membership_covered"], counts["membership_total"], empty=0.0
     )
     outcome = _calibration(counts["outcome_samples"], bins)
     outcome["coverage"] = _safe_ratio(
@@ -985,8 +1189,8 @@ def _public_metrics(counts: dict[str, Any], bins: int) -> dict[str, Any]:
             "measured_events",
             "estimated_events",
             "unavailable_events",
-            "raw_total_tokens",
-            "allocated_total_tokens",
+            *(f"raw_{field}" for field in TOKEN_FIELDS),
+            *(f"allocated_{field}" for field in TOKEN_FIELDS),
         ):
             public[name] = int(public[name])
         for name in (
@@ -997,8 +1201,22 @@ def _public_metrics(counts: dict[str, Any], bins: int) -> dict[str, Any]:
         ):
             public[name] = round(public[name], 9)
         usage[plane] = public
+    attribution = {}
+    for field, values in counts["attribution"].items():
+        expected = values["expected"]
+        attribution[field] = {
+            "expected": int(expected),
+            "present": int(values["present"]),
+            "correct": int(values["correct"]),
+            "coverage": _safe_ratio(values["present"], expected, empty=0.0),
+            "accuracy": _safe_ratio(values["correct"], expected, empty=0.0),
+        }
     return {
         "task_grouping": _public_grouping(counts["grouping"]),
+        "membership_detection": _prf(
+            counts["memberships"]["gold_atoms"],
+            counts["memberships"]["predicted_atoms"],
+        ),
         "relations": _macro_metrics(
             counts["gold_relations"], counts["predicted_relations"]
         ),
@@ -1011,6 +1229,7 @@ def _public_metrics(counts: dict[str, Any], bins: int) -> dict[str, Any]:
             "by_outcome": attempts["by_outcome"],
         },
         "confidence": {"membership": membership, "attempt_outcome": outcome},
+        "execution_attribution": attribution,
         "evidence_coverage": _safe_ratio(
             attempts["evidence_matches"], attempts["evidence_total"], empty=0.0
         ),
@@ -1032,12 +1251,14 @@ def _prefix_relation(item: tuple, prefix: str) -> tuple:
 def _merge_counts(case_counts: Iterable[dict[str, Any]]) -> dict[str, Any]:
     merged = {
         "grouping": {
-            "gold_pairs": set(),
-            "predicted_pairs": set(),
+            "gold_pair_count": 0,
+            "predicted_pair_count": 0,
+            "true_positive_pair_count": 0,
             "b3_precision_sum": 0.0,
             "b3_recall_sum": 0.0,
             "atom_count": 0,
         },
+        "memberships": {"gold_atoms": set(), "predicted_atoms": set()},
         "gold_relations": set(),
         "predicted_relations": set(),
         "attempts": {
@@ -1051,21 +1272,34 @@ def _merge_counts(case_counts: Iterable[dict[str, Any]]) -> dict[str, Any]:
         },
         "membership_samples": [],
         "membership_total": 0,
+        "membership_covered": 0,
         "outcome_samples": [],
         "outcome_total": 0,
         "outcome_covered": 0,
+        "attribution": {
+            field: {"expected": 0, "present": 0, "correct": 0}
+            for field in ATTRIBUTION_FIELDS
+        },
         "usage": {plane: defaultdict(float) for plane in sorted(USAGE_PLANES)},
+        "error_count": 0,
         "errors": [],
     }
     for index, counts in enumerate(case_counts):
         prefix = f"case-{index}:"
         grouping = counts["grouping"]
-        for key in ("gold_pairs", "predicted_pairs"):
-            merged["grouping"][key].update(
-                (prefix + left, prefix + right) for left, right in grouping[key]
-            )
-        for key in ("b3_precision_sum", "b3_recall_sum", "atom_count"):
+        for key in (
+            "gold_pair_count",
+            "predicted_pair_count",
+            "true_positive_pair_count",
+            "b3_precision_sum",
+            "b3_recall_sum",
+            "atom_count",
+        ):
             merged["grouping"][key] += grouping[key]
+        for key in ("gold_atoms", "predicted_atoms"):
+            merged["memberships"][key].update(
+                prefix + atom_key for atom_key in counts["memberships"][key]
+            )
         for key in ("gold_relations", "predicted_relations"):
             merged[key].update(_prefix_relation(item, prefix) for item in counts[key])
         attempts = counts["attempts"]
@@ -1078,14 +1312,25 @@ def _merge_counts(case_counts: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 merged["attempts"]["by_outcome_counts"][label][value_index] += value
         for key in ("membership_samples", "outcome_samples"):
             merged[key].extend(counts[key])
-        for key in ("membership_total", "outcome_total", "outcome_covered"):
+        for key in (
+            "membership_total",
+            "membership_covered",
+            "outcome_total",
+            "outcome_covered",
+        ):
             merged[key] += counts[key]
+        for field, values in counts["attribution"].items():
+            for key, value in values.items():
+                merged["attribution"][field][key] += value
         for plane, values in counts["usage"].items():
             for key, value in values.items():
                 merged["usage"][plane][key] += value
-        merged["errors"].extend(
-            {"case_index": index, **error} for error in counts["errors"]
-        )
+        merged["error_count"] += counts["error_count"]
+        remaining = ERROR_EXAMPLE_LIMIT - len(merged["errors"])
+        if remaining > 0:
+            merged["errors"].extend(
+                {"case_index": index, **error} for error in counts["errors"][:remaining]
+            )
     by_outcome = {}
     for label, values in merged["attempts"]["by_outcome_counts"].items():
         precision, recall, f1 = prf(*values)
@@ -1112,11 +1357,16 @@ def evaluate_suite(suite: dict[str, Any]) -> dict[str, Any]:
         "run_manifest": suite["run_manifest"],
         "metric_config": config,
         "metrics": _public_metrics(merged, config["ece_bins"]),
-        "error_count": len(merged["errors"]),
+        "error_count": merged["error_count"],
+        "error_examples_truncated": merged["error_count"] > len(merged["errors"]),
         "cases": [
             {
                 "case_id": case["case_id"],
                 "metrics": _public_metrics(case_count, config["ece_bins"]),
+                "error_count": case_count["error_count"],
+                "error_examples_truncated": (
+                    case_count["error_count"] > len(case_count["errors"])
+                ),
                 "errors": case_count["errors"],
             }
             for case, case_count in zip(suite["cases"], counts)
@@ -1139,8 +1389,13 @@ def render_text(report: dict[str, Any]) -> str:
                 f"task_pairwise_f1={grouping['pairwise']['f1']:.3f} "
                 f"b3_f1={grouping['b3']['f1']:.3f}"
             ),
+            f"membership_f1={metrics['membership_detection']['f1']:.3f}",
             f"relation_macro_f1={metrics['relations']['macro']['f1']:.3f}",
             f"attempt_outcome_accuracy={metrics['attempt_outcome']['accuracy']:.3f}",
+            (
+                "model_attribution_accuracy="
+                f"{metrics['execution_attribution']['model']['accuracy']:.3f}"
+            ),
             f"evidence_coverage={metrics['evidence_coverage']:.3f}",
             (
                 f"usage_execution_conservation="

@@ -28,9 +28,9 @@ prompt fingerprint 对应字面量 `no-model-prompt:synthetic-logical-task-basel
 
 ## 指标定义
 
-Task 聚合同时报告 pairwise precision/recall/F1 与 B³ precision/recall/F1，缺失的 prediction membership 按该 Atom 的单例预测处理。
+Task 聚合同时报告 pairwise precision/recall/F1 与 B³ precision/recall/F1，缺失的 prediction membership 按该 Atom 的单例预测处理，并由独立的 membership detection 与 confidence coverage 统计漏归属。
 
-Task relation 和 Attempt relation 先基于 Atom 支持集与 EvidenceRange 对齐，再合并计算 micro 指标、relation type macro-F1 和逐类型指标。
+Task relation 和 Attempt relation 先基于 Atom 支持集与 EvidenceRange 对齐，再合并计算 micro 指标、relation type macro-F1 和逐类型指标；`parent(A, B)` 与 `subtask(B, A)` 会规范化为同一条 parent → child 语义边。
 
 Attempt detection 统计漏掉与多出的执行尝试，Attempt outcome 同时报告 accuracy、macro-F1 和逐 outcome 指标。
 
@@ -38,11 +38,15 @@ membership 与 Attempt outcome confidence 分别报告 Brier score、ECE 和 con
 
 evidence coverage 统计 gold EvidenceRange 中被对齐 prediction 覆盖的比例。
 
-execution 与 xskill_processing 分开检查 fraction、Token 和 cost 守恒，并独立统计 measured、estimated、unavailable、shared 和 unattributed 情况。
+execution attribution 分别检查 model、Harness、Skills 和 execution identity 的 coverage 与 accuracy，版本字段只用于执行归因，不参与 Logical Task 身份。
+
+execution 与 xskill_processing 分开检查 fraction、prompt、completion、total、cache-read Token 和 cost 守恒，并独立统计 measured、estimated、unavailable、shared 和 unattributed 情况。
 
 `shared_fraction` 与 `unattributed_fraction` 是各 usage event 分配比例的算术平均，因此始终位于 `[0, 1]`，而不是跨事件直接相加的质量占比。
 
-case 错误输出明确区分误拆分、误合并、缺失或多余关系、Attempt 缺失或多出、outcome 错误及归因不守恒。
+pairwise 计数基于 gold/pred contingency 线性累计，不再物化所有 Atom 对；错误总数保持精确，每份报告最多保留 100 条确定性错误样本。
+
+case 错误输出明确区分误拆分、误合并、membership 缺失或多出、关系缺失或多出、Attempt 缺失或多出、outcome 错误、执行版本归因错误及用量不守恒。
 
 固定 fixture 有意保留少量已知错误，以证明 evaluator 能发现回归信号而不是把 prediction 与 gold 硬编码为相同结果。
 

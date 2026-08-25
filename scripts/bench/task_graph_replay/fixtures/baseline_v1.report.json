@@ -2,6 +2,8 @@
   "cases": [
     {
       "case_id": "single-task-cross-session-attempt",
+      "error_count": 0,
+      "error_examples_truncated": false,
       "errors": [],
       "metrics": {
         "attempt_detection": {
@@ -38,6 +40,44 @@
           }
         },
         "evidence_coverage": 1.0,
+        "execution_attribution": {
+          "execution_identity": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "coverage": 1.0,
+            "expected": 1,
+            "present": 1
+          },
+          "harness": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "coverage": 1.0,
+            "expected": 1,
+            "present": 1
+          },
+          "model": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "coverage": 1.0,
+            "expected": 1,
+            "present": 1
+          },
+          "skills": {
+            "accuracy": 1.0,
+            "correct": 1,
+            "coverage": 1.0,
+            "expected": 1,
+            "present": 1
+          }
+        },
+        "membership_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 2
+        },
         "relations": {
           "by_type": {},
           "macro": {
@@ -71,26 +111,38 @@
         },
         "usage": {
           "execution": {
+            "allocated_cache_read_tokens": 60,
+            "allocated_completion_tokens": 20,
             "allocated_cost_usd": 0.01,
+            "allocated_prompt_tokens": 80,
             "allocated_total_tokens": 100,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 1,
             "measured_events": 1,
+            "raw_cache_read_tokens": 60,
+            "raw_completion_tokens": 20,
             "raw_cost_usd": 0.01,
+            "raw_prompt_tokens": 80,
             "raw_total_tokens": 100,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
             "unavailable_events": 0
           },
           "xskill_processing": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 5,
             "allocated_cost_usd": 0.002,
+            "allocated_prompt_tokens": 15,
             "allocated_total_tokens": 20,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 1,
             "measured_events": 1,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 5,
             "raw_cost_usd": 0.002,
+            "raw_prompt_tokens": 15,
             "raw_total_tokens": 20,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
@@ -101,6 +153,8 @@
     },
     {
       "case_id": "a-b-a-and-attempt-over-split",
+      "error_count": 2,
+      "error_examples_truncated": false,
       "errors": [
         {
           "atom_keys": [
@@ -149,6 +203,44 @@
           }
         },
         "evidence_coverage": 0.666667,
+        "execution_attribution": {
+          "execution_identity": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "harness": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "model": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "skills": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          }
+        },
+        "membership_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
         "relations": {
           "by_type": {},
           "macro": {
@@ -182,26 +274,38 @@
         },
         "usage": {
           "execution": {
+            "allocated_cache_read_tokens": 40,
+            "allocated_completion_tokens": 30,
             "allocated_cost_usd": 0.012,
+            "allocated_prompt_tokens": 90,
             "allocated_total_tokens": 120,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 1,
             "measured_events": 1,
+            "raw_cache_read_tokens": 40,
+            "raw_completion_tokens": 30,
             "raw_cost_usd": 0.012,
+            "raw_prompt_tokens": 90,
             "raw_total_tokens": 120,
             "shared_fraction": 1.0,
             "unattributed_fraction": 0.0,
             "unavailable_events": 0
           },
           "xskill_processing": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 0,
             "allocated_cost_usd": 0.0,
+            "allocated_prompt_tokens": 0,
             "allocated_total_tokens": 0,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 0,
             "measured_events": 0,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 0,
             "raw_cost_usd": 0.0,
+            "raw_prompt_tokens": 0,
             "raw_total_tokens": 0,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
@@ -212,6 +316,8 @@
     },
     {
       "case_id": "retry-with-outcome-mismatch",
+      "error_count": 1,
+      "error_examples_truncated": false,
       "errors": [
         {
           "attempt_id": "gold-attempt-c2",
@@ -265,6 +371,44 @@
           }
         },
         "evidence_coverage": 1.0,
+        "execution_attribution": {
+          "execution_identity": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "harness": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "model": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "skills": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          }
+        },
+        "membership_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 2
+        },
         "relations": {
           "by_type": {
             "attempt:retry_of": {
@@ -307,26 +451,38 @@
         },
         "usage": {
           "execution": {
+            "allocated_cache_read_tokens": 30,
+            "allocated_completion_tokens": 40,
             "allocated_cost_usd": 0.012,
+            "allocated_prompt_tokens": 80,
             "allocated_total_tokens": 120,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 1,
             "measured_events": 1,
+            "raw_cache_read_tokens": 30,
+            "raw_completion_tokens": 40,
             "raw_cost_usd": 0.012,
+            "raw_prompt_tokens": 80,
             "raw_total_tokens": 120,
             "shared_fraction": 1.0,
             "unattributed_fraction": 0.0,
             "unavailable_events": 0
           },
           "xskill_processing": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 10,
             "allocated_cost_usd": 0.003,
+            "allocated_prompt_tokens": 20,
             "allocated_total_tokens": 30,
             "conservation_rate": 1.0,
             "estimated_events": 1,
             "events": 1,
             "measured_events": 0,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 10,
             "raw_cost_usd": 0.003,
+            "raw_prompt_tokens": 20,
             "raw_total_tokens": 30,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
@@ -337,6 +493,8 @@
     },
     {
       "case_id": "parent-subtask-and-unavailable-usage",
+      "error_count": 2,
+      "error_examples_truncated": false,
       "errors": [
         {
           "relation": [
@@ -398,6 +556,44 @@
           }
         },
         "evidence_coverage": 1.0,
+        "execution_attribution": {
+          "execution_identity": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "harness": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "model": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "skills": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          }
+        },
+        "membership_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
         "relations": {
           "by_type": {
             "task:depends_on": {
@@ -409,26 +605,18 @@
               "true_positive": 0
             },
             "task:parent": {
-              "f1": 0.0,
+              "f1": 0.666667,
               "false_negative": 1,
               "false_positive": 0,
-              "precision": 0.0,
-              "recall": 0.0,
-              "true_positive": 0
-            },
-            "task:subtask": {
-              "f1": 1.0,
-              "false_negative": 0,
-              "false_positive": 0,
               "precision": 1.0,
-              "recall": 1.0,
+              "recall": 0.5,
               "true_positive": 1
             }
           },
           "macro": {
-            "f1": 0.333333,
-            "precision": 0.333333,
-            "recall": 0.333333
+            "f1": 0.333334,
+            "precision": 0.5,
+            "recall": 0.25
           },
           "micro": {
             "f1": 0.5,
@@ -456,26 +644,38 @@
         },
         "usage": {
           "execution": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 0,
             "allocated_cost_usd": 0.0,
+            "allocated_prompt_tokens": 0,
             "allocated_total_tokens": 0,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 1,
             "measured_events": 0,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 0,
             "raw_cost_usd": 0.0,
+            "raw_prompt_tokens": 0,
             "raw_total_tokens": 0,
             "shared_fraction": 0.0,
             "unattributed_fraction": 1.0,
             "unavailable_events": 1
           },
           "xskill_processing": {
+            "allocated_cache_read_tokens": 4,
+            "allocated_completion_tokens": 2,
             "allocated_cost_usd": 0.001,
+            "allocated_prompt_tokens": 8,
             "allocated_total_tokens": 10,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 1,
             "measured_events": 1,
+            "raw_cache_read_tokens": 4,
+            "raw_completion_tokens": 2,
             "raw_cost_usd": 0.001,
+            "raw_prompt_tokens": 8,
             "raw_total_tokens": 10,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.2,
@@ -486,6 +686,8 @@
     },
     {
       "case_id": "continuation-correction-and-version-change",
+      "error_count": 2,
+      "error_examples_truncated": false,
       "errors": [
         {
           "relation": [
@@ -549,6 +751,44 @@
           }
         },
         "evidence_coverage": 1.0,
+        "execution_attribution": {
+          "execution_identity": {
+            "accuracy": 1.0,
+            "correct": 3,
+            "coverage": 1.0,
+            "expected": 3,
+            "present": 3
+          },
+          "harness": {
+            "accuracy": 1.0,
+            "correct": 3,
+            "coverage": 1.0,
+            "expected": 3,
+            "present": 3
+          },
+          "model": {
+            "accuracy": 1.0,
+            "correct": 3,
+            "coverage": 1.0,
+            "expected": 3,
+            "present": 3
+          },
+          "skills": {
+            "accuracy": 1.0,
+            "correct": 3,
+            "coverage": 1.0,
+            "expected": 3,
+            "present": 3
+          }
+        },
+        "membership_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
         "relations": {
           "by_type": {
             "attempt:continuation_of": {
@@ -607,26 +847,38 @@
         },
         "usage": {
           "execution": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 0,
             "allocated_cost_usd": 0.0,
+            "allocated_prompt_tokens": 0,
             "allocated_total_tokens": 0,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 0,
             "measured_events": 0,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 0,
             "raw_cost_usd": 0.0,
+            "raw_prompt_tokens": 0,
             "raw_total_tokens": 0,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
             "unavailable_events": 0
           },
           "xskill_processing": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 0,
             "allocated_cost_usd": 0.0,
+            "allocated_prompt_tokens": 0,
             "allocated_total_tokens": 0,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 0,
             "measured_events": 0,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 0,
             "raw_cost_usd": 0.0,
+            "raw_prompt_tokens": 0,
             "raw_total_tokens": 0,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
@@ -637,6 +889,8 @@
     },
     {
       "case_id": "terminal-states-and-cross-session-negative",
+      "error_count": 0,
+      "error_examples_truncated": false,
       "errors": [],
       "metrics": {
         "attempt_detection": {
@@ -683,6 +937,44 @@
           }
         },
         "evidence_coverage": 1.0,
+        "execution_attribution": {
+          "execution_identity": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "harness": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "model": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          },
+          "skills": {
+            "accuracy": 0.0,
+            "correct": 0,
+            "coverage": 0.0,
+            "expected": 0,
+            "present": 0
+          }
+        },
+        "membership_detection": {
+          "f1": 1.0,
+          "false_negative": 0,
+          "false_positive": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "true_positive": 3
+        },
         "relations": {
           "by_type": {},
           "macro": {
@@ -716,26 +1008,38 @@
         },
         "usage": {
           "execution": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 0,
             "allocated_cost_usd": 0.0,
+            "allocated_prompt_tokens": 0,
             "allocated_total_tokens": 0,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 0,
             "measured_events": 0,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 0,
             "raw_cost_usd": 0.0,
+            "raw_prompt_tokens": 0,
             "raw_total_tokens": 0,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
             "unavailable_events": 0
           },
           "xskill_processing": {
+            "allocated_cache_read_tokens": 0,
+            "allocated_completion_tokens": 0,
             "allocated_cost_usd": 0.0,
+            "allocated_prompt_tokens": 0,
             "allocated_total_tokens": 0,
             "conservation_rate": 1.0,
             "estimated_events": 0,
             "events": 0,
             "measured_events": 0,
+            "raw_cache_read_tokens": 0,
+            "raw_completion_tokens": 0,
             "raw_cost_usd": 0.0,
+            "raw_prompt_tokens": 0,
             "raw_total_tokens": 0,
             "shared_fraction": 0.0,
             "unattributed_fraction": 0.0,
@@ -746,6 +1050,7 @@
     }
   ],
   "error_count": 7,
+  "error_examples_truncated": false,
   "metric_config": {
     "ece_bins": 5,
     "usage_numeric_tolerance": 1e-09
@@ -805,6 +1110,44 @@
       }
     },
     "evidence_coverage": 0.9375,
+    "execution_attribution": {
+      "execution_identity": {
+        "accuracy": 1.0,
+        "correct": 4,
+        "coverage": 1.0,
+        "expected": 4,
+        "present": 4
+      },
+      "harness": {
+        "accuracy": 1.0,
+        "correct": 4,
+        "coverage": 1.0,
+        "expected": 4,
+        "present": 4
+      },
+      "model": {
+        "accuracy": 1.0,
+        "correct": 4,
+        "coverage": 1.0,
+        "expected": 4,
+        "present": 4
+      },
+      "skills": {
+        "accuracy": 1.0,
+        "correct": 4,
+        "coverage": 1.0,
+        "expected": 4,
+        "present": 4
+      }
+    },
+    "membership_detection": {
+      "f1": 1.0,
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "true_positive": 16
+    },
     "relations": {
       "by_type": {
         "attempt:continuation_of": {
@@ -848,26 +1191,18 @@
           "true_positive": 0
         },
         "task:parent": {
-          "f1": 0.0,
+          "f1": 0.666667,
           "false_negative": 1,
           "false_positive": 0,
-          "precision": 0.0,
-          "recall": 0.0,
-          "true_positive": 0
-        },
-        "task:subtask": {
-          "f1": 1.0,
-          "false_negative": 0,
-          "false_positive": 0,
           "precision": 1.0,
-          "recall": 1.0,
+          "recall": 0.5,
           "true_positive": 1
         }
       },
       "macro": {
-        "f1": 0.428571,
-        "precision": 0.428571,
-        "recall": 0.428571
+        "f1": 0.444444,
+        "precision": 0.5,
+        "recall": 0.416667
       },
       "micro": {
         "f1": 0.6,
@@ -895,26 +1230,38 @@
     },
     "usage": {
       "execution": {
+        "allocated_cache_read_tokens": 130,
+        "allocated_completion_tokens": 90,
         "allocated_cost_usd": 0.034,
+        "allocated_prompt_tokens": 250,
         "allocated_total_tokens": 340,
         "conservation_rate": 1.0,
         "estimated_events": 0,
         "events": 4,
         "measured_events": 3,
+        "raw_cache_read_tokens": 130,
+        "raw_completion_tokens": 90,
         "raw_cost_usd": 0.034,
+        "raw_prompt_tokens": 250,
         "raw_total_tokens": 340,
         "shared_fraction": 0.5,
         "unattributed_fraction": 0.25,
         "unavailable_events": 1
       },
       "xskill_processing": {
+        "allocated_cache_read_tokens": 4,
+        "allocated_completion_tokens": 17,
         "allocated_cost_usd": 0.006,
+        "allocated_prompt_tokens": 43,
         "allocated_total_tokens": 60,
         "conservation_rate": 1.0,
         "estimated_events": 1,
         "events": 3,
         "measured_events": 2,
+        "raw_cache_read_tokens": 4,
+        "raw_completion_tokens": 17,
         "raw_cost_usd": 0.006,
+        "raw_prompt_tokens": 43,
         "raw_total_tokens": 60,
         "shared_fraction": 0.0,
         "unattributed_fraction": 0.066667,
@@ -922,7 +1269,7 @@
       }
     }
   },
-  "report_sha256": "8d485521fc06647ec457345e7f21d802b3175e3c0a3ca9f82ad37c7728b1c9ef",
+  "report_sha256": "94d911dd303172d46a8fc5d6104da55b67c79d51a16ea2aa087a993c337f978e",
   "run_manifest": {
     "generated_at": "2026-08-25T00:00:00Z",
     "harness": "offline-replay",

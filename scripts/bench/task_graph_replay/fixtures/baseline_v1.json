@@ -25,7 +25,7 @@
         ],
         "task_relations": [],
         "attempts": [
-          {"attempt_id": "gold-attempt-a", "task_id": "gold-task-a", "outcome": "succeeded", "atom_ids": ["atom-a1", "atom-a2"]}
+          {"attempt_id": "gold-attempt-a", "task_id": "gold-task-a", "outcome": "succeeded", "atom_ids": ["atom-a1", "atom-a2"], "model": {"provider": "fixture", "model": "model-v2"}, "harness": {"name": "codex", "version": "0.2"}, "skills": [{"name": "fixture-skill", "version": "v2"}], "execution_identity": {"run_id": "run-a"}}
         ],
         "attempt_relations": []
       },
@@ -40,13 +40,13 @@
         ],
         "attempt_relations": [],
         "usage_allocations": [
-          {"allocation_id": "alloc-a-exec", "usage_event_id": "usage-a-exec", "usage_plane": "execution", "allocation_mode": "direct", "fraction": 1.0, "task_id": "pred-task-a", "attempt_id": "pred-attempt-a", "total_tokens": 100, "cost_usd": 0.01, "method": "fixture", "method_version": "1"},
-          {"allocation_id": "alloc-a-process", "usage_event_id": "usage-a-process", "usage_plane": "xskill_processing", "allocation_mode": "direct", "fraction": 1.0, "task_id": "pred-task-a", "processing_step": "task_linker", "total_tokens": 20, "cost_usd": 0.002, "method": "fixture", "method_version": "1"}
+          {"allocation_id": "alloc-a-exec", "usage_event_id": "usage-a-exec", "usage_plane": "execution", "allocation_mode": "direct", "fraction": 1.0, "task_id": "pred-task-a", "attempt_id": "pred-attempt-a", "prompt_tokens": 80, "completion_tokens": 20, "total_tokens": 100, "cache_read_tokens": 60, "cost_usd": 0.01, "method": "fixture", "method_version": "1"},
+          {"allocation_id": "alloc-a-process", "usage_event_id": "usage-a-process", "usage_plane": "xskill_processing", "allocation_mode": "direct", "fraction": 1.0, "task_id": "pred-task-a", "processing_step": "task_linker", "prompt_tokens": 15, "completion_tokens": 5, "total_tokens": 20, "cache_read_tokens": 0, "cost_usd": 0.002, "method": "fixture", "method_version": "1"}
         ]
       },
       "usage_events": [
-        {"usage_event_id": "usage-a-exec", "usage_plane": "execution", "measurement_quality": "measured", "total_tokens": 100, "cost_usd": 0.01},
-        {"usage_event_id": "usage-a-process", "usage_plane": "xskill_processing", "measurement_quality": "measured", "total_tokens": 20, "cost_usd": 0.002}
+        {"usage_event_id": "usage-a-exec", "usage_plane": "execution", "measurement_quality": "measured", "prompt_tokens": 80, "completion_tokens": 20, "total_tokens": 100, "cache_read_tokens": 60, "cost_usd": 0.01},
+        {"usage_event_id": "usage-a-process", "usage_plane": "xskill_processing", "measurement_quality": "measured", "prompt_tokens": 15, "completion_tokens": 5, "total_tokens": 20, "cache_read_tokens": 0, "cost_usd": 0.002}
       ]
     },
     {
@@ -85,12 +85,12 @@
         ],
         "attempt_relations": [],
         "usage_allocations": [
-          {"allocation_id": "alloc-b-exec-a", "usage_event_id": "usage-b-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-a", "attempt_id": "pred-attempt-a1", "total_tokens": 60, "cost_usd": 0.006, "method": "fixture", "method_version": "1"},
-          {"allocation_id": "alloc-b-exec-b", "usage_event_id": "usage-b-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-b", "attempt_id": "pred-attempt-b", "total_tokens": 60, "cost_usd": 0.006, "method": "fixture", "method_version": "1"}
+          {"allocation_id": "alloc-b-exec-a", "usage_event_id": "usage-b-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-a", "attempt_id": "pred-attempt-a1", "prompt_tokens": 45, "completion_tokens": 15, "total_tokens": 60, "cache_read_tokens": 20, "cost_usd": 0.006, "method": "fixture", "method_version": "1"},
+          {"allocation_id": "alloc-b-exec-b", "usage_event_id": "usage-b-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-b", "attempt_id": "pred-attempt-b", "prompt_tokens": 45, "completion_tokens": 15, "total_tokens": 60, "cache_read_tokens": 20, "cost_usd": 0.006, "method": "fixture", "method_version": "1"}
         ]
       },
       "usage_events": [
-        {"usage_event_id": "usage-b-exec", "usage_plane": "execution", "measurement_quality": "measured", "total_tokens": 120, "cost_usd": 0.012}
+        {"usage_event_id": "usage-b-exec", "usage_plane": "execution", "measurement_quality": "measured", "prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120, "cache_read_tokens": 40, "cost_usd": 0.012}
       ]
     },
     {
@@ -128,14 +128,14 @@
           {"from_attempt_id": "pred-attempt-c2", "to_attempt_id": "pred-attempt-c1", "relation_type": "retry_of", "confidence": 0.8}
         ],
         "usage_allocations": [
-          {"allocation_id": "alloc-c-exec-1", "usage_event_id": "usage-c-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-c", "attempt_id": "pred-attempt-c1", "total_tokens": 60, "cost_usd": 0.006, "method": "fixture", "method_version": "1"},
-          {"allocation_id": "alloc-c-exec-2", "usage_event_id": "usage-c-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-c", "attempt_id": "pred-attempt-c2", "total_tokens": 60, "cost_usd": 0.006, "method": "fixture", "method_version": "1"},
-          {"allocation_id": "alloc-c-process", "usage_event_id": "usage-c-process", "usage_plane": "xskill_processing", "allocation_mode": "direct", "fraction": 1.0, "task_id": "pred-task-c", "processing_step": "task_linker", "total_tokens": 30, "cost_usd": 0.003, "method": "fixture", "method_version": "1"}
+          {"allocation_id": "alloc-c-exec-1", "usage_event_id": "usage-c-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-c", "attempt_id": "pred-attempt-c1", "prompt_tokens": 40, "completion_tokens": 20, "total_tokens": 60, "cache_read_tokens": 15, "cost_usd": 0.006, "method": "fixture", "method_version": "1"},
+          {"allocation_id": "alloc-c-exec-2", "usage_event_id": "usage-c-exec", "usage_plane": "execution", "allocation_mode": "shared", "fraction": 0.5, "task_id": "pred-task-c", "attempt_id": "pred-attempt-c2", "prompt_tokens": 40, "completion_tokens": 20, "total_tokens": 60, "cache_read_tokens": 15, "cost_usd": 0.006, "method": "fixture", "method_version": "1"},
+          {"allocation_id": "alloc-c-process", "usage_event_id": "usage-c-process", "usage_plane": "xskill_processing", "allocation_mode": "direct", "fraction": 1.0, "task_id": "pred-task-c", "processing_step": "task_linker", "prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30, "cache_read_tokens": 0, "cost_usd": 0.003, "method": "fixture", "method_version": "1"}
         ]
       },
       "usage_events": [
-        {"usage_event_id": "usage-c-exec", "usage_plane": "execution", "measurement_quality": "measured", "total_tokens": 120, "cost_usd": 0.012},
-        {"usage_event_id": "usage-c-process", "usage_plane": "xskill_processing", "measurement_quality": "estimated", "total_tokens": 30, "cost_usd": 0.003}
+        {"usage_event_id": "usage-c-exec", "usage_plane": "execution", "measurement_quality": "measured", "prompt_tokens": 80, "completion_tokens": 40, "total_tokens": 120, "cache_read_tokens": 30, "cost_usd": 0.012},
+        {"usage_event_id": "usage-c-process", "usage_plane": "xskill_processing", "measurement_quality": "estimated", "prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30, "cache_read_tokens": 0, "cost_usd": 0.003}
       ]
     },
     {
@@ -182,13 +182,13 @@
         "attempt_relations": [],
         "usage_allocations": [
           {"allocation_id": "alloc-d-exec", "usage_event_id": "usage-d-exec", "usage_plane": "execution", "allocation_mode": "unattributed", "fraction": 1.0, "method": "fixture", "method_version": "1"},
-          {"allocation_id": "alloc-d-process-direct", "usage_event_id": "usage-d-process", "usage_plane": "xskill_processing", "allocation_mode": "direct", "fraction": 0.8, "task_id": "pred-parent", "processing_step": "task_linker", "total_tokens": 8, "cost_usd": 0.0008, "method": "fixture", "method_version": "1"},
-          {"allocation_id": "alloc-d-process-rest", "usage_event_id": "usage-d-process", "usage_plane": "xskill_processing", "allocation_mode": "unattributed", "fraction": 0.2, "total_tokens": 2, "cost_usd": 0.0002, "method": "fixture", "method_version": "1"}
+          {"allocation_id": "alloc-d-process-direct", "usage_event_id": "usage-d-process", "usage_plane": "xskill_processing", "allocation_mode": "direct", "fraction": 0.8, "task_id": "pred-parent", "processing_step": "task_linker", "prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8, "cache_read_tokens": 3, "cost_usd": 0.0008, "method": "fixture", "method_version": "1"},
+          {"allocation_id": "alloc-d-process-rest", "usage_event_id": "usage-d-process", "usage_plane": "xskill_processing", "allocation_mode": "unattributed", "fraction": 0.2, "prompt_tokens": 2, "completion_tokens": 0, "total_tokens": 2, "cache_read_tokens": 1, "cost_usd": 0.0002, "method": "fixture", "method_version": "1"}
         ]
       },
       "usage_events": [
-        {"usage_event_id": "usage-d-exec", "usage_plane": "execution", "measurement_quality": "unavailable", "total_tokens": null, "cost_usd": null},
-        {"usage_event_id": "usage-d-process", "usage_plane": "xskill_processing", "measurement_quality": "measured", "total_tokens": 10, "cost_usd": 0.001}
+        {"usage_event_id": "usage-d-exec", "usage_plane": "execution", "measurement_quality": "unavailable", "prompt_tokens": null, "completion_tokens": null, "total_tokens": null, "cache_read_tokens": null, "cost_usd": null},
+        {"usage_event_id": "usage-d-process", "usage_plane": "xskill_processing", "measurement_quality": "measured", "prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10, "cache_read_tokens": 4, "cost_usd": 0.001}
       ]
     },
     {
@@ -207,9 +207,9 @@
         ],
         "task_relations": [],
         "attempts": [
-          {"attempt_id": "gold-attempt-e1", "task_id": "gold-task-e", "outcome": "blocked", "atom_ids": ["atom-e1"]},
-          {"attempt_id": "gold-attempt-e2", "task_id": "gold-task-e", "outcome": "failed", "atom_ids": ["atom-e2"]},
-          {"attempt_id": "gold-attempt-e3", "task_id": "gold-task-e", "outcome": "succeeded", "atom_ids": ["atom-e3"]}
+          {"attempt_id": "gold-attempt-e1", "task_id": "gold-task-e", "outcome": "blocked", "atom_ids": ["atom-e1"], "model": {"provider": "fixture-a", "model": "model-a"}, "harness": {"name": "codex", "version": "0.1"}, "skills": [{"name": "fixture-skill", "version": "v1"}], "execution_identity": {"run_id": "run-e1"}},
+          {"attempt_id": "gold-attempt-e2", "task_id": "gold-task-e", "outcome": "failed", "atom_ids": ["atom-e2"], "model": {"provider": "fixture-b", "model": "model-b"}, "harness": {"name": "dsh", "version": "0.2"}, "skills": [{"name": "fixture-skill", "version": "v2"}], "execution_identity": {"run_id": "run-e2"}},
+          {"attempt_id": "gold-attempt-e3", "task_id": "gold-task-e", "outcome": "succeeded", "atom_ids": ["atom-e3"], "model": {"provider": "fixture-b", "model": "model-b"}, "harness": {"name": "dsh", "version": "0.3"}, "skills": [{"name": "fixture-skill", "version": "v3"}], "execution_identity": {"run_id": "run-e3"}}
         ],
         "attempt_relations": [
           {"from_attempt_id": "gold-attempt-e2", "to_attempt_id": "gold-attempt-e1", "relation_type": "continuation_of"},
@@ -224,9 +224,9 @@
         ],
         "task_relations": [],
         "attempts": [
-          {"attempt_id": "pred-attempt-e1", "task_id": "pred-task-e", "outcome": "blocked", "confidence": 0.8, "atom_ids": ["atom-e1"], "model": {"provider": "fixture-a", "model": "model-a"}, "harness": {"name": "codex", "version": "0.1"}, "skills": [{"name": "fixture-skill", "version": "v1"}]},
-          {"attempt_id": "pred-attempt-e2", "task_id": "pred-task-e", "outcome": "failed", "confidence": 0.8, "atom_ids": ["atom-e2"], "model": {"provider": "fixture-b", "model": "model-b"}, "harness": {"name": "dsh", "version": "0.2"}, "skills": [{"name": "fixture-skill", "version": "v2"}]},
-          {"attempt_id": "pred-attempt-e3", "task_id": "pred-task-e", "outcome": "succeeded", "confidence": 0.9, "atom_ids": ["atom-e3"], "model": {"provider": "fixture-b", "model": "model-b"}, "harness": {"name": "dsh", "version": "0.3"}, "skills": [{"name": "fixture-skill", "version": "v3"}]}
+          {"attempt_id": "pred-attempt-e1", "task_id": "pred-task-e", "outcome": "blocked", "confidence": 0.8, "atom_ids": ["atom-e1"], "model": {"provider": "fixture-a", "model": "model-a"}, "harness": {"name": "codex", "version": "0.1"}, "skills": [{"name": "fixture-skill", "version": "v1"}], "execution_identity": {"run_id": "run-e1"}},
+          {"attempt_id": "pred-attempt-e2", "task_id": "pred-task-e", "outcome": "failed", "confidence": 0.8, "atom_ids": ["atom-e2"], "model": {"provider": "fixture-b", "model": "model-b"}, "harness": {"name": "dsh", "version": "0.2"}, "skills": [{"name": "fixture-skill", "version": "v2"}], "execution_identity": {"run_id": "run-e2"}},
+          {"attempt_id": "pred-attempt-e3", "task_id": "pred-task-e", "outcome": "succeeded", "confidence": 0.9, "atom_ids": ["atom-e3"], "model": {"provider": "fixture-b", "model": "model-b"}, "harness": {"name": "dsh", "version": "0.3"}, "skills": [{"name": "fixture-skill", "version": "v3"}], "execution_identity": {"run_id": "run-e3"}}
         ],
         "attempt_relations": [
           {"from_attempt_id": "pred-attempt-e2", "to_attempt_id": "pred-attempt-e1", "relation_type": "continuation_of", "confidence": 0.8},
