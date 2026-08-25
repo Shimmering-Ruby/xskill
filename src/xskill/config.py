@@ -113,6 +113,18 @@ llm:
     # token_burst: 20000 # optional token burst capacity (separate from requests)
   # See docs/adr/0001-rate-limit-diy-not-litellm.md for the design rationale.
 
+# Optional per-agent partial overrides. Missing fields inherit llm_skill first,
+# then llm, so leaving this block commented preserves the existing behavior.
+# llm_agents:
+#   split:
+#     model: qwen-plus
+#   cluster:
+#     model: deepseek-v4-flash
+#   edit:
+#     base_url: http://localhost:8000/v1
+#     model: local-skill-editor
+#     api_key: local
+
 # ===== Embedding (vector retrieval) =====
 # Any OpenAI-compatible embeddings endpoint. dim: 0 auto-probes on first call.
 #
@@ -477,6 +489,42 @@ def normalize_runtime_config(config_data: dict) -> dict:
                     skill_rate.setdefault("token_burst", skill_burst)
             llm_skill["rate_limit"] = skill_rate
         runtime_config["llm_skill"] = llm_skill
+
+    llm_agents = runtime_config.get("llm_agents")
+    if llm_agents is not None:
+        if not isinstance(llm_agents, dict):
+            raise ValueError("llm_agents 必须是 mapping")
+        unknown_stages = set(llm_agents) - {"split", "cluster", "edit"}
+        if unknown_stages:
+            raise ValueError(
+                f"llm_agents 包含未知阶段: {sorted(unknown_stages)!r}"
+            )
+        normalized_agents: dict[str, dict] = {}
+        for stage, stage_value in llm_agents.items():
+            if not isinstance(stage_value, dict):
+                raise ValueError(f"llm_agents.{stage} 必须是 mapping")
+            stage_cfg = dict(stage_value)
+            if "rate_limit" in stage_cfg:
+                stage_rate = stage_cfg.get("rate_limit")
+                if stage_rate is None:
+                    stage_rate = {}
+                if not isinstance(stage_rate, dict):
+                    raise ValueError(
+                        f"llm_agents.{stage}.rate_limit 必须是 mapping"
+                    )
+                stage_rate = dict(stage_rate)
+                stage_burst = stage_rate.pop("burst", None)
+                if stage_burst is not None:
+                    stage_burst = _positive_int(
+                        stage_burst,
+                        f"llm_agents.{stage}.rate_limit.burst",
+                    )
+                    stage_rate.setdefault("request_burst", stage_burst)
+                    if "tpm" in stage_rate:
+                        stage_rate.setdefault("token_burst", stage_burst)
+                stage_cfg["rate_limit"] = stage_rate
+            normalized_agents[stage] = stage_cfg
+        runtime_config["llm_agents"] = normalized_agents
 
     embedding = runtime_config.get("embedding") or {}
     if not isinstance(embedding, dict):

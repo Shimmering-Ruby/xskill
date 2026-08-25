@@ -72,6 +72,28 @@ _ACTION_STATUS = {
     "error": "error",
 }
 
+def _agent_context_llm_config(
+    config: dict, stage: str, *, inherit_skill: bool,
+) -> dict:
+    """Resolve settings read by an Agent outside the model factory.
+
+    SkillEdit historically inherited non-empty ``llm_skill`` values, including
+    explicit ``False`` and ``0``; TaskCluster historically read only ``llm``.
+    Keep those contracts while applying the new explicit stage override last.
+    """
+    result = dict(config.get("llm", {}) or {})
+    sections = []
+    if inherit_skill:
+        sections.append(config.get("llm_skill", {}) or {})
+    sections.append(((config.get("llm_agents", {}) or {}).get(stage, {}) or {}))
+    for section in sections:
+        result.update({
+            key: value for key, value in section.items()
+            if value not in (None, "")
+        })
+    return result
+
+
 def _install_thread_event_loop() -> None:
     """给工作线程装一个事件循环（Python 3.9 兼容）。
 
@@ -857,7 +879,7 @@ class DirectoryWatcher:
         if not actionable_skills:
             return
 
-        factory = self._factory()
+        factory = self._factory("edit")
         # store 选哪个：edit agent 工具 (atom_task_read/read_traj) 需要 store +
         # traj_root 才能读到 atom 原文。单机只有一个 watch_dir（cc_sessions）。
         # team-CS server 下有 N 个 watch_dir（每个 client 上传轨迹注册成一个 wd，
@@ -913,16 +935,9 @@ class DirectoryWatcher:
 
         actionable_skills.sort(key=_skill_edit_sort_key)
 
-        base_llm_cfg = self.config.get("llm", {}) or {}
-        skill_llm_override = self.config.get("llm_skill", {}) or {}
-        skill_llm_cfg = {
-            **base_llm_cfg,
-            **{
-                key: value
-                for key, value in skill_llm_override.items()
-                if value not in (None, "")
-            },
-        }
+        skill_llm_cfg = _agent_context_llm_config(
+            self.config, "edit", inherit_skill=True,
+        )
 
         def _run_one(d):
             """在 pool 工作线程里跑单个 skill 的 maybe_run；返回 (d, promoted)。
@@ -2838,18 +2853,21 @@ class DirectoryWatcher:
             self._store_cache[key] = AtomTaskStore(root=Path(dir_path))
         return self._store_cache[key]
 
-    def _factory(self):
+    def _factory(self, stage: str | None = None):
         """返回 agno agent 工厂；优先 inject 的，否则用默认 deepseek 工厂。"""
         if self.agno_agent_factory is not None:
             return self.agno_agent_factory
         from xskill.agents.agno_factory import make_default_factory
         if not hasattr(self, "_default_factory_cache"):
-            self._default_factory_cache = make_default_factory(
+            self._default_factory_cache = {}
+        if stage not in self._default_factory_cache:
+            self._default_factory_cache[stage] = make_default_factory(
                 self.config,
+                stage=stage,
                 usage_ledger=self.usage_ledger,
                 spill_root=self.spill_root,
             )
-        return self._default_factory_cache
+        return self._default_factory_cache[stage]
 
     # ───────────────────────────────────────────────────────────
     # 任务执行函数（在线程池中运行）
@@ -2929,7 +2947,7 @@ class DirectoryWatcher:
             with scope_context:
                 with agent_tools.use_agent_tool_context(tool_context):
                     atoms = TaskAgent(
-                        agno_agent_factory=self._factory(),
+                        agno_agent_factory=self._factory("split"),
                         store=store,
                         traj_root=dir_path,
                         skill_dir=self.skill_dir,
@@ -3103,7 +3121,7 @@ class DirectoryWatcher:
         if not stores:
             raise RuntimeError("cluster batch has no active AtomTaskStore")
         store = stores[0] if len(stores) == 1 else MultiAtomTaskStore(stores)
-        factory = self._factory()
+        factory = self._factory("cluster")
         return process_atom_batch(
             atom_ids=atom_ids,
             config=self.config,
@@ -3633,7 +3651,9 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
     cluster = TaskClusterAgent(
         skill_dir=skill_dir, store=store,
         agno_agent_factory=agno_agent_factory,
-        llm_cfg=config.get("llm", {}),
+        llm_cfg=_agent_context_llm_config(
+            config, "cluster", inherit_skill=False,
+        ),
         logs_dir=logs_dir,
         db_path=db_path,
         tools=[
@@ -3771,7 +3791,9 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
     cluster = TaskClusterAgent(
         skill_dir=skill_dir, store=store,
         agno_agent_factory=agno_agent_factory,
-        llm_cfg=config.get("llm", {}),
+        llm_cfg=_agent_context_llm_config(
+            config, "cluster", inherit_skill=False,
+        ),
         logs_dir=logs_dir,
         db_path=db_path,
         tools=[
