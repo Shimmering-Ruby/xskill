@@ -15,6 +15,7 @@ agent 跑起来；测试代码注入 stub callable。
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 from functools import partial
@@ -216,7 +217,8 @@ def build_chat_model(
             model, llm_cfg, spill_root=spill_root,
         )
         model = _wrap_with_retry(model, llm_cfg)
-        return _wrap_with_trace(model)
+        model = _wrap_with_trace(model)
+        return _wrap_with_otel(model, llm_cfg)
 
     from agno.models.openai import OpenAIChat
     _inject_verify_off_if_requested(OpenAIChat, common_kwargs, log)
@@ -228,7 +230,8 @@ def build_chat_model(
         model, llm_cfg, spill_root=spill_root,
     )
     model = _wrap_with_retry(model, llm_cfg)
-    return _wrap_with_trace(model)
+    model = _wrap_with_trace(model)
+    return _wrap_with_otel(model, llm_cfg)
 
 
 # 瞬时错误特征（可重试）；明确不可重试的(上下文超长/400 invalid)单独排除。
@@ -335,6 +338,142 @@ def _wrap_with_retry(model, llm_cfg: dict):
     return model
 
 
+def _messages_preview(messages) -> str:
+    """把 agno Message 列表压成 Phoenix 能显示的一段文本。"""
+    parts: list[str] = []
+    for message in messages or []:
+        role = getattr(message, "role", None)
+        content = getattr(message, "content", None)
+        if role is None and isinstance(message, dict):
+            role = message.get("role")
+            content = message.get("content")
+        if isinstance(content, list):
+            texts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("text"):
+                    texts.append(str(item["text"]))
+                else:
+                    texts.append(str(item))
+            content = "\n".join(texts)
+        parts.append(f"{role or '?'}: {content or ''}")
+    return "\n\n".join(parts)
+
+
+def _tool_input_preview(arguments: dict) -> str:
+    """工具入参的短摘要：路径、模式串、行号。长正文只记长度。"""
+    preview: dict[str, object] = {}
+    for key, value in arguments.items():
+        if isinstance(value, (int, float, bool)):
+            preview[key] = value
+        elif isinstance(value, str) and len(value) <= 200:
+            preview[key] = value
+        elif isinstance(value, str):
+            preview[key] = f"<{len(value)} chars>"
+        else:
+            preview[key] = type(value).__name__
+    return json.dumps(preview, ensure_ascii=False)
+
+
+def _wrap_with_otel(model, llm_cfg: dict):
+    """``XSKILL_OTEL=1`` 时给每次 ``model.invoke`` 开一个 ``llm.invoke`` span。
+
+    包在 trace 之外（最外层）：看到的轮数就是实际发出去的请求数，compact
+    产生的那次内部调用会作为子 span 挂在触发它的这一轮下面。
+
+    关掉时原样返回 model，一层包装都不加。
+    """
+    from xskill import obs
+    if not obs.is_enabled():
+        return model
+
+    original_invoke = model.invoke
+    model_name = llm_cfg.get("model", "?")
+
+    def observed_invoke(messages, **kwargs):
+        from xskill.usage import extract_usage
+        features = obs.collector()
+        round_index = features.note_llm_round()
+        with obs.span(
+            "llm.invoke",
+            **{
+                obs.SPAN_KIND: obs.KIND_LLM,
+                "llm.model_name": model_name,
+                "xskill.llm_round": round_index,
+                "xskill.message_count": len(messages or []),
+                "input.value": obs.clip(_messages_preview(messages)),
+            },
+        ) as sp:
+            resp = original_invoke(messages, **kwargs)
+            usage = extract_usage(resp)
+            sp.set_attributes({
+                "llm.token_count.prompt": usage.prompt or 0,
+                "llm.token_count.completion": usage.completion or 0,
+                "output.value": obs.clip(getattr(resp, "content", "") or ""),
+            })
+            return resp
+
+    model.invoke = observed_invoke
+    return model
+
+
+def otel_tool_hooks() -> list:
+    """``tool_hooks``：每次工具调用一个 ``tool.<name>`` span + 计数。
+
+    agno 按参数名给 hook 喂参（``agno/tools/function.py:_build_hook_args``），
+    所以签名里的名字不能改。``function_call`` 是链上的下一环，必须原样把
+    ``arguments`` 传进去。
+    """
+    from xskill import obs
+    if not obs.is_enabled():
+        return []
+
+    def observe_tool(function_name, function_call, arguments):
+        import time as _time
+        args = arguments if isinstance(arguments, dict) else {}
+        traj_id = None
+        for key in ("path", "file_path", "traj_id"):
+            if key in args:
+                traj_id = obs.traj_id_from_path(args.get(key))
+                if traj_id:
+                    break
+        attributes = {
+            obs.SPAN_KIND: obs.KIND_TOOL,
+            "tool.name": str(function_name),
+            "xskill.traj_id": traj_id,
+            "input.value": _tool_input_preview(args),
+        }
+        # 参数只记短标量：路径、行号、模式串。长正文（write_file 的
+        # content）不落，除非显式开 capture-content。
+        for key, value in args.items():
+            if isinstance(value, (int, float, bool)):
+                attributes[f"tool.arg.{key}"] = value
+            elif isinstance(value, str) and len(value) <= 200:
+                attributes[f"tool.arg.{key}"] = value
+            elif isinstance(value, str):
+                attributes[f"tool.arg.{key}.chars"] = len(value)
+        started = _time.perf_counter()
+        failed = False
+        try:
+            with obs.span(f"tool.{function_name}", **attributes) as sp:
+                result = function_call(**args)
+                output = str(result or "")
+                sp.set_attribute("tool.result.chars", len(output))
+                sp.set_attribute("output.value", obs.clip(output))
+                return result
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            obs.collector().note_tool_call(
+                str(function_name),
+                arguments=args,
+                seconds=_time.perf_counter() - started,
+                failed=failed,
+            )
+
+    return [observe_tool]
+
+
 def _wrap_with_trace(model):
     """最外层包装：每次 ``model.invoke`` 后把该轮交互写进当前线程的 agent trace sink
     （由 ``agent_trace.trace_to`` 设定）。没设 sink 时零开销。放最外层 → 看到的是
@@ -393,6 +532,10 @@ def make_default_factory(
         # 阻塞甚至挂死（实测单次 run 多挂 3~60s+，这正是探针冒烟测试/脚本
         # "吊死"的根因）。生产/探针都不该把运行数据报给厂商——一律关掉。
         kwargs.setdefault("telemetry", False)
+        # XSKILL_OTEL 关掉时 otel_tool_hooks() 返回空表，不给 agno 挂 hook。
+        hooks = otel_tool_hooks()
+        if hooks:
+            kwargs.setdefault("tool_hooks", hooks)
         return Agent(
             model=model,
             instructions=instructions,

@@ -79,6 +79,7 @@ from xskill.ecosystems.cursor import (
     _cursor_projects_path,
     _cursor_skills_path,
     _cursor_session_id_from_path,
+    _cwd_from_cursor_path,
     _read_cwd_from_cursor_jsonl,
 )
 from xskill.ecosystems.deepseek_harness import (
@@ -205,7 +206,8 @@ __all__ = [
     "_nga3_projects_path", "_nga3_skills_path",
     "_nga3_session_id_from_path", "_read_cwd_from_nga3_jsonl_content",
     "_cursor_projects_path", "_cursor_skills_path",
-    "_cursor_session_id_from_path", "_read_cwd_from_cursor_jsonl",
+    "_cursor_session_id_from_path", "_cwd_from_cursor_path",
+    "_read_cwd_from_cursor_jsonl",
     "_dsh_sessions_path", "_dsh_skills_path",
     "_dsh_session_id_from_path", "_read_cwd_from_dsh_jsonl",
     "_trae_skills_roots", "_trae_workspace_storage_roots",

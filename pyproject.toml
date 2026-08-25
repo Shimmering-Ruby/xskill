@@ -65,6 +65,19 @@ milvus = [
 dsh = [
     "zstandard>=0.21",
 ]
+# ``XSKILL_OTEL=1`` 时的行为观测（agent 跑了几轮、compact 几次、读了哪些
+# 轨迹）。不进主依赖：埋点默认关，产品跑不需要它；只有做行为实验、要把
+# span 送进 Phoenix 面板时才装。缺这几个包时 obs 层自动退回无埋点。
+obs = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
+# 本机 Phoenix 面板（收 OTLP、画瀑布）。单列一档：面板只在观测机上装，
+# 容器里跑实验的那一侧只要 obs 就够。
+phoenix = [
+    "arize-phoenix>=7",
+]
 dev = [
     "pytest>=7",
     "pytest-timeout>=2",

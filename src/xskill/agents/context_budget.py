@@ -1214,11 +1214,70 @@ class ContextManager:
 
         return invoke
 
+    def _estimate_tokens(self, messages: list) -> int:
+        return _estimate_history_tokens(
+            messages,
+            cjk_rate=self.cjk_rate,
+            calibration=self._calibration,
+            cache=self._est_cache,
+        )
+
     def _compact_until_success(
         self,
         messages: list,
         compact_fn: Callable[[str], str],
         prefix_box: dict,
+    ) -> bool:
+        """压缩这一次工作记忆。所有 compact 都从这里出发。
+
+        ``XSKILL_OTEL=1`` 时在外面套一个 ``context.compact`` span 并记一次
+        compact 计数——"这趟 compact 了几次"就是从这里数出来的。关掉时直接
+        进重试循环，不多算 token、不建 span。
+        """
+        from xskill import obs
+        if not obs.is_enabled():
+            return self._compact_attempt_loop(messages, compact_fn, prefix_box)
+
+        progress: dict = {"attempts": 0}
+        tokens_before = self._estimate_tokens(messages)
+        started = time.perf_counter()
+        compacted = False
+        with obs.span(
+            "context.compact",
+            **{
+                obs.SPAN_KIND: obs.KIND_CHAIN,
+                "xskill.tokens_before": tokens_before,
+                "xskill.compact_token_limit": self.compact_token_limit,
+                "xskill.max_context": self.max_context,
+            },
+        ) as sp:
+            try:
+                compacted = self._compact_attempt_loop(
+                    messages, compact_fn, prefix_box, progress=progress,
+                )
+                return compacted
+            finally:
+                tokens_after = self._estimate_tokens(messages)
+                sp.set_attributes({
+                    "xskill.tokens_after": tokens_after,
+                    "xskill.compact_attempts": progress["attempts"],
+                    "xskill.compacted": compacted,
+                })
+                obs.collector().note_compact(
+                    seconds=time.perf_counter() - started,
+                    tokens_before=tokens_before,
+                    tokens_after=tokens_after,
+                    attempts=progress["attempts"],
+                    ok=compacted,
+                )
+
+    def _compact_attempt_loop(
+        self,
+        messages: list,
+        compact_fn: Callable[[str], str],
+        prefix_box: dict,
+        *,
+        progress: dict | None = None,
     ) -> bool:
         """Retry compact. Do not swallow the last failure.
 
@@ -1230,6 +1289,8 @@ class ContextManager:
         """
         last_exc: Exception | None = None
         for attempt in range(1, self.compact_max_retries + 1):
+            if progress is not None:
+                progress["attempts"] = attempt
             try:
                 compacted = _compact_history_in_place(
                     messages,
@@ -1326,6 +1387,9 @@ class ContextManager:
                     cache=self._est_cache,
                 )
                 if trimmed:
+                    from xskill import obs
+                    if obs.is_enabled():
+                        obs.collector().note_spill()
                     after_spill = _estimate_history_tokens(
                         messages,
                         cjk_rate=self.cjk_rate,

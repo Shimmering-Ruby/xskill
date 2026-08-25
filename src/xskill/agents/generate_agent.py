@@ -153,11 +153,29 @@ class GenerateAgent:
             f"指令: {instruction.strip()}\n"
             f"{_name_hint(preferred_names)}"
         )
+        from xskill import obs
+        if obs.is_enabled():
+            obs.collector().note_budget(
+                max_context=max_context,
+                compact_token_limit=compact_limit,
+                enable_spill=enable_spill,
+            )
         with trace_to(
             self._trace_path(user_id, job_id),
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ):
+        ), obs.agent_run(
+            "generate",
+            **{
+                "xskill.user_id": user_id,
+                "xskill.job_id": job_id,
+                "xskill.read_roots": len(self.extra_read_roots),
+                "input.value": obs.clip(user_msg),
+            },
+        ) as root:
             result = agent.run(user_msg)
-        return getattr(result, "content", "") or ""
+            content = getattr(result, "content", "") or ""
+            if root is not None:
+                root.set_attribute("output.value", obs.clip(content))
+            return content
