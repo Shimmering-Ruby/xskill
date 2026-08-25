@@ -94,6 +94,10 @@ llm:
   # compact_keep_recent_messages: 6 # optional; recent complete message blocks
                          # kept verbatim after compact. Default 6.
   # temperature: 0.0     # optional; default 0 (deterministic)
+  # extra_body:          # optional provider-specific OpenAI request fields;
+  #   chat_template_kwargs:  # e.g. llama.cpp/Qwen chat-template controls.
+  #     enable_thinking: false # changing reasoning can affect quality; replay
+                         # representative trajectories before disabling it.
   # request_timeout: 60  # optional; per-request wall-clock cap in seconds
                          # (default 60). Explicit so an unreachable endpoint
                          # fails loud instead of hanging forever.
