@@ -546,3 +546,170 @@ class TestFullSweepBatching:
         assert stats["reason"] == "ephemeral"
         assert stats["upserted"] == 1
         assert embeds == ["alpha"]
+
+
+class TestSweepSeededMarkerReviewFindings:
+    """PR #338 code review（tiammomo）里复现的三个跨轮状态问题的回归测试。"""
+
+    def test_organic_dirty_item_does_not_block_full_seeding(self, registry_db):
+        """review 复现：3 条 catalog，bootstrap 前只有 k0 有机标脏。旧逻辑
+        「脏表非空就不播种」会把这当成「已经播种过」，k1/k2 永远进不了
+        索引，还会误把这轮标记成对账完成。"""
+        _store_catalog(registry_db, _catalog_row("native:k0", "d0"))  # mark=True，有机脏项
+        _store_catalog(registry_db, _catalog_row("native:k1", "d1"), mark=False)
+        _store_catalog(registry_db, _catalog_row("native:k2", "d2"), mark=False)
+        index = CountingIndex()
+
+        stats = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=100.0, limit=256,
+        )
+        assert stats["mode"] == "full"
+        assert stats["remaining"] == 0
+        # 三条全部进了索引，不是只有有机标脏的那一条。
+        assert index.list_keys() == {"native:k0", "native:k1", "native:k2"}
+
+    def test_organic_dirty_item_does_not_block_multi_round_seeding(self, registry_db):
+        """同上，但目录更大、limit 更小，确认播种在多轮场景下同样不受
+        有机脏项影响——只播种一次，后续轮次正常消化剩余积压。"""
+        _store_catalog(registry_db, _catalog_row("native:k0", "d0"))  # 有机脏项
+        for i in range(1, 5):
+            _store_catalog(registry_db, _catalog_row(f"native:k{i}", f"d{i}"), mark=False)
+        index = CountingIndex()
+
+        r1 = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=100.0, limit=2,
+        )
+        assert r1["mode"] == "full"
+        assert r1["remaining"] == 3  # 5 条播种，本轮处理 2 条
+
+        r2 = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=101.0, limit=2,
+        )
+        assert r2["remaining"] == 1
+        # 第二轮没有重新播种（否则 remaining 会跳回接近 5，而不是继续下降）。
+
+        r3 = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=102.0, limit=2,
+        )
+        assert r3["remaining"] == 0
+        assert index.list_keys() == {f"native:k{i}" for i in range(5)}
+
+    def test_model_change_mid_sweep_reseeds_and_reembeds_everything(self, registry_db):
+        """review 复现：sweep 从模型 B 开始，处理 2 条后模型切到 C，剩余
+        条目用 C embed。旧逻辑不会因为指纹变化而重新播种，导致 k0/k1
+        停留在 B 向量、水位却记成 C，形成混合模型索引。"""
+        for i in range(5):
+            _store_catalog(registry_db, _catalog_row(f"native:k{i}", f"d{i}"), mark=False)
+        index = CountingIndex()
+
+        embedded_with = {}
+
+        def embed_b(text):
+            embedded_with[text] = "B"
+            return fake_embed(f"B:{text}", DEFAULT_DIM)
+
+        def embed_c(text):
+            embedded_with[text] = "C"
+            return fake_embed(f"C:{text}", DEFAULT_DIM)
+
+        r1 = run_vector_sync(
+            db_path=registry_db, index=index, embed=embed_b,
+            model_fingerprint="test:model-b:8", now=100.0, limit=2,
+        )
+        assert r1["remaining"] == 3
+        assert index.calls["upsert"] == 2
+
+        # 模型切到 C，sweep 还没追平；应重新播种，之前在 B 下已处理的
+        # 也要用 C 重新 embed，不能停留在 B 向量。
+        r2 = run_vector_sync(
+            db_path=registry_db, index=index, embed=embed_c,
+            model_fingerprint="test:model-c:8", now=101.0, limit=10,
+        )
+        assert r2["reason"] == "model_changed"
+        assert r2["remaining"] == 0
+        # 全部 5 条这一轮都要用 C 重新处理（3 条剩余 + 2 条被重新播种）。
+        assert r2["upserted"] == 5
+        for i in range(5):
+            assert embedded_with[f"d{i}"] == "C"
+
+    def test_sweep_marker_cleared_on_completion_allows_next_periodic_seed(
+        self, registry_db,
+    ):
+        """追平后播种标记要清掉——不然下一次同指纹的周期性对账（内容真的
+        变了）会被误判成「已经播种过」而跳过。"""
+        _store_catalog(registry_db, _catalog_row("native:k0", "d0"), mark=False)
+        index = CountingIndex()
+        first = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8", now=100.0, limit=256,
+        )
+        assert first["remaining"] == 0
+
+        from xskill.recommend.vector_dirty import get_sweep_seeded_fingerprint
+        assert get_sweep_seeded_fingerprint(db_path=registry_db) == ""
+
+        # 内容真的变了 + 到了周期性对账窗口：应该能重新播种并处理。
+        _store_catalog(registry_db, _catalog_row("native:k1", "d1"), mark=False)
+        second = run_vector_sync(
+            db_path=registry_db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            model_fingerprint="test:model-a:8",
+            now=100.0 + VECTOR_RECONCILE_INTERVAL_SECONDS, limit=256,
+        )
+        assert second["reason"] == "periodic"
+        assert "native:k1" in index.list_keys()
+
+
+class TestRecommendsSafeToRecompute:
+    """review 复现：全量对账没追平/内存兜底只覆盖当前批次时，不能拿这
+    份不完整的索引重算并覆盖已有推荐结果。"""
+
+    def test_incremental_always_safe(self):
+        from xskill.recommend.heavy_worker import _recommends_safe_to_recompute
+        assert _recommends_safe_to_recompute(
+            {"mode": "incremental", "remaining": 0}, ephemeral_index=True,
+        )
+        assert _recommends_safe_to_recompute(
+            {"mode": "incremental", "remaining": 0}, ephemeral_index=False,
+        )
+
+    def test_full_sweep_in_progress_is_never_safe(self):
+        from xskill.recommend.heavy_worker import _recommends_safe_to_recompute
+        assert not _recommends_safe_to_recompute(
+            {"mode": "full", "remaining": 3}, ephemeral_index=False,
+        )
+        assert not _recommends_safe_to_recompute(
+            {"mode": "full", "remaining": 3}, ephemeral_index=True,
+        )
+
+    def test_full_sweep_done_persistent_index_is_safe(self):
+        from xskill.recommend.heavy_worker import _recommends_safe_to_recompute
+        assert _recommends_safe_to_recompute(
+            {"mode": "full", "remaining": 0}, ephemeral_index=False,
+        )
+
+    def test_full_sweep_done_ephemeral_single_round_is_safe(self):
+        """整份可索引目录一次就在这批里播种+处理完（total_indexable 有值）
+        ——这一轮内存里的索引确实是完整的。"""
+        from xskill.recommend.heavy_worker import _recommends_safe_to_recompute
+        assert _recommends_safe_to_recompute(
+            {"mode": "full", "remaining": 0, "total_indexable": 3},
+            ephemeral_index=True,
+        )
+
+    def test_full_sweep_done_ephemeral_multi_round_tail_is_not_safe(self):
+        """多轮播种的尾轮：remaining 归零了，但这轮没有播种（没有
+        total_indexable），内存里的索引只有这一轮那一小批，不是全量。"""
+        from xskill.recommend.heavy_worker import _recommends_safe_to_recompute
+        assert not _recommends_safe_to_recompute(
+            {"mode": "full", "remaining": 0}, ephemeral_index=True,
+        )

@@ -434,6 +434,7 @@ def run_recommend_heavy_once() -> int:
             "vector_total_indexable": vector_stats.get("total_indexable"),
             "vector_budget_aborted": vector_stats.get("budget_aborted", False),
             "recommends": heavy.get("recommends", 0),
+            "recommends_deferred": heavy.get("recommends_deferred", False),
             "index_kind": heavy.get("index_kind", ""),
             "rss_peak_mb": heavy.get("rss_peak_mb", 0.0),
         }

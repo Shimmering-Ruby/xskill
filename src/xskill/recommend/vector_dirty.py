@@ -88,16 +88,28 @@ def seed_full_catalog_vector_sweep(
 ) -> dict:
     """把当前全部可索引 catalog 行标脏，交给增量消费循环分批处理（issue #328）。
 
-    调用方只应在「没有正在进行中的积压」时播种一次——重复播种会把已经
-    处理过、已经从脏表清掉的 key 重新标脏，抹掉上一轮已经取得的进度。
-    之后每轮只消费一批（``limit`` 条），天然把一次性的全量重建拆成多轮，
-    不会因为没装持久索引就在单轮里把整份 catalog 的正文和向量都摊进内存。
+    调用方应该配合 ``get_sweep_seeded_fingerprint``/``mark_sweep_seeded``
+    只在「这个播种目标还没播种过」时调用一次，而不是靠脏表是否为空来
+    判断——脏表非空可能只是普通 catalog 编辑产生的有机脏项，和有没有
+    播种过全量对账是两回事（issue #328 review）。之后每轮只消费一批
+    （``limit`` 条），天然把一次性的全量重建拆成多轮，不会因为没装持久
+    索引就在单轮里把整份 catalog 的正文和向量都摊进内存。
+
+    已经脏（不管是有机变化还是上一次播种留下的）的 key 不重新标记——
+    避免播种把它们的 generation 平白再往上蹦一次，干扰「generation 只在
+    真正相关的事件上前进」这条不变量，也少几次没必要的写。
 
     ``existing_index_keys``：当前索引里已有、但按最新 catalog 状态已不
     再可索引（被 retire、被删）的 key 会被标记 delete，交由消费循环把
     它们从索引里清掉，行为与旧的全量对账一致。
     """
     with pooled_connection(db_path) as conn:
+        already_dirty = {
+            row["catalog_key"]
+            for row in conn.execute(
+                "SELECT catalog_key FROM catalog_vector_dirty WHERE dirty=1"
+            ).fetchall()
+        }
         rows = conn.execute(
             """
             SELECT c.catalog_key, c.content_sha, c.source, c.distributable,
@@ -115,12 +127,14 @@ def seed_full_catalog_vector_sweep(
             ):
                 continue
             indexable_keys.add(row["catalog_key"])
+            if row["catalog_key"] in already_dirty:
+                continue
             mark_catalog_vector_dirty_on_connection(
                 conn, row["catalog_key"], operation="upsert",
                 content_sha=row["content_sha"] or "",
             )
             seeded_upsert += 1
-        stale = set(existing_index_keys) - indexable_keys
+        stale = set(existing_index_keys) - indexable_keys - already_dirty
         for catalog_key in stale:
             mark_catalog_vector_dirty_on_connection(
                 conn, catalog_key, operation="delete",
@@ -189,7 +203,13 @@ def finish_catalog_vector_reconcile(
     reconciled_at: float | None = None,
     db_path: Optional[Path] = None,
 ) -> None:
-    """提交全量对账水位，并按 generation 清理开始时观察到的事件。"""
+    """提交全量对账水位，并按 generation 清理开始时观察到的事件。
+
+    同时清掉 ``sweep_seeded_fingerprint`` 播种标记——这一步和「记录已完成」
+    是同一个原子操作：播种标记的意义就是「这个指纹的全量对账还没追平」，
+    追平的那一刻它就该被清空，不然下一次同指纹的触发会误判成「已经播种
+    过」而跳过播种（issue #328 review）。
+    """
     with pooled_connection(db_path) as conn:
         for catalog_key, generation in generations.items():
             conn.execute(
@@ -200,16 +220,45 @@ def finish_catalog_vector_reconcile(
         conn.execute(
             """
             INSERT INTO catalog_vector_sync_meta(
-                singleton, model_fingerprint, reconciled_at
-            ) VALUES (1, ?, ?)
+                singleton, model_fingerprint, reconciled_at,
+                sweep_seeded_fingerprint
+            ) VALUES (1, ?, ?, '')
             ON CONFLICT(singleton) DO UPDATE SET
                 model_fingerprint=excluded.model_fingerprint,
-                reconciled_at=excluded.reconciled_at
+                reconciled_at=excluded.reconciled_at,
+                sweep_seeded_fingerprint=''
             """,
             (
                 model_fingerprint,
                 time.time() if reconciled_at is None else reconciled_at,
             ),
+        )
+        conn.commit()
+
+
+def get_sweep_seeded_fingerprint(*, db_path: Optional[Path] = None) -> str:
+    """当前「已经播种、还没追平」的全量对账目标指纹；没有进行中的播种返回空串。"""
+    with pooled_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT sweep_seeded_fingerprint FROM catalog_vector_sync_meta "
+            "WHERE singleton=1"
+        ).fetchone()
+    return (row["sweep_seeded_fingerprint"] or "") if row else ""
+
+
+def mark_sweep_seeded(
+    model_fingerprint: str, *, db_path: Optional[Path] = None,
+) -> None:
+    """记录「这个指纹的全量对账已经播种」，供后续轮次判断要不要重复播种。"""
+    with pooled_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO catalog_vector_sync_meta(singleton, sweep_seeded_fingerprint)
+            VALUES (1, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                sweep_seeded_fingerprint=excluded.sweep_seeded_fingerprint
+            """,
+            (model_fingerprint,),
         )
         conn.commit()
 

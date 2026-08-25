@@ -161,10 +161,28 @@ def _drain_full_sweep_batch(
         "upserted": 0, "deleted": 0, "skipped": 0, "deferred": 0,
         "budget_aborted": False,
     }
+    # 这一批的 catalog 行（含正文）在上面已经整批读进来了——批次加载本身
+    # 就可能把预算吃光，尤其是 limit 配得偏大时；加载完立刻查一次，不等
+    # 逐行循环里的下一次检查点才发现已经超了（issue #328 review）。
+    if (
+        memory_budget_mb is not None
+        and events
+        and current_rss_mb() > memory_budget_mb
+    ):
+        logger.warning(
+            "vector full sweep aborted before processing: rss over budget "
+            "(%.0f MiB budget) right after loading this batch's %s rows; "
+            "none processed, all stay dirty for next round",
+            memory_budget_mb, len(events),
+        )
+        stats["budget_aborted"] = True
+        return stats
     for processed, event in enumerate(events):
         if (
             memory_budget_mb is not None
-            and processed
+            # 步长为了减少 getrusage 系统调用频率；不能跳过第 0 条——批次
+            # 比步长还小时（如 10 条 vs 步长 20），跳过第 0 条会导致这批
+            # 从头到尾一次都不检查，budget 形同虚设（issue #328 review）。
             and processed % _MEMORY_BUDGET_CHECK_STRIDE == 0
             and current_rss_mb() > memory_budget_mb
         ):
@@ -238,6 +256,7 @@ def run_vector_sync(
     now: float | None = None,
     limit: int = 256,
     memory_budget_mb: Optional[float] = None,
+    sweep_key: Optional[str] = None,
 ) -> dict:
     """优先消费增量队列；首次/模型变化/低频周期触发全量对账。
 
@@ -252,13 +271,26 @@ def run_vector_sync(
     「多轮」只保证内存峰值有界、检索覆盖率会持续被下一轮的批次覆盖，
     并不会跨轮累积成一份完整索引——这是没有持久存储时物理上做不到的，
     不是本函数的缺陷。
+
+    ``sweep_key``：判断「这个全量对账目标是否已经播种过」用的稳定标识，
+    缺省等于 ``model_fingerprint``。两者分开是因为 ``model_fingerprint``
+    里可能拼了索引实例标识（``_vector_index_identity``）——持久索引按
+    db 文件的 dev/inode，重建后正确触发重新 bootstrap；但没有持久索引
+    时索引标识是 ``id(index)``，每个子进程都是全新对象，若直接拿它当
+    播种去重键，会导致「已经播种过」永远判定为假、每轮都重新播种，
+    抹掉多轮攒下的脏表进度。调用方（``run_recommend_heavy_once``）传入
+    不含索引实例标识的稳定部分。
     """
     from xskill.recommend.vector_dirty import (
         catalog_vector_reconcile_reason,
         count_catalog_vector_dirty,
         finish_catalog_vector_reconcile,
+        get_sweep_seeded_fingerprint,
+        mark_sweep_seeded,
         seed_full_catalog_vector_sweep,
     )
+
+    effective_sweep_key = sweep_key if sweep_key is not None else model_fingerprint
 
     reason = "ephemeral" if force_full else catalog_vector_reconcile_reason(
         model_fingerprint,
@@ -267,12 +299,19 @@ def run_vector_sync(
         interval_seconds=VECTOR_RECONCILE_INTERVAL_SECONDS,
     )
     seed_info = None
-    if reason and count_catalog_vector_dirty(db_path=db_path) == 0:
-        # 只在没有积压时播种一次；已经在消化上一次播种的积压时不重复播种，
-        # 否则会把已处理、已清出脏表的 key 重新标脏，抹掉已有进度。
-        seed_info = seed_full_catalog_vector_sweep(
-            db_path=db_path, existing_index_keys=index.list_keys(),
-        )
+    if reason:
+        # 播种去重看的是「这个 sweep_key 是否已经播种过」，不是「脏表是否
+        # 为空」——脏表非空可能只是普通 catalog 编辑产生的有机脏项，跟
+        # 有没有播种过全量对账是两回事，用队列是否为空来判断会导致这类
+        # 有机脏项存在时全量对账被误判成「已经播种过」而永久跳过
+        # （issue #328 review）。sweep_key 变化（比如模型中途又切换）会
+        # 重新播种一遍，让新目标下这份索引重新覆盖全部 catalog，不会把
+        # 老模型的向量和新模型的混在一起当成同一次对账完成。
+        if get_sweep_seeded_fingerprint(db_path=db_path) != effective_sweep_key:
+            seed_info = seed_full_catalog_vector_sweep(
+                db_path=db_path, existing_index_keys=index.list_keys(),
+            )
+            mark_sweep_seeded(effective_sweep_key, db_path=db_path)
 
     if reason:
         stats = _drain_full_sweep_batch(
@@ -484,6 +523,37 @@ def _vector_index_identity(index, vector_db_path: Path) -> str:
     )
 
 
+def _recommends_safe_to_recompute(vec_stats: dict, *, ephemeral_index: bool) -> bool:
+    """本轮的索引内容够不够完整、值不值得用它重算并覆盖已有推荐结果。
+
+    不安全时应该跳过重算，让已有推荐槽保持原样（哪怕已经过期）——过期
+    但完整的一份结果，好过用不完整/不一致的索引算出一份更差的覆盖上去
+    （issue #328 review）：
+
+    - 纯增量（``mode != "full"``）：索引一直在稳态累积，随时可信。
+    - 全量对账仍在进行（``remaining > 0``）：索引处于中途状态——可能是
+      增量脏项还没追完，也可能是模型切换/无持久索引导致内容还没对齐到
+      同一个目标，这时候算出来的结果只会是一份内部不一致的推荐，不能
+      发布。
+    - 全量对账在这次调用里追平（``remaining == 0``）且不是内存兜底
+      （持久索引）：安全，持久索引跨轮次真正累积，此刻磁盘上的内容就是
+      完整的。
+    - 全量对账在这次调用里追平、且是内存兜底：只有当这次调用同时完成了
+      播种和消化（``total_indexable`` 有值，即整份可索引目录一次就在这
+      批里处理完）才安全——这种情况下内存里这份索引确实覆盖了全部
+      catalog。如果 ``total_indexable`` 没有值，说明这是跨多轮播种的
+      尾轮，内存里这份索引对象只有这一轮处理的那一小批，不是全量，
+      不能发布。
+    """
+    if vec_stats.get("mode") != "full":
+        return True
+    if vec_stats.get("remaining", 0) != 0:
+        return False
+    if not ephemeral_index:
+        return True
+    return vec_stats.get("total_indexable") is not None
+
+
 def run_recommend_heavy_once(
     *,
     engine,
@@ -522,6 +592,11 @@ def run_recommend_heavy_once(
         model_fingerprint = f"{VECTOR_SYNC_ALGORITHM}:{model}:{dim}"
     # open_skill_vector_index：无 pymilvus 时退回内存索引并 hourly warn
     index = memory_index or open_skill_vector_index(vdb, dim=dim)
+    # sweep_key 只取 算法:模型:维度 这部分，不拼索引实例标识——见
+    # run_vector_sync 的 sweep_key 说明：没有持久索引时每个子进程的
+    # index 对象都是新的，若拿它的 id() 当播种去重键，会导致「已经
+    # 播种过」永远判定为假，多轮攒下的脏表进度被每轮重新播种抹掉。
+    sweep_key = model_fingerprint
     model_fingerprint = (
         f"{model_fingerprint}:{_vector_index_identity(index, vdb)}"
     )
@@ -537,6 +612,7 @@ def run_recommend_heavy_once(
         embed=embed_fn,
         index=index,
         model_fingerprint=model_fingerprint,
+        sweep_key=sweep_key,
         force_full=ephemeral_index,
         limit=vector_sync_batch_limit,
         memory_budget_mb=memory_budget_mb,
@@ -544,14 +620,32 @@ def run_recommend_heavy_once(
     if mark_catalog_dirty and (
         vec_stats.get("upserted", 0) or vec_stats.get("deleted", 0)
     ):
+        # 标脏只是排进队列，供之后「索引可信」的某一轮消费——标脏本身不
+        # 涉及用这份索引算东西，随时安全，不受下面的门禁影响。
         mark_all_recommend_dirty(reason="catalog_vector_changed", db_path=registry)
-    n = process_dirty_recommends(
-        db_path=registry, vector_index=index, engine=engine,
+    recommends_safe = _recommends_safe_to_recompute(
+        vec_stats, ephemeral_index=ephemeral_index,
     )
+    if recommends_safe:
+        n = process_dirty_recommends(
+            db_path=registry, vector_index=index, engine=engine,
+        )
+    else:
+        # 这一轮的索引不完整/不一致（全量对账还没追平，或没有持久索引时
+        # 只覆盖了这一轮处理的那一小批），不能拿它算推荐去覆盖已有槽位
+        # ——已有结果哪怕过期，也好过用不完整索引算出的一份更差结果
+        # （issue #328 review）。留给脏队列，等索引可信的那一轮再消费。
+        n = 0
+        logger.info(
+            "recommend computation deferred: vector index not yet complete "
+            "this round (mode=%s remaining=%s ephemeral=%s)",
+            vec_stats.get("mode"), vec_stats.get("remaining"), ephemeral_index,
+        )
     index_kind = "milvus" if type(index).__name__ == "MilvusLiteSkillVectorIndex" else "memory"
     return {
         "vector": vec_stats,
         "recommends": n,
+        "recommends_deferred": not recommends_safe,
         "index_kind": index_kind,
         "rss_peak_mb": current_rss_mb(),
     }

@@ -209,3 +209,152 @@ class TestWorkersWiring:
         assert stats["recommends"] == 4
         assert stats["index_kind"] == "memory"
         assert stats["rss_peak_mb"] == 42.5
+
+
+# ─────────────────────────────────────────────────────────────────
+# PR #338 code review（tiammomo）复现的问题：内存预算检查漏洞、
+# 推荐结果不能用不完整索引覆盖
+# ─────────────────────────────────────────────────────────────────
+
+class TestMemoryBudgetReviewFinding:
+    def test_tiny_budget_small_batch_still_aborts(self, tmp_path):
+        """review 复现：memory_budget_mb=1、批量 10 条。旧的检查步长是
+        20，10 条的批次永远凑不到一次检查点，budget 形同虚设，10 条会
+        被全部处理。"""
+        db = tmp_path / "registry.db"
+        from xskill.pipeline.registry import get_connection
+        get_connection(db).close()
+        for i in range(10):
+            _store_row(db, f"native:k{i}", f"desc-{i}")
+        seed_full_catalog_vector_sweep(db_path=db, existing_index_keys=set())
+        assert count_catalog_vector_dirty(db_path=db) == 10
+
+        index = MemorySkillVectorIndex(dim=DEFAULT_DIM)
+        stats = _drain_full_sweep_batch(
+            db_path=db, index=index,
+            embed=lambda text: fake_embed(text, DEFAULT_DIM),
+            limit=10, force_upsert=False,
+            memory_budget_mb=1.0,  # 任何真实进程的 RSS 都会超过 1 MiB
+        )
+        assert stats["budget_aborted"] is True
+        assert stats["upserted"] == 0  # 一条都不该处理
+        assert count_catalog_vector_dirty(db_path=db) == 10  # 全部留给下一轮
+
+
+class TestRecommendsGatingIntegration:
+    """`run_recommend_heavy_once` 按 `_recommends_safe_to_recompute` 门禁
+    决定要不要用这一轮的索引重算推荐——不安全时不调用
+    `process_dirty_recommends`，已有推荐槽保持原样。
+
+    ``open_skill_vector_index``/``fake_embed``/``MemorySkillVectorIndex`` 是
+    ``run_recommend_heavy_once`` 内部局部 import 的，要在它们的源模块
+    （``skill_vector_store``）打 monkeypatch 才生效，不能打在
+    ``heavy_worker`` 模块对象上；``run_vector_sync``/``process_dirty_recommends``/
+    ``_embed_fn_from_engine`` 是同一个模块里定义的函数，直接打在
+    ``heavy_worker`` 模块对象上即可。
+    """
+
+    def _patch_open_index(self, monkeypatch):
+        monkeypatch.setattr(
+            "xskill.recommend.skill_vector_store.open_skill_vector_index",
+            lambda *_a, **_kw: MemorySkillVectorIndex(dim=DEFAULT_DIM),
+        )
+
+    def test_recommends_computed_when_incremental(self, monkeypatch):
+        import xskill.recommend.heavy_worker as hw
+
+        calls = {"process": 0}
+        monkeypatch.setattr(
+            hw, "run_vector_sync",
+            lambda **_kw: {"upserted": 0, "deleted": 0, "mode": "incremental", "reason": ""},
+        )
+        monkeypatch.setattr(
+            hw, "process_dirty_recommends",
+            lambda **_kw: calls.__setitem__("process", calls["process"] + 1) or 3,
+        )
+        monkeypatch.setattr(hw, "_embed_fn_from_engine", lambda engine: None)
+        self._patch_open_index(monkeypatch)
+
+        result = hw.run_recommend_heavy_once(
+            engine=object(), db_path="/tmp/unused-db",
+        )
+        assert calls["process"] == 1
+        assert result["recommends"] == 3
+        assert result["recommends_deferred"] is False
+
+    def test_recommends_deferred_when_full_sweep_in_progress(self, monkeypatch):
+        import xskill.recommend.heavy_worker as hw
+
+        calls = {"process": 0}
+        monkeypatch.setattr(
+            hw, "run_vector_sync",
+            lambda **_kw: {
+                "upserted": 2, "deleted": 0, "mode": "full", "reason": "bootstrap",
+                "remaining": 5,
+            },
+        )
+        monkeypatch.setattr(
+            hw, "process_dirty_recommends",
+            lambda **_kw: calls.__setitem__("process", calls["process"] + 1) or 99,
+        )
+        monkeypatch.setattr(hw, "_embed_fn_from_engine", lambda engine: None)
+        self._patch_open_index(monkeypatch)
+
+        result = hw.run_recommend_heavy_once(
+            engine=object(), db_path="/tmp/unused-db",
+        )
+        assert calls["process"] == 0  # 没调用——索引还不完整，不能拿它覆盖已有推荐
+        assert result["recommends"] == 0
+        assert result["recommends_deferred"] is True
+
+    def test_recommends_computed_when_full_sweep_completes_this_round(self, monkeypatch):
+        import xskill.recommend.heavy_worker as hw
+
+        calls = {"process": 0}
+        monkeypatch.setattr(
+            hw, "run_vector_sync",
+            lambda **_kw: {
+                "upserted": 2, "deleted": 0, "mode": "full", "reason": "bootstrap",
+                "remaining": 0,  # 持久索引：追平即完整，可信
+            },
+        )
+        monkeypatch.setattr(
+            hw, "process_dirty_recommends",
+            lambda **_kw: calls.__setitem__("process", calls["process"] + 1) or 7,
+        )
+        monkeypatch.setattr(hw, "_embed_fn_from_engine", lambda engine: None)
+        # memory_index 显式传入 → ephemeral_index=False（当成可复用/持久对待）。
+        result = hw.run_recommend_heavy_once(
+            engine=object(), db_path="/tmp/unused-db",
+            memory_index=MemorySkillVectorIndex(dim=DEFAULT_DIM),
+        )
+        assert calls["process"] == 1
+        assert result["recommends"] == 7
+        assert result["recommends_deferred"] is False
+
+    def test_recommends_not_computed_ephemeral_multi_round_tail(self, monkeypatch):
+        """无持久索引、多轮播种的尾轮：remaining 归零但这轮没有
+        total_indexable（不是本轮播种+消化完的），内存索引只有这轮那一小
+        批，不能信。"""
+        import xskill.recommend.heavy_worker as hw
+
+        calls = {"process": 0}
+        monkeypatch.setattr(
+            hw, "run_vector_sync",
+            lambda **_kw: {
+                "upserted": 2, "deleted": 0, "mode": "full", "reason": "ephemeral",
+                "remaining": 0,
+            },
+        )
+        monkeypatch.setattr(
+            hw, "process_dirty_recommends",
+            lambda **_kw: calls.__setitem__("process", calls["process"] + 1) or 1,
+        )
+        monkeypatch.setattr(hw, "_embed_fn_from_engine", lambda engine: None)
+        self._patch_open_index(monkeypatch)
+
+        result = hw.run_recommend_heavy_once(
+            engine=object(), db_path="/tmp/unused-db",
+        )
+        assert calls["process"] == 0
+        assert result["recommends_deferred"] is True
