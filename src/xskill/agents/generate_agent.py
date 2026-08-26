@@ -176,24 +176,14 @@ class GenerateAgent:
             f"指令: {instruction.strip()}\n"
             f"{_name_hint(preferred_names)}"
         )
-        from xskill.obs import tracing
+        from xskill.obs.tracing import setup
 
+        setup()
         with trace_to(
             self._trace_path(user_id, job_id),
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ), tracing.span(
-            "generate.run",
-            **{
-                "openinference.span.kind": "AGENT",
-                "user_id": user_id,
-                "job_id": job_id,
-                "input.value": tracing.clip(user_msg),
-            },
-        ) as current:
+        ):
             result = agent.run(user_msg)
-            content = getattr(result, "content", "") or ""
-            current.set_attribute("output.value", tracing.clip(content))
-        tracing.shutdown()
-        return content
+        return getattr(result, "content", "") or ""
