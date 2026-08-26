@@ -106,4 +106,7 @@ def test_resolve_team_client_skill_dir_respects_config_skill_dir(tmp_path, monke
     assert C.resolve_team_client_skill_dir(custom, xskill_home=xhome) == xhome / "client_skill"
     # 默认 skill/ 此时不是自有仓，不得误分流
     assert C.resolve_team_client_skill_dir(xhome / "skill", xskill_home=xhome) == xhome / "skill"
+    # connect / import 共用这条组合：先读配置，再按同机冲突分流
+    requested = C.resolve_local_skill_dir(xskill_home=xhome)
+    assert C.resolve_team_client_skill_dir(requested, xskill_home=xhome) == xhome / "client_skill"
 

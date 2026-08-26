@@ -1292,15 +1292,11 @@ def _local_bm25_hits(query: str, *, top_k: int) -> list[dict]:
     BM25Okapi 那样把全部分数压成 0。"""
     import math
 
-    from xskill.config import XSKILL_HOME, get_skill_dir
+    from xskill.config import resolve_local_skill_dir
     from xskill.recommend.skillhub import BM25_B, BM25_K1, _tokenize
     from xskill.skill.skill import _load_skill
 
-    try:
-        skill_dir = get_skill_dir()
-    except FileNotFoundError:
-        # 首装还没有 config.yaml：关键词回退不应依赖配置，用默认 skill 目录
-        skill_dir = XSKILL_HOME / "skill"
+    skill_dir = resolve_local_skill_dir()
     entries: list[dict] = []
     if skill_dir.exists():
         for d in sorted(skill_dir.iterdir()):
@@ -1674,13 +1670,8 @@ def _is_thin_team_client() -> bool:
 
 
 def _local_import_skill_dir():
-    from xskill.config import CONFIG_PATH, XSKILL_HOME, get_skill_dir
-    if CONFIG_PATH.is_file():
-        try:
-            return get_skill_dir()
-        except Exception:
-            pass
-    return XSKILL_HOME / "skill"
+    from xskill.config import resolve_local_skill_dir
+    return resolve_local_skill_dir()
 
 
 def _print_import_result(imported, *, json_mode: bool) -> None:
@@ -1753,6 +1744,8 @@ def _cmd_import_team(args, sources, *, http=None, headers=None) -> int:
         XSKILL_HOME,
         get_team_client_history_path,
         get_team_client_state_path,
+        resolve_local_skill_dir,
+        resolve_team_client_skill_dir,
     )
     from xskill.skill.importer import (
         HARNESS_IMPORT_WARNING,
@@ -1770,7 +1763,7 @@ def _cmd_import_team(args, sources, *, http=None, headers=None) -> int:
             return 1
         http.timeout = 120.0
 
-    skill_dir = XSKILL_HOME / "skill"
+    skill_dir = resolve_team_client_skill_dir(resolve_local_skill_dir())
     home = Path.home()
     state = load_client_state(get_team_client_state_path())
     history_path = get_team_client_history_path(state.server_url)
