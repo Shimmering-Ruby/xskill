@@ -643,7 +643,7 @@ class PipelinePoolPatch(BaseModel):
 # llm/embedding/agent_worker/watcher 涉及进程级资源，改动需重启 serve。
 HOT_RELOAD_SECTIONS = ("dashboard", "canary", "recommend", "skillhub")
 RESTART_SECTIONS = (
-    "llm", "llm_skill", "embedding", "watcher", "agent_worker", "team",
+    "llm", "llm_skill", "llm_agents", "embedding", "watcher", "agent_worker", "team",
 )
 # team 段整体是重启域(join_token/路径/registry 接线),但这几个子键是纯调优数字,
 # 由 api.live_manifest_tuning() 每请求现取 → 改它们不需要重启。只有改到 team
