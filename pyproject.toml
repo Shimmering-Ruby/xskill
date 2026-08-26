@@ -65,6 +65,12 @@ milvus = [
 dsh = [
     "zstandard>=0.21",
 ]
+# Generate 观测。不进主依赖。观测机：pip install 'xskill[obs]'，再设
+# XSKILL_OTEL_ENDPOINT。LLM 对话走 OpenAIInstrumentor，不手包 invoke。
+obs = [
+    "arize-phoenix-otel>=0.16.0",
+    "openinference-instrumentation-openai",
+]
 dev = [
     "pytest>=7",
     "pytest-timeout>=2",
