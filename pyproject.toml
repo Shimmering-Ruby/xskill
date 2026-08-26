@@ -65,6 +65,13 @@ milvus = [
 dsh = [
     "zstandard>=0.21",
 ]
+# Generate OTel。不进主依赖：没设 XSKILL_OTEL_ENDPOINT 时整层空壳。
+# 观测机：pip install 'xskill[obs]'，再设 XSKILL_OTEL_ENDPOINT。
+obs = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 dev = [
     "pytest>=7",
     "pytest-timeout>=2",

@@ -156,7 +156,10 @@ class GenerateAgent:
             agent_tools.new_skill_folder,
             agent_tools.commit_generate_main,
         ]
-        agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
+        from xskill.obs.generate import observe_run, wrap_factory
+
+        factory = wrap_factory(self.agno_agent_factory)
+        agent = factory(instructions=[sysprompt], tools=tools)
         max_context = int(
             (self.llm_cfg or {}).get("max_context") or DEFAULT_MAX_CONTEXT
         )
@@ -181,6 +184,6 @@ class GenerateAgent:
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ):
+        ), observe_run(user_id=user_id, job_id=job_id):
             result = agent.run(user_msg)
         return getattr(result, "content", "") or ""
