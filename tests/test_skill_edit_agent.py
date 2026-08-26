@@ -347,6 +347,10 @@ class TestMainNeedsUxScoreBeforeStaging:
         assert "write_file / edit 相对路径按 skill_base_path 解析" in (
             _InspectingStagingStubAgno.user_msg
         )
+        assert '对：write_file(path="SKILL.md")' in _InspectingStagingStubAgno.user_msg
+        assert f'错：write_file(path="{skill_dir.name}/SKILL.md")' in (
+            _InspectingStagingStubAgno.user_msg
+        )
         assert "scripts/helper.py" in _InspectingStagingStubAgno.user_msg
 
 
