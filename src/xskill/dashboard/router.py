@@ -27,13 +27,16 @@ _STANDALONE_SKILL_SOURCES = frozenset(("native", "skillhub"))
 
 
 def _skill_dir_for(db_path: Optional[Path]) -> Path:
-    """看板要列 skill 库,需 skill_dir。约定 skill 与 registry.db 同在
-    XSKILL_HOME 下(``<home>/skill`` 与 ``<home>/registry.db``)——据 db_path
-    旁推 skill_dir,这样独立只读实例(显式 db_path)与 serve 内置挂载(db_path=None
-    走 config 默认)都能解析到正确目录,不必单独再传一个参数。"""
+    """看板要列 skill 库,需 skill_dir。
+
+    独立只读实例（显式 ``db_path``）把 ``registry.db`` 所在目录当 state root,
+    走 ``resolve_local_skill_dir``：读该目录 ``config.yaml`` 的 ``skill_dir``,
+    缺省仍是同级 ``skill/``。serve 内置挂载（``db_path=None``）走完整
+    ``get_skill_dir()``。
+    """
+    from xskill.config import get_skill_dir, resolve_local_skill_dir
     if db_path is not None:
-        return Path(db_path).parent / "skill"
-    from xskill.config import get_skill_dir
+        return resolve_local_skill_dir(xskill_home=Path(db_path).parent)
     return get_skill_dir()
 
 
