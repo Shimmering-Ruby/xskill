@@ -1,4 +1,4 @@
-"""有 ``XSKILL_OTEL_ENDPOINT`` 就建 OTLP tracer，没有就是空壳。"""
+"""有 ``XSKILL_OTEL_ENDPOINT`` 就 register Phoenix + OpenAI 自动打点。"""
 from __future__ import annotations
 
 import logging
@@ -38,51 +38,27 @@ def setup() -> bool:
     if _STATE["failed"]:
         return False
     try:
-        _build()
+        from opentelemetry import trace
+        from openinference.instrumentation.openai import OpenAIInstrumentor
+        from phoenix.otel import register
+
+        url = endpoint().rstrip("/")
+        if not url.endswith("/v1/traces"):
+            url = f"{url}/v1/traces"
+        provider = register(
+            project_name="xskill-generate",
+            endpoint=url,
+            protocol="http/protobuf",
+        )
+        OpenAIInstrumentor().instrument(tracer_provider=provider)
+        _STATE["tracer"] = trace.get_tracer("xskill.generate")
+        _STATE["provider"] = provider
     except Exception:  # noqa: BLE001 — 打点起不来不许挡 generate
         _STATE["failed"] = True
-        logger.warning("XSKILL_OTEL_ENDPOINT 已设但 OpenTelemetry 起不来", exc_info=True)
+        logger.warning("XSKILL_OTEL_ENDPOINT 已设但探针起不来", exc_info=True)
         return False
     _STATE["ready"] = True
     return True
-
-
-def _build() -> None:
-    from opentelemetry import trace
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-
-    url = endpoint().rstrip("/")
-    if not url.endswith("/v1/traces"):
-        url = f"{url}/v1/traces"
-    provider = TracerProvider(resource=Resource.create({"service.name": "xskill"}))
-    provider.add_span_processor(SimpleSpanProcessor(_Quiet(OTLPSpanExporter(endpoint=url))))
-    trace.set_tracer_provider(provider)
-    _STATE["tracer"] = trace.get_tracer("xskill.generate")
-    _STATE["provider"] = provider
-
-
-class _Quiet:
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def export(self, spans: Any) -> Any:
-        try:
-            return self._inner.export(spans)
-        except Exception:  # noqa: BLE001
-            logger.warning("OTel 送不出去，generate 继续跑", exc_info=True)
-            return 0
-
-    def shutdown(self) -> None:
-        shutdown = getattr(self._inner, "shutdown", None)
-        if callable(shutdown):
-            shutdown()
-
-    def force_flush(self, timeout_millis: int = 10_000) -> bool:
-        flush = getattr(self._inner, "force_flush", None)
-        return bool(flush(timeout_millis)) if callable(flush) else True
 
 
 @contextmanager
@@ -100,14 +76,14 @@ def shutdown() -> None:
         return
     try:
         provider = _STATE.get("provider")
-        if provider is not None:
-            provider.force_flush(10_000)
+        flush = getattr(provider, "force_flush", None)
+        if callable(flush):
+            flush(10_000)
     except Exception:  # noqa: BLE001
         logger.debug("otel flush failed", exc_info=True)
 
 
 def reset() -> None:
-    """单测用：清掉进程里的 tracer 状态。"""
     _STATE["ready"] = False
     _STATE["failed"] = False
     _STATE["tracer"] = None

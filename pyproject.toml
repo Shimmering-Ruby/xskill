@@ -65,12 +65,11 @@ milvus = [
 dsh = [
     "zstandard>=0.21",
 ]
-# Generate OTel。不进主依赖：没设 XSKILL_OTEL_ENDPOINT 时整层空壳。
-# 观测机：pip install 'xskill[obs]'，再设 XSKILL_OTEL_ENDPOINT。
+# Generate 观测。不进主依赖。观测机：pip install 'xskill[obs]'，再设
+# XSKILL_OTEL_ENDPOINT。LLM 对话走 OpenAIInstrumentor，不手包 invoke。
 obs = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "arize-phoenix-otel>=0.16.0",
+    "openinference-instrumentation-openai",
 ]
 dev = [
     "pytest>=7",

@@ -1,14 +1,13 @@
-"""Generate OTel：没 endpoint 就是空壳。不要求装 SDK。"""
+"""Generate OTel：没 endpoint 就是空壳。不要求装探针。"""
 from __future__ import annotations
 
 from contextlib import contextmanager
-from pathlib import Path
 
 from xskill.agents import agent_tools
 from xskill.agents.generate_agent import GenerateAgent
 
 
-def _ctx(tmp_path: Path):
+def _ctx(tmp_path):
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
     return skill_dir, agent_tools.create_agent_tool_context(
@@ -48,16 +47,18 @@ def test_generate_runs_without_endpoint(tmp_path, monkeypatch):
         assert agent.run(instruction="写一个 skill", user_id="u", job_id="j") == "ok"
 
 
-def test_run_and_invoke_spans_when_endpoint_set(tmp_path, monkeypatch):
-    monkeypatch.setenv("XSKILL_OTEL_ENDPOINT", "http://127.0.0.1:6006")
+def test_agent_span_when_endpoint_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("XSKILL_OTEL_ENDPOINT", "http://127.0.0.1:8873")
     from xskill.obs import tracing
 
     tracing.reset()
     names: list[str] = []
+    kinds: list[str] = []
 
     @contextmanager
-    def fake_span(name, **_attrs):
+    def fake_span(name, **attrs):
         names.append(name)
+        kinds.append(attrs.get("openinference.span.kind", ""))
 
         class _S:
             def set_attribute(self, *_a, **_k):
@@ -65,28 +66,12 @@ def test_run_and_invoke_spans_when_endpoint_set(tmp_path, monkeypatch):
 
         yield _S()
 
-    monkeypatch.setattr(tracing, "is_enabled", lambda: True)
     monkeypatch.setattr(tracing, "setup", lambda: True)
     monkeypatch.setattr(tracing, "span", fake_span)
 
-    calls = {"n": 0}
-
-    class _Model:
-        def invoke(self, messages, **_k):
-            calls["n"] += 1
-
-            class _R:
-                content = "hi"
-
-            return _R()
-
     def factory(*, instructions, tools):
         class _Agent:
-            model = _Model()
-
             def run(self, *_a, **_k):
-                self.model.invoke([{"role": "user", "content": "x"}])
-
                 class _R:
                     content = "done"
 
@@ -100,6 +85,5 @@ def test_run_and_invoke_spans_when_endpoint_set(tmp_path, monkeypatch):
     )
     with agent_tools.use_agent_tool_context(ctx):
         assert agent.run(instruction="写", user_id="u", job_id="j1") == "done"
-    assert calls["n"] == 1
-    assert names.count("generate.run") == 1
-    assert "llm.invoke" in names
+    assert names == ["generate.run"]
+    assert kinds == ["AGENT"]

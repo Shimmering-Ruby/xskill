@@ -178,24 +178,22 @@ class GenerateAgent:
         )
         from xskill.obs import tracing
 
-        orig = getattr(getattr(agent, "model", None), "invoke", None)
-        if tracing.is_enabled() and callable(orig):
-            def _invoke(messages, **kwargs):
-                with tracing.span("llm.invoke") as current:
-                    response = orig(messages, **kwargs)
-                    current.set_attribute(
-                        "output.value",
-                        tracing.clip(getattr(response, "content", "") or ""),
-                    )
-                    return response
-
-            agent.model.invoke = _invoke
         with trace_to(
             self._trace_path(user_id, job_id),
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ), tracing.span("generate.run", user_id=user_id, job_id=job_id):
+        ), tracing.span(
+            "generate.run",
+            **{
+                "openinference.span.kind": "AGENT",
+                "user_id": user_id,
+                "job_id": job_id,
+                "input.value": tracing.clip(user_msg),
+            },
+        ) as current:
             result = agent.run(user_msg)
+            content = getattr(result, "content", "") or ""
+            current.set_attribute("output.value", tracing.clip(content))
         tracing.shutdown()
-        return getattr(result, "content", "") or ""
+        return content
