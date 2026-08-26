@@ -128,6 +128,7 @@ from xskill.ecosystems.ngagent import (
 )
 from xskill.ecosystems.installation import (
     COPY_INSTALL_MARKER_NAME,
+    CopyBaselineRepairStatus,
     GitHeadError,
     InstallSafetyError,
     InstallMode,
@@ -143,6 +144,7 @@ from xskill.ecosystems.installation import (
     read_install_metadata,
     read_install_metadata_file,
     read_skill_head_sha,
+    repair_copy_install_baseline,
     write_install_metadata,
 )
 from xskill.ecosystems.install_ledger import (
@@ -185,7 +187,8 @@ __all__ = [
     "TraeIngester", "detect_trae_record",
     "make_openclaw_canary_flip_hook",
     "adapt_trajectory", "submit_trajectory", "generate_traj_id",
-    "COPY_INSTALL_MARKER_NAME", "GitHeadError", "InstallMode",
+    "COPY_INSTALL_MARKER_NAME", "CopyBaselineRepairStatus",
+    "GitHeadError", "InstallMode",
     "InstallSafetyError",
     "InstallationMetadataError",
     "copy_install_identity_matches", "copy_install_is_current",
@@ -194,6 +197,7 @@ __all__ = [
     "is_link_or_junction", "read_install_metadata",
     "read_copy_install_baseline",
     "read_install_metadata_file", "read_skill_head_sha",
+    "repair_copy_install_baseline",
     "link_install_metadata_is_current",
     "write_install_metadata",
     "InstallLedger", "get_default_ledger", "remove_owned_dest",
