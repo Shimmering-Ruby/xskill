@@ -542,6 +542,11 @@ class TestWritingDisciplineInPrompt:
         assert "隐私守护" in SYSTEM_PROMPT_TEMPLATE
         assert "AtomTaskRead" in SYSTEM_PROMPT_TEMPLATE
 
+    def test_atom_read_is_metadata_traj_is_paged(self):
+        assert "intent、summary" in SYSTEM_PROMPT_TEMPLATE
+        assert "不含 raw_segment" in SYSTEM_PROMPT_TEMPLATE
+        assert "每次最多 200 行" in SYSTEM_PROMPT_TEMPLATE
+
 
 # ────────────────────────────────────────────────────────────────────
 # jam-merge 场景：候选累计 ws ≥ jam_threshold 且 staging 存在 → 越过灰度强砍
