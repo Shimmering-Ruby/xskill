@@ -95,9 +95,11 @@ xskill registry add /path/to/trajectories
 xskill 真正想在组织里铺开的形态是团队模式：一台机器当 server，其他人作为瘦客户端接入，共用 server 上长出来的同一份 Skill 库。
 
 ```bash
-xskill serve --server                        # 启动后打印 join token
-xskill connect <host:port> --token <token>   # 握手后把 /xskill-helper 使用指南装进本机已探测的 agent
+xskill serve --server                                          # 启动后打印 join token
+xskill connect <host:port> --token <token> --name <user-id>
 ```
+
+connect 成功后，在 Claude Code、Codex、Cursor 等已探测到的 agent 里输入 `/xskill-helper`，即可查 generate、search 等用法。没有地址和 token 时，把上面的 connect 当示例，向自己的 server 管理员要参数，不要连外网公开实例。
 
 - **无感蒸馏大佬员工** 一个人在自己工作里跑通的解法，自动可以让全团队复用，不需要任何人做任何事。（能力民主化）
 - **兼容各种 coding 方式** 用 codex、clade 还是 cursor IDE？ 都能加入，多端同步。

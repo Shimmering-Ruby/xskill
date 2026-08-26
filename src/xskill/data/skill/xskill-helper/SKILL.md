@@ -2,13 +2,10 @@
 name: xskill-helper
 description: >-
   How to run, connect, generate, upgrade, debug, and search with the xskill
-  CLI — the team skill-distribution and trajectory-collection daemon. Use
-  when a user asks how to install or join an xskill team server, run
-  `xskill generate` to write or rewrite a skill from team trajectories,
-  search trajectories with `xskill search traj`, upgrade xskill, fix a
-  stuck/black-window/copy-mode install, run xskill in the background on
-  Windows/macOS/Linux/WSL, search or share team skills, import an existing
-  skill, or read the dashboard.
+  CLI. Use when a user asks how to join their team server, run
+  `xskill generate`, search trajectories with `xskill search traj`,
+  upgrade, debug a stuck install, or use xskill from Claude Code, Codex,
+  Cursor, or another supported agent via `/xskill-helper`.
 ---
 
 # xskill-helper
@@ -34,16 +31,23 @@ All state lives under `~/.xskill/`:
 
 ## Getting started
 
-Everyday join is the same command as https://xskill.wiki/wiki.html :
+Join the team's own server. Never send the user to a public hub or any
+address you were not given:
 
 ```bash
 xskill connect <host:port> --token <token> --name <user-id>
 ```
 
-The server operator prints the token with `xskill serve --server`. After a
-successful handshake, connect installs this guide and starts the background
-daemon. Later reconnects can omit the address and token; they reuse
-`~/.xskill/team_client.json`.
+If they do not have host, token, or name, show this command as the example
+and ask their server operator. The operator prints the token with
+`xskill serve --server`. Do not invent an address or token, and do not
+paste one from the internet.
+
+After a successful handshake, connect installs this guide and starts the
+background daemon. Later reconnects can omit the address and token; they
+reuse `~/.xskill/team_client.json`.
+
+In the agent, invoke this guide as `/xskill-helper`.
 
 ## Generate or rewrite a Skill
 

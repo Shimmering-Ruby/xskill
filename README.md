@@ -206,8 +206,10 @@ xskill serve --server  # 会打印connect join命令，复制给组内同事便�
 
 普通用户执行：
 ```bash
-xskill connect <host:port> --token <token>  --name <工号/姓名>   # 握手后把 /xskill-helper 使用指南装进本机已探测的 agent
+xskill connect <host:port> --token <token>  --name <工号/姓名>
 ```
+
+connect 成功后，指南会装进本机已探测到的 Claude Code、Codex、Cursor 等 agent。在对应 agent 里输入 `/xskill-helper`，就可以查 generate、search、升级这些用法。没有地址和 token 时，把上面这条命令当示例，向你们自己的 server 管理员要 host、token 和工号，不要连外网公开实例。
 
 #### 额外功能：管控面板
 
