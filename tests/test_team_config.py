@@ -71,3 +71,42 @@ def test_team_server_section_malformed_raises_valueerror_not_attributeerror():
     # allow_anonymous_user 走同一个 section 解析,行为一致
     with pytest.raises(ValueError, match="team 必须是 mapping"):
         C.allow_anonymous_user({"team": "foo"})
+
+
+def test_resolve_team_client_skill_dir_relocates_when_colocated(tmp_path, monkeypatch):
+    xhome = tmp_path / ".xskill"
+    canonical = xhome / "skill"
+    canonical.mkdir(parents=True)
+    (xhome / "team_server.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(C, "XSKILL_HOME", xhome)
+    assert C.resolve_team_client_skill_dir(canonical, xskill_home=xhome) == xhome / "client_skill"
+    other = tmp_path / "elsewhere" / "skill"
+    other.mkdir(parents=True)
+    assert C.resolve_team_client_skill_dir(other, xskill_home=xhome) == other
+
+
+def test_resolve_team_client_skill_dir_unchanged_without_server(tmp_path, monkeypatch):
+    xhome = tmp_path / ".xskill"
+    canonical = xhome / "skill"
+    canonical.mkdir(parents=True)
+    monkeypatch.setattr(C, "XSKILL_HOME", xhome)
+    assert C.resolve_team_client_skill_dir(canonical, xskill_home=xhome) == canonical
+
+
+def test_resolve_team_client_skill_dir_respects_config_skill_dir(tmp_path, monkeypatch):
+    """自有仓以 config.yaml 的 skill_dir 为准，不写死 ~/.xskill/skill。"""
+    xhome = tmp_path / ".xskill"
+    xhome.mkdir()
+    custom = tmp_path / "company_skills"
+    custom.mkdir()
+    (xhome / "config.yaml").write_text(f"skill_dir: {custom}\n", encoding="utf-8")
+    (xhome / "team_server.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(C, "XSKILL_HOME", xhome)
+    assert C.resolve_local_skill_dir(xskill_home=xhome) == custom
+    assert C.resolve_team_client_skill_dir(custom, xskill_home=xhome) == xhome / "client_skill"
+    # 默认 skill/ 此时不是自有仓，不得误分流
+    assert C.resolve_team_client_skill_dir(xhome / "skill", xskill_home=xhome) == xhome / "skill"
+    # connect / import 共用这条组合：先读配置，再按同机冲突分流
+    requested = C.resolve_local_skill_dir(xskill_home=xhome)
+    assert C.resolve_team_client_skill_dir(requested, xskill_home=xhome) == xhome / "client_skill"
+

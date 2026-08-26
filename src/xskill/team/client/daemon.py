@@ -142,12 +142,23 @@ class TeamClient:
     ):
         self.state = state
         self.http = http
-        # skill working copies 落标准 skill_dir（= ~/.xskill/skill/）——与
-        # standalone 模式同一个位置，不另开 team_skills/。一台机器要么
-        # standalone 要么 client，这个目录谁来管取决于模式。
-        self.skill_dir = Path(skill_dir)
-        self.skill_dir.mkdir(parents=True, exist_ok=True)
         self.home_root = Path(home_root) if home_root else Path.home()
+        from xskill.config import XSKILL_HOME, resolve_team_client_skill_dir
+        # 状态根只认仓库约定的 XSKILL_HOME（测试可 monkeypatch），不从 skill_dir 猜父目录。
+        self._xskill_home = XSKILL_HOME
+
+        # 普通 client：工作副本落 ~/.xskill/skill/，与 standalone 同一位置。
+        # 本机已是 team server 时不能再用自有仓——cleanup 会按派发清单删目录。
+        requested = Path(skill_dir)
+        self.skill_dir = resolve_team_client_skill_dir(
+            requested, xskill_home=self._xskill_home,
+        )
+        if self.skill_dir != requested:
+            logger.warning(
+                "colocated team client skill_dir=%s (server canonical preserved)",
+                self.skill_dir,
+            )
+        self.skill_dir.mkdir(parents=True, exist_ok=True)
         self.poll_interval = poll_interval
         self.history = InstallHistory(history_path)
         self.collector = TeamCollector(
@@ -216,6 +227,33 @@ class TeamClient:
         manifest.slots = list(manifest.slots[:n])
         return manifest
 
+    def _refuse_canonical_skill_dir(self, action: str) -> bool:
+        """本机 team server 自有仓禁止当 client working copy 来改、删。
+        若运行期检测到冲突（如 Server 晚于 Client 启动），自动自愈重定向至 client_skill/。
+        """
+        from xskill.config import is_team_server_canonical_skill_dir, resolve_team_client_skill_dir
+        if not is_team_server_canonical_skill_dir(
+            self.skill_dir, xskill_home=self._xskill_home,
+        ):
+            return False
+        # 触发运行期动态自愈重定向
+        relocated = resolve_team_client_skill_dir(
+            self.skill_dir, xskill_home=self._xskill_home,
+        )
+        if relocated != self.skill_dir:
+            logger.warning(
+                "team client dynamically self-healed from canonical %s to %s during %s",
+                self.skill_dir, relocated, action,
+            )
+            self.skill_dir = relocated
+            self.skill_dir.mkdir(parents=True, exist_ok=True)
+            return False
+        logger.error(
+            "refusing client %s of team server skill repo",
+            action,
+        )
+        return True
+
     # ── ③ reconcile ─────────────────────────────────────────────
     def reconcile_skill_sides(self, manifest: SyncResponse) -> None:
         """对 manifest 每个 slot：拉 bundle → 对齐 side → 装到本机生态。
@@ -224,6 +262,8 @@ class TeamClient:
         就是读 manifest slot 的 side/sha；步骤 2/3/4 走共享
         reconcile_skill_side。
         """
+        if self._refuse_canonical_skill_dir("reconcile"):
+            return
         for slot in manifest.slots:
             repo_dir = self.skill_dir / slot.skill_name
             # 拉 bundle 落地/刷新本地 working copy
@@ -386,6 +426,8 @@ class TeamClient:
         自动到 working copy。每个 skill 先跑 reverse_sync_openclaw_dest 把
         dest 改灌回 working copy，下面 git status 才能看到。
         """
+        if self._refuse_canonical_skill_dir("push-edit"):
+            return 0
         from xskill.agents.user_edit_absorb_agent import (
             ReverseSyncStatus,
             reverse_sync_openclaw_dest_result,
@@ -506,6 +548,8 @@ class TeamClient:
         get_default_ledger().migrate_from_sidecars(
             _ecosystem_skill_roots(self.home_root),
         )
+        if self._refuse_canonical_skill_dir("cleanup"):
+            return
         keep = {s.skill_name for s in manifest.slots}
         for repo_dir in sorted(self.skill_dir.iterdir()):
             if (
@@ -531,17 +575,25 @@ class TeamClient:
         self._reap_orphan_copy_dests(keep)
 
     def _reap_orphaned_ecosystem_links(self, keep: set[str]) -> None:
-        """扫生态 dest 根目录，收掉 manifest 已不含、且指向 xskill 工作副本根的
-        link/junction（含工作副本被删后留下的 dangling 孤儿）。
+        """扫生态 dest 根目录，收掉 manifest 已不含、且指向 xskill 工作副本根（或同机 Server 母本）的
+        link/junction（含工作副本被删后留下的 dangling 孤儿，以及跨模式切换遗留的 Server 软链）。
 
         working-copy 驱动的 cleanup 遍历 ``skill_dir``，看不到"工作副本已消失但
         生态 link 还在"的孤儿——它们永远清不掉，在 ``~/.claude/skills`` 等目录越积
         越多（Windows 卸 junction 失败尤甚）。这里按生态目录反向收敛：仅当 link 的
-        realpath 落在 ``skill_dir`` 根内（= xskill 自己装的）且名字不在 keep 集时才
+        realpath 落在 ``skill_dir`` 根内或 Server 权威仓内（= xskill 安装且非清单技能）时才
         删；真目录 / 手动建 / 指向别处的第三方 link 一律不碰。名字在 keep 里的
         dangling link 留给 reconcile 重装，不在这里删。
         """
         skill_root_key = _source_path_key(self.skill_dir)
+        from xskill.config import (
+            get_team_server_state_path, resolve_local_skill_dir,
+        )
+        server_root_key = (
+            _source_path_key(resolve_local_skill_dir(xskill_home=self._xskill_home))
+            if get_team_server_state_path(xskill_home=self._xskill_home).is_file()
+            else None
+        )
         for root in _ecosystem_skill_roots(self.home_root):
             if not root.is_dir():
                 continue
@@ -552,9 +604,19 @@ class TeamClient:
                 if not is_link_or_junction(entry):
                     continue
                 entry_key = _source_path_key(entry)
-                if not (entry_key == skill_root_key
-                        or entry_key.startswith(skill_root_key + os.sep)):
-                    continue  # link 不指向 xskill 工作副本根 → 第三方安装，跳过
+                is_client_link = (
+                    entry_key == skill_root_key
+                    or entry_key.startswith(skill_root_key + os.sep)
+                )
+                is_stale_server_link = (
+                    server_root_key is not None
+                    and (
+                        entry_key == server_root_key
+                        or entry_key.startswith(server_root_key + os.sep)
+                    )
+                )
+                if not (is_client_link or is_stale_server_link):
+                    continue  # link 不指向 xskill 工作副本根或服务端母本 → 第三方安装，跳过
                 if _remove_owned_install_target(
                     entry, Path(_source_path_key(entry)),
                 ):
