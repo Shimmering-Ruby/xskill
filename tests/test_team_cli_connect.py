@@ -75,7 +75,7 @@ def _install_fakes(monkeypatch):
         "xskill.team.client.service.get_backend",
         lambda: _FakeBackend(),
     )
-    # connect 成功后会把 /xskill 装进探测到的 agent；这些用例只测握手，不碰真实 HOME
+    # connect 成功后会把 /xskill-helper 装进探测到的 agent；这些用例只测握手，不碰真实 HOME
     monkeypatch.setattr(
         "xskill.ecosystems.bundled_guide.install_bundled_xskill_guide",
         lambda target_root=None: [],
@@ -261,7 +261,7 @@ def test_connect_unsupported_platform_falls_back_to_foreground(
 
 
 def test_connect_installs_bundled_guide_after_handshake(tmp_path, monkeypatch):
-    """握手成功后、拉起后台之前，把 /xskill 装进探测到的 agent。"""
+    """握手成功后、拉起后台之前，把 /xskill-helper 装进探测到的 agent。"""
     monkeypatch.setattr("xskill.config.get_team_client_state_path",
                         lambda: tmp_path / "team_client.json")
     _install_fakes(monkeypatch)

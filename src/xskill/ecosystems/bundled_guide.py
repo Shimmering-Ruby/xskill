@@ -1,8 +1,8 @@
-"""把随包发布的 /xskill 使用指南装进用户本机已探测到的 agent skill 目录。
+"""把随包发布的 /xskill-helper 使用指南装进用户本机已探测到的 agent skill 目录。
 
-``xskill init`` 与 ``xskill connect`` 共用这一份实现：探测到 Claude Code /
-Codex / Cursor 等生态后，把 ``xskill/data/skill/xskill`` 装到对应 skill
-根目录，agent 里就可以 /xskill 查 generate、search 等用法。
+``xskill connect`` 握手成功后调用：探测到 Claude Code / Codex / Cursor 等
+生态后，把 ``xskill/data/skill/xskill-helper`` 装到对应 skill 根目录，
+agent 里就可以 /xskill-helper 查 generate、search 等用法。
 
 安装失败只打 warning，不抛给调用方——连不上 skill 目录不该挡住 connect。
 """
@@ -38,13 +38,13 @@ def bundled_xskill_source() -> Path:
     """wheel / 可编辑安装里随包发布的 xskill 指南目录。"""
     from importlib.resources import files
 
-    return Path(str(files("xskill") / "data" / "skill" / "xskill"))
+    return Path(str(files("xskill") / "data" / "skill" / "xskill-helper"))
 
 
 def install_bundled_xskill_guide(
     target_root: Path | str | None = None,
 ) -> list[str]:
-    """把 /xskill 指南装进 ``target_root`` 下已探测到的生态。
+    """把 /xskill-helper 指南装进 ``target_root`` 下已探测到的生态。
 
     返回成功装上的生态 id 列表。捆绑目录缺失或某个生态安装失败时打印
     warning，不抛异常。
@@ -74,7 +74,7 @@ def install_bundled_xskill_guide(
     if installed_ecosystems:
         print(
             f"已把 xskill 使用指南装进 {'/'.join(installed_ecosystems)} 的 "
-            f"skill 目录，在对应 agent 里可直接 /xskill 查用法。"
+            f"skill 目录，在对应 agent 里可直接 /xskill-helper 查用法。"
         )
     else:
         print(

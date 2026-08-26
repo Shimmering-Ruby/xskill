@@ -2,8 +2,8 @@
 
 ## Background hosting
 
-`xskill connect` (and `xskill init`) daemonize by handing the run loop to the
-OS's native service facility, then return. The foreground loop they run is
+`xskill connect` daemonizes by handing the run loop to the OS's native
+service facility, then returns. The foreground loop is
 `xskill connect --foreground`.
 
 | Platform | Background mechanism | Notes |

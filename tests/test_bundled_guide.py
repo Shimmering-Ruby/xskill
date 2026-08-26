@@ -1,4 +1,4 @@
-"""捆绑 /xskill 指南：探测生态后装进对应 skill 目录。"""
+"""捆绑 /xskill-helper 指南：探测生态后装进对应 skill 目录。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,7 +11,7 @@ from xskill.ecosystems.bundled_guide import install_bundled_xskill_guide
 @pytest.fixture
 def bundled_skill(tmp_path, monkeypatch):
     root = tmp_path / "pkgroot"
-    skill = root / "data" / "skill" / "xskill"
+    skill = root / "data" / "skill" / "xskill-helper"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("# xskill\n", encoding="utf-8")
     monkeypatch.setattr("importlib.resources.files", lambda pkg: root)
@@ -53,7 +53,7 @@ def test_installs_into_detected_ecosystems(
     assert all(row[1] == bundled_skill for row in install_recorder)
     assert all(row[2] == home for row in install_recorder)
     out = capsys.readouterr().out
-    assert "/xskill" in out
+    assert "/xskill-helper" in out
     assert "claude_code" in out
     assert "cursor" in out
 
@@ -110,7 +110,9 @@ def test_bundled_skill_documents_generate():
     assert "xskill generate" in skill_md
     assert "xskill import" in skill_md
     assert "xskill connect" in skill_md
-    assert "name: xskill" in skill_md
+    assert "name: xskill-helper" in skill_md
+    assert "/xskill-helper" in skill_md
+    assert "xskill init" not in skill_md
 
 
 def test_no_detected_ecosystems_prints_skip(

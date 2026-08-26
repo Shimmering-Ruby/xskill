@@ -32,7 +32,7 @@ def _args(**overrides) -> argparse.Namespace:
 def bundled_skill(tmp_path, monkeypatch):
     """让 ``files('xskill')`` 指向一个带 SKILL.md 的临时目录。"""
     root = tmp_path / "pkgroot"
-    skill = root / "data" / "skill" / "xskill"
+    skill = root / "data" / "skill" / "xskill-helper"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("# xskill\n", encoding="utf-8")
     monkeypatch.setattr("importlib.resources.files", lambda pkg: root)

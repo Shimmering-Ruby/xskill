@@ -282,7 +282,7 @@ def cmd_connect(args) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
 
-    # 握手或复用已存连接成功后再装 /xskill：前台阻塞循环开始前必须先装，
+    # 握手或复用已存连接成功后再装 /xskill-helper：前台阻塞循环开始前必须先装，
     # 否则 Linux 退化成 run_forever 后这条命令再也走不到安装。
     if not getattr(args, "no_skill", False):
         from xskill.ecosystems.bundled_guide import install_bundled_xskill_guide
@@ -2125,7 +2125,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser(
         "init",
-        help="一站式引导：装 xskill 使用指南 skill 到各 agent + 连上 team server",
+        help="交互引导（日常请用 connect）：可顺带装 /xskill-helper",
     )
     p_init.add_argument("address", nargs="?", default=None,
                         help="server 地址 host:port（交互模式留空会询问）")
@@ -2142,9 +2142,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--no-auto-update", action="store_true", dest="no_auto_update",
                         help="禁用自动更新检查")
     p_init.add_argument("--skills-only", action="store_true", dest="skills_only",
-                        help="只装 xskill skill，不配置连接")
+                        help="只装 /xskill-helper，不配置连接")
     p_init.add_argument("--no-skill", action="store_true", dest="no_skill",
-                        help="只配置连接，不装 xskill skill")
+                        help="只配置连接，不装 /xskill-helper")
     p_init.add_argument("--force", action="store_true",
                         help="已有常驻连接时停掉并重新配置")
     p_init.add_argument("-y", "--yes", action="store_true",
@@ -2185,7 +2185,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_conn.add_argument(
         "--no-skill", action="store_true", dest="no_skill",
-        help="只连 server，不把 /xskill 使用指南装进本机已探测的 agent",
+        help="只连 server，不把 /xskill-helper 使用指南装进本机已探测的 agent",
     )
     p_conn.add_argument(
         "--target-root", default=None,
