@@ -522,6 +522,43 @@ def test_configured_context_uses_only_its_spill_root_without_workspace(
     assert roots == [spill_root.resolve()]
 
 
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        lambda root: agent_tools.init_skill_authoring_tool_context(
+            root, root, {},
+        ),
+        lambda root: agent_tools.init_atom_task_tool_context(
+            skill_dir=root,
+            atom_store=None,
+            default_traj_root=root,
+        ),
+    ],
+    ids=["skill-authoring", "atom-task"],
+)
+def test_compat_initializers_clear_previous_turn_write_authority(
+    tmp_path, initialize,
+):
+    previous = agent_tools.create_agent_tool_context(
+        skill_dir=tmp_path / "previous",
+        cluster_batch_ids=["previous-atom"],
+        skill_edit_skill_name="previous-skill",
+        skill_edit_batch_ids=["previous-atom"],
+    )
+    token = agent_tools.bind_agent_tool_context(previous)
+    try:
+        current_root = tmp_path / "current"
+        initialize(current_root)
+
+        current = agent_tools.current_agent_tool_context()
+        assert current.cluster_batch_ids == frozenset()
+        assert current.skill_edit_skill_name is None
+        assert current.skill_edit_batch_ids == ()
+        assert agent_tools.agent_tool_config.writable_skill_dir == current_root
+    finally:
+        agent_tools.reset_agent_tool_context(token)
+
+
 def test_long_context_spills_are_instance_isolated_and_never_use_shared_tmp(
     tmp_path,
 ):

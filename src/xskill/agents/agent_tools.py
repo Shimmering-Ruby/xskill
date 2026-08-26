@@ -276,6 +276,9 @@ class AgentToolConfig:
                 Path(spill_root) if spill_root is not None else None
             ),
             usage_ledger=usage_ledger,
+            cluster_batch_ids=frozenset(),
+            skill_edit_skill_name=None,
+            skill_edit_batch_ids=(),
         ))
 
     def configure_atom_task(
@@ -293,6 +296,9 @@ class AgentToolConfig:
                 Path(spill_root) if spill_root is not None else None
             ),
             usage_ledger=usage_ledger,
+            cluster_batch_ids=frozenset(),
+            skill_edit_skill_name=None,
+            skill_edit_batch_ids=(),
         ))
 
     def snapshot(self) -> dict:
