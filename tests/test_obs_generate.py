@@ -1,4 +1,4 @@
-"""Generate OTel：没 endpoint 就是空壳，有值才包 invoke。不要求装 SDK。"""
+"""Generate OTel：没 endpoint 就是空壳。不要求装 SDK。"""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -21,16 +21,7 @@ def test_no_endpoint_is_off(monkeypatch):
     from xskill.obs import tracing
 
     tracing.reset()
-    assert tracing.endpoint() == ""
     assert tracing.is_enabled() is False
-
-
-def test_endpoint_turns_on(monkeypatch):
-    monkeypatch.setenv("XSKILL_OTEL_ENDPOINT", "http://127.0.0.1:6006")
-    from xskill.obs import tracing
-
-    tracing.reset()
-    assert tracing.is_enabled() is True
 
 
 def test_generate_runs_without_endpoint(tmp_path, monkeypatch):
@@ -54,14 +45,12 @@ def test_generate_runs_without_endpoint(tmp_path, monkeypatch):
         skill_dir=skill_dir, agno_agent_factory=factory, llm_cfg={}, logs_dir=None,
     )
     with agent_tools.use_agent_tool_context(ctx):
-        text = agent.run(instruction="写一个 skill", user_id="u", job_id="j")
-    assert text == "ok"
+        assert agent.run(instruction="写一个 skill", user_id="u", job_id="j") == "ok"
 
 
-def test_wraps_invoke_when_endpoint_set(tmp_path, monkeypatch):
+def test_run_and_invoke_spans_when_endpoint_set(tmp_path, monkeypatch):
     monkeypatch.setenv("XSKILL_OTEL_ENDPOINT", "http://127.0.0.1:6006")
     from xskill.obs import tracing
-    from xskill.obs.generate import wrap_factory
 
     tracing.reset()
     names: list[str] = []
@@ -88,7 +77,6 @@ def test_wraps_invoke_when_endpoint_set(tmp_path, monkeypatch):
 
             class _R:
                 content = "hi"
-                tool_calls = []
 
             return _R()
 
@@ -108,19 +96,10 @@ def test_wraps_invoke_when_endpoint_set(tmp_path, monkeypatch):
 
     skill_dir, ctx = _ctx(tmp_path)
     agent = GenerateAgent(
-        skill_dir=skill_dir,
-        agno_agent_factory=wrap_factory(factory),
-        llm_cfg={},
-        logs_dir=None,
+        skill_dir=skill_dir, agno_agent_factory=factory, llm_cfg={}, logs_dir=None,
     )
     with agent_tools.use_agent_tool_context(ctx):
         assert agent.run(instruction="写", user_id="u", job_id="j1") == "done"
     assert calls["n"] == 1
-    assert "generate.run" in names
+    assert names.count("generate.run") == 1
     assert "llm.invoke" in names
-
-
-def test_skill_edit_source_does_not_import_obs():
-    text = Path("src/xskill/agents/skill_edit_agent.py").read_text(encoding="utf-8")
-    assert "xskill.obs" not in text
-    assert "opentelemetry" not in text

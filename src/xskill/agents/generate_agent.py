@@ -156,10 +156,7 @@ class GenerateAgent:
             agent_tools.new_skill_folder,
             agent_tools.commit_generate_main,
         ]
-        from xskill.obs.generate import observe_run, wrap_factory
-
-        factory = wrap_factory(self.agno_agent_factory)
-        agent = factory(instructions=[sysprompt], tools=tools)
+        agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
         max_context = int(
             (self.llm_cfg or {}).get("max_context") or DEFAULT_MAX_CONTEXT
         )
@@ -179,11 +176,26 @@ class GenerateAgent:
             f"指令: {instruction.strip()}\n"
             f"{_name_hint(preferred_names)}"
         )
+        from xskill.obs import tracing
+
+        orig = getattr(getattr(agent, "model", None), "invoke", None)
+        if tracing.is_enabled() and callable(orig):
+            def _invoke(messages, **kwargs):
+                with tracing.span("llm.invoke") as current:
+                    response = orig(messages, **kwargs)
+                    current.set_attribute(
+                        "output.value",
+                        tracing.clip(getattr(response, "content", "") or ""),
+                    )
+                    return response
+
+            agent.model.invoke = _invoke
         with trace_to(
             self._trace_path(user_id, job_id),
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ), observe_run(user_id=user_id, job_id=job_id):
+        ), tracing.span("generate.run", user_id=user_id, job_id=job_id):
             result = agent.run(user_msg)
+        tracing.shutdown()
         return getattr(result, "content", "") or ""
