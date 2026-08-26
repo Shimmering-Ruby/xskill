@@ -399,6 +399,84 @@ def test_cleanup_reaps_stale_server_ecosystem_links(tmp_path, monkeypatch):
     assert (canonical / "stale-skill").is_dir()
 
 
+def test_cleanup_fails_closed_when_server_config_becomes_malformed(tmp_path, monkeypatch):
+    """Server 后启动且配置损坏时，cleanup 不得删除自定义权威仓。"""
+    from xskill.team.shared.protocol import SyncResponse
+
+    xhome = tmp_path / ".xskill"
+    xhome.mkdir()
+    canonical = tmp_path / "company-skills"
+    server_skill = canonical / "server-only"
+    server_skill.mkdir(parents=True)
+    (server_skill / "SKILL.md").write_text("# keep\n", encoding="utf-8")
+    config = xhome / "config.yaml"
+    config.write_text(f"skill_dir: {canonical}\n", encoding="utf-8")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
+
+    tc = TeamClient(
+        state=ClientState(
+            server_url="http://testserver", client_id="c", join_token="t",
+        ),
+        http=SimpleNamespace(),
+        skill_dir=canonical,
+        cursor_path=tmp_path / "cursor.json",
+        history_path=tmp_path / "history.jsonl",
+        home_root=tmp_path / "home",
+        min_change_interval=0,
+    )
+    (xhome / "team_server.json").write_text("{}", encoding="utf-8")
+    config.write_text("skill_dir: [", encoding="utf-8")
+
+    tc.cleanup(SyncResponse(slots=[], server_time=1.0))
+
+    assert tc.skill_dir == xhome / "client_skill"
+    assert server_skill.is_dir()
+
+
+def test_cleanup_repairs_kept_link_that_targets_server_repo(tmp_path, monkeypatch):
+    """清单保留项的旧 Server 软链要在同轮切回 Client 工作副本。"""
+    from xskill.team.shared.protocol import SkillSlot, SyncResponse
+
+    xhome = tmp_path / ".xskill"
+    canonical = xhome / "skill"
+    server_skill = canonical / "kept-skill"
+    server_skill.mkdir(parents=True)
+    (server_skill / "SKILL.md").write_text("# server\n", encoding="utf-8")
+    (xhome / "team_server.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
+
+    client_skill = xhome / "client_skill" / "kept-skill"
+    client_skill.mkdir(parents=True)
+    (client_skill / "SKILL.md").write_text("# client\n", encoding="utf-8")
+    home_dir = tmp_path / "home"
+    cursor_skills = home_dir / ".cursor" / "skills"
+    cursor_skills.mkdir(parents=True)
+    link = cursor_skills / "kept-skill"
+    link.symlink_to(server_skill)
+
+    tc = TeamClient(
+        state=ClientState(
+            server_url="http://testserver", client_id="c", join_token="t",
+        ),
+        http=SimpleNamespace(),
+        skill_dir=canonical,
+        cursor_path=tmp_path / "cursor.json",
+        history_path=tmp_path / "history.jsonl",
+        home_root=home_dir,
+        min_change_interval=0,
+    )
+    manifest = SyncResponse(
+        slots=[SkillSlot(
+            skill_name="kept-skill", side="main", sha="abc", bucket="ranked",
+        )],
+        server_time=1.0,
+    )
+
+    tc.cleanup(manifest)
+
+    assert link.resolve() == client_skill.resolve()
+
+
 
 def test_cleanup_reaps_orphaned_ecosystem_links(server_app, tmp_path):
     """cleanup 按生态目录反向收孤儿 link:工作副本被 out-of-band 删除后残留、
