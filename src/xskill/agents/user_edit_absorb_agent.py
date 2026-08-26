@@ -286,6 +286,24 @@ class ReverseSyncStatus(str, Enum):
     FAILED = "failed"
 
 
+@dataclass(frozen=True)
+class ReverseSyncResult:
+    """copy 安装回流结果；失败时保留可稳定展示的错误类型。"""
+
+    status: ReverseSyncStatus
+    error_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status == ReverseSyncStatus.FAILED:
+            if not (
+                isinstance(self.error_type, str)
+                and self.error_type.startswith("REVERSE_SYNC_")
+            ):
+                raise ValueError("failed reverse sync requires error_type")
+        elif self.error_type is not None:
+            raise ValueError("successful reverse sync cannot have error_type")
+
+
 class _DestEditStatus(str, Enum):
     NO_EDIT = "no_edit"
     RECENT_EDIT = "recent_edit"
@@ -318,12 +336,31 @@ def _reverse_sync_path_hash(path: Path) -> str:
     ).hexdigest()[:16]
 
 
-def _log_reverse_sync_failure(dest_dir: Path, error_type: str) -> None:
-    logger.warning(
-        "reverse sync failed path_hash=%s error_type=%s",
-        _reverse_sync_path_hash(dest_dir),
-        error_type,
+def _log_reverse_sync_failure(
+    dest_dir: Path, error_type: str, *, source_dir: Path | None = None,
+) -> None:
+    if source_dir is None:
+        logger.warning(
+            "reverse sync failed path_hash=%s error_type=%s",
+            _reverse_sync_path_hash(dest_dir),
+            error_type,
+        )
+    else:
+        logger.warning(
+            "reverse sync failed skill=%r path_hash=%s error_type=%s",
+            source_dir.name,
+            _reverse_sync_path_hash(dest_dir),
+            error_type,
+        )
+
+
+def _reverse_sync_failure(
+    dest_dir: Path, source_dir: Path, error_type: str,
+) -> ReverseSyncResult:
+    _log_reverse_sync_failure(
+        dest_dir, error_type, source_dir=source_dir,
     )
+    return ReverseSyncResult(ReverseSyncStatus.FAILED, error_type)
 
 
 def _log_reverse_transaction_failure(
@@ -1307,19 +1344,20 @@ def _commit_reverse_transaction(
         return False
 
 
-def reverse_sync_copy_dest(
+def reverse_sync_copy_dest_result(
     dest_dir: Path, source_dir: Path,
     *,
     exclude: frozenset[str] = _DEFAULT_REVERSE_SYNC_EXCLUDE,
     quiet_seconds: int = USER_EDIT_QUIET_SECONDS,
-) -> ReverseSyncStatus:
+) -> ReverseSyncResult:
     """通用 copy-mode 回流：把 dest 用户改灌回 source。
 
     任何 ``install_dir`` 走到 copy 路径的生态都能用（openclaw / ngagent /
     其它落到 copy fallback 的）。``exclude`` 默认只排 ``.git``；调用方
     可以加更多（如 openclaw 兼容路径加 ``_OPENCLAW_INSTALL_META``）。
 
-    返回 :class:`ReverseSyncStatus`，明确区分无修改、仍在编辑、同步成功和失败。
+    返回 :class:`ReverseSyncResult`，明确区分无修改、仍在编辑、同步成功和失败，
+    并在失败时保留稳定的 ``error_type`` 供调用方展示和记录。
 
     流程：
     1. ``has_pending_dest_edit`` 检查（dest 有改且静默 ≥quiet_seconds）
@@ -1355,10 +1393,9 @@ def reverse_sync_copy_dest(
                 or _is_reparse_point(source_stat)
                 or not _recover_pending_reverse_transaction(source_dir)
             ):
-                _log_reverse_sync_failure(
-                    dest_dir, "REVERSE_SYNC_RECOVERY_FAILED",
+                return _reverse_sync_failure(
+                    dest_dir, source_dir, "REVERSE_SYNC_RECOVERY_FAILED",
                 )
-                return ReverseSyncStatus.FAILED
 
             full_exclude = frozenset(exclude)
             assessment = _dest_edit_status(
@@ -1367,24 +1404,22 @@ def reverse_sync_copy_dest(
                 exclude=full_exclude,
             )
             if assessment.status == _DestEditStatus.FAILED:
-                _log_reverse_sync_failure(
-                    dest_dir, "REVERSE_SYNC_STATE_FAILED",
+                return _reverse_sync_failure(
+                    dest_dir, source_dir, "REVERSE_SYNC_STATE_FAILED",
                 )
-                return ReverseSyncStatus.FAILED
             if (
                 assessment.status == _DestEditStatus.NO_EDIT
                 and not assessment.files
             ):
-                return ReverseSyncStatus.NO_EDIT
+                return ReverseSyncResult(ReverseSyncStatus.NO_EDIT)
             try:
                 baseline_fingerprints = read_copy_install_baseline(
                     dest_dir,
                 )
             except Exception:  # pylint: disable=broad-exception-caught
-                _log_reverse_sync_failure(
-                    dest_dir, "REVERSE_SYNC_BASELINE_FAILED",
+                return _reverse_sync_failure(
+                    dest_dir, source_dir, "REVERSE_SYNC_BASELINE_FAILED",
                 )
-                return ReverseSyncStatus.FAILED
             candidate_files: list[tuple[_SafeDestFile, str]] = []
             for file_info in assessment.files:
                 dest_hash = _hash_verified_file(
@@ -1395,14 +1430,14 @@ def reverse_sync_copy_dest(
                 ):
                     candidate_files.append((file_info, dest_hash))
             if not candidate_files:
-                return ReverseSyncStatus.NO_EDIT
+                return ReverseSyncResult(ReverseSyncStatus.NO_EDIT)
             last_change_time = max(
                 max(file_info.mtime_ns, file_info.ctime_ns)
                 / 1_000_000_000
                 for file_info, _ in candidate_files
             )
             if time.time() - last_change_time < quiet_seconds:
-                return ReverseSyncStatus.RECENT_EDIT
+                return ReverseSyncResult(ReverseSyncStatus.RECENT_EDIT)
 
             changed_files: list[
                 tuple[_SafeDestFile, str, str | None]
@@ -1441,16 +1476,17 @@ def reverse_sync_copy_dest(
                         else None
                     )
                     if normalized_source_hash != baseline_hash:
-                        _log_reverse_sync_failure(
-                            dest_dir, "REVERSE_SYNC_CONTENT_CONFLICT",
+                        return _reverse_sync_failure(
+                            dest_dir,
+                            source_dir,
+                            "REVERSE_SYNC_CONTENT_CONFLICT",
                         )
-                        return ReverseSyncStatus.FAILED
                 if source_hash != dest_hash:
                     changed_files.append(
                         (file_info, dest_hash, source_hash),
                     )
             if not changed_files:
-                return ReverseSyncStatus.NO_EDIT
+                return ReverseSyncResult(ReverseSyncStatus.NO_EDIT)
 
             manifest_path, data_dir, manifest = (
                 _create_reverse_transaction(source_dir)
@@ -1515,12 +1551,11 @@ def reverse_sync_copy_dest(
                 dest_dir, full_exclude,
             )
             if not rescan_ok:
-                _log_reverse_sync_failure(
-                    dest_dir, "REVERSE_SYNC_RESCAN_FAILED",
+                return _reverse_sync_failure(
+                    dest_dir, source_dir, "REVERSE_SYNC_RESCAN_FAILED",
                 )
-                return ReverseSyncStatus.FAILED
             if rescanned_files != assessment.files:
-                return ReverseSyncStatus.RECENT_EDIT
+                return ReverseSyncResult(ReverseSyncStatus.RECENT_EDIT)
 
             if not _commit_reverse_transaction(
                 source_dir,
@@ -1531,20 +1566,47 @@ def reverse_sync_copy_dest(
                 rollback_ok = _recover_pending_reverse_transaction(
                     source_dir,
                 )
-                _log_reverse_sync_failure(
+                return _reverse_sync_failure(
                     dest_dir,
+                    source_dir,
                     (
                         "REVERSE_SYNC_COMMIT_FAILED"
                         if rollback_ok
                         else "REVERSE_SYNC_ROLLBACK_FAILED"
                     ),
                 )
-                return ReverseSyncStatus.FAILED
     except Exception:  # pylint: disable=broad-exception-caught
-        _log_reverse_sync_failure(dest_dir, "REVERSE_SYNC_STAGE_FAILED")
-        return ReverseSyncStatus.FAILED
+        return _reverse_sync_failure(
+            dest_dir, source_dir, "REVERSE_SYNC_STAGE_FAILED",
+        )
 
-    return ReverseSyncStatus.SYNCED
+    return ReverseSyncResult(ReverseSyncStatus.SYNCED)
+
+
+def reverse_sync_copy_dest(
+    dest_dir: Path, source_dir: Path,
+    *,
+    exclude: frozenset[str] = _DEFAULT_REVERSE_SYNC_EXCLUDE,
+    quiet_seconds: int = USER_EDIT_QUIET_SECONDS,
+) -> ReverseSyncStatus:
+    """兼容旧调用方的状态 API；详细失败原因用 result 版本读取。"""
+    return reverse_sync_copy_dest_result(
+        dest_dir,
+        source_dir,
+        exclude=exclude,
+        quiet_seconds=quiet_seconds,
+    ).status
+
+
+def reverse_sync_openclaw_dest_result(
+    dest_dir: Path, source_dir: Path,
+    *, quiet_seconds: int = USER_EDIT_QUIET_SECONDS,
+) -> ReverseSyncResult:
+    """OpenClaw 兼容入口的详细结果版本。"""
+    return reverse_sync_copy_dest_result(
+        dest_dir, source_dir,
+        quiet_seconds=quiet_seconds,
+    )
 
 
 def reverse_sync_openclaw_dest(

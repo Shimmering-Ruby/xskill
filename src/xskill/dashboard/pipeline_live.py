@@ -111,6 +111,10 @@ def pipeline_live(db_path: Optional[Path]) -> dict:
         "started_at": stats.get("started_at"),
         "heartbeat_at": stats.get("heartbeat_at"),
         "llm": stats.get("llm") or {},
+        "reverse_sync": stats.get("reverse_sync") or {
+            "failed": 0,
+            "failures": [],
+        },
         "pending_atoms": int(cluster.get("pending_atoms") or 0),
         "pools": pools,
     }

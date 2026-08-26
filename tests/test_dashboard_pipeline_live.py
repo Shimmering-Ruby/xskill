@@ -70,6 +70,14 @@ def _full_stats():
             "embed": {"workers": 2, "queued": 0, "completed": 9, "failed": 0},
         },
         "cluster": {"pending_atoms": 6, "claimed_atoms": 2, "running_batches": 1},
+        "reverse_sync": {
+            "failed": 1,
+            "failures": [{
+                "skill": "invoice-helper",
+                "ecosystem": "openclaw",
+                "error_type": "REVERSE_SYNC_CONTENT_CONFLICT",
+            }],
+        },
     }
 
 
@@ -89,6 +97,11 @@ def test_full_status_shapes_three_monitored_pools(tmp_path):
     assert body["pid"] == 1234
     assert body["pending_atoms"] == 6
     assert body["llm"]["inflight"] == 2
+    assert body["reverse_sync"]["failures"][0] == {
+        "skill": "invoice-helper",
+        "ecosystem": "openclaw",
+        "error_type": "REVERSE_SYNC_CONTENT_CONFLICT",
+    }
     assert set(body["pools"]) == {"split", "cluster", "edit", "generate"}
 
     split = body["pools"]["split"]
@@ -233,6 +246,10 @@ def test_live_endpoint_standalone_strips_task_identity(tmp_path):
     assert "task" not in seat
     assert body["pools"]["split"]["queue"] == []
     assert body["pools"]["split"]["queued"] == 1  # 计数仍在
+    assert body["reverse_sync"]["failures"] == [{
+        "ecosystem": "openclaw",
+        "error_type": "REVERSE_SYNC_CONTENT_CONFLICT",
+    }]
 
 
 def test_log_endpoint_only_on_sensitive_router(tmp_path):

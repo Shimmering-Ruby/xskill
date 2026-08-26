@@ -182,6 +182,8 @@ def test_pipeline_log_scroll_is_sticky_not_forced():
         re.S,
     ) is None
     assert "pmLogKey.kind === kind && pmLogKey.name === name" in js
+    assert "回流受阻" in js
+    assert "reverse_sync" in js
     # 抽屉重渲染后恢复滚动
     assert "stickBottom ? newLog.scrollHeight : savedScroll" in js
 

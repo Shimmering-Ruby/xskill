@@ -408,6 +408,15 @@ def build_dashboard_router(db_path: Optional[Path] = None, *,
                 for seat in pool.get("seats") or []
             ]
             pool["queue"] = []
+        reverse_sync = live.get("reverse_sync") or {}
+        reverse_sync["failures"] = [
+            {
+                "ecosystem": failure.get("ecosystem"),
+                "error_type": failure.get("error_type"),
+            }
+            for failure in reverse_sync.get("failures") or []
+            if isinstance(failure, dict)
+        ]
         return live
 
     @sensitive_router.get("/api/v1/dashboard/pipeline/log")

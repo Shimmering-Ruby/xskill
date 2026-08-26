@@ -48,6 +48,31 @@ from xskill.team.shared.protocol import (
 
 logger = logging.getLogger("xskill.team.client")
 
+_REVERSE_SYNC_ERROR_DETAILS = {
+    "REVERSE_SYNC_CONTENT_CONFLICT": (
+        "源目录与安装目录存在同文件双边修改，已保留现有安装目录"
+    ),
+    "REVERSE_SYNC_BASELINE_FAILED": (
+        "安装基线损坏或不可读，已保留现有安装目录"
+    ),
+    "REVERSE_SYNC_RECOVERY_FAILED": (
+        "上次用户修改回流事务恢复失败，已保留现有安装目录"
+    ),
+    "REVERSE_SYNC_ROLLBACK_FAILED": (
+        "用户修改回流回滚失败，已保留恢复数据和现有安装目录"
+    ),
+    "REVERSE_SYNC_STATE_FAILED": (
+        "安装目录状态无法安全确认，已保留现有安装目录"
+    ),
+}
+
+
+def _reverse_sync_error_detail(error_type: str) -> str:
+    return _REVERSE_SYNC_ERROR_DETAILS.get(
+        error_type,
+        "用户修改回流失败，已保留现有安装目录",
+    )
+
 
 def register_with_server(
     http, *,
@@ -363,7 +388,7 @@ class TeamClient:
         """
         from xskill.agents.user_edit_absorb_agent import (
             ReverseSyncStatus,
-            reverse_sync_openclaw_dest,
+            reverse_sync_openclaw_dest_result,
         )
 
         pushed = 0
@@ -374,32 +399,32 @@ class TeamClient:
             # openclaw 回流（dest → working copy）— 没装到 openclaw 时 no-op
             dest_dir = self.home_root / ".agents" / "skills" / repo_dir.name
             try:
-                reverse_status = reverse_sync_openclaw_dest(
+                reverse_result = reverse_sync_openclaw_dest_result(
                     dest_dir, repo_dir,
                 )
             except Exception:
                 logger.warning(
-                    "openclaw reverse sync stopped skill_id_hash=%s "
+                    "reverse sync stopped skill=%r ecosystem=openclaw "
                     "error_type=REVERSE_SYNC_UNEXPECTED",
-                    hashlib.sha256(
-                        repo_dir.name.encode("utf-8"),
-                    ).hexdigest()[:12],
+                    repo_dir.name,
                 )
                 continue
+            reverse_status = reverse_result.status
             if reverse_status in {
                 ReverseSyncStatus.RECENT_EDIT,
                 ReverseSyncStatus.FAILED,
             }:
                 logger.warning(
-                    "openclaw reverse sync stopped skill_id_hash=%s "
+                    "reverse sync stopped skill=%r ecosystem=openclaw "
                     "error_type=%s",
-                    hashlib.sha256(
-                        repo_dir.name.encode("utf-8"),
-                    ).hexdigest()[:12],
+                    repo_dir.name,
                     (
                         "REVERSE_SYNC_RECENT_EDIT"
                         if reverse_status == ReverseSyncStatus.RECENT_EDIT
-                        else "REVERSE_SYNC_FAILED"
+                        else (
+                            reverse_result.error_type
+                            or "REVERSE_SYNC_FAILED"
+                        )
                     ),
                 )
                 continue
@@ -408,11 +433,9 @@ class TeamClient:
                 ReverseSyncStatus.SYNCED,
             }:
                 logger.warning(
-                    "openclaw reverse sync stopped skill_id_hash=%s "
+                    "reverse sync stopped skill=%r ecosystem=openclaw "
                     "error_type=REVERSE_SYNC_INVALID_STATUS",
-                    hashlib.sha256(
-                        repo_dir.name.encode("utf-8"),
-                    ).hexdigest()[:12],
+                    repo_dir.name,
                 )
                 continue
 
@@ -986,8 +1009,8 @@ def install_skill_to_ecosystems(
                     error_code = "USER_EDIT_IN_PROGRESS"
                     error_detail = "检测到用户仍在编辑，已保留现有安装目录"
                 else:
-                    error_code = "REVERSE_SYNC_FAILED"
-                    error_detail = "用户修改回流失败，已保留现有安装目录"
+                    error_code = install_error.error_type
+                    error_detail = _reverse_sync_error_detail(error_code)
             elif isinstance(install_error, PermissionError):
                 error_code = "TARGET_PERMISSION_DENIED"
                 error_detail = "目标目录不可写，请检查目录权限"
@@ -1089,10 +1112,14 @@ def install_skill_to_ecosystems(
                 verification_error = (
                     "Git HEAD 校验失败，请检查 skill 仓库完整性"
                 )
-        if record.get("error_code") in {
-            "USER_EDIT_IN_PROGRESS",
-            "REVERSE_SYNC_FAILED",
-        }:
+        record_error_code = record.get("error_code")
+        if (
+            record_error_code == "USER_EDIT_IN_PROGRESS"
+            or (
+                isinstance(record_error_code, str)
+                and record_error_code.startswith("REVERSE_SYNC_")
+            )
+        ):
             target_is_current = False
         if target_is_current:
             record["status"] = "installed"

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import logging
 import os
 import threading
@@ -156,6 +155,9 @@ class DirectoryWatcher:
             Path(install_history_path) if install_history_path
             else xskill_state_root / "install_history.jsonl"
         )
+        # 只保存当前仍未恢复的回流失败；用 copy-on-write 让状态上报线程读取
+        # 稳定快照，也避免每轮轮询向 install_history 重复追加同一故障。
+        self._reverse_sync_failures: dict[str, str] = {}
         # 冷启动批量 flush：rebuild 写 COLD_START 文件后，watcher 等流水线空闲再
         # 做一次 SkillEdit 扫描；这是 XSkill 状态，不能跟生态 home_root 混用。
         from xskill.pipeline.cold_start import ColdStartSignal
@@ -331,6 +333,7 @@ class DirectoryWatcher:
     def agent_worker_status(self):
         from xskill.utils.rate_limit import request_limiter_status
 
+        reverse_sync_failures = self._reverse_sync_failures
         return {
             "pid": os.getpid(),
             "started_at": self._started_at,
@@ -360,6 +363,19 @@ class DirectoryWatcher:
                 "running_batches": len(self.cluster_futures),
             },
             "cluster_write_queue": self.cluster_write_queue.status,
+            "reverse_sync": {
+                "failed": len(reverse_sync_failures),
+                "failures": [
+                    {
+                        "skill": skill,
+                        "ecosystem": "openclaw",
+                        "error_type": error_type,
+                    }
+                    for skill, error_type in sorted(
+                        reverse_sync_failures.items(),
+                    )
+                ],
+            },
             "llm": request_limiter_status("llm"),
             "embedding": request_limiter_status("embedding"),
         }
@@ -1366,6 +1382,25 @@ class DirectoryWatcher:
                 skill, agent,
             )
 
+    def _update_reverse_sync_failure(
+        self, *, skill: str, error_type: str | None,
+    ) -> bool:
+        """更新当前回流故障快照，返回故障是否发生了状态迁移。"""
+        current = self._reverse_sync_failures
+        if error_type is None:
+            if skill not in current:
+                return False
+            updated = dict(current)
+            updated.pop(skill, None)
+            self._reverse_sync_failures = updated
+            return True
+        if current.get(skill) == error_type:
+            return False
+        updated = dict(current)
+        updated[skill] = error_type
+        self._reverse_sync_failures = updated
+        return True
+
     def _install_skill_to_cc(self, skill_path):
         """Backward-compat thin wrapper for ``_install_skill_to_all_detected``.
 
@@ -1388,7 +1423,7 @@ class DirectoryWatcher:
             ReverseSyncStatus,
             UserEditAbsorbAgent,
             detect_user_edits,
-            reverse_sync_openclaw_dest,
+            reverse_sync_openclaw_dest_result,
         )
         from xskill.agents import agent_tools
         target_root = self._resolve_target_root()
@@ -1403,59 +1438,101 @@ class DirectoryWatcher:
             usage_ledger=self.usage_ledger,
             registry_db_path=self.db_path,
         )
-        for d in sorted(self.skill_dir.iterdir()):
-            if not d.is_dir() or d.name.startswith("."):
-                continue
+        skill_paths = [
+            d for d in sorted(self.skill_dir.iterdir())
+            if d.is_dir() and not d.name.startswith(".")
+        ]
+        active_skill_names = {d.name for d in skill_paths}
+        for stale_skill in (
+            set(self._reverse_sync_failures).difference(active_skill_names)
+        ):
+            self._update_reverse_sync_failure(
+                skill=stale_skill, error_type=None,
+            )
+        for d in skill_paths:
             try:
                 # openclaw 回流（dest → source）— 没装 openclaw / dest 不存在
-                # / dest 没改 → no-op。返回 True 意味着 source mtime 刚被 touch，
+                # / dest 没改 → no-op。返回 SYNCED 意味着 source 刚完成回流，
                 # 下面 detect_user_edits 会立刻看到 pending edit。
                 if target_root is not None:
                     dest_dir = target_root / ".agents" / "skills" / d.name
                     try:
-                        reverse_status = reverse_sync_openclaw_dest(
+                        reverse_result = reverse_sync_openclaw_dest_result(
                             dest_dir, d,
                         )
                     except Exception:
+                        error_type = "REVERSE_SYNC_UNEXPECTED"
                         logger.warning(
-                            "openclaw reverse sync stopped skill_id_hash=%s "
-                            "error_type=REVERSE_SYNC_UNEXPECTED",
-                            hashlib.sha256(
-                                d.name.encode("utf-8"),
-                            ).hexdigest()[:12],
+                            "reverse sync stopped skill=%r ecosystem=openclaw "
+                            "error_type=%s",
+                            d.name,
+                            error_type,
                         )
+                        if self._update_reverse_sync_failure(
+                            skill=d.name, error_type=error_type,
+                        ):
+                            self._record_install_fail(
+                                skill=d.name,
+                                agent="openclaw",
+                                reason=error_type,
+                            )
                         continue
+                    reverse_status = reverse_result.status
                     if reverse_status in {
                         ReverseSyncStatus.RECENT_EDIT,
                         ReverseSyncStatus.FAILED,
                     }:
-                        logger.warning(
-                            "openclaw reverse sync stopped "
-                            "skill_id_hash=%s error_type=%s",
-                            hashlib.sha256(
-                                d.name.encode("utf-8"),
-                            ).hexdigest()[:12],
-                            (
-                                "REVERSE_SYNC_RECENT_EDIT"
-                                if reverse_status
-                                == ReverseSyncStatus.RECENT_EDIT
-                                else "REVERSE_SYNC_FAILED"
-                            ),
+                        error_type = (
+                            "REVERSE_SYNC_RECENT_EDIT"
+                            if reverse_status == ReverseSyncStatus.RECENT_EDIT
+                            else (
+                                reverse_result.error_type
+                                or "REVERSE_SYNC_FAILED"
+                            )
                         )
+                        logger.warning(
+                            "reverse sync stopped skill=%r ecosystem=openclaw "
+                            "error_type=%s",
+                            d.name,
+                            error_type,
+                        )
+                        if reverse_status == ReverseSyncStatus.FAILED:
+                            if self._update_reverse_sync_failure(
+                                skill=d.name, error_type=error_type,
+                            ):
+                                self._record_install_fail(
+                                    skill=d.name,
+                                    agent="openclaw",
+                                    reason=error_type,
+                                )
+                        else:
+                            self._update_reverse_sync_failure(
+                                skill=d.name, error_type=None,
+                            )
                         continue
                     if reverse_status not in {
                         ReverseSyncStatus.NO_EDIT,
                         ReverseSyncStatus.SYNCED,
                     }:
+                        error_type = "REVERSE_SYNC_INVALID_STATUS"
                         logger.warning(
-                            "openclaw reverse sync stopped "
-                            "skill_id_hash=%s "
-                            "error_type=REVERSE_SYNC_INVALID_STATUS",
-                            hashlib.sha256(
-                                d.name.encode("utf-8"),
-                            ).hexdigest()[:12],
+                            "reverse sync stopped skill=%r ecosystem=openclaw "
+                            "error_type=%s",
+                            d.name,
+                            error_type,
                         )
+                        if self._update_reverse_sync_failure(
+                            skill=d.name, error_type=error_type,
+                        ):
+                            self._record_install_fail(
+                                skill=d.name,
+                                agent="openclaw",
+                                reason=error_type,
+                            )
                         continue
+                    self._update_reverse_sync_failure(
+                        skill=d.name, error_type=None,
+                    )
 
                 if not detect_user_edits(d):
                     continue
