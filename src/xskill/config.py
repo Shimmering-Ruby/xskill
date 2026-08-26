@@ -113,8 +113,9 @@ llm:
     # token_burst: 20000 # optional token burst capacity (separate from requests)
   # See docs/adr/0001-rate-limit-diy-not-litellm.md for the design rationale.
 
-# Optional per-agent partial overrides. Missing fields inherit llm_skill first,
-# then llm, so leaving this block commented preserves the existing behavior.
+# Optional. Give split, cluster, or edit their own model or endpoint if you want.
+# Anything you leave out falls back to llm_skill, then llm. Leave this commented
+# and your existing config keeps working as before.
 # llm_agents:
 #   split:
 #     model: qwen-plus
