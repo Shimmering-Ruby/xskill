@@ -311,10 +311,13 @@ CREATE INDEX IF NOT EXISTS idx_catalog_vector_dirty_marked
     ON catalog_vector_dirty(dirty, marked_at, catalog_key);
 
 -- 全量向量对账水位：首次升级、模型/算法变化和低频修复时更新。
+-- sweep_seeded_fingerprint 非空 = 这个指纹对应的全量播种已经做过、还没
+-- 追平（见 _migrate 里的注释，issue #328 review）。
 CREATE TABLE IF NOT EXISTS catalog_vector_sync_meta (
-    singleton          INTEGER PRIMARY KEY CHECK(singleton=1),
-    model_fingerprint  TEXT NOT NULL DEFAULT '',
-    reconciled_at      REAL NOT NULL DEFAULT 0
+    singleton                   INTEGER PRIMARY KEY CHECK(singleton=1),
+    model_fingerprint           TEXT NOT NULL DEFAULT '',
+    reconciled_at               REAL NOT NULL DEFAULT 0,
+    sweep_seeded_fingerprint    TEXT NOT NULL DEFAULT ''
 );
 
 -- 用户画像脏队列：generation 让“计算期间又发生变化”不会被旧任务误清。
@@ -1117,6 +1120,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "side" not in pref_cols:
         conn.execute(
             "ALTER TABLE skill_prefs ADD COLUMN side TEXT NOT NULL DEFAULT ''"
+        )
+
+    # catalog_vector_sync_meta.sweep_seeded_fingerprint：全量对账「已播种但
+    # 还没追平」的目标指纹（issue #328 review）。只在这里非空时代表某个
+    # bootstrap/model_changed/periodic/ephemeral 触发的全量播种正在进行中；
+    # 不能只看 catalog_vector_dirty 是否为空来判断——那张表也会因为普通的
+    # catalog 编辑产生脏项，和「已经播种过」是两回事，混用会导致播种被
+    # 有机脏项误判为「已经播种」而永久跳过，见 review 复现。
+    cur = conn.execute("PRAGMA table_info(catalog_vector_sync_meta)")
+    cvsm_cols = {row[1] for row in cur.fetchall()}
+    if "sweep_seeded_fingerprint" not in cvsm_cols:
+        conn.execute(
+            "ALTER TABLE catalog_vector_sync_meta"
+            " ADD COLUMN sweep_seeded_fingerprint TEXT NOT NULL DEFAULT ''"
         )
 
     _migrate_atom_candidate_pending(conn)
