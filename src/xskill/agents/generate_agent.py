@@ -176,6 +176,9 @@ class GenerateAgent:
             f"指令: {instruction.strip()}\n"
             f"{_name_hint(preferred_names)}"
         )
+        from xskill.obs.tracing import setup
+
+        setup()
         with trace_to(
             self._trace_path(user_id, job_id),
             append=True,
