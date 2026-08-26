@@ -1091,9 +1091,45 @@ def get_registry_db_path(
 # get_config() 会抛 KeyError。get_team_trajectories_dir() 是唯一例外
 # （只 server 调，server 一定有 key）。
 
-def get_team_server_state_path() -> Path:
-    """server join token 落盘位置（~/.xskill/team_server.json，0600）。"""
-    return XSKILL_HOME / "team_server.json"
+def get_team_server_state_path(*, xskill_home: Optional[Path] = None) -> Path:
+    """server join token 落盘位置（~/.xskill/team_server.json，0600）。
+
+    无 ``xskill_home`` 时保持历史行为：直接拼 ``XSKILL_HOME / team_server.json``，
+    不 ``resolve``，避免和现有路径断言漂移。
+    """
+    if xskill_home is None:
+        return XSKILL_HOME / "team_server.json"
+    return Path(xskill_home).expanduser().resolve() / "team_server.json"
+
+
+def _peek_state_config(xskill_home: Optional[Path] = None) -> dict:
+    """只读 state_root/config.yaml，不经 ``get_config()``。
+
+    瘦客户端没有 llm.api_key，``get_config()`` 会抛 KeyError。同机隔离只需要
+    ``skill_dir`` 字段，所以这里只做 YAML 窥视，再交给 ``get_skill_dir``。
+    """
+    state_root = (
+        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    ).expanduser().resolve()
+    cfg_file = state_root / "config.yaml"
+    if not cfg_file.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_local_skill_dir(*, xskill_home: Optional[Path] = None) -> Path:
+    """本机 skill 仓路径：走 ``get_skill_dir``，不要求完整 config。"""
+    return get_skill_dir(_peek_state_config(xskill_home), xskill_home=xskill_home)
+
+
+def get_team_client_working_dir(*, xskill_home: Optional[Path] = None) -> Path:
+    """同机隔离后的 client 工作副本根（``<xskill_home>/client_skill``）。"""
+    root = Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    return root.expanduser() / "client_skill"
 
 
 def _norm_path_key(p: Path | str) -> str:
@@ -1108,21 +1144,8 @@ def _norm_path_key(p: Path | str) -> str:
 
 
 def _canonical_server_skill_dir(xskill_home: Optional[Path] = None) -> Path:
-    """Server 端的标准自有仓目录。瘦客户端没有 config.yaml 时回退到默认 ~/.xskill/skill/。"""
-    state_root = (
-        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
-    ).expanduser().resolve()
-    cfg_file = state_root / "config.yaml"
-    if cfg_file.is_file():
-        try:
-            cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
-            raw = cfg.get("skill_dir")
-            if raw and isinstance(raw, str) and raw.strip():
-                p = Path(raw).expanduser()
-                return p if p.is_absolute() else state_root / p
-        except Exception:
-            pass
-    return state_root / "skill"
+    """Server 端的标准自有仓目录。委托 ``get_skill_dir``，不手写 ``skill/``。"""
+    return resolve_local_skill_dir(xskill_home=xskill_home)
 
 
 def is_team_server_canonical_skill_dir(
@@ -1133,19 +1156,19 @@ def is_team_server_canonical_skill_dir(
     """判断给定目录是否等于本机 team server 的标准自有仓。
 
     本机既 ``serve --server`` 又 ``connect`` 时，client 默认也会指向
-    ``~/.xskill/skill/``。cleanup 会按派发清单删仓，把自有仓收成只剩
+    ``get_skill_dir()``。cleanup 会按派发清单删仓，把自有仓收成只剩
     分给这个 client 的那几十上百个。
+
+    「这台机器是不是 team server」沿用仓库已有约定：
+    ``get_team_server_state_path()`` 对应的 join token 落盘文件。
     """
-    state_root = (
-        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
-    ).expanduser().resolve()
-    if not (state_root / "team_server.json").is_file():
+    if not get_team_server_state_path(xskill_home=xskill_home).is_file():
         return False
     try:
         req_key = _norm_path_key(skill_dir)
-        canon_key = _norm_path_key(_canonical_server_skill_dir(state_root))
+        canon_key = _norm_path_key(resolve_local_skill_dir(xskill_home=xskill_home))
         return req_key == canon_key
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return False
 
 
@@ -1155,13 +1178,10 @@ def resolve_team_client_skill_dir(
     xskill_home: Optional[Path] = None,
 ) -> Path:
     """client 工作副本目录。与 server 自有仓撞车时改放到 ``client_skill/``。"""
-    state_root = (
-        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
-    ).expanduser().resolve()
     requested = Path(skill_dir)
-    if not is_team_server_canonical_skill_dir(requested, xskill_home=state_root):
+    if not is_team_server_canonical_skill_dir(requested, xskill_home=xskill_home):
         return requested
-    relocated = state_root / "client_skill"
+    relocated = get_team_client_working_dir(xskill_home=xskill_home)
     logger.warning(
         "team client colocated with team server; using %s instead of %s",
         relocated, requested,

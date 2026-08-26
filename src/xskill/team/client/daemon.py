@@ -118,14 +118,9 @@ class TeamClient:
         self.state = state
         self.http = http
         self.home_root = Path(home_root) if home_root else Path.home()
-        # 统一解析 xskill_home（优先从 skill_dir 派生，其次 home_root / .xskill，最后回退全局 XSKILL_HOME）
         from xskill.config import XSKILL_HOME, resolve_team_client_skill_dir
-        if Path(skill_dir).parent.name == ".xskill":
-            self._xskill_home = Path(skill_dir).parent
-        elif home_root is not None and (Path(home_root) / ".xskill").exists():
-            self._xskill_home = Path(home_root) / ".xskill"
-        else:
-            self._xskill_home = XSKILL_HOME
+        # 状态根只认仓库约定的 XSKILL_HOME（测试可 monkeypatch），不从 skill_dir 猜父目录。
+        self._xskill_home = XSKILL_HOME
 
         # 普通 client：工作副本落 ~/.xskill/skill/，与 standalone 同一位置。
         # 本机已是 team server 时不能再用自有仓——cleanup 会按派发清单删目录。
@@ -568,10 +563,12 @@ class TeamClient:
         dangling link 留给 reconcile 重装，不在这里删。
         """
         skill_root_key = _source_path_key(self.skill_dir)
-        from xskill.config import _canonical_server_skill_dir
+        from xskill.config import (
+            get_team_server_state_path, resolve_local_skill_dir,
+        )
         server_root_key = (
-            _source_path_key(_canonical_server_skill_dir(self._xskill_home))
-            if (self._xskill_home / "team_server.json").is_file()
+            _source_path_key(resolve_local_skill_dir(xskill_home=self._xskill_home))
+            if get_team_server_state_path(xskill_home=self._xskill_home).is_file()
             else None
         )
         for root in _ecosystem_skill_roots(self.home_root):

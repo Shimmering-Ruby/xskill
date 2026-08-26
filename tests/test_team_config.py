@@ -79,12 +79,10 @@ def test_resolve_team_client_skill_dir_relocates_when_colocated(tmp_path, monkey
     canonical.mkdir(parents=True)
     (xhome / "team_server.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(C, "XSKILL_HOME", xhome)
-    monkeypatch.setattr(C, "get_team_server_state_path", lambda: xhome / "team_server.json")
-    monkeypatch.setattr(C, "get_skill_dir", lambda: canonical)
-    assert C.resolve_team_client_skill_dir(canonical) == xhome / "client_skill"
+    assert C.resolve_team_client_skill_dir(canonical, xskill_home=xhome) == xhome / "client_skill"
     other = tmp_path / "elsewhere" / "skill"
     other.mkdir(parents=True)
-    assert C.resolve_team_client_skill_dir(other) == other
+    assert C.resolve_team_client_skill_dir(other, xskill_home=xhome) == other
 
 
 def test_resolve_team_client_skill_dir_unchanged_without_server(tmp_path, monkeypatch):
@@ -92,7 +90,20 @@ def test_resolve_team_client_skill_dir_unchanged_without_server(tmp_path, monkey
     canonical = xhome / "skill"
     canonical.mkdir(parents=True)
     monkeypatch.setattr(C, "XSKILL_HOME", xhome)
-    monkeypatch.setattr(C, "get_team_server_state_path", lambda: xhome / "missing.json")
-    monkeypatch.setattr(C, "get_skill_dir", lambda: canonical)
-    assert C.resolve_team_client_skill_dir(canonical) == canonical
+    assert C.resolve_team_client_skill_dir(canonical, xskill_home=xhome) == canonical
+
+
+def test_resolve_team_client_skill_dir_respects_config_skill_dir(tmp_path, monkeypatch):
+    """自有仓以 config.yaml 的 skill_dir 为准，不写死 ~/.xskill/skill。"""
+    xhome = tmp_path / ".xskill"
+    xhome.mkdir()
+    custom = tmp_path / "company_skills"
+    custom.mkdir()
+    (xhome / "config.yaml").write_text(f"skill_dir: {custom}\n", encoding="utf-8")
+    (xhome / "team_server.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(C, "XSKILL_HOME", xhome)
+    assert C.resolve_local_skill_dir(xskill_home=xhome) == custom
+    assert C.resolve_team_client_skill_dir(custom, xskill_home=xhome) == xhome / "client_skill"
+    # 默认 skill/ 此时不是自有仓，不得误分流
+    assert C.resolve_team_client_skill_dir(xhome / "skill", xskill_home=xhome) == xhome / "skill"
 

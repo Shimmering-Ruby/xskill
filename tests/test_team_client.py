@@ -264,11 +264,6 @@ def test_colocated_client_does_not_delete_server_skills(tmp_path, monkeypatch):
     (keep / "SKILL.md").write_text("# keep\n", encoding="utf-8")
     (xhome / "team_server.json").write_text('{"join_token": "t"}', encoding="utf-8")
     monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
-    monkeypatch.setattr(
-        "xskill.config.get_team_server_state_path",
-        lambda: xhome / "team_server.json",
-    )
-    monkeypatch.setattr("xskill.config.get_skill_dir", lambda: canonical)
 
     tc = TeamClient(
         state=ClientState(
@@ -301,11 +296,6 @@ def test_refuse_canonical_skill_dir_guards_and_self_heals(tmp_path, monkeypatch)
     canonical.mkdir(parents=True)
     (xhome / "team_server.json").write_text('{"join_token": "t"}', encoding="utf-8")
     monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
-    monkeypatch.setattr(
-        "xskill.config.get_team_server_state_path",
-        lambda: xhome / "team_server.json",
-    )
-    monkeypatch.setattr("xskill.config.get_skill_dir", lambda **kw: canonical)
 
     tc = TeamClient(
         state=ClientState(
@@ -343,11 +333,6 @@ def test_startup_race_client_before_server_self_heals(tmp_path, monkeypatch):
 
     server_state_file = xhome / "team_server.json"
     monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
-    monkeypatch.setattr(
-        "xskill.config.get_team_server_state_path",
-        lambda: server_state_file,
-    )
-    monkeypatch.setattr("xskill.config.get_skill_dir", lambda **kw: canonical)
 
     # 1. 此时 Server 尚未启动，team_server.json 不存在
     tc = TeamClient(
@@ -394,8 +379,6 @@ def test_cleanup_reaps_stale_server_ecosystem_links(tmp_path, monkeypatch):
 
     (xhome / "team_server.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr("xskill.config.XSKILL_HOME", xhome)
-    monkeypatch.setattr("xskill.config.get_team_server_state_path", lambda: xhome / "team_server.json")
-    monkeypatch.setattr("xskill.config.get_skill_dir", lambda **kw: canonical)
 
     tc = TeamClient(
         state=ClientState(server_url="http://testserver", client_id="c", join_token="t"),
