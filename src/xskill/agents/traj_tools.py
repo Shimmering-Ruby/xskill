@@ -367,10 +367,31 @@ def _rg(args: list[str], timeout: int) -> str:
     return completed.stdout if completed.returncode <= 1 else ""
 
 
+def _format_search_hit(
+    path: Path, hit_line: int, snippet: str, count: int, context: int,
+) -> str:
+    """检索命中：默认一行摘要；context>0 时带前后文，命中行标星。"""
+    mark = f"（共命中 {count} 处）" if count > 1 else ""
+    if context <= 0:
+        return f"{path.stem}\tL{hit_line}: {_one_line(snippet, 100)}{mark}"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    start = max(1, hit_line - context)
+    end = min(len(lines), hit_line + context) if lines else hit_line
+    rows = [f"{path.stem}{mark}"]
+    for number in range(start, end + 1):
+        tag = "*" if number == hit_line else " "
+        text = lines[number - 1] if 0 <= number - 1 < len(lines) else ""
+        rows.append(f"  L{number}{tag} {_one_line(text, 90)}")
+    return "\n".join(rows)
+
+
 def _search_by_query(query: str, take: int, context: int = 0) -> str:
     roots = _traj_roots()
     if not shutil.which("rg"):
-        return _search_by_query_python(query, take, roots)
+        return _search_by_query_python(query, take, roots, context)
     # 一遍 rg -c 同时拿命中文件与每文件命中处数
     counts: dict[Path, int] = {}
     for root in roots:
@@ -405,27 +426,16 @@ def _search_by_query(query: str, take: int, context: int = 0) -> str:
     for path in shown:
         args = ["rg", "-n", "--no-heading", "--color", "never", "--smart-case",
                 "-m", "1", "-e", query, str(path)]
-        if context > 0:
-            args[1:1] = ["-C", str(context)]
         out = _rg(args, 10)
         lines = [ln for ln in out.splitlines() if ln.strip()]
-        total = counts.get(path, 1)
-        mark = f"（共命中 {total} 处）" if total > 1 else ""
-        if context <= 0:
-            first = lines[0] if lines else "1:"
-            lineno, _, content = first.partition(":")
-            rows.append(f"{path.stem}\tL{lineno}: {_one_line(content, 100)}{mark}")
-            continue
-        block: list[str] = [f"{path.stem}{mark}"]
-        for raw in lines:
-            # rg 上下文行用 '-' 分隔，命中行用 ':'
-            for sep in (":", "-"):
-                lineno, found, content = raw.partition(sep)
-                if found and lineno.isdigit():
-                    tag = "*" if sep == ":" else " "
-                    block.append(f"  L{lineno}{tag} {_one_line(content, 90)}")
-                    break
-        rows.append("\n".join(block))
+        first = lines[0] if lines else "1:"
+        lineno, _, content = first.partition(":")
+        hit_line = int(lineno) if lineno.isdigit() else 1
+        rows.append(
+            _format_search_hit(
+                path, hit_line, content, counts.get(path, 1), context,
+            )
+        )
     head = (
         f"query={query!r} 命中 {len(hits)} 条不同轨迹，展示 {len(shown)} 条"
         f"（同名前缀已错开）。看内容用 traj_cards，一次最多 {CARDS_MAX} 个 id。"
@@ -437,7 +447,9 @@ def _search_by_query(query: str, take: int, context: int = 0) -> str:
     return head + "\n" + "\n".join(rows)
 
 
-def _search_by_query_python(query: str, take: int, roots: list[Path]) -> str:
+def _search_by_query_python(
+    query: str, take: int, roots: list[Path], context: int = 0,
+) -> str:
     needle = query.lower()
     hits: list[tuple[Path, int, str, int]] = []
     for path in _traj_files():
@@ -462,8 +474,7 @@ def _search_by_query_python(query: str, take: int, roots: list[Path]) -> str:
         if path not in lookup:
             continue
         number, line, count = lookup[path]
-        mark = f"（共命中 {count} 处）" if count > 1 else ""
-        rows.append(f"{path.stem}\tL{number}: {_one_line(line, 100)}{mark}")
+        rows.append(_format_search_hit(path, number, line, count, context))
     leftover = len(hits) - len(rows)
     head = (
         f"query={query!r} 命中 {len(hits)} 条不同轨迹，展示 {len(rows)} 条"

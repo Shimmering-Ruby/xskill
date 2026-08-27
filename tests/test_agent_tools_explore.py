@@ -100,8 +100,9 @@ class TestGrepFiles:
         )
 
         assert out.startswith("engine: ")
-        assert f"{corpus_dir}/traj_a.md:2:" in out
-        assert f"{corpus_dir}/traj_a.md-1-" in out
+        hit = corpus_dir / "traj_a.md"
+        assert f"{hit}:2:" in out
+        assert f"{hit}-1-" in out
         assert "context: before=2 after=2" in out
 
     def test_sensitive_files_filtered_from_hits(self, tmp_path, monkeypatch):
@@ -186,8 +187,9 @@ class TestGrepFiles:
             "DOCKER_RESTART", path=str(corpus_dir), before=0, after=0,
         )
 
-        assert f"{corpus_dir}/traj_a.md:2:" in out
-        assert f"{corpus_dir}/traj_a.md-1-" not in out
+        hit = corpus_dir / "traj_a.md"
+        assert f"{hit}:2:" in out
+        assert f"{hit}-1-" not in out
 
 
 class TestSkillReadTree:

@@ -139,6 +139,16 @@ def test_search_hit_counts_and_context(tmp_path: Path):
     assert "我应该先定位循环" in ctx_hits
 
 
+def test_search_context_without_rg(tmp_path: Path, monkeypatch):
+    """CI 没有 rg，必须走逐行回退且仍尊重 context。"""
+    monkeypatch.setattr("xskill.agents.traj_tools.shutil.which", lambda _name: None)
+    with agent_tools.use_agent_tool_context(_ctx(tmp_path)):
+        ctx_hits = traj_search.entrypoint(query="重试循环", context=2)
+    assert "无 rg" in ctx_hits
+    assert "L31*" in ctx_hits
+    assert "我应该先定位循环" in ctx_hits
+
+
 def test_card_keeps_questions_and_drops_tool_output(tmp_path: Path):
     with agent_tools.use_agent_tool_context(_ctx(tmp_path)):
         batch = traj_cards.entrypoint(
