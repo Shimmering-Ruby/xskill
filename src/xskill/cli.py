@@ -204,6 +204,81 @@ def _print_init_next_steps(connected: bool) -> None:
     print("  xskill serve --server")
 
 
+def _print_init_connect_guide(*, address: str = "") -> None:
+    print("token 向你们的 server 管理员要，他们执行 xskill serve --server 时会打印。")
+    print("不要用网上搜到的公共地址。")
+    if address:
+        print("补 token 后再连：")
+        print(f"  xskill connect {address} --token <token> --name <工号>")
+    else:
+        print("以后要连，再跑：")
+        print("  xskill connect <host:port> --token <token> --name <工号>")
+    print("也可以自己起一台：")
+    print("  xskill serve --server")
+
+
+def _init_connect_args(args, address: str, token: str, name: str | None):
+    return argparse.Namespace(
+        address=address,
+        token=token,
+        label=getattr(args, "label", "") or "",
+        name=name,
+        use_proxy=bool(getattr(args, "use_proxy", False)),
+        foreground=False,
+        no_auto_update=bool(getattr(args, "no_auto_update", False)),
+        no_skill=True,
+        target_root=getattr(args, "target_root", None),
+    )
+
+
+def _offer_optional_connect(args, connected: bool) -> None:
+    """交互式可选连团队。回车或空 token 都算跳过，不让 init 失败。"""
+    if connected or args.yes:
+        _print_init_next_steps(connected)
+        return
+    print("连团队 server 是可选的。现在可以跳过，本机 traj search 已经能用。")
+    print("  回车 / skip：先不连")
+    print("  1：现在连接（要管理员给的地址和 token）")
+    print("  2：看自己起团队服务的命令")
+    choice = input("选择：").strip().lower()
+    if choice in ("", "0", "skip", "n", "no", "none", "later"):
+        print("已跳过连接。本机检索：")
+        print("  xskill traj search <词>")
+        print("  xskill traj read <traj_id>")
+        _print_init_connect_guide()
+        return
+    if choice in ("2", "serve", "server"):
+        print("自己起团队服务：")
+        print("  xskill serve --server")
+        print("启动后终端会打印 join token。本机或同事再：")
+        print("  xskill connect <host:port> --token <刚打印的 token> --name <工号>")
+        print("不要用网上搜到的公共地址。")
+        print("本机检索现在就能用：xskill traj search <词>")
+        return
+    if choice not in ("1", "c", "connect", "y", "yes"):
+        print("未识别的选项，已按跳过连接处理。")
+        print("本机检索：xskill traj search <词>")
+        _print_init_connect_guide()
+        return
+    address = input("server 地址 host:port（回车=跳过连接）：").strip()
+    if not address:
+        print("没有填写地址，已跳过连接。")
+        _print_init_connect_guide()
+        return
+    token = input("join token（回车=跳过；向 server 管理员要）：").strip()
+    if not token:
+        print("没有填写 token，已跳过连接。")
+        _print_init_connect_guide(address=address)
+        return
+    name = input("工号 / 用户 ID（回车可后补）：").strip() or None
+    print(f"正在连接 {address} …")
+    code = cmd_connect(_init_connect_args(args, address, token, name))
+    if code != 0:
+        print("连接没有成功。本机引导已经完成，可以先用：")
+        print("  xskill traj search <词>")
+        print("连上后再跑 connect。")
+
+
 def _choose_helper_ecosystems(args, detections: list[dict], interactive: bool) -> list[str]:
     names = [str(row["ecosystem"]) for row in detections]
     selected = [str(item) for item in (getattr(args, "harness", None) or []) if item]
@@ -240,7 +315,8 @@ def _choose_helper_ecosystems(args, detections: list[dict], interactive: bool) -
 def cmd_init(args) -> int:
     """本机引导：扫描 harness、转换轨迹、可选装 /xskill-helper。
 
-    不要求 connect。``--yes`` 无头：全量扫描并把 helper 装到已扫到的 harness。
+    不要求 connect。交互时可选连团队，回车或空 token 都跳过并给出后续命令。
+    ``--yes`` 无头：全量扫描并把 helper 装到已扫到的 harness，不询问连接。
     """
     from pathlib import Path
 
@@ -277,7 +353,7 @@ def cmd_init(args) -> int:
         print("本机检索：xskill traj search <词>    读原文：xskill traj read <id>")
 
     if args.no_skill:
-        _print_init_next_steps(connected)
+        _offer_optional_connect(args, connected)
         return 0
 
     chosen = _choose_helper_ecosystems(args, detections, interactive)
@@ -285,7 +361,7 @@ def cmd_init(args) -> int:
         install_bundled_xskill_guide(target_root=home, ecosystems=chosen)
     elif detections:
         print("未安装 /xskill-helper。以后可再跑 xskill init，或 xskill connect 后自动装。")
-    _print_init_next_steps(connected)
+    _offer_optional_connect(args, connected)
     return 0
 
 
@@ -2888,7 +2964,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser(
         "init",
-        help="本机引导：扫描 harness、转换轨迹、可选装 /xskill-helper",
+        help="本机引导：扫描 harness、转换轨迹、可选装 /xskill-helper；连团队可跳过",
     )
     p_init.add_argument("-y", "--yes", action="store_true",
                         help="非交互：扫描全部，并把 helper 装到已扫到的 harness")
