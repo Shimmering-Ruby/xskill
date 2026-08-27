@@ -134,7 +134,7 @@ xskill serve --server                          # prints a join token
 xskill connect <host:port> --token <token> --name <user-id>
 ```
 
-After connecting successfully, the guide is automatically installed into detected agents like Claude Code, Codex, and Cursor. Type `/xskill-helper` inside any agent to check commands for generate, search, and upgrades. If you do not have an address and token yet, ask your team's server operator.
+After connect succeeds, type `/xskill-helper` in Claude Code, Codex, Cursor, or another detected agent to see generate, search, and upgrade. If you do not have a host and token yet, treat the command above as the example and ask your own server operator. Do not connect to a public instance.
 
 - **Silently distill your top performers** — one person's solution reaches the whole team automatically.
 - **Any workflow plugs in** — Codex, Claude Code, Cursor IDE; everyone joins the same library, synced across tools.

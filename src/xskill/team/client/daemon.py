@@ -304,8 +304,17 @@ class TeamClient:
             display_name=display_name, source_path=source_path,
         )
 
-    def _install_to_ecosystems(self, repo_dir: Path) -> None:
-        install_skill_to_ecosystems(repo_dir, home_root=self.home_root)
+    def _install_to_ecosystems(
+        self,
+        repo_dir: Path,
+        *,
+        ecosystems: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        install_skill_to_ecosystems(
+            repo_dir,
+            home_root=self.home_root,
+            ecosystems=ecosystems,
+        )
 
     def reconcile_downloaded_skills(self) -> int:
         """刷新显式下载项；持久下载不占 search LRU，随服务端版本继续更新。"""
@@ -569,12 +578,28 @@ class TeamClient:
             )
         # 上面的 working-copy 驱动清理看不见"工作副本已被 out-of-band 删除、生态
         # link 却还在"的孤儿；按生态目录反向再收一遍。
-        self._reap_orphaned_ecosystem_links(keep)
+        reinstall = self._reap_orphaned_ecosystem_links(keep)
+        for skill_name, ecosystems in sorted(reinstall.items()):
+            repo_dir = self.skill_dir / skill_name
+            if not repo_dir.is_dir():
+                logger.warning(
+                    "kept server link repair skipped missing working copy "
+                    "skill_id_hash=%s",
+                    hashlib.sha256(
+                        skill_name.encode("utf-8"),
+                    ).hexdigest()[:12],
+                )
+                continue
+            self._install_to_ecosystems(
+                repo_dir, ecosystems=sorted(ecosystems),
+            )
         # copy 孤儿（有老 meta、无账本或卸装拒删）同样逃出 working-copy 驱动清理；
         # 推荐流 delta 必须能清掉，否则 .agents 只增不减。
         self._reap_orphan_copy_dests(keep)
 
-    def _reap_orphaned_ecosystem_links(self, keep: set[str]) -> None:
+    def _reap_orphaned_ecosystem_links(
+        self, keep: set[str],
+    ) -> dict[str, set[str]]:
         """扫生态 dest 根目录，收掉 manifest 已不含、且指向 xskill 工作副本根（或同机 Server 母本）的
         link/junction（含工作副本被删后留下的 dangling 孤儿，以及跨模式切换遗留的 Server 软链）。
 
@@ -589,17 +614,24 @@ class TeamClient:
         from xskill.config import (
             get_team_server_state_path, resolve_local_skill_dir,
         )
-        server_root_key = (
-            _source_path_key(resolve_local_skill_dir(xskill_home=self._xskill_home))
-            if get_team_server_state_path(xskill_home=self._xskill_home).is_file()
-            else None
-        )
-        for root in _ecosystem_skill_roots(self.home_root):
+        server_root_key = None
+        if get_team_server_state_path(xskill_home=self._xskill_home).is_file():
+            try:
+                server_root_key = _source_path_key(resolve_local_skill_dir(
+                    xskill_home=self._xskill_home,
+                    strict_config=True,
+                ))
+            except (OSError, RuntimeError, ValueError) as config_error:
+                logger.warning(
+                    "server skill link cleanup skipped uncertain canonical "
+                    "root error_type=%s",
+                    type(config_error).__name__,
+                )
+        reinstall: dict[str, set[str]] = {}
+        for root, ecosystem in _ecosystem_skill_root_installers(self.home_root):
             if not root.is_dir():
                 continue
             for entry in sorted(root.iterdir()):
-                if entry.name in keep:
-                    continue  # manifest 仍需要 → 保留（dangling 也留给 reconcile 重装）
                 # 只收 link/junction：真目录（手动建 skill）与 copy 安装一律不碰。
                 if not is_link_or_junction(entry):
                     continue
@@ -615,15 +647,20 @@ class TeamClient:
                         or entry_key.startswith(server_root_key + os.sep)
                     )
                 )
+                if entry.name in keep and not is_stale_server_link:
+                    continue  # 正常 Client link 与 dangling link 留给 reconcile
                 if not (is_client_link or is_stale_server_link):
                     continue  # link 不指向 xskill 工作副本根或服务端母本 → 第三方安装，跳过
                 if _remove_owned_install_target(
                     entry, Path(_source_path_key(entry)),
                 ):
+                    if entry.name in keep and is_stale_server_link:
+                        reinstall.setdefault(entry.name, set()).add(ecosystem)
                     logger.info(
                         "reaped orphaned ecosystem link target_hash=%s",
                         _target_path_hash(entry),
                     )
+        return reinstall
 
     def _reap_orphan_copy_dests(self, keep: set[str]) -> None:
         """收掉 manifest 已不含、带 dest 内老 install-meta 的 copy 真目录。
@@ -832,21 +869,32 @@ def _targets_for_ecosystem(ecosystem: str, skill_name: str,
     return roots.get(ecosystem, [])
 
 
-def _ecosystem_skill_roots(home_root: Path) -> list[Path]:
-    """所有安装器的 skill 目标根目录；不依赖生态当前是否仍可探测。"""
+def _ecosystem_skill_root_installers(
+    home_root: Path,
+) -> list[tuple[Path, str]]:
+    """安装目标根及其定向修复安装器；不依赖生态当前是否仍可探测。"""
     from xskill.ecosystems import (
         _agents_skills_path, _cc_skills_path, _cursor_skills_path,
         _nga3_skills_path, _ngagent_skills_path,
     )
 
     return [
-        _cc_skills_path(home_root),
-        _agents_skills_path(home_root),
-        _nga3_skills_path(home_root),
-        _ngagent_skills_path(home_root),
-        _cursor_skills_path(home_root),
-        home_root / ".trae-cn" / "skills",
-        home_root / ".trae" / "skills",
+        (_cc_skills_path(home_root), "claude_code"),
+        # Codex / OpenCode / OpenClaw 共用 .agents/skills；遗留 link 用
+        # symlink-first 的 Codex 安装器即可恢复为 Client 工作副本。
+        (_agents_skills_path(home_root), "codex"),
+        (_nga3_skills_path(home_root), "nga3"),
+        (_ngagent_skills_path(home_root), "ngagent"),
+        (_cursor_skills_path(home_root), "cursor"),
+        (home_root / ".trae-cn" / "skills", "trae"),
+        (home_root / ".trae" / "skills", "trae"),
+    ]
+
+
+def _ecosystem_skill_roots(home_root: Path) -> list[Path]:
+    """所有安装器的 skill 目标根目录；不依赖生态当前是否仍可探测。"""
+    return [
+        root for root, _ecosystem in _ecosystem_skill_root_installers(home_root)
     ]
 
 

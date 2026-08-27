@@ -112,3 +112,19 @@ def test_resolve_team_client_skill_dir_respects_config_skill_dir(tmp_path, monke
     requested = C.resolve_local_skill_dir(xskill_home=xhome)
     assert C.resolve_team_client_skill_dir(requested, xskill_home=xhome) == xhome / "client_skill"
 
+
+def test_team_server_canonical_check_fails_closed_on_bad_config(tmp_path):
+    """Server 存在但权威仓配置不可判定时，破坏性 Client 操作必须保守拦截。"""
+    xhome = tmp_path / ".xskill"
+    xhome.mkdir()
+    requested = tmp_path / "company-skills"
+    requested.mkdir()
+    (xhome / "team_server.json").write_text("{}", encoding="utf-8")
+    (xhome / "config.yaml").write_text("skill_dir: [", encoding="utf-8")
+
+    assert C.is_team_server_canonical_skill_dir(
+        requested, xskill_home=xhome,
+    ) is True
+    assert C.resolve_team_client_skill_dir(
+        requested, xskill_home=xhome,
+    ) == xhome / "client_skill"

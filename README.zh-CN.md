@@ -99,7 +99,7 @@ xskill serve --server                                          # 启动后打印
 xskill connect <host:port> --token <token> --name <user-id>
 ```
 
-connect 成功后，使用指南会自动安装至已探测到的 Claude Code、Codex、Cursor 等 agent。在对应 agent 里输入 `/xskill-helper`，即可查阅 generate、search 等命令用法。如尚未获取地址与 token，可向团队的 server 管理员申请。
+connect 成功后，在 Claude Code、Codex、Cursor 等已探测到的 agent 里输入 `/xskill-helper`，即可查 generate、search 等用法。没有地址和 token 时，把上面的 connect 当示例，向自己的 server 管理员要参数，不要连外网公开实例。
 
 - **无感蒸馏大佬员工** 一个人在自己工作里跑通的解法，自动可以让全团队复用，不需要任何人做任何事。（能力民主化）
 - **兼容各种 coding 方式** 用 codex、clade 还是 cursor IDE？ 都能加入，多端同步。
