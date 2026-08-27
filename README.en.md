@@ -181,6 +181,7 @@ On **macOS / Linux**, native persistence (launchd / systemd --user) is still on 
 #### Search / share skills on demand (skillhub)
 
 ```bash
+xskill init                    # this machine: scan harnesses, convert traj, optional helper
 xskill search docker compose   # return compact metadata and skill IDs only
 xskill traj search memory leak # search session index (first user query, no split agent)
 xskill traj read traj_cc_alice # read trajectory lines (current and total range)
@@ -192,7 +193,7 @@ xskill download <skill-id> --agent claude-code --agent codex -y
 xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
 ```
 
-`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. `xskill traj search` ranks the session index by the first user query (no split agent, query path does not open md). `xskill atom search` searches already-split atoms (granularity may change). Use `xskill traj read` for source lines. `--name` narrows search to specific employee ids. Reading another person's trajectory in team mode needs `allow_read_others` on the server.
+`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. After `pip install xskill`, `xskill traj search` does not require `connect`. The first search scans local harnesses if this machine has not been initialized. `xskill init` is the guided form. Join a remote team with `xskill connect`; run your own server with `xskill serve --server`. `xskill traj search` ranks the session index by the first user query (no split agent, query path does not open md). `xskill atom search` searches already-split atoms (granularity may change). Use `xskill traj read` for source lines. `--name` narrows search to specific employee ids. Reading another person's trajectory in team mode needs `allow_read_others` on the server.
 
 * * *
 

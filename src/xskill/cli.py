@@ -176,82 +176,117 @@ def cmd_registry_list_client() -> int:
     return 0
 
 
-def cmd_init(args) -> int:
-    """一站式引导：把 xskill 使用指南 skill 装进各 agent 生态 + 连上 team server。
+def _print_init_harnesses(detections: list[dict]) -> None:
+    if not detections:
+        print(
+            "未扫到已知 harness（Claude Code、Codex、Cursor、OpenCode、"
+            "Trae、DeepSeek Harness、ngagent）。"
+        )
+        return
+    print("本机扫到这些 harness：")
+    for index, detection in enumerate(detections, 1):
+        print(
+            f"  [{index}] {detection['ecosystem']}  "
+            f"源={detection['source']}  轨迹目录={detection['bridge']}"
+        )
 
-    交互式（默认）逐项询问缺失的 server/token/工号；带齐 flag 且 ``--yes`` 可无头执行。
+
+def _print_init_next_steps(connected: bool) -> None:
+    if connected:
+        print("已连接 team server。默认 xskill traj search 走团队；只看本机加 --local。")
+    else:
+        print("当前没有 team 连接。本机轨迹可以搜：")
+        print("  xskill traj search <词>")
+        print("  xskill traj read <traj_id>")
+    print("连远端团队拿共享 skill 和同事轨迹：")
+    print("  xskill connect <host:port> --token <token> --name <工号>")
+    print("也可以自己起一台团队服务：")
+    print("  xskill serve --server")
+
+
+def _choose_helper_ecosystems(args, detections: list[dict], interactive: bool) -> list[str]:
+    names = [str(row["ecosystem"]) for row in detections]
+    selected = [str(item) for item in (getattr(args, "harness", None) or []) if item]
+    if selected:
+        unknown = [name for name in selected if name not in names]
+        if unknown:
+            print("warning: 未扫到 " + "、".join(unknown), file=sys.stderr)
+        return [name for name in selected if name in names]
+    if not names:
+        return []
+    if (not interactive) or args.yes:
+        return names
+    print("要把 /xskill-helper 装进哪些 harness？")
+    print("  回车或 all：全部    none：不装    或输入编号，逗号分隔")
+    raw = input("选择：").strip().lower()
+    if raw in ("", "all", "y", "yes"):
+        return names
+    if raw in ("none", "n", "no", "skip"):
+        return []
+    picked: list[str] = []
+    for part in raw.replace("，", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit():
+            index = int(part)
+            if 1 <= index <= len(names):
+                picked.append(names[index - 1])
+        elif part in names:
+            picked.append(part)
+    return picked
+
+
+def cmd_init(args) -> int:
+    """本机引导：扫描 harness、转换轨迹、可选装 /xskill-helper。
+
+    不要求 connect。``--yes`` 无头：全量扫描并把 helper 装到已扫到的 harness。
     """
     from pathlib import Path
 
+    from xskill.config import get_team_client_state_path
+    from xskill.ecosystems import detect_known_ecosystems
+    from xskill.ecosystems.bundled_guide import install_bundled_xskill_guide
+    from xskill.ecosystems.local_bootstrap import ensure_local_sessions
+
     interactive = not args.yes
-    target_root = None
+    home = None
     if args.target_root:
-        target_root = Path(args.target_root).expanduser().resolve()
+        home = Path(args.target_root).expanduser().resolve()
 
-    if not args.no_skill:
-        from xskill.ecosystems.bundled_guide import install_bundled_xskill_guide
-        install_bundled_xskill_guide(target_root=target_root)
+    detections = detect_known_ecosystems(home_root=home)
+    _print_init_harnesses(detections)
+    connected = get_team_client_state_path().is_file()
+    if connected:
+        print("已有 team 连接，团队检索可用。")
+    else:
+        print("未连接 team server。先完成本机轨迹处理，不必先 connect。")
 
-    if args.skills_only:
+    if not args.skills_only:
+        print("轨迹处理：开启。正在扫描并转换本机会话…")
+        report = ensure_local_sessions(
+            home_root=home, force=args.force, skip_if_server=False,
+        )
+        if report.get("ran"):
+            for eco, count in (report.get("bridged") or {}).items():
+                print(f"  {eco}: 新转换 {count} 条")
+            for eco, err in (report.get("errors") or {}).items():
+                print(f"  warning: {eco} {err}", file=sys.stderr)
+        elif report.get("reason") == "already":
+            print("轨迹处理：本机索引已在，未重复全量扫描（加 --force 可重扫）。")
+        print("本机检索：xskill traj search <词>    读原文：xskill traj read <id>")
+
+    if args.no_skill:
+        _print_init_next_steps(connected)
         return 0
 
-    from xskill.team.client.service import read_daemon_state
-    daemon_state = read_daemon_state()
-    if daemon_state.get("running"):
-        current_server = "?"
-        try:
-            from xskill.config import get_team_client_state_path
-            from xskill.team.client.state import load_client_state
-            current_server = load_client_state(get_team_client_state_path()).server_url
-        except Exception:  # noqa: BLE001
-            logger.debug("读取当前 team server 地址失败", exc_info=True)
-        print(f"检测到常驻连接正在运行：server={current_server}  "
-              f"pid={daemon_state.get('pid')}  backend={daemon_state.get('backend')}")
-        should_stop = args.force
-        if not args.force:
-            if not interactive:
-                print("已保留现有连接（加 --force 可停掉重新配置）。")
-                return 0
-            should_stop = input("停掉并重新配置？[y/N] ").strip().lower() in ("y", "yes")
-            if not should_stop:
-                print("保留现有连接，未改动。")
-                return 0
-        from xskill.team.client.service import (
-            ServiceError, clear_daemon_state, get_backend,
-        )
-        try:
-            get_backend().stop()
-        except ServiceError as stop_error:
-            print(f"warning: 停止旧常驻失败：{stop_error}", file=sys.stderr)
-        clear_daemon_state()
-
-    address = args.address
-    if not address and interactive:
-        address = input("server 地址 (host:port): ").strip()
-    if not address:
-        print("error: 缺少 server 地址（位置参数或交互输入）", file=sys.stderr)
-        return 2
-    token = args.token
-    if not token and interactive:
-        token = input("join token (server 启动时打印的 token): ").strip()
-    if not token:
-        print("error: 缺少 --token（首次连接必填）", file=sys.stderr)
-        return 2
-    name = args.name
-    if not name and interactive:
-        name = input("工号/用户 ID (推荐填，直接回车留空): ").strip() or None
-
-    connect_args = argparse.Namespace(
-        address=address, token=token, label=args.label, name=name,
-        use_proxy=args.use_proxy, foreground=args.foreground,
-        no_auto_update=args.no_auto_update,
-        no_skill=True,
-    )
-    exit_code = cmd_connect(connect_args)
-    if exit_code == 0:
-        print("\n后续：`xskill status` 看状态 · `xskill search <词>` 搜技能 · "
-              "`xskill update`／`pip install -U xskill` 升级 · `xskill stop` 停。")
-    return exit_code
+    chosen = _choose_helper_ecosystems(args, detections, interactive)
+    if chosen:
+        install_bundled_xskill_guide(target_root=home, ecosystems=chosen)
+    elif detections:
+        print("未安装 /xskill-helper。以后可再跑 xskill init，或 xskill connect 后自动装。")
+    _print_init_next_steps(connected)
+    return 0
 
 
 def cmd_connect(args) -> int:
@@ -1246,6 +1281,31 @@ def _render_search_kind_hits(
     _write_search_output("\n".join(output_lines))
 
 
+def _maybe_bootstrap_local_traj() -> None:
+    """standalone 或 --local 时，首次把本机 harness 会话转成可搜轨迹。
+
+    提示一律打 stderr，避免污染 ``--json`` 的 stdout。
+    """
+    from xskill.ecosystems.local_bootstrap import ensure_local_sessions
+
+    report = ensure_local_sessions()
+    if not report.get("ran"):
+        return
+    harnesses = [str(name) for name in (report.get("harnesses") or [])]
+    new_count = sum((report.get("bridged") or {}).values())
+    if harnesses:
+        message = (
+            f"已扫描本机 {('、'.join(harnesses))}，转换 {new_count} 条新会话。"
+            "之后可用 xskill traj search。"
+        )
+    else:
+        message = (
+            "未检测到 Claude Code、Codex、Cursor 等 harness。"
+            "装好其中之一后再跑 xskill init。"
+        )
+    _write_search_output(message, to_stderr=True)
+
+
 def cmd_search_traj(args, http=None, headers=None) -> int:
     """`xskill traj search <query>` —— 搜已上传轨迹文件，不经拆分代理。"""
     return _cmd_search_kind(args, kind="traj", http=http, headers=headers)
@@ -1304,6 +1364,8 @@ def _cmd_search_kind_local(
             "warning: --name 仅 team 检索有效，本机检索忽略",
             to_stderr=True,
         )
+    if kind == "traj":
+        _maybe_bootstrap_local_traj()
     try:
         if kind == "atom":
             hits = search_indexed_atoms(query, top_k=top_k)
@@ -2153,6 +2215,8 @@ def _cmd_read_kind_local(
             "warning: --name 仅 team 检索有效，本机读取忽略",
             to_stderr=True,
         )
+    if kind == "traj":
+        _maybe_bootstrap_local_traj()
     try:
         if kind == "atom":
             payload = read_atom(
@@ -2677,30 +2741,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser(
         "init",
-        help="交互引导（日常请用 connect）：可顺带装 /xskill-helper",
+        help="本机引导：扫描 harness、转换轨迹、可选装 /xskill-helper",
     )
-    p_init.add_argument("address", nargs="?", default=None,
-                        help="server 地址 host:port（交互模式留空会询问）")
-    p_init.add_argument("--token", default=None,
-                        help="join token（server 启动时打印；交互模式留空会询问）")
-    p_init.add_argument("--name", default=None, metavar="EMPLOYEE_ID",
-                        help="工号/用户 ID（推荐填，跨设备保持身份一致）")
-    p_init.add_argument("--label", default="",
-                        help="本 client 可读标签（默认主机名）")
-    p_init.add_argument("--use-proxy", action="store_true",
-                        help="经系统/环境代理连 server（默认直连，绕开公司 SWG 代理）")
-    p_init.add_argument("--foreground", action="store_true",
-                        help="前台阻塞跑守护循环（默认交给操作系统后台常驻）")
-    p_init.add_argument("--no-auto-update", action="store_true", dest="no_auto_update",
-                        help="禁用自动更新检查")
-    p_init.add_argument("--skills-only", action="store_true", dest="skills_only",
-                        help="只装 /xskill-helper，不配置连接")
-    p_init.add_argument("--no-skill", action="store_true", dest="no_skill",
-                        help="只配置连接，不装 /xskill-helper")
-    p_init.add_argument("--force", action="store_true",
-                        help="已有常驻连接时停掉并重新配置")
     p_init.add_argument("-y", "--yes", action="store_true",
-                        help="非交互：缺必填项直接报错，不询问")
+                        help="非交互：扫描全部，并把 helper 装到已扫到的 harness")
+    p_init.add_argument("--skills-only", action="store_true", dest="skills_only",
+                        help="只装 /xskill-helper，不扫描转换轨迹")
+    p_init.add_argument("--no-skill", action="store_true", dest="no_skill",
+                        help="只扫描转换轨迹，不装 /xskill-helper")
+    p_init.add_argument("--force", action="store_true",
+                        help="已有本机索引时仍重新扫描转换")
+    p_init.add_argument("--harness", action="append", default=[],
+                        help="只把 /xskill-helper 装到这些生态（可重复）")
     p_init.add_argument("--target-root", default=None,
                         help="[测试/隔离] 安装与探测的 HOME 根（默认真实 HOME）")
 
@@ -2867,7 +2919,7 @@ def main() -> int:
         if not args.path:
             parser.error(f"path is required for 'registry {args.registry_action}'")
 
-    # init 一站式引导：装 skill + connect，同样是瘦客户端侧，不碰 config.yaml。
+    # init 本机引导：扫 harness、转轨迹、可选装 helper，不碰 config.yaml。
     if args.command == "init":
         return cmd_init(args)
 

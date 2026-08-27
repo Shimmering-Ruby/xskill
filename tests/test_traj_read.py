@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -20,6 +21,11 @@ from xskill.traj_read import (
 )
 
 TOKEN = "secret-token"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_local_bootstrap(monkeypatch):
+    monkeypatch.setattr(cli, "_maybe_bootstrap_local_traj", lambda: None)
 
 
 def _args(**overrides) -> SimpleNamespace:

@@ -116,9 +116,9 @@ def test_bundled_skill_documents_generate():
     assert "teammates" in skill_md
     assert "xskill traj search" in skill_md
     assert "--local" in skill_md
+    assert "xskill init" in skill_md
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md
-    assert "xskill init" not in skill_md
 
     fm, _body = parse(skill_md)
     desc = " ".join(str(fm["description"]).split())
@@ -126,10 +126,29 @@ def test_bundled_skill_documents_generate():
     # description is truncated and the tail never reaches the model.
     assert len(desc) <= 500
     for token in (
-        "connect", "generate", "search", "download", "upload", "import",
-        "traj search", "traj read", "--local", "upgrade", "debug",
+        "init", "connect", "generate", "search", "download", "upload",
+        "import", "traj search", "traj read", "--local", "upgrade", "debug",
     ):
         assert token in desc, f"description missing trigger cue: {token}"
+
+
+def test_install_respects_ecosystem_filter(
+        bundled_skill, install_recorder, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: [
+            {"ecosystem": "claude_code", "source": "/x", "bridge": "/y"},
+            {"ecosystem": "cursor", "source": "/c", "bridge": "/d"},
+        ],
+    )
+
+    installed = install_bundled_xskill_guide(
+        target_root=home, ecosystems=["cursor"],
+    )
+
+    assert installed == ["cursor"]
+    assert [row[0] for row in install_recorder] == ["cursor"]
 
 
 def test_no_detected_ecosystems_prints_skip(

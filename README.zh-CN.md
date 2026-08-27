@@ -124,6 +124,7 @@ macOS / Linux 的原生常驻（launchd / systemd --user）仍在路上，当前
 ### 按需搜索 / 分享技能（skillhub）
 
 ```bash
+xskill init                         # 本机引导：扫描 harness、转换轨迹、可选装 helper
 xskill search docker compose        # 只返回精简元信息和 skill ID
 xskill traj search memory leak      # 搜会话索引（用户首问，不经拆分代理）
 xskill traj read traj_cc_alice      # 按行号读轨迹（带当前与总行号）
@@ -135,7 +136,7 @@ xskill download <skill-id> --agent claude-code --agent codex -y
 xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
 ```
 
-`search` 使用 BM25 关键词+语义向量混合检索、与推荐画像无关；语义服务不可用时自动退化为 BM25。默认只输出精简元信息、排名和 ID，不修改本机；`search --download` 保留原来的 **10 个槽位**滚动淘汰逻辑。`download` 按 ID 持久下载，人类可交互多选 harness，agent/脚本应重复传 `--agent` 并加 `-y`。`upload` 在 server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。`xskill traj search` 搜会话索引里的用户首问（不经拆分代理，查询不打开 md）。`xskill atom search` 搜已拆好的 Atom（带 summary 和行号；粒度可能随版本变化）。人不读原文用 search；读原文用 `xskill traj read`。`--name` 可按工号收窄检索范围。team 读他人轨迹需 server 打开 `allow_read_others`。
+`search` 使用 BM25 关键词+语义向量混合检索、与推荐画像无关；语义服务不可用时自动退化为 BM25。默认只输出精简元信息、排名和 ID，不修改本机；`search --download` 保留原来的 **10 个槽位**滚动淘汰逻辑。`download` 按 ID 持久下载，人类可交互多选 harness，agent/脚本应重复传 `--agent` 并加 `-y`。`upload` 在 server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。`pip install xskill` 之后不必先 connect：第一次 `xskill traj search` 若尚未初始化，会扫描本机 harness、转换成 `~/.xskill/*_sessions` 并建索引。也可以手动跑 `xskill init`（列出 harness、开启轨迹处理、询问要把 `/xskill-helper` 装到哪几个）。连远端团队用 `xskill connect`；自己起服务用 `xskill serve --server`。`xskill traj search` 搜会话索引里的用户首问（不经拆分代理，查询不打开 md）。`xskill atom search` 搜已拆好的 Atom（带 summary 和行号；粒度可能随版本变化）。人不读原文用 search；读原文用 `xskill traj read`。`--name` 可按工号收窄检索范围。team 读他人轨迹需 server 打开 `allow_read_others`。
 
 ## 架构图
 

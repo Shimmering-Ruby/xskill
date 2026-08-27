@@ -123,3 +123,24 @@ xskill search <query> ...        # 不变，只搜 skill，不再看首词
 - `xskill traj list`、`xskill traj stats` 等新操作本期不加，
   只保证命名空间留好位置。
 - 敏感内容脱敏见第四节，以后再说。
+
+## 七、本机未 connect 也可以搜（本期）
+
+只需要本机轨迹时，不必先 `xskill connect`。`pip install xskill` 之后：
+
+- 首次 `xskill traj search`（standalone，或显式 `--local`）若还没有
+  `~/.xskill/local_init.json`，或本机索引仍空，就现场扫描已探测到的
+  harness，把会话转成 `~/.xskill/*_sessions`，并建会话索引。
+- `xskill init` 是同一套本机引导的手动入口：列出扫到的 harness、开启
+  轨迹处理、询问要把 `/xskill-helper` 装到哪几个 harness。不要求
+  server 地址或 token。`-y` 无头全做；`--no-skill` 只扫不装 helper；
+  `--skills-only` 只装 helper。
+- 引导结束会提醒：`xskill connect` 连远端拿共享 skill 和同事轨迹；
+  `xskill serve --server` 自己起团队服务。
+- 已 connect 时默认仍走 team；`--local` 才走本机，并在尚未初始化时
+  补一次扫描。
+- team server 进程所在机器的自动扫描默认跳过，避免把操作员 HOME
+  扫进 serve 仓库。`xskill init` 本身会扫（`skip_if_server=False`）。
+
+以后再说：本机常驻、不靠首次 search 触发的增量采集；把 collector
+后台线程也提供给未 connect 的用户。

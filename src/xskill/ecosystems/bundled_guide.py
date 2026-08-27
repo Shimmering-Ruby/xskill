@@ -43,11 +43,12 @@ def bundled_xskill_source() -> Path:
 
 def install_bundled_xskill_guide(
     target_root: Path | str | None = None,
+    ecosystems: list[str] | None = None,
 ) -> list[str]:
     """把 /xskill-helper 指南装进 ``target_root`` 下已探测到的生态。
 
-    返回成功装上的生态 id 列表。捆绑目录缺失或某个生态安装失败时打印
-    warning，不抛异常。
+    ``ecosystems`` 非空时只装这些 id。返回成功装上的生态 id 列表。
+    捆绑目录缺失或某个生态安装失败时打印 warning，不抛异常。
     """
     root = Path(target_root).expanduser().resolve() if target_root else None
     skill_source = bundled_xskill_source()
@@ -58,17 +59,21 @@ def install_bundled_xskill_guide(
         )
         return []
 
+    wanted = set(ecosystems) if ecosystems else None
     installed_ecosystems: list[str] = []
     for detection in _ecosystems.detect_known_ecosystems(home_root=root):
-        install_fn = _installer_for(detection["ecosystem"])
+        eco = detection["ecosystem"]
+        if wanted is not None and eco not in wanted:
+            continue
+        install_fn = _installer_for(eco)
         if install_fn is None:
             continue
         try:
             install_fn(skill_source, target_root=root, side="main")
-            installed_ecosystems.append(detection["ecosystem"])
+            installed_ecosystems.append(eco)
         except Exception as install_error:  # noqa: BLE001
             print(
-                f"warning: 装到 {detection['ecosystem']} 失败：{install_error}",
+                f"warning: 装到 {eco} 失败：{install_error}",
                 file=sys.stderr,
             )
     if installed_ecosystems:

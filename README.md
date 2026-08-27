@@ -267,6 +267,7 @@ xskill generate --name alice,bob "根据这些用户的成功案例生成数据�
 
 除了 server 按画像推送的Skill,client 还可以主动搜索或下载 server 中的技能:
 ```bash
+xskill init                             # 本机引导：扫描 harness、转换轨迹、可选装 helper
 xskill search <KEYWORDS>       
 xskill traj search <KEYWORDS>           # 搜会话索引（用户首问，不经拆分代理）
 xskill traj read <TRAJ_ID>              # 按行号读轨迹原文（带当前与总行号）
@@ -277,6 +278,8 @@ xskill download <skill-id>          # 交互多选安装 harness, 会持久化�
 xskill download <skill-id> --agent claude-code --agent codex -y   # 非交互式安装到指定harness
 xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
 ```
+
+`pip install` 之后不必先 connect：第一次 `xskill traj search` 会在尚未初始化时扫描本机 harness。也可以手动 `xskill init`。连远端用 `xskill connect`，自己起服务用 `xskill serve --server`。
 
 #### 额外功能：SkillHub支持
  Xskill支持导入skillhub并将海量skill纳入**推荐**和**评价**，

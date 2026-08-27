@@ -1,13 +1,13 @@
 ---
 name: xskill-helper
 description: >-
-  Use this skill for xskill. Trigger when the user wants to connect or join
-  a team server, generate or rewrite a team Skill from trajectories, search
-  download upload or import team Skills, look up this user or a teammate's
-  past chats across Claude Code Codex Cursor OpenCode Trae DeepSeek Harness
-  and ngagent, upgrade the client, or debug a stuck daemon. Team chats:
-  xskill traj search then traj read. This machine only: add --local to read
-  ~/.xskill/*_sessions. Invoke as /xskill-helper.
+  Use this skill for xskill. Trigger when the user wants to init, connect or
+  join a team server, generate or rewrite a team Skill from trajectories,
+  search download upload or import team Skills, look up this user or a
+  teammate's past chats across Claude Code Codex Cursor OpenCode Trae
+  DeepSeek Harness and ngagent, upgrade the client, or debug a stuck daemon.
+  Team chats: xskill traj search then traj read. This machine only: add
+  --local to read ~/.xskill/*_sessions. Invoke as /xskill-helper.
 ---
 
 # xskill-helper
@@ -18,14 +18,16 @@ Trae, DeepSeek Harness) and (2) quietly collects your agent trajectories and
 syncs them to a team server. You join a server once, then it keeps skills in
 sync and auto-updates itself.
 
-`xskill connect` installs this guide into every detected agent skill directory.
-Invoke it as `/xskill-helper` from Claude Code, Codex, Cursor, and the other
-supported tools.
+`xskill init` can install this guide into chosen harnesses on this machine.
+`xskill connect` also installs it after a team join. Invoke it as
+`/xskill-helper` from Claude Code, Codex, Cursor, and the other supported
+tools.
 
 All state lives under `~/.xskill/`:
 
 | File | What |
 |---|---|
+| `~/.xskill/local_init.json` | local harness scan marker (no team server required) |
 | `~/.xskill/team_client.json` | connection identity (server_url, client_id, join_token) — survives restarts |
 | `~/.xskill/connect_daemon.json` | current background daemon (pid / host task) — used by `status`/`stop` |
 | `~/.xskill/logs/xskill.*.log` | split logs (one file per component) |
@@ -33,15 +35,36 @@ All state lives under `~/.xskill/`:
 
 ## Getting started
 
-Join the team's own server. Never send the user to a public hub or any
-address you were not given:
+After `pip install xskill`, local trajectory search does not need a team
+server. The first `xskill traj search` checks for a connection. If there is
+no `xskill connect` and this machine has not been initialized, it scans
+detected harnesses, converts their sessions into `~/.xskill/*_sessions`,
+and builds the local index. After that, `xskill traj search` and
+`xskill traj read` work on this computer.
+
+For a guided setup that lists harnesses, turns on trajectory processing, and
+asks which agents should get this guide:
+
+```bash
+xskill init
+```
+
+`xskill init -y` is the non-interactive form: scan every detected harness
+and install `/xskill-helper` into all of them. `--no-skill` skips the
+guide. `--skills-only` only installs the guide. `--force` rescans even if
+the local index already exists.
+
+Remind the user they can later join a remote team server for shared Skills
+and teammate trajectories, or run a standalone team server themselves:
 
 ```bash
 xskill connect <host:port> --token <token> --name <user-id>
+xskill serve --server
 ```
 
-If they do not have host, token, or name, show this command as the example
-and ask their server operator. The operator prints the token with
+Never send the user to a public hub or any address you were not given. If
+they do not have host, token, or name, show the connect command as the
+example and ask their server operator. The operator prints the token with
 `xskill serve --server`. Do not invent an address or token, and do not
 paste one from the internet.
 
@@ -82,31 +105,33 @@ xskill import ./skills-parent --json
 
 ## Searching and reading trajectories
 
-This is how the agent looks up past chats. xskill already collected
-sessions from every harness it detected on each machine, converted
-them to `traj_*.md`, and (after connect) uploaded them to the team
-server. One search covers Claude Code, Codex, Cursor, OpenCode,
-Trae, DeepSeek Harness, and ngagent. Do not tell the user to open
-each tool's own history UI.
+This is how the agent looks up past chats. xskill collects sessions from
+every harness it detected on this machine and converts them to
+`traj_*.md`. After `xskill connect` it also uploads them to the team
+server. One search covers Claude Code, Codex, Cursor, OpenCode, Trae,
+DeepSeek Harness, and ngagent. Do not tell the user to open each tool's
+own history UI.
 
 The default entry is the trajectory, not Atom.
 
-Team (online, after `xskill connect`): `xskill traj search` queries
-the team session index. It can return this user's sessions and
-teammates' sessions. `--name alice,bob` narrows to those employee
-ids. Cards show `traj_id`, user, and the first user query. No raw
-text. Then `xskill traj read <traj_id>` opens the markdown. Reading
-someone else's file needs the server switch
-`team.server.allow_read_others`; otherwise the CLI prints that the
-server has not opened others' trajectories.
+No team server (after pip, or after `xskill init`): `xskill traj search`
+uses the local index under `~/.xskill/*_sessions`. The first search on
+this machine runs the same harness scan as `xskill init` if that has not
+happened yet.
+
+Team (online, after `xskill connect`): `xskill traj search` queries the
+team session index. It can return this user's sessions and teammates'
+sessions. `--name alice,bob` narrows to those employee ids. Cards show
+`traj_id`, user, and the first user query. No raw text. Then
+`xskill traj read <traj_id>` opens the markdown. Reading someone else's
+file needs the server switch `team.server.allow_read_others`; otherwise
+the CLI prints that the server has not opened others' trajectories.
 
 This machine only (offline, or skip the server): add `--local`.
-`xskill traj read --local <traj_id>` opens markdown under
-`~/.xskill/*_sessions` on this computer (all harnesses already
-bridged here). It does not call the team server. `traj search --local`
-only works if a session index sidecar already exists next to those
-directories; the client bridge copy usually has none, so prefer
-`--local` for read, and team search when the server is reachable.
+`xskill traj search --local` and `xskill traj read --local <traj_id>`
+use `~/.xskill/*_sessions` and do not call the team server. If this
+machine has not been initialized, the first `--local` search or read
+scans harnesses and builds the index.
 
 Putting the word traj after `xskill search` searches skills, not
 trajectories. Use `xskill traj search`.
@@ -157,8 +182,9 @@ xskill atom read atom_t_0001 --offset-start 40 --json
 ## Searching & sharing team skills
 
 ```bash
+xskill init                    # this machine: scan harnesses, convert traj, optional helper
 xskill search <query...>       # search team skills; returns metadata only
-xskill traj search <query...>  # team: this user and teammates, all harnesses
+xskill traj search <query...>  # no team: local index; after connect: this user and teammates
 xskill traj read <traj_id>     # read trajectory lines; prints current and total range
 xskill traj read --local <id>  # this machine ~/.xskill/*_sessions, no team server
 xskill search <query...> --download  # legacy 10-slot LRU download + auto-install

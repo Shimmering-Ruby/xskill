@@ -35,6 +35,12 @@ from tests.test_atom_task_store import _FakeEmbed
 TOKEN = "secret-token"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_local_bootstrap(monkeypatch):
+    """CLI 单测不要去扫真实 HOME 的 harness。"""
+    monkeypatch.setattr(cli, "_maybe_bootstrap_local_traj", lambda: None)
+
+
 def _args(**overrides) -> SimpleNamespace:
     base = {
         "terms": ["django", "migration"],
@@ -885,7 +891,7 @@ def test_bundled_skill_documents_real_traj_search_not_mock():
     assert "name: xskill-helper" in skill_md
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md
-    assert "xskill init" not in skill_md
+    assert "xskill init" in skill_md
     assert "mock" not in skill_md.lower()
 
 
