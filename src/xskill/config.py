@@ -1220,7 +1220,11 @@ def get_team_server_state_path(*, xskill_home: Optional[Path] = None) -> Path:
     return Path(xskill_home).expanduser().resolve() / "team_server.json"
 
 
-def _peek_state_config(xskill_home: Optional[Path] = None) -> dict:
+def _peek_state_config(
+    xskill_home: Optional[Path] = None,
+    *,
+    strict: bool = False,
+) -> dict:
     """只读 state_root/config.yaml，不经 ``get_config()``。
 
     瘦客户端没有 llm.api_key，``get_config()`` 会抛 KeyError。同机隔离只需要
@@ -1234,14 +1238,29 @@ def _peek_state_config(xskill_home: Optional[Path] = None) -> dict:
         return {}
     try:
         data = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except Exception as config_error:
+        if strict:
+            raise ValueError(
+                "state config cannot be read safely"
+            ) from config_error
         return {}
-    return data if isinstance(data, dict) else {}
+    if isinstance(data, dict):
+        return data
+    if strict:
+        raise ValueError("state config must be a mapping")
+    return {}
 
 
-def resolve_local_skill_dir(*, xskill_home: Optional[Path] = None) -> Path:
+def resolve_local_skill_dir(
+    *,
+    xskill_home: Optional[Path] = None,
+    strict_config: bool = False,
+) -> Path:
     """本机 skill 仓路径：走 ``get_skill_dir``，不要求完整 config。"""
-    return get_skill_dir(_peek_state_config(xskill_home), xskill_home=xskill_home)
+    return get_skill_dir(
+        _peek_state_config(xskill_home, strict=strict_config),
+        xskill_home=xskill_home,
+    )
 
 
 def get_team_client_working_dir(*, xskill_home: Optional[Path] = None) -> Path:
@@ -1284,10 +1303,18 @@ def is_team_server_canonical_skill_dir(
         return False
     try:
         req_key = _norm_path_key(skill_dir)
-        canon_key = _norm_path_key(resolve_local_skill_dir(xskill_home=xskill_home))
+        canon_key = _norm_path_key(resolve_local_skill_dir(
+            xskill_home=xskill_home,
+            strict_config=True,
+        ))
         return req_key == canon_key
-    except (OSError, RuntimeError, ValueError):
-        return False
+    except (OSError, RuntimeError, ValueError) as config_error:
+        logger.error(
+            "team server canonical skill dir is uncertain; failing closed "
+            "error_type=%s",
+            type(config_error).__name__,
+        )
+        return True
 
 
 def resolve_team_client_skill_dir(
