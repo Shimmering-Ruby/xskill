@@ -244,6 +244,7 @@ Standalone readiness: `xskill traj search` works out of the box after `pip insta
 
 ## 📰 News
 
+- **2026-08-27** `v0.7.0`: Generate reads trajectories with traj_search, traj_cards, atom_search, and read_traj, and can append to the wiki incrementally; `xskill init` can skip joining a team and will not disconnect an existing client.
 - **2026-08-17** `v0.6.32a1`: Newest trajectories are split and clustered first; admins can hot-change pool seats and LLM weights; generate waiting for an LLM slot always goes first; imported skills that already meet SkillEdit triggers take an edit seat before distilled ones.
 - **2026-08-14** `v0.6.31`: `xskill rebuild --force` no longer dies on a non-empty `.git/objects` directory; a full rebuild keeps skills brought in with `xskill import` and only wipes distilled ones.
 - **2026-08-14** `v0.6.30`: Team `xskill import` pins the skill onto the initiator's recommendation list; the skills library shows a hollow star to pin into your feed, plus whether a skill is already pushed or pinned; imported skills appear in the library list immediately.
