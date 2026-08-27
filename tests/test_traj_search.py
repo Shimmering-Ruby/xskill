@@ -1056,6 +1056,7 @@ def test_team_atom_search_named_dir_uses_real_hybrid_search(tmp_path, monkeypatc
     monkeypatch.setattr(
         "xskill.utils.search.create_embed_client", lambda _cfg=None: _FakeEmbed(),
     )
+    monkeypatch.setattr("xskill.utils.search.load_config", lambda: {})
     response = client.get(
         "/api/v1/team/atoms/search",
         params={"query": "django migration", "limit": 5, "names": "alice,ghost"},

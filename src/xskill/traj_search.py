@@ -12,13 +12,13 @@ import math
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger("xskill.traj_search")
 
 SearchOne = Callable[..., list[dict[str, Any]]]
 SearchAll = Callable[..., list[dict[str, Any]]]
-FindClientId = Callable[[str], str | None]
+FindClientId = Callable[[str], Optional[str]]
 DirNameFor = Callable[[str], str]
 
 _TRAJ_MD_NAME = re.compile(r"^traj_[A-Za-z0-9_-]+\.md$")
