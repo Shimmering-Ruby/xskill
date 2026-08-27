@@ -1,12 +1,14 @@
 ---
 name: xskill-helper
 description: >-
-  How to run, connect, generate, upgrade, debug, and search with the xskill
-  CLI. Use when a user asks how to join their team server, run
-  `xskill generate`, search trajectories with `xskill traj search`,
-  read lines with `xskill traj read`,
-  upgrade, debug a stuck install, or use xskill from Claude Code, Codex,
-  Cursor, or another supported agent via `/xskill-helper`.
+  Let this agent search and read coding-agent chat history for the current
+  user and for teammates, across every collected harness (Claude Code, Codex,
+  Cursor, OpenCode, Trae, DeepSeek Harness, ngagent). Use when the user asks
+  what they or someone else did, wants past sessions, trajectories, or chat
+  history from any of those tools. Team mode: `xskill traj search` then
+  `xskill traj read`. Offline or this machine only: add `--local` to read
+  `~/.xskill/*_sessions` markdown. Also covers connect, generate, upgrade,
+  and debug. Invoke as `/xskill-helper`.
 ---
 
 # xskill-helper
@@ -81,20 +83,51 @@ xskill import ./skills-parent --json
 
 ## Searching and reading trajectories
 
-The default human and agent entry is the trajectory, not Atom.
+This is how the agent looks up past chats. xskill already collected
+sessions from every harness it detected on each machine, converted
+them to `traj_*.md`, and (after connect) uploaded them to the team
+server. One search covers Claude Code, Codex, Cursor, OpenCode,
+Trae, DeepSeek Harness, and ngagent. Do not tell the user to open
+each tool's own history UI.
 
-`xskill traj search` searches the session index, not the raw `traj_*.md`
-files. The query path does not wait for the split agent and does not
-open trajectory files. Cards show `traj_id`, user, and the first user
-query. Putting the word traj after `xskill search` searches skills,
-not trajectories. Use `xskill traj search`.
+The default entry is the trajectory, not Atom.
 
-`xskill traj read` opens one uploaded `traj_*.md` by line number
-(`--offset-start`, `--offset-end`, 1-based half-open). Each reply
-prints the current window and the total window. One call returns at
-most 200 lines. Team mode defaults to the caller's own employee
-directory; reading someone else's trajectory needs the server switch
-`team.server.allow_read_others`.
+Team (online, after `xskill connect`): `xskill traj search` queries
+the team session index. It can return this user's sessions and
+teammates' sessions. `--name alice,bob` narrows to those employee
+ids. Cards show `traj_id`, user, and the first user query. No raw
+text. Then `xskill traj read <traj_id>` opens the markdown. Reading
+someone else's file needs the server switch
+`team.server.allow_read_others`; otherwise the CLI prints that the
+server has not opened others' trajectories.
+
+This machine only (offline, or skip the server): add `--local`.
+`xskill traj read --local <traj_id>` opens markdown under
+`~/.xskill/*_sessions` on this computer (all harnesses already
+bridged here). It does not call the team server. `traj search --local`
+only works if a session index sidecar already exists next to those
+directories; the client bridge copy usually has none, so prefer
+`--local` for read, and team search when the server is reachable.
+
+Putting the word traj after `xskill search` searches skills, not
+trajectories. Use `xskill traj search`.
+
+`xskill traj read` takes `--offset-start` and `--offset-end`
+(1-based, half-open). Each reply prints the current window and the
+total window. One call returns at most 200 lines.
+
+Local harness directories (this machine):
+
+| Harness | Bridged markdown |
+|---|---|
+| Claude Code | `~/.xskill/cc_sessions/traj_*.md` |
+| Codex | `~/.xskill/codex_sessions/traj_*.md` |
+| Cursor | `~/.xskill/cursor_sessions/traj_*.md` |
+| OpenCode | `~/.xskill/opencode_sessions/traj_*.md` |
+| ngagent | `~/.xskill/ngagent_sessions/traj_*.md` |
+| nga3 | `~/.xskill/nga3_sessions/traj_*.md` |
+| Trae | `~/.xskill/trae_sessions/traj_*.md` |
+| DeepSeek Harness | `~/.xskill/dsh_sessions/traj_*.md` |
 
 ```bash
 xskill traj search 内存泄漏
@@ -102,11 +135,13 @@ xskill traj search "alembic 半迁移" -k 8
 xskill traj search --name alice,bob 发票核对 --json
 xskill traj read traj_cc_alice_memleak
 xskill traj read traj_cc_alice_memleak --offset-start 12 --offset-end 88
+xskill traj read --local traj_cc_alice_memleak
+xskill traj read --local traj_cc_alice_memleak --offset-start 12 --offset-end 88
 ```
 
-`--name` only applies in team mode. Search does not download files or
-return raw text. Paste a `traj_id` into `xskill generate` when you
-want the instruction to name the evidence. Do not print server paths.
+`--name` only applies in team mode. Search does not download files.
+Paste a `traj_id` into `xskill generate` when the instruction should
+name the evidence. Do not print server paths.
 
 ## Advanced: atoms
 
@@ -124,8 +159,9 @@ xskill atom read atom_t_0001 --offset-start 40 --json
 
 ```bash
 xskill search <query...>       # search team skills; returns metadata only
-xskill traj search <query...>  # search session index (first user query, no split agent)
+xskill traj search <query...>  # team: this user and teammates, all harnesses
 xskill traj read <traj_id>     # read trajectory lines; prints current and total range
+xskill traj read --local <id>  # this machine ~/.xskill/*_sessions, no team server
 xskill search <query...> --download  # legacy 10-slot LRU download + auto-install
 xskill download <skill-id>     # persist one result; interactively select harnesses
 xskill download <skill-id> --agent claude-code --agent codex -y  # for agents/scripts

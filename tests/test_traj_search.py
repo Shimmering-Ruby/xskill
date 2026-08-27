@@ -27,6 +27,7 @@ from xskill.traj_search import (
     search_indexed_trajectories,
     search_session_trajectories,
     upsert_session_file,
+    watch_session_dirs,
 )
 from xskill.utils.search import HybridSearch
 from tests.test_atom_task_store import _FakeEmbed
@@ -371,6 +372,32 @@ def test_search_session_ignores_md_until_indexed(tmp_path):
         dataset_dirs=[("alice", alice)],
     )
     assert hits[0]["traj_id"] == "traj_cc_alice_memleak"
+
+
+def test_watch_session_dirs_includes_harness_bridge(tmp_path, monkeypatch):
+    home = tmp_path / ".xskill"
+    sessions = home / "cc_sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "traj_cc_offline.md").write_text("hello\n", encoding="utf-8")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", home)
+    monkeypatch.setattr("xskill.pipeline.registry.list_watch_dirs", lambda: [])
+    dirs = watch_session_dirs()
+    assert [(label, path) for label, path in dirs] == [("cc_sessions", sessions)]
+
+
+def test_watch_session_dirs_dedupes_registry_and_bridge(tmp_path, monkeypatch):
+    home = tmp_path / ".xskill"
+    sessions = home / "cc_sessions"
+    sessions.mkdir(parents=True)
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", home)
+    monkeypatch.setattr(
+        "xskill.pipeline.registry.list_watch_dirs",
+        lambda: [{"path": str(sessions), "label": "alice"}],
+    )
+    dirs = watch_session_dirs()
+    assert [(label, path.resolve()) for label, path in dirs] == [
+        ("alice", sessions.resolve()),
+    ]
 
 
 def test_refresh_session_index_drops_deleted(tmp_path):
@@ -851,6 +878,10 @@ def test_bundled_skill_documents_real_traj_search_not_mock():
     assert "xskill atom read" in skill_md
     assert "xskill search traj" not in skill_md
     assert "xskill read traj" not in skill_md
+    assert "--local" in skill_md
+    assert "~/.xskill/cc_sessions" in skill_md
+    assert "teammates" in skill_md
+    assert "Claude Code" in skill_md
     assert "name: xskill-helper" in skill_md
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md

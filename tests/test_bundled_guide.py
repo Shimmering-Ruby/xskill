@@ -112,6 +112,9 @@ def test_bundled_skill_documents_generate():
     assert "xskill connect" in skill_md
     assert "name: xskill-helper" in skill_md
     assert "/xskill-helper" in skill_md
+    assert "teammates" in skill_md
+    assert "xskill traj search" in skill_md
+    assert "--local" in skill_md
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md
     assert "xskill init" not in skill_md
