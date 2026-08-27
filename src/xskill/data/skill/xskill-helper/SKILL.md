@@ -114,24 +114,33 @@ own history UI.
 
 The default entry is the trajectory, not Atom.
 
-No team server (after pip, or after `xskill init`): `xskill traj search`
-uses the local index under `~/.xskill/*_sessions`. The first search on
-this machine runs the same harness scan as `xskill init` if that has not
-happened yet.
+`xskill traj search` is full-text over `traj_*.md`, not the first-user-query
+index. Default listing is one block per hit: `traj_id`, then the first
+match with three lines before and after (the hit line is marked `*`).
+Same-name prefixes are spread. A page shows at most 30 hits. `--page N`
+turns the page. `--cards` returns index cards (source, line count, user
+turns, tools, then `L 问` / `L 答`), at most 8 per page; cards are not
+close reading. Close-read with
+`xskill traj read <traj_id> --offset-start <L from the card>`.
 
-Team (online, after `xskill connect`): `xskill traj search` queries the
-team session index. It can return this user's sessions and teammates'
-sessions. `--name alice,bob` narrows to those employee ids. Cards show
-`traj_id`, user, and the first user query. No raw text. Then
-`xskill traj read <traj_id>` opens the markdown. Reading someone else's
-file needs the server switch `team.server.allow_read_others`; otherwise
-the CLI prints that the server has not opened others' trajectories.
+No team server (after pip, or after `xskill init`): search reads
+`~/.xskill/*_sessions`. The first search on this machine runs the same
+harness scan as `xskill init` if that has not happened yet.
+
+Team (online, after `xskill connect`): search reads uploaded
+`traj_*.md` this user and teammates can see. `--name alice,bob`
+narrows to those employee ids. Reading someone else's file needs the
+server switch `team.server.allow_read_others`; otherwise the CLI
+prints that the server has not opened others' trajectories.
 
 This machine only (offline, or skip the server): add `--local`.
 `xskill traj search --local` and `xskill traj read --local <traj_id>`
 use `~/.xskill/*_sessions` and do not call the team server. If this
 machine has not been initialized, the first `--local` search or read
-scans harnesses and builds the index.
+scans harnesses and converts sessions. `--local` also prints the
+concrete `*_sessions` directories. After that, grep those folders
+with this harness's own search tools (`traj_*.md`); do not invent a
+server path.
 
 Putting the word traj after `xskill search` searches skills, not
 trajectories. Use `xskill traj search`.
@@ -155,7 +164,10 @@ Local harness directories (this machine):
 
 ```bash
 xskill traj search 内存泄漏
-xskill traj search "alembic 半迁移" -k 8
+xskill traj search patentdagger --page 2
+xskill traj search patentdagger --cards
+xskill traj search --cards traj_cc_patentdagger_43773fc8
+xskill traj search "alembic 半迁移" --cards --page 2
 xskill traj search --name alice,bob 发票核对 --json
 xskill traj read traj_cc_alice_memleak
 xskill traj read traj_cc_alice_memleak --offset-start 12 --offset-end 88

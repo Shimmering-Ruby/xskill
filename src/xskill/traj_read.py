@@ -1,8 +1,7 @@
-"""按行号读轨迹原文：``xskill traj read`` 与 ``xskill atom read``。
+"""历史会话轨迹与 Atom 原文按行读取模块。
 
-行号是 1-based 半开区间 ``[start, end)``，和 Atom、atom search 卡片一致。
-每次最多 ``TRAJ_READ_MAX_LINES`` 行。返回里带当前窗口和总窗口，
-对外字段不含路径。
+支持按 1-based 行号区间读取已归档会话轨迹或指定 Atom 对应的原始会话内容，
+单次最大支持读取 TRAJ_READ_MAX_LINES 行，并返回当前阅读窗口与总行号区间。
 """
 from __future__ import annotations
 
@@ -36,7 +35,7 @@ def _as_offset(value: Any) -> int | None:
 def parse_read_offsets(
     offset_start: Any, offset_end: Any,
 ) -> tuple[int | None, int | None, str | None]:
-    """解析用户传入的行号。不合法时返回错误中文。"""
+    """解析并校验传入的起止行号，返回有效的整数区间或错误提示。"""
     start = _as_offset(offset_start)
     end = _as_offset(offset_end)
     if offset_start not in (None, "") and start is None:
@@ -56,7 +55,7 @@ def find_traj_md(
     traj_id: str,
     dataset_dirs: list[tuple[str, Path]] | None = None,
 ) -> tuple[str, Path] | None:
-    """在 sessions 目录里找 ``<traj_id>.md``。只做直查，不递归。"""
+    """在指定会话目录中查找对应的轨迹 Markdown 文件。"""
     if not is_safe_read_id(traj_id):
         return None
     dirs = dataset_dirs if dataset_dirs is not None else watch_session_dirs()
@@ -72,7 +71,7 @@ def find_atom_record(
     atom_id: str,
     dataset_dirs: list[tuple[str, Path]] | None = None,
 ) -> tuple[str, Any, Path] | None:
-    """在 sessions 目录的 AtomTaskStore 里找 atom。返回工号、atom、目录。"""
+    """在指定会话目录的存储中查找对应的 Atom 记录。"""
     if not is_safe_read_id(atom_id):
         return None
     from xskill.pipeline.atom import AtomTaskStore
@@ -127,7 +126,7 @@ def read_md_lines(
     bound_end: int | None = None,
     max_lines: int = TRAJ_READ_MAX_LINES,
 ) -> dict[str, Any]:
-    """读 md 的一行窗口。一次顺序扫描，只留当前页。"""
+    """按指定行号范围读取 Markdown 文件内容，并计算分页与截断状态。"""
     known_bound = bound_start is not None and bound_end is not None
     if known_bound:
         page_start, page_end, _truncated = _page_window(

@@ -1092,29 +1092,75 @@ def _team_read_session_dirs(
 
 @router.get("/trajectories/search")
 def team_trajectories_search(
-    query: str,
-    limit: int = 5,
+    query: str = "",
+    limit: int = 30,
+    page: int = 1,
     names: str = "",
+    cards: str = "",
+    ids: str = "",
     x_xskill_token: str | None = Header(default=None),
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
 ) -> dict:
-    """搜已上传的 ``traj_*.md``（BM25，不经拆分代理）。"""
+    """全文检索已上传轨迹；cards=1 时返回卡片文本。"""
     _auth(x_xskill_token, x_xskill_client, x_xskill_version)
     cleaned = (query or "").strip()
-    if not cleaned:
+    id_list = [part for part in str(ids or "").replace(",", " ").split() if part]
+    want_cards = str(cards or "").strip().lower() in {"1", "true", "yes"}
+    if not cleaned and not id_list:
         raise HTTPException(status_code=400, detail="empty query")
-    bounded_limit = max(1, min(int(limit), 20))
-    from xskill.traj_search import search_session_trajectories, session_corpus_empty
+    bounded_page = max(1, int(page or 1))
+    from xskill.traj_browse import (
+        CARDS_MAX,
+        LIST_PAGE,
+        find_query_hits,
+        format_cards,
+        iter_traj_md,
+        listing_rows,
+        page_slice,
+    )
 
     name_list, dataset_dirs, unknown = _team_search_session_dirs(names)
+    dirs = dataset_dirs if dataset_dirs is not None else []
+    if id_list and not want_cards:
+        raise HTTPException(status_code=400, detail="ids requires cards=1")
     try:
-        if name_list and not dataset_dirs:
-            results = []
+        if id_list:
+            ordered_ids = id_list
+            matches = []
+        elif name_list and not dirs:
+            ordered_ids = []
+            matches = []
         else:
-            results = search_session_trajectories(
-                cleaned, top_k=bounded_limit, dataset_dirs=dataset_dirs,
+            matches = find_query_hits(cleaned, dataset_dirs=dirs)
+            ordered_ids = [hit.traj_id for hit in matches]
+        if want_cards:
+            size = CARDS_MAX
+            shown_ids = page_slice(ordered_ids, bounded_page, size)
+            leftover = max(
+                0, len(ordered_ids) - ((bounded_page - 1) * size + len(shown_ids)),
             )
+            text = format_cards(
+                shown_ids, dataset_dirs=dirs, leftover=leftover,
+                query=cleaned, page=bounded_page,
+            )
+            return {
+                "text": text,
+                "results": [{"traj_id": item} for item in shown_ids],
+                "count": len(shown_ids),
+                "meta": {
+                    "unknown_names": unknown,
+                    "total": len(ordered_ids),
+                    "page": bounded_page,
+                    "page_size": size,
+                    "corpus_empty": (
+                        False if name_list and not dirs
+                        else not list(iter_traj_md(dirs))
+                    ),
+                },
+            }
+        size = max(1, min(int(limit or LIST_PAGE), LIST_PAGE))
+        shown = listing_rows(page_slice(matches, bounded_page, size))
     except Exception:
         request_id = f"traj-search-{secrets.token_hex(8)}"
         server_logger.exception(
@@ -1126,12 +1172,16 @@ def team_trajectories_search(
             detail="trajectory search failed",
         ) from None
     return {
-        "results": results,
-        "count": len(results),
+        "results": shown,
+        "count": len(shown),
         "meta": {
             "unknown_names": unknown,
+            "total": len(matches),
+            "page": bounded_page,
+            "page_size": size,
             "corpus_empty": (
-                False if unknown else session_corpus_empty(dataset_dirs)
+                False if name_list and not dirs
+                else not list(iter_traj_md(dirs))
             ),
         },
     }
@@ -1146,7 +1196,7 @@ def team_atoms_search(
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
 ) -> dict:
-    """搜已拆好的 Atom（向量 + BM25）。同步 def：内部 embedding 是同步 HTTP。"""
+    """检索团队成员已提取的原子任务（向量与 BM25 混合检索）。"""
     _auth(x_xskill_token, x_xskill_client, x_xskill_version)
     cleaned = (query or "").strip()
     if not cleaned:
@@ -1255,7 +1305,7 @@ def team_trajectories_read(
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
 ) -> dict:
-    """按行号读已上传的 ``traj_*.md``。同步 def，只读当前页。"""
+    """按行号范围读取已上传的会话轨迹 Markdown 原文内容。"""
     client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
     cleaned = (traj_id or "").strip()
     if not cleaned:
@@ -1280,7 +1330,7 @@ def team_atoms_read(
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
 ) -> dict:
-    """按 Atom 行号窗口读对应轨迹原文。同步 def。"""
+    """按 Atom 对应的行号区间读取轨迹原文内容。"""
     client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
     cleaned = (atom_id or "").strip()
     if not cleaned:

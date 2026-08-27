@@ -116,12 +116,8 @@ def test_local_traj_search_bootstraps_once(monkeypatch):
         lambda: boot.append(True),
     )
     monkeypatch.setattr(
-        "xskill.traj_search.search_session_trajectories",
-        lambda query, top_k=5, **kwargs: [],
-    )
-    monkeypatch.setattr(
-        "xskill.traj_search.session_corpus_empty",
-        lambda: True,
+        "xskill.traj_browse.find_query_hits",
+        lambda query, **kwargs: [],
     )
     monkeypatch.setattr(cli, "_write_search_output", lambda *a, **k: None)
 

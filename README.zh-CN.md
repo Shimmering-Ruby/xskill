@@ -99,7 +99,7 @@ xskill serve --server                                          # 启动后打印
 xskill connect <host:port> --token <token> --name <user-id>
 ```
 
-connect 成功后，在 Claude Code、Codex、Cursor 等已探测到的 agent 里输入 `/xskill-helper`，即可查 generate、search 等用法。没有地址和 token 时，把上面的 connect 当示例，向自己的 server 管理员要参数，不要连外网公开实例。
+connect 成功后，使用指南会自动安装至已探测到的 Claude Code、Codex、Cursor 等 agent。在对应 agent 里输入 `/xskill-helper`，即可查阅 generate、search 等命令用法。如尚未获取地址与 token，可向团队的 server 管理员申请。
 
 - **无感蒸馏大佬员工** 一个人在自己工作里跑通的解法，自动可以让全团队复用，不需要任何人做任何事。（能力民主化）
 - **兼容各种 coding 方式** 用 codex、clade 还是 cursor IDE？ 都能加入，多端同步。
@@ -121,22 +121,34 @@ xskill stop / xskill start                     # 停止 / 重新拉起(需先 co
 
 macOS / Linux 的原生常驻（launchd / systemd --user）仍在路上，当前用自己的 init 系统托管 `xskill connect --foreground` 即可。
 
-### 按需搜索 / 分享技能（skillhub）
+### 技能检索与共享（SkillHub）
+
+除了由服务端按画像自动推荐，也可以主动检索、下载或发布技能：
 
 ```bash
-xskill init                         # 本机引导：扫描 harness、转换轨迹、可选装 helper
-xskill search docker compose        # 只返回精简元信息和 skill ID
-xskill traj search memory leak      # 搜会话索引（用户首问，不经拆分代理）
-xskill traj read traj_cc_alice      # 按行号读轨迹（带当前与总行号）
-xskill atom search memory leak      # 搜已拆 Atom（粒度可能随版本变化）
-xskill atom read atom_t_0001        # 按行号读 Atom（带当前与总行号）
-xskill search docker --download     # 命中写入 10 槽 LRU 并自动安装
-xskill download <skill-id>          # 交互多选安装 harness
-xskill download <skill-id> --agent claude-code --agent codex -y
-xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
+xskill search <关键词>                                        # 检索技能库，返回匹配技能与 ID
+xskill download <skill-id>                                  # 交互式多选目标 agent 进行安装
+xskill download <skill-id> --agent claude-code --agent codex -y  # 非交互安装至指定 agent
+xskill upload ./my-skill                                    # 打包上传技能目录，团队立即可见
+xskill search <关键词> --download                            # 临时试用：下载至本地轮转槽位并自动安装
 ```
 
-`search` 使用 BM25 关键词+语义向量混合检索、与推荐画像无关；语义服务不可用时自动退化为 BM25。默认只输出精简元信息、排名和 ID，不修改本机；`search --download` 保留原来的 **10 个槽位**滚动淘汰逻辑。`download` 按 ID 持久下载，人类可交互多选 harness，agent/脚本应重复传 `--agent` 并加 `-y`。`upload` 在 server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。`pip install xskill` 之后不必先 connect：第一次 `xskill traj search` 若尚未初始化，会扫描本机 harness、转换成 `~/.xskill/*_sessions` 并建索引。也可以手动跑 `xskill init`（列出 harness、开启轨迹处理、询问要把 `/xskill-helper` 装到哪几个）。连远端团队用 `xskill connect`；自己起服务用 `xskill serve --server`。`xskill traj search` 搜会话索引里的用户首问（不经拆分代理，查询不打开 md）。`xskill atom search` 搜已拆好的 Atom（带 summary 和行号；粒度可能随版本变化）。人不读原文用 search；读原文用 `xskill traj read`。`--name` 可按工号收窄检索范围。team 读他人轨迹需 server 打开 `allow_read_others`。
+`search` 默认采用关键词与语义向量混合检索；`download` 会将指定技能持久化安装并跟随更新；`upload` 支持将本地编写的 `SKILL.md` 目录一键分享给团队。
+
+### 历史会话与轨迹检索
+
+遇到复杂问题时，可直接检索团队或本机的历史 coding 会话（轨迹）与原子任务（Atom），快速找到相关解决过程与排查命令：
+
+```bash
+xskill traj search "内存泄漏"                                # 检索相关历史会话轨迹
+xskill traj search --name alice,bob "内存泄漏"                # 限定检索特定成员的轨迹
+xskill traj read <traj_id> --offset-start 1 --offset-end 100 # 按行号分段阅读会话原文
+
+xskill atom search "OAuth token 刷新"                       # 检索提炼出的原子任务片段
+xskill atom read <atom_id>                                  # 按行号阅读指定 Atom 的会话片段
+```
+
+单机开箱即用：`pip install xskill` 之后无需连接 server 即可通过 `xskill traj search` 检索本机各 agent 会话，首次使用会自动扫描已支持的 agent 并建立本地索引，也可以执行 `xskill init` 进行交互式环境扫描与引导。已连接团队服务时，默认检索团队库，添加 `--local` 可强制检索本机。
 
 ## 架构图
 

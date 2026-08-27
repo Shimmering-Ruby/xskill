@@ -210,6 +210,7 @@ def test_cli_read_traj_local_prints_ranges(monkeypatch, capsys, tmp_path):
     sessions = tmp_path / "alice" / "sessions"
     _write_lines(sessions / "traj_cc_alice_memleak.md", 5)
     monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", tmp_path / ".xskill")
     monkeypatch.setattr(
         "xskill.traj_read.watch_session_dirs",
         lambda: [("alice", sessions)],
@@ -237,6 +238,8 @@ def test_cli_read_traj_local_reads_harness_bridge(monkeypatch, capsys, tmp_path)
     assert "当前行号：L2-L4" in out
     assert "L2" in out
     assert "L3" in out
+    assert "本机轨迹原文目录如下，可用本 harness 的 grep 直接搜里面的 traj_*.md：" in out
+    assert str(sessions) in out
 
 
 def test_cli_read_atom_missing_id_errors(capsys):

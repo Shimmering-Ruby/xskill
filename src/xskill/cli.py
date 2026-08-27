@@ -1201,6 +1201,27 @@ def _clip_search_description(text: str) -> str:
     return description
 
 
+def _traj_search_extra_flags(args) -> str:
+    if getattr(args, "local", False):
+        return "--local"
+    return ""
+
+
+def _render_traj_search_lines(
+    hits: list[dict], query: str, *, meta: dict | None = None, extra_flags: str = "",
+) -> None:
+    from xskill.traj_browse import format_listing
+
+    info = meta or {}
+    total = int(info.get("total") if info.get("total") is not None else len(hits))
+    page = int(info.get("page") or 1)
+    page_size = int(info.get("page_size") or max(len(hits), 1))
+    _write_search_output(format_listing(
+        query, hits, total=total, page=page, page_size=page_size,
+        extra_flags=extra_flags,
+    ))
+
+
 def _traj_match_line(hit: dict) -> str:
     labels: list[str] = []
     for item in hit.get("sources") or []:
@@ -1226,22 +1247,20 @@ def _render_search_kind_hits(
             "warning: 未识别工号 " + "、".join(unknown),
             to_stderr=True,
         )
+    if kind != "atom":
+        _render_traj_search_lines(
+            hits, query, meta=meta, extra_flags=str((meta or {}).get("extra_flags") or ""),
+        )
+        return
     if not hits:
         if (meta or {}).get("corpus_empty"):
-            if kind == "atom":
-                _write_search_output(
-                    "Atom 索引尚未建成，或指定工号还没有可搜目录",
-                )
-            else:
-                _write_search_output(
-                    "轨迹检索索引尚未建成，或还没有已上传的轨迹",
-                )
-        elif kind == "atom":
-            _write_search_output(f"Atom 无匹配：{query}")
+            _write_search_output(
+                "Atom 索引尚未建成，或指定工号还没有可搜目录",
+            )
         else:
-            _write_search_output(f"轨迹无匹配：{query}")
+            _write_search_output(f"Atom 无匹配：{query}")
         return
-    count_label = f"找到 {len(hits)} 个 Atom" if kind == "atom" else f"找到 {len(hits)} 条轨迹"
+    count_label = f"找到 {len(hits)} 个 Atom"
     output_lines = [
         f"搜索：{query}",
         count_label,
@@ -1250,25 +1269,21 @@ def _render_search_kind_hits(
     for index, hit in enumerate(hits, start=1):
         if index > 1:
             output_lines.append("-" * 64)
-        if kind == "atom":
-            title = (
-                hit.get("intent")
-                or hit.get("summary")
-                or hit.get("traj_id")
-                or "(unnamed)"
-            )
-            description = hit.get("summary") or ""
-        else:
-            title = hit.get("query") or hit.get("traj_id") or "(unnamed)"
-            description = hit.get("query") or ""
+        title = (
+            hit.get("intent")
+            or hit.get("summary")
+            or hit.get("traj_id")
+            or "(unnamed)"
+        )
+        description = hit.get("summary") or ""
         output_lines.append(f"[{index}/{len(hits)}] {title}")
         output_lines.append(f"轨迹 ID：{hit.get('traj_id') or '-'}")
         output_lines.append(f"工号：{hit.get('user') or '（未知）'}")
-        if kind == "atom" and hit.get("atom_id"):
+        if hit.get("atom_id"):
             output_lines.append(f"Atom ID：{hit['atom_id']}")
         start = hit.get("offset_start")
         end = hit.get("offset_end")
-        if kind == "atom" and (start is not None or end is not None):
+        if start is not None or end is not None:
             output_lines.append(f"行号：L{start}-L{end}")
         output_lines.append(
             f"描述：{_clip_search_description(description) or '（无描述）'}"
@@ -1279,6 +1294,30 @@ def _render_search_kind_hits(
             output_lines.append("用过：" + "、".join(used))
     output_lines.append("=" * 64)
     _write_search_output("\n".join(output_lines))
+
+
+def _local_traj_md_hint() -> str:
+    """``--local`` 时告诉 agent 本机 traj_*.md 在哪，方便用 harness 自带 grep。"""
+    from xskill.traj_search import iter_local_bridge_session_dirs
+
+    directories = [
+        str(path) for _label, path in iter_local_bridge_session_dirs()
+        if path.is_dir()
+    ]
+    if not directories:
+        return (
+            "本机还没有 ~/.xskill/*_sessions。"
+            "可先 xskill init，再用本 harness 的 grep 搜这些目录里的 traj_*.md。"
+        )
+    lines = [
+        "本机轨迹原文目录如下，可用本 harness 的 grep 直接搜里面的 traj_*.md：",
+    ]
+    lines.extend(f"  {directory}" for directory in directories)
+    return "\n".join(lines)
+
+
+def _write_local_traj_md_hint(*, json_mode: bool) -> None:
+    _write_search_output(_local_traj_md_hint(), to_stderr=json_mode)
 
 
 def _maybe_bootstrap_local_traj() -> None:
@@ -1322,42 +1361,54 @@ def cmd_search_atom(args, http=None, headers=None) -> int:
 def _cmd_search_kind(args, *, kind: str, http=None, headers=None) -> int:
     from xskill.traj_search import parse_search_names
 
-    query = " ".join(getattr(args, "terms", None) or []).strip()
+    terms = [str(item) for item in (getattr(args, "terms", None) or []) if item]
+    cards = bool(getattr(args, "cards", False)) if kind == "traj" else False
+    id_mode = bool(cards and terms and all(item.startswith("traj_") for item in terms))
+    query = "" if id_mode else " ".join(terms).strip()
     usage = "xskill atom search <query>" if kind == "atom" else "xskill traj search <query>"
-    if not query:
+    if not query and not id_mode:
         _write_search_output(f"error: 用法 {usage}", to_stderr=True)
+        return 2
+    page = int(getattr(args, "page", 1) or 1)
+    if page < 1:
+        _write_search_output("error: --page 从 1 起", to_stderr=True)
         return 2
     names = parse_search_names(getattr(args, "name", "") or "")
     force_team = getattr(args, "team", False)
     force_local = getattr(args, "local", False)
+    extra = _traj_search_extra_flags(args) if kind == "traj" else ""
     if force_local:
         return _cmd_search_kind_local(
             query, kind=kind, top_k=args.top_k, json_mode=args.json, names=names,
+            announce_local_dirs=True, cards=cards, page=page, card_ids=terms if id_mode else None,
+            extra_flags=extra,
         )
     if force_team:
         return _cmd_search_kind_team(
             query, kind=kind, args=args, http=http, headers=headers, names=names,
+            cards=cards, page=page, card_ids=terms if id_mode else None,
         )
     from xskill.runtime import role
     if role() == "client":
         return _cmd_search_kind_team(
             query, kind=kind, args=args, http=http, headers=headers, names=names,
+            cards=cards, page=page, card_ids=terms if id_mode else None,
         )
     return _cmd_search_kind_local(
         query, kind=kind, top_k=args.top_k, json_mode=args.json, names=names,
+        cards=cards, page=page, card_ids=terms if id_mode else None,
+        extra_flags=extra,
     )
 
 
 def _cmd_search_kind_local(
     query: str, *, kind: str, top_k: int, json_mode: bool, names: list[str],
+    announce_local_dirs: bool = False, cards: bool = False, page: int = 1,
+    card_ids: list[str] | None = None, extra_flags: str = "",
 ) -> int:
     import json as _json
 
-    from xskill.traj_search import (
-        search_indexed_atoms,
-        search_session_trajectories,
-        session_corpus_empty,
-    )
+    from xskill.traj_search import search_indexed_atoms
 
     if names:
         _write_search_output(
@@ -1366,33 +1417,98 @@ def _cmd_search_kind_local(
         )
     if kind == "traj":
         _maybe_bootstrap_local_traj()
+        return _cmd_search_traj_local(
+            query, json_mode=json_mode, cards=cards, page=page,
+            card_ids=card_ids, extra_flags=extra_flags,
+            announce_local_dirs=announce_local_dirs, top_k=top_k,
+        )
     try:
-        if kind == "atom":
-            hits = search_indexed_atoms(query, top_k=top_k)
-        else:
-            hits = search_session_trajectories(query, top_k=top_k)
+        hits = search_indexed_atoms(query, top_k=top_k)
     except Exception as search_error:
-        label = "Atom" if kind == "atom" else "轨迹"
         _write_search_output(
-            f"error: 本地{label}检索失败（{type(search_error).__name__}）",
+            f"error: 本地Atom检索失败（{type(search_error).__name__}）",
             to_stderr=True,
         )
         return 1
     if json_mode:
         _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
         return 0
-    if kind == "atom":
-        from xskill.pipeline.registry import all_index_paths
+    from xskill.pipeline.registry import all_index_paths
 
-        meta = {"corpus_empty": not hits and not all_index_paths()}
-    else:
-        meta = {"corpus_empty": not hits and session_corpus_empty()}
-    _render_search_kind_hits(hits, query, kind=kind, meta=meta)
+    meta = {"corpus_empty": not hits and not all_index_paths()}
+    _render_search_kind_hits(hits, query, kind="atom", meta=meta)
+    return 0
+
+
+def _cmd_search_traj_local(
+    query: str, *, json_mode: bool, cards: bool, page: int,
+    card_ids: list[str] | None, extra_flags: str,
+    announce_local_dirs: bool, top_k: int,
+) -> int:
+    import json as _json
+
+    from xskill.traj_browse import (
+        CARDS_MAX,
+        LIST_PAGE,
+        find_query_hits,
+        format_cards,
+        listing_rows,
+        page_slice,
+        format_listing,
+    )
+
+    try:
+        if card_ids:
+            ordered_ids = list(card_ids)
+            matches = []
+        else:
+            matches = find_query_hits(query)
+            ordered_ids = [hit.traj_id for hit in matches]
+        if cards:
+            size = CARDS_MAX
+            shown_ids = page_slice(ordered_ids, page, size)
+            leftover = max(0, len(ordered_ids) - ((page - 1) * size + len(shown_ids)))
+            text = format_cards(
+                shown_ids, leftover=leftover, query=query,
+                page=page, extra_flags=extra_flags,
+            )
+            if json_mode:
+                _write_search_output(_json.dumps(
+                    {"text": text, "traj_ids": shown_ids, "page": page, "total": len(ordered_ids)},
+                    ensure_ascii=True, indent=2,
+                ))
+            else:
+                _write_search_output(text)
+        else:
+            if card_ids:
+                _write_search_output(
+                    "error: 指定 traj_id 时请加 --cards",
+                    to_stderr=True,
+                )
+                return 2
+            size = max(1, min(int(top_k or LIST_PAGE), LIST_PAGE))
+            shown = listing_rows(page_slice(matches, page, size))
+            if json_mode:
+                _write_search_output(_json.dumps(shown, ensure_ascii=True, indent=2))
+            else:
+                _write_search_output(format_listing(
+                    query, shown, total=len(matches), page=page, page_size=size,
+                    extra_flags=extra_flags,
+                ))
+    except Exception as search_error:
+        _write_search_output(
+            f"error: 本地轨迹检索失败（{type(search_error).__name__}）",
+            to_stderr=True,
+        )
+        return 1
+    if announce_local_dirs:
+        _write_local_traj_md_hint(json_mode=json_mode)
     return 0
 
 
 def _cmd_search_kind_team(
     query: str, *, kind: str, args, http=None, headers=None, names: list[str],
+    cards: bool = False, page: int = 1, card_ids: list[str] | None = None,
 ) -> int:
     import json as _json
     import httpx
@@ -1401,7 +1517,13 @@ def _cmd_search_kind_team(
         http, headers = _team_client_http_and_headers()
         if http is None:
             return 1
-    params = {"query": query, "limit": args.top_k}
+    params: dict[str, object] = {"query": query, "limit": args.top_k}
+    if kind == "traj":
+        params["page"] = page
+        if cards:
+            params["cards"] = "1"
+        if card_ids:
+            params["ids"] = ",".join(card_ids)
     if names:
         params["names"] = ",".join(names)
     path = (
@@ -1435,7 +1557,18 @@ def _cmd_search_kind_team(
     hits = payload.get("results") or []
     meta = payload.get("meta") or {}
     if args.json:
-        _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
+        if kind == "traj" and payload.get("text"):
+            _write_search_output(_json.dumps(payload, ensure_ascii=True, indent=2))
+        else:
+            _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
+        return 0
+    if kind == "traj" and payload.get("text"):
+        _write_search_output(str(payload["text"]))
+        return 0
+    if kind == "traj":
+        meta = dict(meta)
+        meta["extra_flags"] = ""
+        _render_search_kind_hits(hits, query, kind=kind, meta=meta)
         return 0
     _render_search_kind_hits(hits, query, kind=kind, meta=meta)
     return 0
@@ -2184,6 +2317,7 @@ def _cmd_read_kind(args, *, kind: str, http=None, headers=None) -> int:
         return _cmd_read_kind_local(
             target, kind=kind, offset_start=start, offset_end=end,
             json_mode=bool(getattr(args, "json", False)), names=names,
+            announce_local_dirs=True,
         )
     if force_team:
         return _cmd_read_kind_team(
@@ -2205,6 +2339,7 @@ def _cmd_read_kind(args, *, kind: str, http=None, headers=None) -> int:
 def _cmd_read_kind_local(
     target: str, *, kind: str, offset_start: int | None, offset_end: int | None,
     json_mode: bool, names: list[str],
+    announce_local_dirs: bool = False,
 ) -> int:
     import json as _json
 
@@ -2246,8 +2381,12 @@ def _cmd_read_kind_local(
         return 2
     if json_mode:
         _write_search_output(_json.dumps(payload, ensure_ascii=True, indent=2))
+        if announce_local_dirs:
+            _write_local_traj_md_hint(json_mode=True)
         return 0
     _render_read_payload(payload)
+    if announce_local_dirs:
+        _write_local_traj_md_hint(json_mode=False)
     return 0
 
 
@@ -2591,13 +2730,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_traj = sub.add_parser("traj", help="检索或读取已上传轨迹")
     traj_sub = p_traj.add_subparsers(dest="traj_action", required=True)
     p_traj_search = traj_sub.add_parser(
-        "search", help="搜已上传轨迹（用户首问，不经拆分代理）",
+        "search", help="全文检索已上传轨迹，一行一条命中",
     )
     p_traj_search.add_argument(
-        "terms", nargs="+", metavar="QUERY", help="轨迹检索词",
+        "terms", nargs="*", metavar="QUERY",
+        help="检索词；加 --cards 时也可以直接跟 traj_id",
     )
     p_traj_search.add_argument(
-        "--top-k", "-k", type=int, default=5, help="返回条数（最多 20）",
+        "--top-k", "-k", type=int, default=30, help="列表每页条数（最多 30）",
+    )
+    p_traj_search.add_argument(
+        "--page", type=int, default=1, help="页码，从 1 起",
+    )
+    p_traj_search.add_argument(
+        "--cards", action="store_true",
+        help="返回轨迹卡片，每页最多 8 张",
     )
     p_traj_search.add_argument(
         "--name", default="",

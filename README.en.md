@@ -134,7 +134,7 @@ xskill serve --server                          # prints a join token
 xskill connect <host:port> --token <token> --name <user-id>
 ```
 
-After connect succeeds, type `/xskill-helper` in Claude Code, Codex, Cursor, or another detected agent to see generate, search, and upgrade. If you do not have a host and token yet, treat the command above as the example and ask your own server operator. Do not connect to a public instance.
+After connecting successfully, the guide is automatically installed into detected agents like Claude Code, Codex, and Cursor. Type `/xskill-helper` inside any agent to check commands for generate, search, and upgrades. If you do not have an address and token yet, ask your team's server operator.
 
 - **Silently distill your top performers** — one person's solution reaches the whole team automatically.
 - **Any workflow plugs in** — Codex, Claude Code, Cursor IDE; everyone joins the same library, synced across tools.
@@ -178,22 +178,34 @@ xskill stop / xskill start                    # stop / re-start (must have conne
 
 On **macOS / Linux**, native persistence (launchd / systemd --user) is still on the way; for now run the foreground form `xskill connect --foreground` under your own init system.
 
-#### Search / share skills on demand (skillhub)
+#### Search and share skills on demand (SkillHub)
+
+In addition to personalized recommendations from the server, you can search, download, and publish skills directly:
 
 ```bash
-xskill init                    # this machine: scan harnesses, convert traj, optional helper
-xskill search docker compose   # return compact metadata and skill IDs only
-xskill traj search memory leak # search session index (first user query, no split agent)
-xskill traj read traj_cc_alice # read trajectory lines (current and total range)
-xskill atom search memory leak # search split atoms (granularity may change)
-xskill atom read atom_t_0001   # read atom lines (current and total range)
-xskill search docker --download  # legacy 10-slot LRU download and auto-install
-xskill download <skill-id>     # interactively select target harnesses
-xskill download <skill-id> --agent claude-code --agent codex -y
-xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
+xskill search <keywords>                                      # search skills, returning metadata and IDs
+xskill download <skill-id>                                    # interactively select target agents to install
+xskill download <skill-id> --agent claude-code --agent codex -y  # non-interactive install to specified agents
+xskill upload ./my-skill                                      # package and share a local skill with your team
+xskill search <keywords> --download                           # temporary search and install into rotating slots
 ```
 
-`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. After `pip install xskill`, `xskill traj search` does not require `connect`. The first search scans local harnesses if this machine has not been initialized. `xskill init` is the guided form. Join a remote team with `xskill connect`; run your own server with `xskill serve --server`. `xskill traj search` ranks the session index by the first user query (no split agent, query path does not open md). `xskill atom search` searches already-split atoms (granularity may change). Use `xskill traj read` for source lines. `--name` narrows search to specific employee ids. Reading another person's trajectory in team mode needs `allow_read_others` on the server.
+`search` uses hybrid keyword and semantic-vector ranking. `download` persistently installs a skill to chosen harnesses. `upload` publishes a skill folder (containing `SKILL.md`) so the rest of the team can find and use it immediately.
+
+#### Search and inspect session trajectories
+
+When tackling challenging bugs or complex workflows, query team or local session histories (trajectories) and distilled atomic tasks (Atoms) to view proven solutions and diagnostic steps:
+
+```bash
+xskill traj search "memory leak"                               # search relevant session trajectories
+xskill traj search --name alice,bob "memory leak"              # narrow search to specific team members
+xskill traj read <traj_id> --offset-start 1 --offset-end 100   # read transcript lines within a specific range
+
+xskill atom search "oauth token refresh"                       # search distilled atomic task segments
+xskill atom read <atom_id>                                     # read transcript lines for a specific Atom
+```
+
+Standalone readiness: `xskill traj search` works out of the box after `pip install xskill` without requiring a server connection. The first search automatically scans local harnesses and builds an index, or you can run `xskill init` for guided setup. When connected to a team server, searches query the team catalog by default; pass `--local` to search this machine only.
 
 * * *
 

@@ -1,13 +1,9 @@
-"""轨迹检索与 Atom 检索的装配。
+"""历史会话轨迹与原子任务（Atom）检索模块。
 
-``xskill traj search`` 读每个 sessions 目录旁的会话索引（用户首问），做 BM25。
-索引由上传写穿、watcher 增量补齐；查询路径不打开 ``traj_*.md``，
-避免海量扫盘把 team server 卡住。不经拆分代理，不打 embedding。
-
-``xskill atom search`` 走现成 Atom 混合检索（向量 + BM25，字段是 intent 和
-summary）。没拆完的轨迹不会出现。Atom 粒度可能随版本变化。
-
-两条路都按工号收窄 sessions 目录，对外字段不含路径和原文。
+提供会话轨迹（trajectory）与原子任务（Atom）的高效检索能力：
+- 会话轨迹检索（traj search）：基于会话首问及元数据构建轻量索引，支持团队与本地会话检索；
+- 原子任务检索（atom search）：基于 Atom 的意图（intent）与摘要（summary）进行语义及关键词混合检索；
+- 支持按工号列表（--name）过滤检索范围，统一输出标准结果格式。
 """
 from __future__ import annotations
 
@@ -33,7 +29,7 @@ SESSION_INDEX_REFRESH_LIMIT = 400
 
 
 def parse_search_names(raw: str | None) -> list[str]:
-    """把 ``--name 张三,李四`` 收成去空白的工号列表，保持用户写下的顺序。"""
+    """解析逗号分隔的工号或用户名参数，去重并保持原始顺序。"""
     names: list[str] = []
     seen: set[str] = set()
     for part in str(raw or "").split(","):
@@ -53,7 +49,7 @@ def format_session_hit(
     turns: int,
     score: float,
 ) -> dict[str, Any]:
-    """会话级命中：traj_id、首问、工号。没有 Atom、没有行号。"""
+    """格式化会话轨迹检索结果项。"""
     return {
         "kind": "traj",
         "traj_id": str(traj_id or ""),
@@ -66,7 +62,7 @@ def format_session_hit(
 
 
 def format_traj_hit(raw: dict[str, Any], *, user: str = "") -> dict[str, Any]:
-    """把 ``search`` 的 Atom 命中收成对外字段，去掉路径和原文。"""
+    """格式化 Atom 检索结果项，输出标准元数据字段。"""
     vector = raw.get("vector_similarity")
     bm25 = raw.get("bm25_score")
     if vector is None:
@@ -117,7 +113,7 @@ def _as_line_offset(value: Any) -> int | None:
 
 
 def _hit_sort_key(hit: dict[str, Any]) -> tuple:
-    # 有向量分的排前面；只有 BM25 的排后面。同档再按分数、traj_id。
+    # 优先排序包含语义向量分的结果，同档次按综合得分及轨迹 ID 降序排列
     has_vector = 0 if hit.get("vector_similarity") is None else 1
     return (
         -has_vector,
@@ -135,7 +131,7 @@ def _path_name(path: Path) -> str:
 
 
 def user_label_for_dataset(dataset_dir: str | Path) -> str:
-    """用 registry 的 watch 目录 label（工号目录名）当命中上的 user。"""
+    """根据监控目录路径获取对应的用户标签。"""
     from xskill.pipeline.registry import list_watch_dirs
 
     target = str(Path(dataset_dir).expanduser().resolve())
@@ -155,7 +151,7 @@ def resolve_named_session_dirs(
     find_client_id: FindClientId,
     dir_name_for: DirNameFor,
 ) -> tuple[list[tuple[str, Path]], list[str]]:
-    """工号 → ``<traj_root>/clients/<dir>/sessions``。不认识的工号进 unknown。"""
+    """根据成员工号或用户名解析对应的会话存储目录。"""
     found: list[tuple[str, Path]] = []
     unknown: list[str] = []
     root = Path(traj_root)
@@ -174,7 +170,7 @@ def resolve_named_session_dirs(
 
 
 def iter_client_session_dirs(traj_root: Path) -> list[tuple[str, Path]]:
-    """``<traj_root>/clients/<工号目录>/sessions``。"""
+    """遍历服务端下所有客户端成员的会话目录。"""
     found: list[tuple[str, Path]] = []
     clients = Path(traj_root) / "clients"
     if not clients.is_dir():
@@ -203,7 +199,7 @@ def _resolved_dir_key(directory: Path) -> str | None:
 def iter_local_bridge_session_dirs(
     xskill_home: Path | None = None,
 ) -> list[tuple[str, Path]]:
-    """本机 ``~/.xskill/*_sessions`` 桥接目录（各 harness 落盘的 ``traj_*.md``）。"""
+    """遍历本机各个 agent 适配器生成的会话轨迹桥接目录。"""
     from xskill.config import XSKILL_HOME
 
     root = Path(xskill_home) if xskill_home is not None else XSKILL_HOME
@@ -222,7 +218,7 @@ def iter_local_bridge_session_dirs(
 
 
 def watch_session_dirs() -> list[tuple[str, Path]]:
-    """本机可搜、可读的轨迹目录：registry 已登记目录，加上各 harness 桥接目录。"""
+    """获取本机当前所有可用于检索与读取的会话轨迹目录。"""
     from xskill.pipeline.registry import list_watch_dirs
 
     found: list[tuple[str, Path]] = []
@@ -318,7 +314,7 @@ def _write_session_row(
 
 
 def upsert_session_file(directory: Path, path: Path) -> None:
-    """把一份 ``traj_*.md`` 的用户首问写进该目录的会话索引。"""
+    """提取轨迹文件的首问与交互轮数，更新至对应的会话索引库。"""
     path = Path(path)
     try:
         stat = path.stat()
@@ -348,10 +344,7 @@ def _stale_file_name(item: tuple[Path, float, int]) -> str:
 def refresh_session_index(
     directory: Path, *, limit: int | None = SESSION_INDEX_REFRESH_LIMIT,
 ) -> int:
-    """按 mtime 和 size 增量补索引。返回本轮之后仍落后的文件数。
-
-    查询路径不要调用这个函数。它会扫目录项，必要时才读 md。
-    """
+    """根据文件修改时间与大小增量更新会话索引库，返回未处理完成的文件数。"""
     directory = Path(directory)
     if not directory.is_dir():
         return 0
@@ -404,7 +397,7 @@ def refresh_session_index(
 
 
 def load_session_docs(directory: Path, *, user: str) -> list[dict[str, Any]]:
-    """只读 sidecar 索引，不打开 ``traj_*.md``。"""
+    """从会话索引库中加载指定目录的会话记录。"""
     directory = Path(directory)
     if not session_index_path(directory).is_file():
         return []
@@ -455,7 +448,7 @@ def session_corpus_empty(
 def _session_bm25_scores(
     query_tokens: list[str], corpus: list[list[str]],
 ) -> list[float]:
-    """和 skillhub 一样用恒正 IDF，小语料不会整表打成 0。"""
+    """计算查询词与会话文档集合的 BM25 相关性得分。"""
     k1 = 1.2
     b = 0.75
     doc_count = len(corpus)
@@ -499,7 +492,7 @@ def search_session_trajectories(
     top_k: int = 5,
     dataset_dirs: list[tuple[str, Path]] | None = None,
 ) -> list[dict[str, Any]]:
-    """对会话索引里的用户首问做 BM25。查询路径不读 md，不打 embedding。"""
+    """在指定的会话目录中执行会话轨迹检索并按相关度排序。"""
     from xskill.utils.search import tokenize_search_text
 
     dirs = dataset_dirs if dataset_dirs is not None else watch_session_dirs()
@@ -537,7 +530,7 @@ def search_indexed_trajectories(
     search_one: SearchOne | None = None,
     search_all_fn: SearchAll | None = None,
 ) -> list[dict[str, Any]]:
-    """在指定 sessions 目录或全量 registry 上跑 Atom 混合检索。"""
+    """在指定会话目录中执行 Atom 混合检索。"""
     from xskill.utils.search import search as default_search_one
     from xskill.utils.search import search_all as default_search_all
 
@@ -575,3 +568,4 @@ def search_indexed_trajectories(
 
 
 search_indexed_atoms = search_indexed_trajectories
+

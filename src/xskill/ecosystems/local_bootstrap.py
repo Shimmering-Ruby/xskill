@@ -1,7 +1,7 @@
-"""本机未 connect 时的轨迹引导：扫 harness、转 traj_*.md、建会话索引。
+"""本机环境探测与会话轨迹初始化模块。
 
-``xskill init`` 与首次 ``xskill traj search``（standalone 或 ``--local``）共用。
-不装团队 skill 仓，也不要求 ``config.yaml`` / team server。
+在单机模式或首次检索前，扫描本机已安装的 AI Agent 生态并生成会话轨迹与索引，
+提供开箱即用的本地检索能力，无需提前配置团队服务。
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def make_session_ingester(
     home_root: Path,
     poll_interval: float = 10.0,
 ):
-    """按探测记录构造一轮即走的镜像 ingester；未知生态返回 None。"""
+    """根据探测到的 Agent 生态构造单次采集实例；未知生态返回 None。"""
     from xskill.ecosystems import (
         CC_SPEC,
         CODEX_SPEC,
@@ -130,7 +130,7 @@ def ingest_detected_sessions_once(
     home_root: Path | str | None = None,
     ecosystems: list[str] | None = None,
 ) -> dict[str, Any]:
-    """探测本机 harness，各跑一轮桥接，并给 bridge 目录建会话索引。"""
+    """探测本机支持的 Agent，执行一次会话提取并构建对应的索引库。"""
     from xskill.ecosystems import detect_known_ecosystems
     from xskill.traj_search import refresh_session_index, session_index_count
 
@@ -174,10 +174,9 @@ def ensure_local_sessions(
     force: bool = False,
     skip_if_server: bool = True,
 ) -> dict[str, Any]:
-    """需要时扫盘转轨迹。已初始化且本机已有索引则跳过。
+    """确保本机具备可检索的会话数据与索引。
 
-    第一次（没有 ``local_init.json``）、``force``、或标记在但索引仍空时会跑。
-    team server 进程所在机器默认跳过，避免把操作员 HOME 扫进 serve 仓库。
+    若已完成初始化且索引有效则自动跳过；在首次运行或强制指定 force 时重新扫描并生成。
     """
     if skip_if_server:
         from xskill.runtime import role

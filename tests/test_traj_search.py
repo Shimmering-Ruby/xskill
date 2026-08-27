@@ -1,6 +1,7 @@
 """`xskill traj search` 与 `xskill atom search`：两条检索 + CLI / team 分流。
 
-traj 读会话索引里的用户首问做 BM25。atom 走 Atom 混合检索。
+traj 对 `traj_*.md` 做全文检索，可加 `--cards` 与 `--page`。
+会话索引仍给上传写穿用。atom 走 Atom 混合检索。
 """
 from __future__ import annotations
 
@@ -49,6 +50,8 @@ def _args(**overrides) -> SimpleNamespace:
         "team": False,
         "local": False,
         "name": "",
+        "page": 1,
+        "cards": False,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -90,11 +93,47 @@ def _write_traj_md(root: Path, *, traj_id: str, query: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"{traj_id}.md"
     path.write_text(
-        f"## Initial Query\n\n{query}\n\n## Assistant\n\nok\n",
+        "# Trajectory\n\n"
+        f"## Initial Query\n\n{query}\n\n"
+        f"## User\n\n{query}\n\n"
+        "## Assistant\n\nlooking into it.\n\n"
+        "padding-line-to-pass-min-traj-bytes\n",
         encoding="utf-8",
     )
     upsert_session_file(root, path)
     return path
+
+
+def _browse_hit(**overrides) -> dict:
+    row = {
+        "kind": "traj",
+        "traj_id": "traj_cc_alice_memleak",
+        "user": "alice",
+        "line": 5,
+        "snippet": "diagnose a python process leaking memory",
+        "hit_count": 1,
+        "context": [
+            {"line": 2, "hit": False, "text": ""},
+            {"line": 3, "hit": False, "text": "## Initial Query"},
+            {"line": 4, "hit": False, "text": ""},
+            {"line": 5, "hit": True, "text": "diagnose a python process leaking memory"},
+            {"line": 6, "hit": False, "text": ""},
+            {"line": 7, "hit": False, "text": "## User"},
+            {"line": 8, "hit": False, "text": ""},
+        ],
+    }
+    row.update(overrides)
+    return row
+
+
+def _seed_watch(monkeypatch, tmp_path: Path, rows: list[tuple[str, str, str]]):
+    dirs: list[tuple[str, Path]] = []
+    for user, traj_id, query in rows:
+        root = tmp_path / user / "sessions"
+        _write_traj_md(root, traj_id=traj_id, query=query)
+        dirs.append((user, root))
+    monkeypatch.setattr("xskill.traj_search.watch_session_dirs", lambda: dirs)
+    return dirs
 
 
 class _Response:
@@ -110,9 +149,15 @@ class _TrajHttp:
     def __init__(self, status_code=200, payload=None, error=None):
         self.status_code = status_code
         self.payload = payload if payload is not None else {
-            "results": [_session_hit()],
+            "results": [_browse_hit()],
             "count": 1,
-            "meta": {"unknown_names": [], "corpus_empty": False},
+            "meta": {
+                "unknown_names": [],
+                "corpus_empty": False,
+                "total": 1,
+                "page": 1,
+                "page_size": 30,
+            },
         }
         self.error = error
         self.calls: list[tuple[str, dict | None]] = []
@@ -441,64 +486,122 @@ def test_hybrid_search_one_returns_atom_fields_not_raw(tmp_path):
 # ── CLI ───────────────────────────────────────────────────────────
 
 
-def test_cli_search_traj_local_prints_hits(monkeypatch, capsys):
+def test_cli_search_traj_local_prints_hits(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
-
-    def fake_search(query, *, top_k=5, **_kwargs):
-        assert query == "django migration"
-        assert top_k == 5
-        return [_session_hit()]
-
-    monkeypatch.setattr(
-        "xskill.traj_search.search_session_trajectories", fake_search,
-    )
-    monkeypatch.setattr(
-        "xskill.traj_search.session_corpus_empty", lambda dataset_dirs=None: False,
-    )
+    _seed_watch(monkeypatch, tmp_path, [
+        ("alice", "traj_cc_alice_memleak", "fix django migration conflict"),
+    ])
     rc = cli.cmd_search_traj(_args())
     assert rc == 0
     out = capsys.readouterr()
-    assert "搜索：django migration" in out.out
-    assert "找到 1 条轨迹" in out.out
-    assert "轨迹 ID：traj_cc_alice_memleak" in out.out
-    assert "工号：alice" in out.out
+    assert "query='django migration' 命中 1 条不同轨迹，展示 1 条" in out.out
+    assert "同名前缀已错开" in out.out
+    assert "看内容用 --cards，一次最多 8 个 id。" in out.out
+    assert "看原文：xskill traj read <traj_id>" not in out.out
+    assert "traj_cc_alice_memleak" in out.out
+    assert "django migration" in out.out
+    assert "*" in out.out
+    assert "## Initial Query" in out.out
+    assert "首问:" not in out.out
+    assert "轨迹 ID：" not in out.out
+    assert "找到 1 条轨迹" not in out.out
     assert "Atom：" not in out.out
-    assert "行号：" not in out.out
-    assert "diagnose a python process leaking memory" in out.out
     assert "MUST_NOT_LEAK" not in out.out
     assert "/secret/server" not in out.out
+    assert "本机轨迹原文目录" not in out.out
 
 
-def test_cli_search_traj_local_json(monkeypatch, capsys):
+def test_cli_search_traj_flag_local_prints_md_dirs(monkeypatch, capsys, tmp_path):
+    home = tmp_path / ".xskill"
+    cc = home / "cc_sessions"
+    cursor = home / "cursor_sessions"
+    cc.mkdir(parents=True)
+    cursor.mkdir(parents=True)
+    monkeypatch.setattr("xskill.runtime.role", lambda: "client")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", home)
+    _seed_watch(monkeypatch, tmp_path, [
+        ("alice", "traj_cc_alice_memleak", "diagnose 内存泄漏 in python"),
+    ])
+    rc = cli.cmd_search_traj(_args(local=True, terms=["内存泄漏"]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "query='内存泄漏' 命中 1 条不同轨迹" in out
+    assert "看内容用 --cards" in out
+    assert "traj_cc_alice_memleak" in out
+    assert "内存泄漏" in out
+    assert "*" in out
+    assert "本机轨迹原文目录如下，可用本 harness 的 grep 直接搜里面的 traj_*.md：" in out
+    assert str(cc) in out
+    assert str(cursor) in out
+    rc = cli.cmd_search_traj(_args(local=True, json=True, terms=["内存泄漏"]))
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload[0]["traj_id"] == "traj_cc_alice_memleak"
+    assert payload[0]["line"] >= 1
+    assert payload[0]["context"]
+    assert any(item.get("hit") for item in payload[0]["context"])
+    assert str(cc) in captured.err
+    assert "本机轨迹原文目录" in captured.err
+
+
+def test_cli_search_traj_local_json(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
-    monkeypatch.setattr(
-        "xskill.traj_search.search_session_trajectories",
-        lambda query, **_kw: [_session_hit()],
-    )
+    _seed_watch(monkeypatch, tmp_path, [
+        ("alice", "traj_cc_alice_memleak", "fix alembic half migration"),
+    ])
     rc = cli.cmd_search_traj(_args(json=True, terms=["alembic"]))
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["traj_id"] == "traj_cc_alice_memleak"
     assert payload[0]["kind"] == "traj"
+    assert "snippet" in payload[0]
+    assert payload[0]["context"]
     assert "md_path" not in payload[0]
     assert "raw_segment" not in payload[0]
 
 
-def test_cli_search_traj_local_warns_and_ignores_name(monkeypatch, capsys):
+def test_cli_search_traj_local_warns_and_ignores_name(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
-    monkeypatch.setattr(
-        "xskill.traj_search.search_session_trajectories",
-        lambda query, **_kw: [],
-    )
-    monkeypatch.setattr(
-        "xskill.traj_search.session_corpus_empty",
-        lambda dataset_dirs=None: True,
-    )
+    _seed_watch(monkeypatch, tmp_path, [])
     rc = cli.cmd_search_traj(_args(name="alice", terms=["q"]))
     assert rc == 0
     captured = capsys.readouterr()
     assert "仅 team" in captured.err
-    assert "轨迹检索索引尚未建成" in captured.out
+    assert "query='q' 没有命中" in captured.out
+    assert "轨迹检索索引尚未建成" not in captured.out
+
+
+def test_cli_search_traj_local_cards_and_page(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    rows = [
+        ("alice", f"traj_cc_alice_{index:02d}", "patentdagger crawl routine")
+        for index in range(10)
+    ]
+    _seed_watch(monkeypatch, tmp_path, rows)
+    listed = cli.cmd_search_traj(_args(terms=["patentdagger"], top_k=3, page=2))
+    assert listed == 0
+    listing = capsys.readouterr().out
+    assert "命中 10 条不同轨迹，展示 3 条" in listing
+    assert "还有 4 条未列出" in listing
+    assert "--page 3" in listing
+    assert "看内容用 --cards" in listing
+    cards = cli.cmd_search_traj(_args(terms=["patentdagger"], cards=True))
+    assert cards == 0
+    card_out = capsys.readouterr().out
+    assert "cards=8（卡片只是索引，不算精读）" in card_out
+    assert "来源: claude-code" in card_out
+    assert "问: patentdagger crawl routine" in card_out
+    assert "精读：xskill traj read " in card_out
+    assert "--offset-start <上面的 L 行号>" in card_out
+    assert "还有 2 张未列出" in card_out
+    assert "--cards --page 2" in card_out
+    by_id = cli.cmd_search_traj(_args(
+        terms=["traj_cc_alice_00"], cards=True,
+    ))
+    assert by_id == 0
+    id_out = capsys.readouterr().out
+    assert "cards=1（卡片只是索引，不算精读）" in id_out
+    assert "--- traj_cc_alice_00 ---" in id_out
 
 
 def test_cli_search_traj_missing_query_errors(capsys):
@@ -574,7 +677,15 @@ def test_parser_noun_first_and_search_keeps_traj_word():
     assert traj.command == "traj"
     assert traj.traj_action == "search"
     assert traj.terms == ["内存泄漏"]
+    assert traj.page == 1
+    assert traj.cards is False
+    assert traj.top_k == 30
     assert not hasattr(traj, "download")
+    paged = parser.parse_args(
+        ["traj", "search", "patentdagger", "--cards", "--page", "3"],
+    )
+    assert paged.cards is True
+    assert paged.page == 3
     atom = parser.parse_args(["atom", "search", "编辑器"])
     assert atom.command == "atom"
     assert atom.atom_action == "search"
@@ -632,13 +743,38 @@ def test_cli_search_traj_team_prints_and_forwards_names(capsys):
     assert rc == 0
     assert http.calls[0][0] == "/api/v1/team/trajectories/search"
     assert http.calls[0][1] == {
-        "query": "memory", "limit": 5, "names": "alice,ghost",
+        "query": "memory", "limit": 5, "page": 1, "names": "alice,ghost",
     }
     out = capsys.readouterr().out
-    assert "搜索：memory" in out
-    assert "找到 1 条轨迹" in out
-    assert "轨迹 ID：traj_cc_alice_memleak" in out
-    assert "工号：alice" in out
+    assert "query='memory' 命中 1 条不同轨迹，展示 1 条" in out
+    assert "看内容用 --cards，一次最多 8 个 id。" in out
+    assert "traj_cc_alice_memleak" in out
+    assert "  L5* diagnose a python process leaking memory" in out
+    assert "  L3  ## Initial Query" in out
+    assert "首问:" not in out
+    assert "轨迹 ID：" not in out
+
+
+def test_cli_search_traj_team_forwards_cards_and_page(capsys):
+    http = _TrajHttp(payload={
+        "text": (
+            "cards=1（卡片只是索引，不算精读）\n\n"
+            "--- traj_cc_alice_memleak ---\n来源: claude-code"
+        ),
+        "results": [{"traj_id": "traj_cc_alice_memleak"}],
+        "count": 1,
+        "meta": {"unknown_names": [], "total": 1, "page": 2, "page_size": 8},
+    })
+    rc = cli.cmd_search_traj(
+        _args(team=True, cards=True, page=2, terms=["patentdagger"]),
+        http=http,
+        headers={"X-Xskill-Token": TOKEN},
+    )
+    assert rc == 0
+    assert http.calls[0][1] == {
+        "query": "patentdagger", "limit": 5, "page": 2, "cards": "1",
+    }
+    assert "cards=1（卡片只是索引，不算精读）" in capsys.readouterr().out
 
 
 def test_cli_search_traj_team_unknown_names_warn(capsys):
@@ -655,7 +791,7 @@ def test_cli_search_traj_team_unknown_names_warn(capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "未识别工号 ghost" in captured.err
-    assert "轨迹无匹配" in captured.out
+    assert "query='q' 没有命中" in captured.out
 
 
 def test_cli_search_traj_team_old_server(capsys):
@@ -767,6 +903,61 @@ def test_team_traj_search_named_dir_uses_md_bm25(tmp_path):
     assert "md_path" not in hit
     dumped = json.dumps(payload)
     assert str(traj_root) not in dumped
+    assert "django migration" in hit["snippet"]
+    assert hit["line"] >= 1
+    assert hit["context"]
+    assert any(item.get("hit") and "django migration" in str(item.get("text")) for item in hit["context"])
+    assert len(hit["context"]) >= 4
+
+
+def test_team_traj_search_cards_and_page(tmp_path):
+    client, traj_root, registry = _make_team_app(tmp_path)
+    headers = _register(client, "alice")
+    client_id = registry.find_by_user_name("alice")
+    sessions = traj_root / "clients" / registry.dir_name_for(client_id) / "sessions"
+    for index in range(9):
+        _write_traj_md(
+            sessions,
+            traj_id=f"traj_cc_alice_{index:02d}",
+            query="patentdagger crawl routine",
+        )
+    listed = client.get(
+        "/api/v1/team/trajectories/search",
+        params={"query": "patentdagger", "limit": 3, "page": 2},
+        headers=headers,
+    )
+    assert listed.status_code == 200
+    listing = listed.json()
+    assert listing["count"] == 3
+    assert listing["meta"]["total"] == 9
+    assert listing["meta"]["page"] == 2
+    cards = client.get(
+        "/api/v1/team/trajectories/search",
+        params={"query": "patentdagger", "cards": "1"},
+        headers=headers,
+    )
+    assert cards.status_code == 200
+    payload = cards.json()
+    assert payload["count"] == 8
+    assert payload["meta"]["total"] == 9
+    text = payload["text"]
+    assert "cards=8（卡片只是索引，不算精读）" in text
+    assert "问: patentdagger crawl routine" in text
+    assert "精读：xskill traj read " in text
+    assert "还有 1 张未列出" in text
+    by_id = client.get(
+        "/api/v1/team/trajectories/search",
+        params={"cards": "1", "ids": "traj_cc_alice_00"},
+        headers=headers,
+    )
+    assert by_id.status_code == 200
+    assert "--- traj_cc_alice_00 ---" in by_id.json()["text"]
+    bad = client.get(
+        "/api/v1/team/trajectories/search",
+        params={"ids": "traj_cc_alice_00"},
+        headers=headers,
+    )
+    assert bad.status_code == 400
 
 
 def test_team_traj_search_unknown_names_do_not_fail(tmp_path, monkeypatch):
@@ -777,6 +968,7 @@ def test_team_traj_search_unknown_names_do_not_fail(tmp_path, monkeypatch):
         raise AssertionError("should not search when every name is unknown")
 
     monkeypatch.setattr("xskill.traj_search.search_session_trajectories", boom)
+    monkeypatch.setattr("xskill.traj_browse.find_query_hits", boom)
     monkeypatch.setattr("xskill.utils.search.search", boom)
     monkeypatch.setattr("xskill.utils.search.search_all", boom)
     response = client.get(
@@ -803,20 +995,28 @@ def test_team_traj_search_reads_session_index(tmp_path):
     )
     response = client.get(
         "/api/v1/team/trajectories/search",
-        params={"query": "auth retry", "limit": 5},
+        params={"query": "oauth token", "limit": 5},
         headers=headers,
     )
     assert response.status_code == 200
     hit = response.json()["results"][0]
     assert hit["traj_id"] == "traj_cc_erin_auth_retry"
     assert hit["kind"] == "traj"
+    assert hit["line"] >= 1
+    assert "oauth token" in hit["snippet"]
     assert "md_path" not in hit
 
 
 def test_team_upload_write_through_session_index(tmp_path):
     client, _traj_root, _registry = _make_team_app(tmp_path)
     headers = _register(client, "alice")
-    body = "## Initial Query\n\nretry expired oauth token\n\n## Assistant\n\nok\n"
+    body = (
+        "# Trajectory\n\n"
+        "## Initial Query\n\nretry expired oauth token\n\n"
+        "## User\n\nretry expired oauth token\n\n"
+        "## Assistant\n\nlooking into it.\n\n"
+        "padding-line-to-pass-min-traj-bytes\n"
+    )
     uploaded = client.post(
         "/api/v1/team/upload",
         headers=headers,
@@ -832,13 +1032,14 @@ def test_team_upload_write_through_session_index(tmp_path):
     assert uploaded.json()["accepted"] == ["traj_cc_erin_auth_retry"]
     response = client.get(
         "/api/v1/team/trajectories/search",
-        params={"query": "auth retry", "limit": 5},
+        params={"query": "oauth token", "limit": 5},
         headers=headers,
     )
     assert response.status_code == 200
     hit = response.json()["results"][0]
     assert hit["traj_id"] == "traj_cc_erin_auth_retry"
     assert hit["kind"] == "traj"
+    assert "oauth token" in hit["snippet"]
 
 
 def test_team_atom_search_named_dir_uses_real_hybrid_search(tmp_path, monkeypatch):
@@ -885,6 +1086,9 @@ def test_bundled_skill_documents_real_traj_search_not_mock():
     assert "xskill search traj" not in skill_md
     assert "xskill read traj" not in skill_md
     assert "--local" in skill_md
+    assert "--cards" in skill_md
+    assert "--page" in skill_md
+    assert "grep" in skill_md
     assert "~/.xskill/cc_sessions" in skill_md
     assert "teammates" in skill_md
     assert "Claude Code" in skill_md

@@ -150,6 +150,14 @@ xskill是一套无监督的skill蒸馏方案，其不需要构建数据集就可
 
 ### 单人模式（尝鲜体验）
 
+如果只想具备检索轨迹的能力，不打算蒸馏任何skill：
+```bash
+pip install xskill          # Python 3.9+
+xskill init                 # 扫描本机 agent，转换会话；不必填模型
+xskill traj search 内存泄漏
+xskill traj read <traj_id>  # 按行号读原文
+```
+如果你有LLM API，不只想要轨迹检索，可以尝试开始skill蒸馏能力：
 ```bash
 pip install xskill          # Python 3.9+
 xskill serve                # 第一次启动只初始化配置文件 ~/.xskill/config.yaml
@@ -209,7 +217,7 @@ xskill serve --server  # 会打印connect join命令，复制给组内同事便�
 xskill connect <host:port> --token <token>  --name <工号/姓名>
 ```
 
-connect 成功后，指南会装进本机已探测到的 Claude Code、Codex、Cursor 等 agent。在对应 agent 里输入 `/xskill-helper`，就可以查 generate、search、升级这些用法。没有地址和 token 时，把上面这条命令当示例，向你们自己的 server 管理员要 host、token 和工号，不要连外网公开实例。
+connect 成功后，使用指南会自动安装至本机已探测到的 Claude Code、Codex、Cursor 等 agent。在对应 agent 里输入 `/xskill-helper`，即可随时查阅 generate、search、升级等命令用法。如尚未获取地址与 token，可向团队的 server 管理员申请。
 
 #### 额外功能：管控面板
 
@@ -263,23 +271,34 @@ xskill generate --name alice,bob "根据这些用户的成功案例生成数据�
 
 任务可能会先等待 SkillEdit 池的空闲席位。CLI 会持续输出排队和运行日志；完成后，生成或改写的 Skill 会直接提交到主干，并 pin 到发起人的推荐列表。如果 CLI 提示 server 版本过旧，请联系管理员升级 team server。
 
-#### 额外功能：按需搜索
+#### 额外功能：技能检索与共享
 
-除了 server 按画像推送的Skill,client 还可以主动搜索或下载 server 中的技能:
+除了由服务端根据画像自动推荐 Skill 之外，客户端也可以按需主动搜索、下载与上传技能：
+
 ```bash
-xskill init                             # 本机引导：扫描 harness、转换轨迹、可选装 helper
-xskill search <KEYWORDS>       
-xskill traj search <KEYWORDS>           # 搜会话索引（用户首问，不经拆分代理）
-xskill traj read <TRAJ_ID>              # 按行号读轨迹原文（带当前与总行号）
-xskill atom search <KEYWORDS>           # 搜已拆 Atom（intent、summary、行号；粒度可能随版本变化）
-xskill atom read <ATOM_ID>              # 按行号读 Atom 原文（带当前与总行号）
-xskill search <KEYWORDS> --download     # 检索的同时下载到本地(老的搜索结果会被刷新掉，建议在临时使用场景触发）
-xskill download <skill-id>          # 交互多选安装 harness, 会持久化到本地, 会随云端更新
-xskill download <skill-id> --agent claude-code --agent codex -y   # 非交互式安装到指定harness
-xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
+xskill search <关键词>                                        # 搜索技能库，返回匹配技能与 ID
+xskill download <skill-id>                                  # 交互式选择要安装的目标 agent
+xskill download <skill-id> --agent claude-code --agent codex -y  # 命令行非交互式安装
+xskill upload ./my-skill                                    # 将本地技能目录打包上传至团队共享库
+xskill search <关键词> --download                            # 临时检索并下载至本地轮转槽位
 ```
 
-`pip install` 之后不必先 connect：第一次 `xskill traj search` 会在尚未初始化时扫描本机 harness。也可以手动 `xskill init`。连远端用 `xskill connect`，自己起服务用 `xskill serve --server`。
+搜索默认结合关键词与语义向量进行混合排序；`download` 会将指定技能持久化安装至对应 agent；`upload` 则可将团队成员编写的有效技能一键发布至团队共享库。
+
+#### 额外功能：历史会话与轨迹检索
+
+开发过程中遇到疑难问题时，可直接检索团队成员或本机历史会话（轨迹）及提炼出的原子任务（Atom），参考前人已走通的上下文与排查命令：
+
+```bash
+xskill traj search "内存泄漏排查"                             # 检索历史会话轨迹
+xskill traj search --name alice,bob "内存泄漏"                # 指定只检索特定成员的轨迹
+xskill traj read <traj_id> --offset-start 1 --offset-end 100 # 按行号阅读会话原文
+
+xskill atom search "OAuth token 刷新"                       # 检索已切分的原子任务片段
+xskill atom read <atom_id>                                  # 查看该 Atom 对应的会话内容
+```
+
+在未连接团队服务端时，`xskill traj search` 同样支持检索本机各 agent 的历史会话；也可运行 `xskill init` 进行交互式扫描与初始化。已连接团队服务时，默认发起团队检索，如需仅看本机可追加 `--local` 参数。
 
 #### 额外功能：SkillHub支持
  Xskill支持导入skillhub并将海量skill纳入**推荐**和**评价**，

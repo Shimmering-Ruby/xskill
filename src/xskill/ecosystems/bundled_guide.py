@@ -1,10 +1,7 @@
-"""把随包发布的 /xskill-helper 使用指南装进用户本机已探测到的 agent skill 目录。
+"""将随包附带的 /xskill-helper 使用指南安装至本机检测到的 Agent 技能目录。
 
-``xskill connect`` 握手成功后调用：探测到 Claude Code / Codex / Cursor 等
-生态后，把 ``xskill/data/skill/xskill-helper`` 装到对应 skill 根目录，
-agent 里就可以 /xskill-helper 查 generate、search 等用法。
-
-安装失败只打 warning，不抛给调用方——连不上 skill 目录不该挡住 connect。
+在环境初始化或客户端接入时，自动识别已安装的 AI Agent 生态（如 Claude Code、Codex、Cursor 等），
+并部署使用指南，方便在各 Agent 环境内直接唤起使用指导。
 """
 from __future__ import annotations
 
@@ -35,7 +32,7 @@ def _installer_for(eco: str):
 
 
 def bundled_xskill_source() -> Path:
-    """wheel / 可编辑安装里随包发布的 xskill 指南目录。"""
+    """获取随包发布的 xskill-helper 指南目录路径。"""
     from importlib.resources import files
 
     return Path(str(files("xskill") / "data" / "skill" / "xskill-helper"))
@@ -45,10 +42,9 @@ def install_bundled_xskill_guide(
     target_root: Path | str | None = None,
     ecosystems: list[str] | None = None,
 ) -> list[str]:
-    """把 /xskill-helper 指南装进 ``target_root`` 下已探测到的生态。
+    """将 /xskill-helper 指南安装至目标目录下检测到的 Agent 环境中。
 
-    ``ecosystems`` 非空时只装这些 id。返回成功装上的生态 id 列表。
-    捆绑目录缺失或某个生态安装失败时打印 warning，不抛异常。
+    若指定 ecosystems 则仅安装至对应生态。返回成功安装的生态列表。
     """
     root = Path(target_root).expanduser().resolve() if target_root else None
     skill_source = bundled_xskill_source()
@@ -73,13 +69,14 @@ def install_bundled_xskill_guide(
             installed_ecosystems.append(eco)
         except Exception as install_error:  # noqa: BLE001
             print(
-                f"warning: 装到 {eco} 失败：{install_error}",
+                f"warning: 安装至 {eco} 失败：{install_error}",
                 file=sys.stderr,
             )
     if installed_ecosystems:
+        names = "/".join(installed_ecosystems)
         print(
-            f"已把 xskill 使用指南装进 {'/'.join(installed_ecosystems)} 的 "
-            f"skill 目录，在对应 agent 里可直接 /xskill-helper 查用法。"
+            f"已把 xskill 使用指南装进 {names} 的 skill 目录，"
+            f"在对应 agent 里可直接 /xskill-helper 查用法。"
         )
     else:
         print(
