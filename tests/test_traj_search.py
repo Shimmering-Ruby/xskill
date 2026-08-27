@@ -1,9 +1,10 @@
 """`xskill search traj` 与 `xskill search atom`：两条检索 + CLI / team 分流。
 
-traj 对着 ``traj_*.md`` 的用户首问做 BM25。atom 走 Atom 混合检索。
+traj 读会话索引里的用户首问做 BM25。atom 走 Atom 混合检索。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,9 +22,11 @@ from xskill.traj_search import (
     format_session_hit,
     format_traj_hit,
     parse_search_names,
+    refresh_session_index,
     resolve_named_session_dirs,
     search_indexed_trajectories,
     search_session_trajectories,
+    upsert_session_file,
 )
 from xskill.utils.search import HybridSearch
 from tests.test_atom_task_store import _FakeEmbed
@@ -84,6 +87,7 @@ def _write_traj_md(root: Path, *, traj_id: str, query: str) -> Path:
         f"## Initial Query\n\n{query}\n\n## Assistant\n\nok\n",
         encoding="utf-8",
     )
+    upsert_session_file(root, path)
     return path
 
 
@@ -332,6 +336,59 @@ def test_search_session_bm25_reads_user_query_not_atom(tmp_path):
     assert str(tmp_path) not in dumped
 
 
+def test_search_session_reads_index_not_md(tmp_path, monkeypatch):
+    alice = tmp_path / "alice" / "sessions"
+    _write_traj_md(
+        alice,
+        traj_id="traj_cc_alice_memleak",
+        query="diagnose a python process leaking memory",
+    )
+
+    def boom(path):
+        raise AssertionError(f"search must not open {path}")
+
+    monkeypatch.setattr("xskill.traj_search._read_session_query", boom)
+    hits = search_session_trajectories(
+        "python process leaking",
+        dataset_dirs=[("alice", alice)],
+    )
+    assert hits[0]["traj_id"] == "traj_cc_alice_memleak"
+
+
+def test_search_session_ignores_md_until_indexed(tmp_path):
+    alice = tmp_path / "alice" / "sessions"
+    alice.mkdir(parents=True)
+    (alice / "traj_cc_alice_memleak.md").write_text(
+        "## Initial Query\n\ndiagnose a python process leaking memory\n",
+        encoding="utf-8",
+    )
+    assert search_session_trajectories(
+        "python process leaking",
+        dataset_dirs=[("alice", alice)],
+    ) == []
+    assert refresh_session_index(alice, limit=None) == 0
+    hits = search_session_trajectories(
+        "python process leaking",
+        dataset_dirs=[("alice", alice)],
+    )
+    assert hits[0]["traj_id"] == "traj_cc_alice_memleak"
+
+
+def test_refresh_session_index_drops_deleted(tmp_path):
+    alice = tmp_path / "alice" / "sessions"
+    path = _write_traj_md(
+        alice,
+        traj_id="traj_cc_alice_memleak",
+        query="diagnose a python process leaking memory",
+    )
+    path.unlink()
+    assert refresh_session_index(alice, limit=None) == 0
+    assert search_session_trajectories(
+        "python process leaking",
+        dataset_dirs=[("alice", alice)],
+    ) == []
+
+
 def test_hybrid_search_one_returns_atom_fields_not_raw(tmp_path):
     sessions = _seed_sessions(
         tmp_path / "sessions",
@@ -409,7 +466,7 @@ def test_cli_search_traj_local_warns_and_ignores_name(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "仅 team" in captured.err
-    assert "还没有已上传的轨迹" in captured.out
+    assert "轨迹检索索引尚未建成" in captured.out
 
 
 def test_cli_search_traj_missing_query_errors(capsys):
@@ -676,7 +733,7 @@ def test_team_traj_search_unknown_names_do_not_fail(tmp_path, monkeypatch):
     assert payload["meta"]["corpus_empty"] is False
 
 
-def test_team_traj_search_all_scans_uploaded_md(tmp_path):
+def test_team_traj_search_reads_session_index(tmp_path):
     client, traj_root, registry = _make_team_app(tmp_path)
     headers = _register(client, "alice")
     client_id = registry.find_by_user_name("alice")
@@ -696,6 +753,34 @@ def test_team_traj_search_all_scans_uploaded_md(tmp_path):
     assert hit["traj_id"] == "traj_cc_erin_auth_retry"
     assert hit["kind"] == "traj"
     assert "md_path" not in hit
+
+
+def test_team_upload_write_through_session_index(tmp_path):
+    client, _traj_root, _registry = _make_team_app(tmp_path)
+    headers = _register(client, "alice")
+    body = "## Initial Query\n\nretry expired oauth token\n\n## Assistant\n\nok\n"
+    uploaded = client.post(
+        "/api/v1/team/upload",
+        headers=headers,
+        json={
+            "trajectories": [{
+                "traj_id": "traj_cc_erin_auth_retry",
+                "content": body,
+                "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            }],
+        },
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json()["accepted"] == ["traj_cc_erin_auth_retry"]
+    response = client.get(
+        "/api/v1/team/trajectories/search",
+        params={"query": "auth retry", "limit": 5},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    hit = response.json()["results"][0]
+    assert hit["traj_id"] == "traj_cc_erin_auth_retry"
+    assert hit["kind"] == "traj"
 
 
 def test_team_atom_search_named_dir_uses_real_hybrid_search(tmp_path, monkeypatch):

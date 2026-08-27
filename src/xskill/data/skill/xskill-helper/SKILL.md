@@ -82,10 +82,12 @@ xskill import ./skills-parent --json
 
 These are two commands. Do not mix them.
 
-`xskill search traj` searches uploaded `traj_*.md` files. It reads
-`## Initial Query` and `## User` and ranks with BM25. It does not wait
-for the split agent and does not need an Atom index. Cards show
-`traj_id`, user, and the first user query.
+`xskill search traj` searches the session index, not the raw `traj_*.md`
+files. Upload and the watcher extract `## Initial Query` / `## User`
+once and write the sidecar index. The query path only reads that index
+and ranks with BM25. It does not wait for the split agent and does not
+open trajectory files. Cards show `traj_id`, user, and the first user
+query.
 
 `xskill search atom` searches atoms that the split agent already wrote
 (intent, summary, line range). Ranking is vector plus BM25. Sessions
@@ -108,7 +110,7 @@ when you want the instruction to name the evidence.
 
 ```bash
 xskill search <query...>       # search team skills; returns metadata only
-xskill search traj <query...>  # search uploaded trajectory files (no split agent)
+xskill search traj <query...>  # search session index (first user query, no split agent)
 xskill search atom <query...>  # search split atoms (intent / summary / offsets)
 xskill search <query...> --download  # legacy 10-slot LRU download + auto-install
 xskill download <skill-id>     # persist one result; interactively select harnesses

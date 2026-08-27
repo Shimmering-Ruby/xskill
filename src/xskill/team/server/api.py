@@ -719,7 +719,17 @@ async def team_upload(
         # sha256 完整性校验已过（上面），落盘前再做一遍内容清洗：客户端桥接常把
         # 终端 ANSI 码 / 控制字符灌进 .md，会让 splitlines 行号错位、污染模型输入。
         clean = sanitize_trajectory_text(t.content)
-        (sessions_dir / f"{t.traj_id}.md").write_text(clean, encoding="utf-8")
+        md_path = sessions_dir / f"{t.traj_id}.md"
+        md_path.write_text(clean, encoding="utf-8")
+        try:
+            from xskill.traj_search import upsert_session_file
+
+            upsert_session_file(sessions_dir, md_path)
+        except Exception:
+            logger.warning(
+                "session index upsert failed traj_id=%s dir=%s",
+                t.traj_id, sessions_dir, exc_info=True,
+            )
         accepted.append(t.traj_id)
     logger.info("team upload from %s: %d accepted, %d rejected",
                 client_id, len(accepted), len(rejected))

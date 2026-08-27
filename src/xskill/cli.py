@@ -1199,7 +1199,7 @@ def _render_search_kind_hits(
                 )
             else:
                 _write_search_output(
-                    "还没有已上传的轨迹，或指定工号还没有可搜目录",
+                    "轨迹检索索引尚未建成，或还没有已上传的轨迹",
                 )
         elif kind == "atom":
             _write_search_output(f"Atom 无匹配：{query}")

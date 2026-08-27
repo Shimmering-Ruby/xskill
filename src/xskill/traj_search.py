@@ -1,7 +1,8 @@
 """轨迹检索与 Atom 检索的装配。
 
-``search traj`` 对着已上传的 ``traj_*.md`` 抽 ``## Initial Query`` /
-``## User``，做 BM25。不经拆分代理，不打 embedding。
+``search traj`` 读每个 sessions 目录旁的会话索引（用户首问），做 BM25。
+索引由上传写穿、watcher 增量补齐；查询路径不打开 ``traj_*.md``，
+避免海量扫盘把 team server 卡住。不经拆分代理，不打 embedding。
 
 ``search atom`` 走现成 Atom 混合检索（向量 + BM25，字段是 intent 和
 summary）。没拆完的轨迹不会出现。
@@ -13,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +28,8 @@ DirNameFor = Callable[[str], str]
 _TRAJ_MD_NAME = re.compile(r"^traj_[A-Za-z0-9_-]+\.md$")
 _TRAJ_READ_MAX_BYTES = 65_536
 _SESSION_TEXT_LIMIT = 2_000
+SESSION_INDEX_NAME = ".xskill_traj_session_index.sqlite"
+SESSION_INDEX_REFRESH_LIMIT = 400
 
 
 def parse_search_names(raw: str | None) -> list[str]:
@@ -232,12 +236,178 @@ def _read_session_query(path: Path) -> tuple[str, int]:
     return first, len(sections)
 
 
+def session_index_path(directory: Path) -> Path:
+    return Path(directory) / SESSION_INDEX_NAME
+
+
+def _open_session_index(directory: Path) -> sqlite3.Connection:
+    from xskill._sqlite_connect import connect_with_lock
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    conn = connect_with_lock(
+        sqlite3.connect, str(session_index_path(directory)), timeout=10,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_docs ("
+        " traj_id TEXT PRIMARY KEY,"
+        " first_query TEXT NOT NULL DEFAULT '',"
+        " turns INTEGER NOT NULL DEFAULT 0,"
+        " file_mtime REAL NOT NULL DEFAULT 0,"
+        " file_size INTEGER NOT NULL DEFAULT 0)"
+    )
+    return conn
+
+
+def _write_session_row(
+    conn: sqlite3.Connection,
+    traj_id: str,
+    first_query: str,
+    turns: int,
+    file_mtime: float,
+    file_size: int,
+) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO session_docs"
+        " (traj_id, first_query, turns, file_mtime, file_size)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (traj_id, first_query, int(turns), float(file_mtime), int(file_size)),
+    )
+
+
+def upsert_session_file(directory: Path, path: Path) -> None:
+    """把一份 ``traj_*.md`` 的用户首问写进该目录的会话索引。"""
+    path = Path(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        logger.warning("session index skip missing file %s", path)
+        return
+    first_query, turns = _read_session_query(path)
+    conn = _open_session_index(directory)
+    try:
+        _write_session_row(
+            conn,
+            path.stem,
+            first_query,
+            turns,
+            float(stat.st_mtime),
+            int(stat.st_size),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _stale_file_name(item: tuple[Path, float, int]) -> str:
+    return item[0].name
+
+
+def refresh_session_index(
+    directory: Path, *, limit: int | None = SESSION_INDEX_REFRESH_LIMIT,
+) -> int:
+    """按 mtime 和 size 增量补索引。返回本轮之后仍落后的文件数。
+
+    查询路径不要调用这个函数。它会扫目录项，必要时才读 md。
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return 0
+    current: dict[str, tuple[Path, float, int]] = {}
+    for path in _iter_traj_md(directory):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        current[path.stem] = (path, float(stat.st_mtime), int(stat.st_size))
+    index_path = session_index_path(directory)
+    if not current and not index_path.is_file():
+        return 0
+    conn = _open_session_index(directory)
+    try:
+        existing = {
+            str(row["traj_id"]): (
+                float(row["file_mtime"] or 0),
+                int(row["file_size"] or 0),
+            )
+            for row in conn.execute(
+                "SELECT traj_id, file_mtime, file_size FROM session_docs"
+            )
+        }
+        stale: list[tuple[Path, float, int]] = []
+        for traj_id, item in current.items():
+            old = existing.get(traj_id)
+            if old is None or old[0] != item[1] or old[1] != item[2]:
+                stale.append(item)
+        stale.sort(key=_stale_file_name)
+        remaining = len(stale)
+        if limit is None:
+            budget = remaining
+        else:
+            budget = max(0, int(limit))
+        for path, mtime, size in stale[:budget]:
+            first_query, turns = _read_session_query(path)
+            _write_session_row(conn, path.stem, first_query, turns, mtime, size)
+            remaining -= 1
+        for traj_id in existing:
+            if traj_id not in current:
+                conn.execute(
+                    "DELETE FROM session_docs WHERE traj_id=?",
+                    (traj_id,),
+                )
+        conn.commit()
+        return remaining
+    finally:
+        conn.close()
+
+
+def load_session_docs(directory: Path, *, user: str) -> list[dict[str, Any]]:
+    """只读 sidecar 索引，不打开 ``traj_*.md``。"""
+    directory = Path(directory)
+    if not session_index_path(directory).is_file():
+        return []
+    conn = _open_session_index(directory)
+    try:
+        rows = conn.execute(
+            "SELECT traj_id, first_query, turns FROM session_docs"
+            " ORDER BY traj_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    docs: list[dict[str, Any]] = []
+    for row in rows:
+        traj_id = str(row["traj_id"] or "")
+        first_query = str(row["first_query"] or "")
+        docs.append({
+            "traj_id": traj_id,
+            "user": user,
+            "query": first_query,
+            "turns": int(row["turns"] or 0),
+            "text": f"{traj_id} {first_query}".strip(),
+        })
+    return docs
+
+
+def session_index_count(directory: Path) -> int:
+    directory = Path(directory)
+    if not session_index_path(directory).is_file():
+        return 0
+    conn = _open_session_index(directory)
+    try:
+        row = conn.execute("SELECT COUNT(*) AS n FROM session_docs").fetchone()
+    finally:
+        conn.close()
+    return int((row["n"] if row is not None else 0) or 0)
+
+
 def session_corpus_empty(
     dataset_dirs: list[tuple[str, Path]] | None = None,
 ) -> bool:
     dirs = dataset_dirs if dataset_dirs is not None else watch_session_dirs()
     for _user, directory in dirs:
-        if _iter_traj_md(directory):
+        if session_index_count(Path(directory)):
             return False
     return True
 
@@ -289,22 +459,13 @@ def search_session_trajectories(
     top_k: int = 5,
     dataset_dirs: list[tuple[str, Path]] | None = None,
 ) -> list[dict[str, Any]]:
-    """对 ``traj_*.md`` 的用户首问做 BM25。不读 Atom，不打 embedding。"""
+    """对会话索引里的用户首问做 BM25。查询路径不读 md，不打 embedding。"""
     from xskill.utils.search import tokenize_search_text
 
     dirs = dataset_dirs if dataset_dirs is not None else watch_session_dirs()
     docs: list[dict[str, Any]] = []
     for user, directory in dirs:
-        for path in _iter_traj_md(Path(directory)):
-            first_query, turns = _read_session_query(path)
-            text = f"{path.stem} {first_query}".strip()
-            docs.append({
-                "traj_id": path.stem,
-                "user": user,
-                "query": first_query,
-                "turns": turns,
-                "text": text,
-            })
+        docs.extend(load_session_docs(Path(directory), user=user))
     tokens = tokenize_search_text(query)
     if not docs or not tokens:
         return []
