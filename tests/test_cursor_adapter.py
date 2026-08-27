@@ -96,6 +96,26 @@ class TestCursorAdapter:
         assert "read_file" in meta["tool_names"]
         assert "edit_file" in meta["tool_names"]
 
+    def test_adapter_keeps_tool_input_on_timeline(self):
+        raw = json.dumps({
+            "role": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "look"},
+                    {
+                        "type": "tool_use",
+                        "name": "Shell",
+                        "input": {"command": "ps aux", "working_directory": "/tmp"},
+                    },
+                ]
+            },
+        })
+        md, meta = adapt_trajectory(raw + "\n", "cursor_transcripts_jsonl")
+        assert "[tool_use: Shell command=ps aux]" in md
+        tools = (meta["timeline"][0].get("tools") or [])
+        assert tools and tools[0]["tool"] == "Shell"
+        assert tools[0]["input"]["command"] == "ps aux"
+
     def test_adapter_counts_turns(self, fixture_content):
         _md, meta = adapt_trajectory(fixture_content, "cursor_transcripts_jsonl")
         # fixture 有 4 行：user / assistant+tool / assistant+tool / user

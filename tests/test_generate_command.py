@@ -28,6 +28,14 @@ def _call_tool(tool, *args, **kwargs):
     return entrypoint(*args, **kwargs)
 
 
+def _write_minimal_skill(target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "SKILL.md").write_text(
+        "---\nname: x\ndescription: real body for commit gate\n---\n\n# X\n\n正文。\n",
+        encoding="utf-8",
+    )
+
+
 def _bind_skill_ctx(tmp_path: Path, **extra):
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
@@ -113,9 +121,72 @@ def test_generate_read_roots_include_traj_not_parent_secrets(tmp_path: Path):
         assert blocked.startswith("error:")
 
 
+def test_commit_generate_main_refuses_without_traj_reads(tmp_path: Path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    ctx = agent_tools.create_agent_tool_context(
+        skill_dir=skill_dir,
+        atom_skill_dir=skill_dir,
+        extra_read_roots=(skill_dir, sessions),
+        generate_user_id="alice",
+        wiki_root=wiki,
+    )
+    agent_tools.reset_generate_session()
+    with agent_tools.use_agent_tool_context(ctx):
+        result = _call_tool(
+            agent_tools.commit_generate_main,
+            skill_name="too-soon",
+            message="no reads",
+        )
+    assert result.startswith("error:")
+    assert "8" in result
+    assert "traj_cards" in result
+    assert "read_traj" in result
+    assert agent_tools.generate_committed_skills() == []
+
+
+def test_commit_generate_main_allows_after_enough_traj_reads(tmp_path: Path):
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    ctx = agent_tools.create_agent_tool_context(
+        skill_dir=skill_dir,
+        atom_skill_dir=skill_dir,
+        extra_read_roots=(skill_dir, sessions),
+        generate_user_id="alice",
+        wiki_root=wiki,
+    )
+    agent_tools.reset_generate_session()
+    from xskill.agents.traj_tools import read_traj
+
+    with agent_tools.use_agent_tool_context(ctx):
+        for index in range(agent_tools.GENERATE_MIN_TRAJ_READS):
+            path = sessions / f"traj_cursor_x_{index:08x}.md"
+            path.write_text("## User\n\nline\n" * 40, encoding="utf-8")
+            read_traj.entrypoint(
+                traj_id=f"traj_cursor_x_{index:08x}", offset=1, limit=5,
+            )
+        _write_minimal_skill(skill_dir / "ready-skill")
+        result = _call_tool(
+            agent_tools.commit_generate_main,
+            skill_name="ready-skill",
+            message="read enough",
+        )
+    assert result.startswith("committed to main: ready-skill")
+    assert len(agent_tools.generate_read_traj_ids()) == 8
+
+
 def test_commit_generate_main_tool_prefixes_user(tmp_path: Path):
     skill_dir, ctx = _bind_skill_ctx(tmp_path)
     with agent_tools.use_agent_tool_context(ctx):
+        _write_minimal_skill(skill_dir / "fresh-skill")
         result = _call_tool(
             agent_tools.commit_generate_main,
             skill_name="fresh-skill",
@@ -125,6 +196,54 @@ def test_commit_generate_main_tool_prefixes_user(tmp_path: Path):
     repo = skill_dir / "fresh-skill"
     assert current_branch(str(repo)) == "main"
     assert agent_tools.generate_committed_skills() == ["fresh-skill"]
+
+
+def test_commit_generate_main_refuses_placeholder_skill_md(tmp_path: Path):
+    skill_dir, ctx = _bind_skill_ctx(tmp_path)
+    with agent_tools.use_agent_tool_context(ctx):
+        missing = _call_tool(
+            agent_tools.commit_generate_main,
+            skill_name="never-written",
+            message="no skill md",
+        )
+        assert missing.startswith("error:")
+        assert "SKILL.md 不存在" in missing
+        _call_tool(
+            agent_tools.new_skill_folder,
+            skill_name="still-stub",
+            description="占位描述，用来测试 stub 拒绝提交。",
+        )
+        stub = _call_tool(
+            agent_tools.commit_generate_main,
+            skill_name="still-stub",
+            message="stub body",
+        )
+    assert stub.startswith("error:")
+    assert "占位符" in stub
+
+
+def test_generate_write_file_lands_in_active_skill(tmp_path: Path):
+    skill_dir, ctx = _bind_skill_ctx(tmp_path)
+    body = (
+        "---\nname: routed\ndescription: 落点改道测试\n---\n\n# Routed\n\n正文。\n"
+    )
+    with agent_tools.use_agent_tool_context(ctx):
+        _call_tool(
+            agent_tools.new_skill_folder,
+            skill_name="routed",
+            description="裸相对路径应当落进本次新建的 skill 目录。",
+        )
+        wrote = _call_tool(agent_tools.write_file, "SKILL.md", body)
+        assert str(skill_dir / "routed" / "SKILL.md") in wrote
+        wrote_script = _call_tool(
+            agent_tools.write_file, "scripts/check.sh", "#!/bin/sh\necho ok\n"
+        )
+        assert str(skill_dir / "routed" / "scripts" / "check.sh") in wrote_script
+        # 点名了 skill 目录的路径不再二次加前缀
+        explicit = _call_tool(agent_tools.write_file, "routed/notes.md", "n\n")
+        assert str(skill_dir / "routed" / "notes.md") in explicit
+    assert (skill_dir / "routed" / "SKILL.md").read_text(encoding="utf-8").count("Routed")
+    assert not (skill_dir / "SKILL.md").exists()
 
 
 def test_pin_generated_skills(tmp_path: Path):

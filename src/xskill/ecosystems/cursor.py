@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from xskill.ecosystems._shared import (
     EcosystemSpec,
@@ -151,6 +152,41 @@ CURSOR_SPEC = EcosystemSpec(
 )
 
 
+_CURSOR_TOOL_KEYS = (
+    "command", "file_path", "path", "pattern", "query", "glob", "url",
+    "target_file", "relative_workspace_path",
+)
+
+
+def _cursor_tool_snip(inp: dict[str, Any], limit: int = 160) -> str:
+    """把工具入参收成短串，写进 md / timeline，给后面的卡片用。"""
+    if not inp:
+        return ""
+    parts: list[str] = []
+    keys = [k for k in _CURSOR_TOOL_KEYS if k in inp and inp[k] not in (None, "")]
+    if not keys:
+        keys = [k for k in inp if not str(k).startswith("_")][:3]
+    for key in keys:
+        val = re.sub(r"\s+", " ", str(inp[key]).strip())
+        if len(val) > 80:
+            val = val[:79] + "…"
+        parts.append(f"{key}={val}")
+        if len(" ".join(parts)) >= limit:
+            break
+    text = " ".join(parts)
+    return text[:limit]
+
+
+def _clip_cursor_tool_input(inp: dict[str, Any], max_val: int = 300) -> dict[str, Any]:
+    clipped: dict[str, Any] = {}
+    for index, (key, value) in enumerate(inp.items()):
+        if index >= 8:
+            break
+        text = str(value)
+        clipped[key] = text if len(text) <= max_val else text[:max_val] + "…"
+    return clipped
+
+
 # ─────────────────────────────────────────────────────────────────
 # Trajectory adapter
 # ─────────────────────────────────────────────────────────────────
@@ -195,6 +231,7 @@ def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, 
             continue
 
         text_chunks: list[str] = []
+        pending_tools: list[dict] = []
         for part in parts:
             if not isinstance(part, dict):
                 continue
@@ -207,7 +244,17 @@ def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, 
                 name = part.get("name", "tool")
                 if name not in tool_names:
                     tool_names.append(name)
-                text_chunks.append(f"[tool_use: {name}]")
+                inp = part.get("input") or part.get("arguments") or {}
+                if not isinstance(inp, dict):
+                    inp = {"value": inp}
+                snip = _cursor_tool_snip(inp)
+                text_chunks.append(
+                    f"[tool_use: {name} {snip}]" if snip else f"[tool_use: {name}]"
+                )
+                pending_tools.append({
+                    "tool": name,
+                    "input": _clip_cursor_tool_input(inp),
+                })
 
         body = "\n".join(text_chunks).strip()
         if not body:
@@ -216,9 +263,12 @@ def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, 
         if role == "user" and not first_user_query:
             first_user_query = body[:500]
 
-        timeline.append({
+        entry = {
             "t": t, "role": role, "content": body[:2000],
-        })
+        }
+        if pending_tools:
+            entry["tools"] = pending_tools
+        timeline.append(entry)
         t += 1
 
     lines: list[str] = ["# Cursor Agent Trajectory", ""]

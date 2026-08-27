@@ -71,13 +71,13 @@ CJK_TOKENS_PER_CHAR_BY_FAMILY = {
 _TRIMMABLE_TOOLS = (
     "look", "readfile", "read_file", "atom_task_read", "read_traj", "skill_read",
     "grep_files", "list_files", "edit",
-    "list_sessions", "session_card", "session_cards",
+    "traj_search", "traj_cards", "atom_search",
     "wiki_read", "wiki_search", "wiki_status",
 )
 _SPILLABLE_TOOLS = (
     "readfile", "read_file", "atom_task_read", "read_traj", "skill_read",
     "grep_files", "edit",
-    "list_sessions", "session_card", "session_cards",
+    "traj_search", "traj_cards", "atom_search",
     "wiki_read", "wiki_search", "wiki_status",
 )
 _TRIM_MARK = "[…look 旧结果已剪裁,需要可重新 look…]"
@@ -96,6 +96,7 @@ _COMPACT_ACTION_TOOLS = (
     "commit_to_staging",
     "commit_update_main",
     "wiki_write",
+    "wiki_edit",
     "wiki_log",
 )
 _COMPACT_SUCCESS_PREFIXES = {
@@ -108,6 +109,7 @@ _COMPACT_SUCCESS_PREFIXES = {
     "commit_to_staging": ("committed to staging:",),
     "commit_update_main": ("updated on main:",),
     "wiki_write": ("ok created", "ok updated"),
+    "wiki_edit": ("ok appended", "ok edited"),
     "wiki_log": ("ok appended",),
 }
 

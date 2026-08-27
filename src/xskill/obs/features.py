@@ -29,7 +29,13 @@ from typing import Any
 _TRAJ_STEM = re.compile(r"^(traj_[A-Za-z0-9][A-Za-z0-9._\-]*?)(?:\.md|\.json)?$")
 
 # 读类工具：这几个的调用次数是"读取行为"的主口径。
-READ_TOOLS = ("read_file", "grep_files", "list_files", "skill_read", "read_traj")
+READ_TOOLS = (
+    "read_file", "grep_files", "list_files", "skill_read", "read_traj",
+    "traj_search", "traj_cards", "atom_search",
+)
+# 只看过卡片不算精读；精读口径就是 read_traj 读到的不同 traj_id。
+CARD_TOOLS = ("traj_cards", "atom_search")
+TRAJ_READ_TOOLS = ("read_traj", "read_file", "grep_files")
 
 
 def traj_id_from_path(path: Any) -> str | None:
@@ -64,9 +70,15 @@ class FeatureCollector:
     tool_errors: dict[str, int] = field(default_factory=dict)
     tool_seconds: dict[str, float] = field(default_factory=dict)
 
-    # 读到的轨迹：按首次读到的顺序去重
+    # 真正精读过的轨迹（read_file / grep_files / read_traj），按首次读到的顺序去重
     read_traj_ids: list[str] = field(default_factory=list)
     traj_read_calls: int = 0
+    # session_card / session_cards 扫过的 id，不算精读
+    card_traj_ids: list[str] = field(default_factory=list)
+    card_traj_calls: int = 0
+    _card_seen: set[str] = field(
+        default_factory=set, repr=False, compare=False,
+    )
 
     started_at: float | None = None
     finished_at: float | None = None
@@ -146,7 +158,6 @@ class FeatureCollector:
         failed: bool = False,
     ) -> None:
         tool = str(name or "tool")
-        traj_id = self._traj_from_arguments(arguments)
         with self._lock:
             self.tool_calls[tool] = self.tool_calls.get(tool, 0) + 1
             self.tool_call_total += 1
@@ -156,26 +167,54 @@ class FeatureCollector:
                 )
             if failed:
                 self.tool_errors[tool] = self.tool_errors.get(tool, 0) + 1
-            if traj_id is not None:
-                self.traj_read_calls += 1
-                if traj_id not in self._traj_seen:
-                    self._traj_seen.add(traj_id)
-                    self.read_traj_ids.append(traj_id)
+            if tool in CARD_TOOLS:
+                for traj_id in self._card_ids_from_arguments(arguments):
+                    self.card_traj_calls += 1
+                    if traj_id not in self._card_seen:
+                        self._card_seen.add(traj_id)
+                        self.card_traj_ids.append(traj_id)
+            elif tool in TRAJ_READ_TOOLS:
+                for traj_id in self._path_traj_ids_from_arguments(arguments):
+                    self.traj_read_calls += 1
+                    if traj_id not in self._traj_seen:
+                        self._traj_seen.add(traj_id)
+                        self.read_traj_ids.append(traj_id)
 
     @staticmethod
-    def _traj_from_arguments(arguments: dict | None) -> str | None:
-        """只认真正"读一条轨迹"的参数位：path。
-
-        grep/list 的 path 是目录，抽不出 traj id，自然返回 None——不去猜。
-        """
+    def _path_traj_ids_from_arguments(arguments: dict | None) -> list[str]:
+        """认 read_traj 的 traj_id，以及旧读法的 path。目录不算精读。"""
         if not isinstance(arguments, dict):
-            return None
-        for key in ("path", "file_path", "traj_path", "traj_id"):
+            return []
+        found: list[str] = []
+        seen: set[str] = set()
+        for key in ("traj_id", "path", "file_path", "traj_path"):
             if key in arguments:
-                found = traj_id_from_path(arguments.get(key))
-                if found is not None:
-                    return found
-        return None
+                traj_id = traj_id_from_path(arguments.get(key))
+                if traj_id and traj_id not in seen:
+                    seen.add(traj_id)
+                    found.append(traj_id)
+        return found
+
+    @staticmethod
+    def _card_ids_from_arguments(arguments: dict | None) -> list[str]:
+        if not isinstance(arguments, dict):
+            return []
+        found: list[str] = []
+        seen: set[str] = set()
+
+        def _add(raw: Any) -> None:
+            traj_id = traj_id_from_path(raw)
+            if traj_id and traj_id not in seen:
+                seen.add(traj_id)
+                found.append(traj_id)
+
+        if "traj_id" in arguments:
+            _add(arguments.get("traj_id"))
+        raw_ids = arguments.get("traj_ids")
+        if raw_ids is not None:
+            for part in str(raw_ids).replace(",", " ").split():
+                _add(part)
+        return found
 
     # ── 导出 ────────────────────────────────────────────────────
 
@@ -214,6 +253,9 @@ class FeatureCollector:
                 "traj_read_calls": self.traj_read_calls,
                 "read_traj_count": len(self.read_traj_ids),
                 "read_traj_ids": list(self.read_traj_ids),
+                "card_traj_calls": self.card_traj_calls,
+                "card_traj_count": len(self.card_traj_ids),
+                "card_traj_ids": list(self.card_traj_ids),
                 "error": self.error,
             }
 

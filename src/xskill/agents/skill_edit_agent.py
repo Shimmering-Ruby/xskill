@@ -298,8 +298,8 @@ commit message 写明本次基于哪些 atom_id 整理，以及**行为级**变�
 - read_file(path, offset=1, limit=200) — 按 1-based 行号窗口读取 skill 仓 /
   ~/.xskill / /tmp spill 下的文件；trim 后的 ``spill_path`` 也用它分页回读
 - list_files(path) — 列目录文件，返回可直接传给 read_file 的完整路径
-- grep_files(pattern, path="", glob="", max_results=100) — 全文检索（ripgrep），
-  返回「文件:行号:内容」；先检索定位、再 read_file 精读，别逐个翻文件
+- grep_files(pattern, path="", glob="", max_results=100, before=2, after=2) — 全文检索（ripgrep），
+  命中行是「文件:行号:内容」，前后文是「文件-行号-内容」；先检索定位、再 read_file 精读，别逐个翻文件
 - write_file(path, content) — 写到 skill_dir 下；相对路径如 SKILL.md、
   scripts/foo.py，不要加 ./skill/ 前缀
 - commit_baby(skill_name, message) — 仅 baby 分支可用；checkpoint 当前批次

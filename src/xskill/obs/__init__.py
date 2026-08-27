@@ -47,14 +47,18 @@ from xskill.obs.tracing import (
     SPAN_KIND,
     capture_content,
     clip,
+    clip_tail,
+    end_span,
     is_enabled,
     job_name,
+    msg_budget,
     out_dir,
     project_name,
     session_id,
     setup,
     shutdown,
     span,
+    start_span,
 )
 
 logger = logging.getLogger("xskill.obs")
@@ -69,11 +73,14 @@ __all__ = [
     "agent_run",
     "capture_content",
     "clip",
+    "clip_tail",
     "collector",
+    "end_span",
     "dump_features",
     "features_path",
     "is_enabled",
     "job_name",
+    "msg_budget",
     "out_dir",
     "project_name",
     "reset_collector",
@@ -81,6 +88,7 @@ __all__ = [
     "setup",
     "shutdown",
     "span",
+    "start_span",
     "traj_id_from_path",
 ]
 

@@ -14,15 +14,18 @@ opentelemetry。装不装 ``xskill[obs]`` 都不影响正常跑。
 ``XSKILL_OTEL_ENDPOINT``     OTLP HTTP 接收端；缺省读 ``PHOENIX_COLLECTOR_ENDPOINT``
 ``XSKILL_OTEL_PROJECT``      Phoenix 项目名（默认 ``xskill-generate``）
 ``XSKILL_OTEL_CONSOLE``      ``1`` 时同时打 stdout，排查埋点自己用
-``XSKILL_OTEL_CAPTURE_CONTENT`` ``1`` 时记截断后的提示词与回答正文
+``XSKILL_OTEL_MSG_BUDGET``   ``llm.input_messages`` 的字符预算，默认 60000
 
 为什么给 Phoenix 打 OTLP 而不是接 openinference 的自动埋点：自动埋点跟着
 agno 版本走，而这里要量的是 xskill 自己的东西——``context.compact`` 到底
 触发了几次、``read_file`` 打在哪条轨迹上。手写 span 的名字和属性稳定，
-跨 agno 版本不漂。
+跨 agno 版本不漂。代价是 OpenInference 那套消息类属性得自己拼，见
+``obs/generate.py``。
 
-隐私：属性只记工具名、计数、轨迹 id、路径 basename。提示词正文要显式开
-``XSKILL_OTEL_CAPTURE_CONTENT`` 才记，且截断。任何情况都不记 API key。
+隐私：属性记工具名、计数、轨迹 id、路径 basename，以及提示词与回答正文
+（按预算截断）。正文是无条件记的，``XSKILL_OTEL_CAPTURE_CONTENT`` 目前没有
+任何代码读它，:func:`capture_content` 只是留着的读取函数。任何情况都不记
+API key。
 """
 from __future__ import annotations
 
@@ -46,6 +49,10 @@ KIND_TOOL = "TOOL"
 
 _DEFAULT_PROJECT = "xskill-generate"
 _CONTENT_MAX_CHARS = 4000
+_DEFAULT_MSG_BUDGET = 60_000
+# OTel SDK 默认一条 span 只留 128 个属性，多的静默丢掉。把整段对话摊成
+# llm.input_messages.{i}.* 之后轻松过百，不抬上限会丢到看不出规律。
+_SPAN_ATTRIBUTE_LIMIT = 4096
 
 _SETUP_LOCK = threading.Lock()
 _STATE: dict[str, Any] = {
@@ -83,6 +90,16 @@ def session_id() -> str:
     ).strip() or job_name()
 
 
+def msg_budget() -> int:
+    """摊平进 ``llm.input_messages`` 的正文字符预算。超了从最早的消息开始丢。"""
+    raw = (os.environ.get("XSKILL_OTEL_MSG_BUDGET") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MSG_BUDGET
+    return value if value > 0 else _DEFAULT_MSG_BUDGET
+
+
 def out_dir() -> Path | None:
     raw = (os.environ.get("XSKILL_OTEL_OUT") or "").strip()
     if not raw:
@@ -98,6 +115,27 @@ def clip(text: Any, limit: int = _CONTENT_MAX_CHARS) -> str:
     if len(body) <= limit:
         return body
     return f"{body[:limit]}\n...[truncated, {len(body):,} chars total]"
+
+
+def clip_tail(text: Any, limit: int = _CONTENT_MAX_CHARS) -> str:
+    """从尾部截断。多轮对话要从最近的 tool 结果看起，不能总切 system 头。"""
+    body = str(text or "")
+    if len(body) <= limit:
+        return body
+    omitted = len(body) - limit
+    return (
+        f"...[truncated {omitted:,} chars from start, {len(body):,} total]\n"
+        f"{body[-limit:]}"
+    )
+
+
+def _common_span_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    clean = {k: v for k, v in attributes.items() if v is not None}
+    clean.setdefault("xskill.job", job_name())
+    sid = session_id()
+    clean.setdefault("session.id", sid)
+    clean.setdefault("openinference.session.id", sid)
+    return clean
 
 
 class _JsonlSpanExporter:
@@ -216,7 +254,7 @@ class _LoggedExporter:
 def _build_provider() -> None:
     from opentelemetry import trace
     from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace import SpanLimits, TracerProvider
     from opentelemetry.sdk.trace.export import (
         ConsoleSpanExporter,
         SimpleSpanProcessor,
@@ -233,7 +271,10 @@ def _build_provider() -> None:
         "session.id": sid,
         "openinference.session.id": sid,
     })
-    provider = TracerProvider(resource=resource)
+    provider = TracerProvider(
+        resource=resource,
+        span_limits=SpanLimits(max_span_attributes=_SPAN_ATTRIBUTE_LIMIT),
+    )
     _STATE["provider"] = provider
 
     endpoint = (
@@ -320,11 +361,7 @@ def span(name: str, **attributes: Any) -> Iterator[Any]:
     if tracer is None:
         yield _NULL_SPAN
         return
-    clean = {k: v for k, v in attributes.items() if v is not None}
-    clean.setdefault("xskill.job", job_name())
-    sid = session_id()
-    clean.setdefault("session.id", sid)
-    clean.setdefault("openinference.session.id", sid)
+    clean = _common_span_attributes(attributes)
     try:
         scope = tracer.start_as_current_span(name, attributes=clean)
     except Exception:  # noqa: BLE001 — 埋点建不起来就当没开
@@ -333,3 +370,44 @@ def span(name: str, **attributes: Any) -> Iterator[Any]:
         return
     with scope as sp:
         yield sp
+
+
+def start_span(name: str, **attributes: Any) -> tuple[Any, Any]:
+    """开一个 span 并设成当前 span。调用方必须再调 :func:`end_span`。
+
+    给 Generate 的 ``llm.invoke`` 用：HTTP 返回后先不关，这一轮点的工具
+    才能挂到同一个父 span 下面。
+    """
+    if not setup():
+        return _NULL_SPAN, None
+    tracer = _STATE["tracer"]
+    if tracer is None:
+        return _NULL_SPAN, None
+    clean = _common_span_attributes(attributes)
+    try:
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace
+
+        span_obj = tracer.start_span(name, attributes=clean)
+        token = otel_context.attach(trace.set_span_in_context(span_obj))
+        return span_obj, token
+    except Exception:  # noqa: BLE001 — 埋点建不起来就当没开
+        logger.debug("otel span %s could not start", name, exc_info=True)
+        return _NULL_SPAN, None
+
+
+def end_span(span_obj: Any, token: Any) -> None:
+    """结束 :func:`start_span` 打开的 span，并恢复上一层当前 span。"""
+    if span_obj is not None and span_obj is not _NULL_SPAN:
+        try:
+            span_obj.end()
+        except Exception:  # noqa: BLE001
+            logger.debug("otel span end failed", exc_info=True)
+    if token is None:
+        return
+    try:
+        from opentelemetry import context as otel_context
+
+        otel_context.detach(token)
+    except Exception:  # noqa: BLE001
+        logger.debug("otel context detach failed", exc_info=True)

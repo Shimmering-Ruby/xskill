@@ -51,9 +51,9 @@ def test_other_agents_do_not_import_wiki_modules():
     factory = Path("src/xskill/agents/agno_factory.py").read_text(encoding="utf-8")
     for text in (skill_edit, task_agent, scripting, factory):
         assert "llm_wiki" not in text
-        assert "session_catalog" not in text
+        assert "traj_tools" not in text
         assert "wiki_write" not in text
-        assert "list_sessions" not in text
+        assert "traj_search" not in text
 
 
 def test_generate_agent_registers_wiki_tools(tmp_path: Path):
@@ -80,9 +80,9 @@ def test_generate_agent_registers_wiki_tools(tmp_path: Path):
     agent.run(instruction="写一个 skill", user_id="u", job_id="j")
     names = set(seen["names"])
     assert {
-        "list_sessions",
-        "session_card",
-        "session_cards",
+        "traj_search",
+        "traj_cards",
+        "read_traj",
         "wiki_status",
         "wiki_read",
         "wiki_write",
@@ -90,6 +90,63 @@ def test_generate_agent_registers_wiki_tools(tmp_path: Path):
         "wiki_log",
         "commit_generate_main",
     } <= names
+
+
+def test_generate_list_files_refuses_traj_tree(tmp_path: Path):
+    traj_root = tmp_path / "team_trajectories" / "clients" / "cursor-local" / "sessions"
+    traj_root.mkdir(parents=True)
+    (traj_root / "traj_cursor_x_aaaaaaaa.md").write_text("x\n", encoding="utf-8")
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    ctx = agent_tools.create_agent_tool_context(
+        skill_dir=skill,
+        default_traj_root=tmp_path / "team_trajectories",
+        extra_read_roots=(tmp_path / "team_trajectories",),
+        generate_user_id="obs-user",
+        wiki_root=wiki,
+    )
+    with agent_tools.use_agent_tool_context(ctx):
+        refused = agent_tools.list_files.entrypoint(str(traj_root))
+        skill_listing = agent_tools.list_files.entrypoint(str(skill))
+    assert refused.startswith("error:")
+    assert "traj_search" in refused
+    assert "(empty)" in skill_listing or str(skill) in skill_listing
+
+
+def test_compact_nudge_appends_wiki_hint():
+    from agno.models.message import Message
+
+    from xskill.agents.context_budget import ContextManager
+    from xskill.agents.generate_agent import generate_compact_nudge
+    from xskill.agents.llm_wiki import AFTER_COMPACT_EMPTY_HINT
+
+    messages = [
+        Message(role="system", content="you are a test agent"),
+        Message(role="user", content="turn0 " + "u" * 4000),
+    ]
+    for index in range(8):
+        role = "assistant" if index % 2 == 0 else "user"
+        messages.append(Message(role=role, content=f"m{index} " + "x" * 4000))
+
+    class _Resp:
+        content = "ok"
+        usage = None
+
+    manager = ContextManager(
+        200_000,
+        compact_token_limit=1_000,
+        compact_keep_recent_messages=2,
+        compact_fn=lambda prompt: "## Model handoff summary\n\ndone\n",
+    )
+    invoke = manager.wrap(lambda _messages, **_kwargs: _Resp())
+    with generate_compact_nudge():
+        invoke(messages)
+    assert any(
+        AFTER_COMPACT_EMPTY_HINT in str(getattr(message, "content", ""))
+        for message in messages
+    )
 
 
 def test_pyproject_wiki_adds_no_main_deps():

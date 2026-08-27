@@ -101,6 +101,8 @@ class TestGrepFiles:
 
         assert out.startswith("engine: ")
         assert f"{corpus_dir}/traj_a.md:2:" in out
+        assert f"{corpus_dir}/traj_a.md-1-" in out
+        assert "context: before=2 after=2" in out
 
     def test_sensitive_files_filtered_from_hits(self, tmp_path, monkeypatch):
         xskill_home, _skill_dir = _setup_home(tmp_path, monkeypatch)
@@ -175,6 +177,17 @@ class TestGrepFiles:
         )
 
         assert "(no matches" in out
+
+    def test_before_after_zero_keeps_hit_only(self, tmp_path, monkeypatch):
+        xskill_home, _skill_dir = _setup_home(tmp_path, monkeypatch)
+        corpus_dir = self._seed_corpus(xskill_home)
+
+        out = agent_tools.grep_files.entrypoint(
+            "DOCKER_RESTART", path=str(corpus_dir), before=0, after=0,
+        )
+
+        assert f"{corpus_dir}/traj_a.md:2:" in out
+        assert f"{corpus_dir}/traj_a.md-1-" not in out
 
 
 class TestSkillReadTree:

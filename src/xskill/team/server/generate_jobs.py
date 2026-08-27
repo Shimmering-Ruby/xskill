@@ -7,8 +7,9 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 logger = logging.getLogger("xskill.team.generate")
 
@@ -387,7 +388,9 @@ def pin_generated_skills(
     origin_source: str = "generate",
 ) -> list[str]:
     from xskill.pipeline.registry import (
-        PinQuotaExceeded, record_skill_origin, set_skill_pref,
+        PinQuotaExceeded,
+        record_skill_origin,
+        set_skill_pref,
     )
 
     pinned: list[str] = []
@@ -439,7 +442,7 @@ def run_generate_job(job_id: str, *, ctx: Any, config: dict | None) -> None:
                 traj_root=traj_root,
                 config=config or {},
             )
-    except Exception as error:  # noqa: BLE001 — job must end in failed, not crash thread
+    except Exception as error:
         logger.exception("generate job %s failed", job_id)
         _update_job(job_id, status="failed", error=str(error))
 
@@ -478,7 +481,7 @@ def run_claimed_generate_job(
                 db_path=db_path,
                 logs_dir=logs_dir,
             )
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         logger.exception("generate job %s failed", job_id)
         _update_job(job_id, status="failed", error=str(error))
 
@@ -550,6 +553,14 @@ def _run_generate_job_body(
     wiki_root = _prepare_generate_wiki(job, logs_dir)
     extra_roots = list(extra_roots) + [wiki_root]
     resolved_db = Path(db_path) if db_path is not None else get_registry_db_path()
+    # atom_search 的语义检索客户端；embedding 未配置就置 None，工具会提示改走关键词搜。
+    embed_client = None
+    try:
+        from xskill.utils.llm import create_embed_client
+
+        embed_client = create_embed_client(config)
+    except Exception:  # noqa: BLE001 — embedding 缺配置不阻塞 generate 主流程
+        logger.info("generate job %s: embedding 未配置，atom_search 不可用", job["job_id"])
     agent_tools.reset_generate_session()
     tool_context = agent_tools.create_agent_tool_context(
         skill_dir=skill_dir,
@@ -563,6 +574,7 @@ def _run_generate_job_body(
         registry_db_path=resolved_db,
         blocked_read_roots=blocked_roots,
         wiki_root=wiki_root,
+        embed_client=embed_client,
     )
     llm_cfg = {**(config.get("llm") or {}), **(config.get("llm_skill") or {})}
     factory = make_default_factory(
