@@ -2032,13 +2032,27 @@ def _cmd_import_team(args, sources, *, http=None, headers=None) -> int:
     return 0
 
 
-def cmd_read(args, xskill) -> int:
-    """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
-    del xskill  # CLI handler signature compatibility.
+def cmd_read(args, xskill=None, http=None, headers=None) -> int:
+    """`xskill read traj|atom <id>` 按行号读原文，其余仍是 db 桥接入库。"""
+    del xskill
+    terms = [str(item) for item in (getattr(args, "terms", None) or [])]
+    if not terms and getattr(args, "path", None):
+        terms = [str(args.path)]
+    if terms and terms[0] == "traj":
+        return cmd_read_traj(args, http=http, headers=headers)
+    if terms and terms[0] == "atom":
+        return cmd_read_atom(args, http=http, headers=headers)
+    if not terms:
+        _write_search_output(
+            "error: 用法 xskill read traj <id> 或 xskill read atom <id> "
+            "或 xskill read <db路径>",
+            to_stderr=True,
+        )
+        return 2
     from xskill.pipeline.db_ingest import read_db_files
     try:
         summary = read_db_files(
-            args.path,
+            terms[0],
             eco=args.eco,
             register=not args.no_register,
             recursive=args.recursive,
@@ -2052,6 +2066,212 @@ def cmd_read(args, xskill) -> int:
     )
     if not args.no_register:
         print("已注册为 watch_dir —— 启动 `xskill serve` 后将自动拆分入库。")
+    return 0
+
+
+def cmd_read_traj(args, http=None, headers=None) -> int:
+    """`xskill read traj <traj_id>` —— 按行号读轨迹原文。"""
+    return _cmd_read_kind(args, kind="traj", http=http, headers=headers)
+
+
+def cmd_read_atom(args, http=None, headers=None) -> int:
+    """`xskill read atom <atom_id>` —— 按行号读 Atom 对应的轨迹原文。"""
+    return _cmd_read_kind(args, kind="atom", http=http, headers=headers)
+
+
+def _render_read_payload(payload: dict, *, unknown_names: list[str] | None = None) -> None:
+    if unknown_names:
+        _write_search_output(
+            "warning: 未识别工号 " + "、".join(unknown_names),
+            to_stderr=True,
+        )
+    kind = str(payload.get("kind") or "traj")
+    title = payload.get("traj_id") or payload.get("atom_id") or "(unnamed)"
+    lines = [
+        f"读取：{title}",
+        f"当前行号：L{payload.get('offset_start')}-L{payload.get('offset_end')}",
+        f"总行号：L{payload.get('total_start')}-L{payload.get('total_end')}",
+    ]
+    if kind == "atom":
+        if payload.get("atom_id"):
+            lines.append(f"Atom：{payload['atom_id']}")
+        lines.append(f"ID：{payload.get('traj_id') or '-'}")
+    else:
+        lines.append(f"ID：{payload.get('traj_id') or '-'}")
+    if payload.get("user"):
+        lines.append(f"工号：{payload['user']}")
+    if payload.get("truncated"):
+        nxt = payload.get("offset_end")
+        lines.append(f"warning: 单次最多 200 行，下一段从 L{nxt} 继续")
+    lines.append("=" * 64)
+    text = str(payload.get("text") or "")
+    if text.endswith("\n"):
+        text = text[:-1]
+    lines.append(text)
+    lines.append("=" * 64)
+    _write_search_output("\n".join(lines))
+
+
+def _cmd_read_kind(args, *, kind: str, http=None, headers=None) -> int:
+    from xskill.traj_read import parse_read_offsets
+    from xskill.traj_search import parse_search_names
+
+    terms = [str(item) for item in (getattr(args, "terms", None) or [])]
+    target = " ".join(terms[1:]).strip()
+    usage = "xskill read atom <atom_id>" if kind == "atom" else "xskill read traj <traj_id>"
+    if not target:
+        _write_search_output(f"error: 用法 {usage}", to_stderr=True)
+        return 2
+    start, end, offset_error = parse_read_offsets(
+        getattr(args, "offset_start", None),
+        getattr(args, "offset_end", None),
+    )
+    if offset_error:
+        _write_search_output(f"error: {offset_error}", to_stderr=True)
+        return 2
+    names = parse_search_names(getattr(args, "name", "") or "")
+    force_team = getattr(args, "team", False)
+    force_local = getattr(args, "local", False)
+    if force_local:
+        return _cmd_read_kind_local(
+            target, kind=kind, offset_start=start, offset_end=end,
+            json_mode=bool(getattr(args, "json", False)), names=names,
+        )
+    if force_team:
+        return _cmd_read_kind_team(
+            target, kind=kind, args=args, offset_start=start, offset_end=end,
+            http=http, headers=headers, names=names,
+        )
+    from xskill.runtime import role
+    if role() == "client":
+        return _cmd_read_kind_team(
+            target, kind=kind, args=args, offset_start=start, offset_end=end,
+            http=http, headers=headers, names=names,
+        )
+    return _cmd_read_kind_local(
+        target, kind=kind, offset_start=start, offset_end=end,
+        json_mode=bool(getattr(args, "json", False)), names=names,
+    )
+
+
+def _cmd_read_kind_local(
+    target: str, *, kind: str, offset_start: int | None, offset_end: int | None,
+    json_mode: bool, names: list[str],
+) -> int:
+    import json as _json
+
+    from xskill.traj_read import read_atom, read_trajectory
+
+    if names:
+        _write_search_output(
+            "warning: --name 仅 team 检索有效，本机读取忽略",
+            to_stderr=True,
+        )
+    try:
+        if kind == "atom":
+            payload = read_atom(
+                target, offset_start=offset_start, offset_end=offset_end,
+            )
+        else:
+            payload = read_trajectory(
+                target, offset_start=offset_start, offset_end=offset_end,
+            )
+    except Exception as read_error:
+        label = "Atom" if kind == "atom" else "轨迹"
+        _write_search_output(
+            f"error: 本地{label}读取失败（{type(read_error).__name__}）",
+            to_stderr=True,
+        )
+        return 1
+    if payload is None:
+        label = "Atom" if kind == "atom" else "轨迹"
+        _write_search_output(f"error: 未找到{label} {target}", to_stderr=True)
+        return 1
+    if payload["offset_start"] >= payload["total_end"] and payload["total_lines"] > 0:
+        _write_search_output(
+            "error: 行号超出总区间 "
+            f"L{payload['total_start']}-L{payload['total_end']}",
+            to_stderr=True,
+        )
+        return 2
+    if json_mode:
+        _write_search_output(_json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0
+    _render_read_payload(payload)
+    return 0
+
+
+def _cmd_read_kind_team(
+    target: str, *, kind: str, args, offset_start: int | None, offset_end: int | None,
+    http=None, headers=None, names: list[str],
+) -> int:
+    import json as _json
+    import httpx
+
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+    params: dict[str, object] = (
+        {"atom_id": target} if kind == "atom" else {"traj_id": target}
+    )
+    if offset_start is not None:
+        params["offset_start"] = offset_start
+    if offset_end is not None:
+        params["offset_end"] = offset_end
+    if names:
+        params["names"] = ",".join(names)
+    path = (
+        "/api/v1/team/atoms/read"
+        if kind == "atom"
+        else "/api/v1/team/trajectories/read"
+    )
+    label = "Atom" if kind == "atom" else "轨迹"
+    try:
+        resp = http.get(path, params=params, headers=headers)
+    except (httpx.HTTPError, OSError) as network_error:
+        _write_search_output(
+            f"error: 无法连接 team server（{type(network_error).__name__}），"
+            "server 可能未响应，请检查网络或联系管理员",
+            to_stderr=True,
+        )
+        return 1
+    if resp.status_code == 404:
+        detail = ""
+        try:
+            detail = str((resp.json() or {}).get("detail") or "")
+        except Exception:
+            detail = ""
+        if detail == "not found":
+            _write_search_output(f"error: 未找到{label} {target}", to_stderr=True)
+        else:
+            _write_search_output(
+                f"error: server 版本过旧，不支持{label}读取，请管理员先升级 server",
+                to_stderr=True,
+            )
+        return 1
+    if resp.status_code in (400, 422):
+        _write_search_output(
+            f"error: {label}读取参数不合法",
+            to_stderr=True,
+        )
+        return 2
+    if resp.status_code != 200:
+        _write_search_output(
+            f"error: {label}读取失败 HTTP {resp.status_code}",
+            to_stderr=True,
+        )
+        return 1
+    body = resp.json()
+    payload = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(payload, dict):
+        _write_search_output(f"error: {label}读取失败，返回不是结果对象", to_stderr=True)
+        return 1
+    if getattr(args, "json", False):
+        _write_search_output(_json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0
+    meta = body.get("meta") or {}
+    _render_read_payload(payload, unknown_names=list(meta.get("unknown_names") or []))
     return 0
 
 
@@ -2452,10 +2672,35 @@ def build_parser() -> argparse.ArgumentParser:
                          help="htop 式整屏刷新（每 2s）")
 
     p_read = sub.add_parser(
-        "read", help="批量从指定位置读取 db 文件并入库（ngagent/opencode）",
+        "read",
+        help="read traj / read atom 按行号读原文，或把 db 桥接入库",
     )
-    p_read.add_argument("path", type=str,
-                        help="db 文件，或包含 db 文件的目录")
+    p_read.add_argument(
+        "terms", nargs="+", metavar="TARGET",
+        help="read traj <traj_id>、read atom <atom_id>，或 db 文件/目录路径",
+    )
+    p_read.add_argument(
+        "--offset-start", type=int, default=None,
+        help="起始行号，从 1 起，半开区间",
+    )
+    p_read.add_argument(
+        "--offset-end", type=int, default=None,
+        help="结束行号（不含）。单次最多 200 行",
+    )
+    p_read.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_read.add_argument(
+        "--name", default="",
+        help="read traj 或 read atom 时限定工号，逗号分隔；仅 team 模式有效",
+    )
+    p_read_mode = p_read.add_mutually_exclusive_group()
+    p_read_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 读取（需先 xskill connect）",
+    )
+    p_read_mode.add_argument(
+        "--local", action="store_true",
+        help="强制读本机已登记轨迹目录",
+    )
     p_read.add_argument("--eco", default="ngagent",
                         choices=sorted(SQLITE_SPEC_BY_ECO),
                         help="db 所属生态（默认 ngagent）")

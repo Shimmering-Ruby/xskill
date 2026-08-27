@@ -184,6 +184,8 @@ On **macOS / Linux**, native persistence (launchd / systemd --user) is still on 
 xskill search docker compose   # return compact metadata and skill IDs only
 xskill search traj memory leak # search session index (first user query, no split agent)
 xskill search atom memory leak # search split atoms (intent, summary, offsets)
+xskill read traj traj_cc_alice # read trajectory lines (current and total range)
+xskill read atom atom_t_0001   # read atom lines (current and total range)
 xskill search docker --download  # legacy 10-slot LRU download and auto-install
 xskill download <skill-id>     # interactively select target harnesses
 xskill download <skill-id> --agent claude-code --agent codex -y

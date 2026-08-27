@@ -127,6 +127,8 @@ macOS / Linux 的原生常驻（launchd / systemd --user）仍在路上，当前
 xskill search docker compose        # 只返回精简元信息和 skill ID
 xskill search traj memory leak      # 搜会话索引（用户首问，不经拆分代理）
 xskill search atom memory leak      # 搜已拆 Atom（intent、summary、行号）
+xskill read traj traj_cc_alice      # 按行号读轨迹（带当前与总行号）
+xskill read atom atom_t_0001        # 按行号读 Atom（带当前与总行号）
 xskill search docker --download     # 命中写入 10 槽 LRU 并自动安装
 xskill download <skill-id>          # 交互多选安装 harness
 xskill download <skill-id> --agent claude-code --agent codex -y

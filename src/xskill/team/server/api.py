@@ -1162,6 +1162,106 @@ def team_atoms_search(
     }
 
 
+def _team_read_payload(
+    *,
+    kind: str,
+    target: str,
+    offset_start: int | None,
+    offset_end: int | None,
+    names: str,
+) -> dict:
+    from xskill.traj_read import (
+        parse_read_offsets,
+        read_atom,
+        read_trajectory,
+    )
+
+    start, end, offset_error = parse_read_offsets(offset_start, offset_end)
+    if offset_error:
+        raise HTTPException(status_code=400, detail=offset_error)
+    name_list, dataset_dirs, unknown = _team_search_session_dirs(names)
+    if name_list and not dataset_dirs:
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        if kind == "atom":
+            payload = read_atom(
+                target,
+                offset_start=start,
+                offset_end=end,
+                dataset_dirs=dataset_dirs,
+            )
+        else:
+            payload = read_trajectory(
+                target,
+                offset_start=start,
+                offset_end=end,
+                dataset_dirs=dataset_dirs,
+            )
+    except Exception:
+        request_id = f"{kind}-read-{secrets.token_hex(8)}"
+        server_logger.exception(
+            "team %s read failed request_id=%s target_length=%d",
+            kind, request_id, len(target),
+        )
+        raise HTTPException(status_code=500, detail=f"{kind} read failed") from None
+    if payload is None:
+        raise HTTPException(status_code=404, detail="not found")
+    if payload["offset_start"] >= payload["total_end"] and payload["total_lines"] > 0:
+        raise HTTPException(status_code=400, detail="offset out of range")
+    return {
+        "result": payload,
+        "meta": {"unknown_names": unknown},
+    }
+
+
+@router.get("/trajectories/read")
+def team_trajectories_read(
+    traj_id: str,
+    offset_start: int | None = None,
+    offset_end: int | None = None,
+    names: str = "",
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> dict:
+    """按行号读已上传的 ``traj_*.md``。同步 def，只读当前页。"""
+    _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    cleaned = (traj_id or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="empty traj_id")
+    return _team_read_payload(
+        kind="traj",
+        target=cleaned,
+        offset_start=offset_start,
+        offset_end=offset_end,
+        names=names,
+    )
+
+
+@router.get("/atoms/read")
+def team_atoms_read(
+    atom_id: str,
+    offset_start: int | None = None,
+    offset_end: int | None = None,
+    names: str = "",
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> dict:
+    """按 Atom 行号窗口读对应轨迹原文。同步 def。"""
+    _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    cleaned = (atom_id or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="empty atom_id")
+    return _team_read_payload(
+        kind="atom",
+        target=cleaned,
+        offset_start=offset_start,
+        offset_end=offset_end,
+        names=names,
+    )
+
+
 @router.get("/skill_hub/search")
 async def team_skill_hub_search(
     query: str,

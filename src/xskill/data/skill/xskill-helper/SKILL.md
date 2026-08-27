@@ -4,6 +4,7 @@ description: >-
   How to run, connect, generate, upgrade, debug, and search with the xskill
   CLI. Use when a user asks how to join their team server, run
   `xskill generate`, search trajectories with `xskill search traj`,
+  read lines with `xskill read traj` / `xskill read atom`,
   upgrade, debug a stuck install, or use xskill from Claude Code, Codex,
   Cursor, or another supported agent via `/xskill-helper`.
 ---
@@ -106,12 +107,33 @@ xskill search atom --name alice,bob 发票核对
 returns raw trajectory text. Paste a `traj_id` into `xskill generate`
 when you want the instruction to name the evidence.
 
+## Reading a trajectory or atom
+
+These are not search. `read traj` opens one uploaded `traj_*.md` by
+line number. `read atom` opens the same markdown, but only inside that
+atom's line range. Both take `--offset-start` and `--offset-end`
+(1-based, half-open). Each reply prints the current window and the
+total window. One call returns at most 200 lines; if truncated, the
+next page starts at the current end.
+
+```bash
+xskill read traj traj_cc_alice_memleak
+xskill read traj traj_cc_alice_memleak --offset-start 12 --offset-end 88
+xskill read atom atom_t_0001
+xskill read atom atom_t_0001 --offset-start 40 --json
+```
+
+`--name` only applies in team mode. Do not print server paths. If the
+CLI says the server is too old, ask the operator to upgrade.
+
 ## Searching & sharing team skills
 
 ```bash
 xskill search <query...>       # search team skills; returns metadata only
 xskill search traj <query...>  # search session index (first user query, no split agent)
 xskill search atom <query...>  # search split atoms (intent / summary / offsets)
+xskill read traj <traj_id>     # read trajectory lines; prints current and total range
+xskill read atom <atom_id>     # read atom lines; prints current and total range
 xskill search <query...> --download  # legacy 10-slot LRU download + auto-install
 xskill download <skill-id>     # persist one result; interactively select harnesses
 xskill download <skill-id> --agent claude-code --agent codex -y  # for agents/scripts
