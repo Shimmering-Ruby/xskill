@@ -2,8 +2,8 @@
 
 ## Background hosting
 
-`xskill connect` (and `xskill init`) daemonize by handing the run loop to the
-OS's native service facility, then return. The foreground loop they run is
+`xskill connect` daemonizes by handing the run loop to the OS's native
+service facility, then returns. The foreground loop is
 `xskill connect --foreground`.
 
 | Platform | Background mechanism | Notes |
@@ -49,6 +49,7 @@ Settings → Privacy & security → For developers → **Developer Mode: On**.
 | OpenCode | `~/.agents/skills/` (shared user scope) |
 | Cursor | `~/.cursor/skills/` |
 | Trae | IDE workspace storage, `~/.trae-cn`, or CLI trajectory dir (auto-detected) |
+| DeepSeek Harness | `~/.dsh/skills/` |
 
 Codex, OpenCode, and OpenClaw share `~/.agents/skills/`, so installing a skill
 once makes it visible to all three.

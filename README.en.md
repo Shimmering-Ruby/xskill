@@ -131,8 +131,10 @@ One machine is the server; everyone else joins as a thin client and works agains
 
 ```bash
 xskill serve --server                          # prints a join token
-xskill connect <host:port> --token <token>     # on each teammate's machine
+xskill connect <host:port> --token <token> --name <user-id>
 ```
+
+After connect succeeds, type `/xskill-helper` in Claude Code, Codex, Cursor, or another detected agent to see generate, search, and upgrade. If you do not have a host and token yet, treat the command above as the example and ask your own server operator. Do not connect to a public instance.
 
 - **Silently distill your top performers** — one person's solution reaches the whole team automatically.
 - **Any workflow plugs in** — Codex, Claude Code, Cursor IDE; everyone joins the same library, synced across tools.
