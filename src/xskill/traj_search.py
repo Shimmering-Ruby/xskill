@@ -191,18 +191,58 @@ def iter_client_session_dirs(traj_root: Path) -> list[tuple[str, Path]]:
     return found
 
 
+def _resolved_dir_key(directory: Path) -> str | None:
+    try:
+        if directory.is_dir():
+            return str(directory.resolve())
+    except OSError:
+        return None
+    return None
+
+
+def iter_local_bridge_session_dirs(
+    xskill_home: Path | None = None,
+) -> list[tuple[str, Path]]:
+    """本机 ``~/.xskill/*_sessions`` 桥接目录（各 harness 落盘的 ``traj_*.md``）。"""
+    from xskill.config import XSKILL_HOME
+
+    root = Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    found: list[tuple[str, Path]] = []
+    if not root.is_dir():
+        return found
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return found
+    children.sort(key=_path_name)
+    for child in children:
+        if child.is_dir() and child.name.endswith("_sessions"):
+            found.append((child.name, child))
+    return found
+
+
 def watch_session_dirs() -> list[tuple[str, Path]]:
-    """本机 registry 里已登记的轨迹目录。"""
+    """本机可搜、可读的轨迹目录：registry 已登记目录，加上各 harness 桥接目录。"""
     from xskill.pipeline.registry import list_watch_dirs
 
     found: list[tuple[str, Path]] = []
+    seen: set[str] = set()
     for row in list_watch_dirs():
         path = row.get("path")
         if not path:
             continue
         directory = Path(path)
-        if directory.is_dir():
-            found.append((str(row.get("label") or directory.name), directory))
+        key = _resolved_dir_key(directory)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        found.append((str(row.get("label") or directory.name), directory))
+    for label, directory in iter_local_bridge_session_dirs():
+        key = _resolved_dir_key(directory)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        found.append((label, directory))
     return found
 
 

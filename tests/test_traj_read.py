@@ -218,6 +218,21 @@ def test_cli_read_traj_local_prints_ranges(monkeypatch, capsys, tmp_path):
     assert "L1\n" not in out
 
 
+def test_cli_read_traj_local_reads_harness_bridge(monkeypatch, capsys, tmp_path):
+    home = tmp_path / ".xskill"
+    sessions = home / "cc_sessions"
+    _write_lines(sessions / "traj_cc_alice_memleak.md", 5)
+    monkeypatch.setattr("xskill.runtime.role", lambda: "client")
+    monkeypatch.setattr("xskill.config.XSKILL_HOME", home)
+    monkeypatch.setattr("xskill.pipeline.registry.list_watch_dirs", lambda: [])
+    rc = cli.cmd_read_traj(_args(local=True, offset_start=2, offset_end=4))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "当前行号：L2-L4" in out
+    assert "L2" in out
+    assert "L3" in out
+
+
 def test_cli_read_atom_missing_id_errors(capsys):
     rc = cli.cmd_read_atom(_args(target=""))
     assert rc == 2
