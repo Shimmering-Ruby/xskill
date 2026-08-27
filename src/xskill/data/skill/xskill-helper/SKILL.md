@@ -54,8 +54,10 @@ and install `/xskill-helper` into all of them. `--no-skill` skips the
 guide. `--skills-only` only installs the guide. `--force` rescans even if
 the local index already exists.
 
-Remind the user they can later join a remote team server for shared Skills
-and teammate trajectories, or run a standalone team server themselves:
+Interactive `xskill init` then asks whether to join a team server. Enter,
+skip, or an empty address/token all leave the machine usable locally. Do
+not treat a skipped connect as failure. If they want to connect later, or
+run a standalone team server:
 
 ```bash
 xskill connect <host:port> --token <token> --name <user-id>
