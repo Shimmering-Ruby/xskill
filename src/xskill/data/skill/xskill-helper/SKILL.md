@@ -1,14 +1,13 @@
 ---
 name: xskill-helper
 description: >-
-  Let this agent search and read coding-agent chat history for the current
-  user and for teammates, across every collected harness (Claude Code, Codex,
-  Cursor, OpenCode, Trae, DeepSeek Harness, ngagent). Use when the user asks
-  what they or someone else did, wants past sessions, trajectories, or chat
-  history from any of those tools. Team mode: `xskill traj search` then
-  `xskill traj read`. Offline or this machine only: add `--local` to read
-  `~/.xskill/*_sessions` markdown. Also covers connect, generate, upgrade,
-  and debug. Invoke as `/xskill-helper`.
+  Use this skill for xskill. Trigger when the user wants to connect or join
+  a team server, generate or rewrite a team Skill from trajectories, search
+  download upload or import team Skills, look up this user or a teammate's
+  past chats across Claude Code Codex Cursor OpenCode Trae DeepSeek Harness
+  and ngagent, upgrade the client, or debug a stuck daemon. Team chats:
+  xskill traj search then traj read. This machine only: add --local to read
+  ~/.xskill/*_sessions. Invoke as /xskill-helper.
 ---
 
 # xskill-helper

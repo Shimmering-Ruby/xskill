@@ -105,6 +105,7 @@ def test_unknown_or_failing_ecosystem_does_not_abort(
 
 def test_bundled_skill_documents_generate():
     from xskill.ecosystems.bundled_guide import bundled_xskill_source
+    from xskill.skill.frontmatter import parse
 
     skill_md = (bundled_xskill_source() / "SKILL.md").read_text(encoding="utf-8")
     assert "xskill generate" in skill_md
@@ -118,6 +119,17 @@ def test_bundled_skill_documents_generate():
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md
     assert "xskill init" not in skill_md
+
+    fm, _body = parse(skill_md)
+    desc = " ".join(str(fm["description"]).split())
+    # DeepSeek Harness catalogDescriptionMaxLength is 500; a longer
+    # description is truncated and the tail never reaches the model.
+    assert len(desc) <= 500
+    for token in (
+        "connect", "generate", "search", "download", "upload", "import",
+        "traj search", "traj read", "--local", "upgrade", "debug",
+    ):
+        assert token in desc, f"description missing trigger cue: {token}"
 
 
 def test_no_detected_ecosystems_prints_skip(
