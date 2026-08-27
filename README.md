@@ -348,6 +348,7 @@ skillhub:
 
 
 ## 📰 动态
+- **2026-08-27** `v0.7.0`：Generate 读轨迹改为 traj_search、traj_cards、atom_search、read_traj，wiki 可增量记进度；`xskill init` 可跳过连接，已连接用户再跑不会断连。
 - **2026-08-17** `v0.6.32a1`：流水线按新轨迹先拆先归；看板可热改席位和配额比，不重启 agent-worker；有 generate 在等大模型时硬优先；已达触发条件的 import 技能优先占编辑座。
 - **2026-08-14** `v0.6.31`：`xskill rebuild --force` 不再因 `.git/objects` 非空中断；全量 rebuild 会留下 `xskill import` 纳入的技能，只清蒸馏产物。
 - **2026-08-14** `v0.6.30`：team `xskill import` 后钉到发起人推荐列表；技能库登录后可点空心星 pin 进自己的推荐流，并标出推给我、已钉状态；import 后技能立即出现在技能库清单。
