@@ -29,6 +29,7 @@ from xskill.ecosystems import (
     _cursor_projects_path,
     _cursor_session_id_from_path,
     _cursor_skills_path,
+    _cwd_from_cursor_path,
     _read_cwd_from_cursor_jsonl,
     detect_known_ecosystems,
     ingest_cursor_sessions,
@@ -95,6 +96,26 @@ class TestCursorAdapter:
         assert "read_file" in meta["tool_names"]
         assert "edit_file" in meta["tool_names"]
 
+    def test_adapter_keeps_tool_input_on_timeline(self):
+        raw = json.dumps({
+            "role": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "look"},
+                    {
+                        "type": "tool_use",
+                        "name": "Shell",
+                        "input": {"command": "ps aux", "working_directory": "/tmp"},
+                    },
+                ]
+            },
+        })
+        md, meta = adapt_trajectory(raw + "\n", "cursor_transcripts_jsonl")
+        assert "[tool_use: Shell command=ps aux]" in md
+        tools = (meta["timeline"][0].get("tools") or [])
+        assert tools and tools[0]["tool"] == "Shell"
+        assert tools[0]["input"]["command"] == "ps aux"
+
     def test_adapter_counts_turns(self, fixture_content):
         _md, meta = adapt_trajectory(fixture_content, "cursor_transcripts_jsonl")
         # fixture 有 4 行：user / assistant+tool / assistant+tool / user
@@ -136,7 +157,7 @@ class TestIngestCursorSessions:
         assert rec["status"] == "stored"
         assert rec["session_id"] == "abc12345"
         assert rec["ecosystem"] == "cursor"
-        assert rec["traj_id"].startswith("traj_cursor_")
+        assert rec["traj_id"] == "traj_cursor_c-proj-foo_abc12345"
 
         md_path = Path(rec["path"])
         assert md_path.is_file()
@@ -172,6 +193,21 @@ class TestIngestCursorSessions:
         results = ingest_cursor_sessions(tmp_path / "traj", home_root=tmp_path)
         sids = sorted(r["session_id"] for r in results)
         assert sids == ["aaaa1111", "bbbb2222"]
+        assert {r["traj_id"] for r in results} == {
+            "traj_cursor_c-proj-A_aaaa1111",
+            "traj_cursor_c-proj-B_bbbb2222",
+        }
+
+    def test_ingest_finds_nested_transcript_layout(self, tmp_path, fixture_content):
+        transcripts = (
+            tmp_path / ".cursor" / "projects" / "home-admin-xskill"
+            / "agent-transcripts" / "sid-nested"
+        )
+        transcripts.mkdir(parents=True)
+        (transcripts / "sid-nested.jsonl").write_text(fixture_content, encoding="utf-8")
+        results = ingest_cursor_sessions(tmp_path / "traj", home_root=tmp_path)
+        assert len(results) == 1
+        assert results[0]["traj_id"] == "traj_cursor_home-admin-xskill_sid-nest"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -212,6 +248,19 @@ class TestCursorHelpers:
         line = json.dumps({"role": "user", "message": {"content": []}})
         assert _read_cwd_from_cursor_jsonl(line) == ""
 
+    def test_cwd_from_path_reads_encoded_project(self, tmp_path):
+        nested = (
+            tmp_path / "projects" / "home-admin-xskill" / "agent-transcripts"
+            / "sid" / "sid.jsonl"
+        )
+        nested.parent.mkdir(parents=True)
+        nested.write_text("{}\n", encoding="utf-8")
+        assert _cwd_from_cursor_path(nested) == "home-admin-xskill"
+        flat = tmp_path / "projects" / "c-proj-foo" / "agent-transcripts" / "abc.jsonl"
+        flat.parent.mkdir(parents=True)
+        flat.write_text("{}\n", encoding="utf-8")
+        assert _cwd_from_cursor_path(flat) == "c-proj-foo"
+
     def test_path_resolvers(self):
         home = Path("/fake/home")
         assert _cursor_projects_path(home) == home / ".cursor" / "projects"
@@ -222,7 +271,8 @@ class TestCursorHelpers:
         assert CURSOR_SPEC.source_kind == "jsonl"
         assert CURSOR_SPEC.adapter_format == "cursor_transcripts_jsonl"
         assert CURSOR_SPEC.traj_id_prefix == "traj_cursor_"
-        assert CURSOR_SPEC.sessions_glob == "*/agent-transcripts/*.jsonl"
+        assert CURSOR_SPEC.sessions_glob == "*/agent-transcripts/**/*.jsonl"
+        assert CURSOR_SPEC.cwd_from_path is _cwd_from_cursor_path
         # skills 装到 ~/.cursor/skills/，不是 ~/.agents/skills/
         home = Path("/fake/home")
         assert CURSOR_SPEC.skills_install_path(home) == home / ".cursor" / "skills"

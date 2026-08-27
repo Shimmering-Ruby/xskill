@@ -95,6 +95,10 @@ class AgentToolContext:
     extra_read_roots: tuple[Path, ...] = ()
     generate_user_id: str | None = None
     blocked_read_roots: tuple[Path, ...] = ()
+    # Generate 会话证据 wiki。只有 Generate job 会设；其他 agent 保持 None。
+    wiki_root: Path | None = None
+    # atom_search 语义检索用的 EmbedClient。None 时 atom_search 报未配置。
+    embed_client: Any = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -112,6 +116,8 @@ class AgentToolContext:
         object.__setattr__(self, "extra_read_roots", extra)
         blocked = tuple(Path(p) for p in (self.blocked_read_roots or ()))
         object.__setattr__(self, "blocked_read_roots", blocked)
+        if self.wiki_root is not None:
+            object.__setattr__(self, "wiki_root", Path(self.wiki_root))
 
 
 _EMPTY_AGENT_TOOL_CONTEXT = AgentToolContext()
@@ -142,6 +148,8 @@ def create_agent_tool_context(
     extra_read_roots=(),
     generate_user_id=None,
     blocked_read_roots=(),
+    wiki_root=None,
+    embed_client=None,
 ) -> AgentToolContext:
     """Create an immutable context without changing the current task."""
     return AgentToolContext(
@@ -183,6 +191,8 @@ def create_agent_tool_context(
         blocked_read_roots=tuple(
             Path(p) for p in (blocked_read_roots or ())
         ),
+        wiki_root=Path(wiki_root) if wiki_root is not None else None,
+        embed_client=embed_client,
     )
 
 
@@ -323,6 +333,8 @@ class AgentToolConfig:
             "extra_read_roots": current.extra_read_roots,
             "generate_user_id": current.generate_user_id,
             "blocked_read_roots": current.blocked_read_roots,
+            "wiki_root": current.wiki_root,
+            "embed_client": current.embed_client,
         }
 
     def restore(self, snapshot: dict) -> None:
@@ -344,6 +356,8 @@ class AgentToolConfig:
             extra_read_roots=snapshot.get("extra_read_roots") or (),
             generate_user_id=snapshot.get("generate_user_id"),
             blocked_read_roots=snapshot.get("blocked_read_roots") or (),
+            wiki_root=snapshot.get("wiki_root"),
+            embed_client=snapshot.get("embed_client"),
         ))
         if not snapshot.get("configured", True):
             current = _AGENT_TOOL_CONTEXT.get()
@@ -582,12 +596,20 @@ _READ_FILES: contextvars.ContextVar[set[str]] = contextvars.ContextVar(
 _GENERATE_COMMITTED: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
     "xskill_generate_committed_skills",
 )
+_GENERATE_TRAJ_READS: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
+    "xskill_generate_traj_reads",
+)
+_TRAJ_STEM = re.compile(
+    r"^(traj_[A-Za-z0-9][A-Za-z0-9._\-]*?)(?:\.md|\.json)?$"
+)
+GENERATE_MIN_TRAJ_READS = 8
 
 
 def reset_generate_session() -> None:
     """Clear per-run read tracking and generate commit ledger."""
     _READ_FILES.set(set())
     _GENERATE_COMMITTED.set([])
+    _GENERATE_TRAJ_READS.set([])
 
 
 def generate_committed_skills() -> list[str]:
@@ -595,6 +617,71 @@ def generate_committed_skills() -> list[str]:
         return list(_GENERATE_COMMITTED.get())
     except LookupError:
         return []
+
+
+def generate_read_traj_ids() -> list[str]:
+    try:
+        return list(_GENERATE_TRAJ_READS.get())
+    except LookupError:
+        return []
+
+
+def _traj_id_from_path(path: Path | str) -> str | None:
+    matched = _TRAJ_STEM.match(Path(str(path)).name)
+    return matched.group(1) if matched else None
+
+
+def _is_generate_wiki_job() -> bool:
+    return current_agent_tool_context().wiki_root is not None
+
+
+def _is_generate_traj_dir(target: Path) -> bool:
+    """Generate job 里指向轨迹根（或其子目录）的路径，交给 traj_search 处理。"""
+    ctx = current_agent_tool_context()
+    if ctx.wiki_root is None and not ctx.generate_user_id:
+        return False
+    candidates: list[Path] = []
+    if ctx.default_traj_root is not None:
+        candidates.append(Path(ctx.default_traj_root))
+    candidates.extend(Path(p) for p in (ctx.extra_read_roots or ()))
+    for raw in candidates:
+        try:
+            root = raw.resolve()
+        except OSError:
+            root = raw
+        if target == root or _is_relative_to(target, root):
+            return True
+    return False
+
+
+def _note_generate_traj_read(path: Path) -> None:
+    if not _is_generate_wiki_job():
+        return
+    traj_id = _traj_id_from_path(path)
+    if not traj_id:
+        return
+    try:
+        ids = _GENERATE_TRAJ_READS.get()
+    except LookupError:
+        ids = []
+        _GENERATE_TRAJ_READS.set(ids)
+    if traj_id not in ids:
+        ids.append(traj_id)
+
+
+def _generate_traj_read_gate() -> str | None:
+    if not _is_generate_wiki_job():
+        return None
+    ids = generate_read_traj_ids()
+    if len(ids) >= GENERATE_MIN_TRAJ_READS:
+        return None
+    shown = "、".join(ids) if ids else "还没有"
+    return (
+        f"error: 提交前必须用 read_traj 精读至少 {GENERATE_MIN_TRAJ_READS} 条不同轨迹，"
+        f"现在只有 {len(ids)} 条：{shown}。"
+        "traj_cards 只是索引卡，不算精读。"
+        "用卡片上的 L 行号调用 read_traj(traj_id, offset=起始行, limit=行数)。"
+    )
 
 
 def _read_file_ledger() -> set[str]:
@@ -742,18 +829,22 @@ def search_similar_trajs(query: str, top_k: int = 5, filter: str = "all") -> str
 
 @tool(name="read_file")
 def read_file(path: str, offset: int = 1, limit: int = 200) -> str:
-    """Read a file under the skill workspace or current instance spill area.
+    """按行读一个文件，配合 list_files 或 grep_files 给出的路径用。
 
-    Use with list_files / grep_files output: they return paths this tool can
-    read directly. Instance-owned spill files hold trimmed raw tool results;
-    reload them in line windows when placeholders are not enough. Secret-bearing
-    files (config.yaml, *token*, *key*, ...) are refused.
+    spill 文件里是被剪裁掉的旧工具结果，占位符不够用时按行窗口读回来。
+    带密钥的文件（config.yaml、名字含 token 或 key 的）会被拒绝。
+    读参考轨迹不要用它，用 read_traj。
 
     Args:
-        path: File path under an allowed read root.
-        offset: 1-based start line.
-        limit: Number of lines to read from offset.
+        path: 允许的只读根内的文件路径。
+        offset: 1-based 起始行号。
+        limit: 从起始行往后读多少行。
     """
+    if _is_generate_wiki_job() and _traj_id_from_path(path):
+        return (
+            "error: 轨迹一律用 read_traj(traj_id, offset, limit) 读，不走 read_file。"
+            "read_file 只管 skill 目录和 spill 文件。"
+        )
     try:
         line_offset = int(offset)
         line_limit = int(limit)
@@ -1067,18 +1158,20 @@ def _resolve_skill_write_path(path: str) -> tuple[Path | None, str | None]:
 
 @tool(name="write_file")
 def write_file(path: str, content: str) -> str:
-    """Write or overwrite a file under the current skill_dir.
+    """在当前 skill 目录里新建或整文件覆盖一个文件。
 
-    Relative paths resolve against skill_dir, not the process working
-    directory. Use ``SKILL.md`` or ``scripts/foo.py``. Do not prefix
-    ``./skill/`` or the skill folder name. Wrong paths return error
-    with ok or not examples. Absolute paths must stay inside skill_dir.
+    路径相对 skill 目录解析，写 ``SKILL.md`` 或 ``scripts/foo.py`` 即可，
+    不要加 ``./skill/`` 前缀；绝对路径必须落在 skill 目录内。
+    写 SKILL.md 会先校验 frontmatter，非法就不落盘并把原因返回给你改。
+    改已有文件的一小段用 edit，不用整文件重写。
 
-    v2 行为：只做路径安全 + frontmatter 日期消毒。旧 v1 ``source_trajs ≥ 3``
-    gate 和 ``N/M 条轨迹`` warning 消毒已删——v2 用 ``source_atoms`` 引用 atom
-    而非 traj，且质量保障靠 candidates buffer 累计 weightscore ≥ 10 的硬门槛，
-    不需要 SKILL.md 写入端再卡一道。
+    Args:
+        path: skill 目录内的相对路径。
+        content: 文件的完整内容。
     """
+    # 只做路径安全 + frontmatter 日期消毒。旧 v1 的 source_trajs >= 3 gate 与
+    # "N/M 条轨迹" warning 消毒已删：v2 引用 atom 而非 traj，质量靠 candidates
+    # buffer 的 weightscore 门槛，写入端不再卡第二道。
     resolved, err = _resolve_skill_write_path(path)
     if err:
         return err
@@ -1109,12 +1202,17 @@ def write_file(path: str, content: str) -> str:
 
 @tool(name="edit")
 def edit_file(path: str, old_string: str, new_string: str) -> str:
-    """改已经读过的 skill 文件里的一处原文。生成出来的文件同样用它改。
+    """把 skill 文件里的一段原文替换成新内容，用于小改而不重写整份文件。
 
-    已有文件（包括 new_skill_folder 放下的 stub SKILL.md、本趟 write_file
-    刚写的脚本）一律先 read_file 或 skill_read，再调用本工具。old_string
-    必须在文件里恰好出现一次。文件还不存在时用 write_file，不要用本工具
-    创建。相对路径按当前 skill 仓解析：SKILL.md、scripts/foo.py。
+    这个文件必须在本次运行里读过（read_file、skill_read 或 write_file 都算，
+    包括 new_skill_folder 放下的 stub SKILL.md），否则报错。old_string 要能
+    在文件里唯一命中：匹配不到或匹配多处都会报错，这时把上下文多带几行使
+    其唯一。文件还不存在就用 write_file。
+
+    Args:
+        path: skill 目录内的相对路径。
+        old_string: 要被替换的原文，必须在文件中唯一出现。
+        new_string: 替换成的新内容。
     """
     resolved, err = _resolve_skill_write_path(path)
     if err:
@@ -1163,11 +1261,15 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 @tool(name="commit_generate_main")
 def commit_generate_main(skill_name: str, message: str) -> str:
-    """Commit the named skill onto main no matter the current git state.
+    """把写好的 skill 提交到主干 main，这是 generate 任务的最后一步。
 
-    Creates the repository and the main branch when they do not exist.
-    Empty or stub content is allowed.  Never opens a staging branch.
-    The initiating user id is prepended to the commit message.
+    没有仓库或没有 main 分支都会自动建，不会开灰度分支。提交前会检查这一轮
+    用 read_traj 精读过多少条不同轨迹，不够就拒绝并告诉你还差多少。
+    发起人 ID 由系统自动加在 commit message 前面。
+
+    Args:
+        skill_name: 要提交的 skill 名。
+        message: commit message，写清新建还是改了什么、依据是哪些轨迹。
     """
     from xskill.skill.git import commit_generate_to_main_branch
 
@@ -1179,6 +1281,20 @@ def commit_generate_main(skill_name: str, message: str) -> str:
         return "error: skill_name 不能为空"
     target = Path(skill_dir) / slug
     msg = (message or "").strip() or "generate"
+    blocked = _generate_traj_read_gate()
+    if blocked:
+        return blocked
+    from xskill.skill.git import skill_md_still_baby_stub
+
+    if not (target / "SKILL.md").is_file():
+        return (
+            f"error: {slug}/SKILL.md 不存在，先用 write_file 写正文再提交。"
+        )
+    if skill_md_still_baby_stub(target):
+        return (
+            f"error: {slug}/SKILL.md 正文还是初始化占位符，没有写过内容。"
+            f"先用 write_file 把正文写进 {slug}/SKILL.md 再提交。"
+        )
     user_id = current_agent_tool_context().generate_user_id or "unknown"
     prefixed = f"generate-by: {user_id}\n\n{msg}"
     try:
@@ -1447,16 +1563,18 @@ def read_traj(traj_id: str, offset_start: int, offset_end: int) -> str:
 
 @tool(name="new_skill_folder")
 def new_skill_folder(skill_name: str, description: str) -> str:
-    """v2: 创建 skill 目录 → git init → checkout baby 分支 → 首次 commit
-    （含 stub SKILL.md + .gitignore）。
+    """新建一个 skill 目录并初始化 git，生成占位 SKILL.md 等你用 write_file 填。
 
-    description 必填，落到 stub SKILL.md 的 frontmatter 中。后续：
-    - 路由表（``build_skill_catalog_block``）从 SKILL.md frontmatter 取 desc
-      展示
-    - state 由 git 分支决定（baby/main/staging），不再单写 .meta.yml
-    - 后续 SkillEditAgent 触发时拿到 candidates 来填正文，调
-      ``commit_baby_to_main`` graduate 到 main
+    建完之后再写正文；skill 已经存在时会直接告诉你已存在，不会覆盖。
+
+    Args:
+        skill_name: skill 名，会被转成小写连字符形式当目录名。
+        description: 两三句话说清这个 skill 解决什么问题、什么时候该用它。
+            它会进 SKILL.md 的 frontmatter，是别的代理决定要不要读这份
+            skill 的唯一依据，不要写成一句空话。
     """
+    # 目录 -> git init -> baby 分支 -> 首次 commit（stub SKILL.md + .gitignore）。
+    # state 由 git 分支决定（baby/main/staging），不再单写 .meta.yml。
     skill_dir = agent_tool_config.atom_skill_dir
     if skill_dir is None:
         return "error: atom task tool context not initialized"
@@ -1472,7 +1590,11 @@ def new_skill_folder(skill_name: str, description: str) -> str:
             return f"already exists: {target}"
         from xskill.skill.git import init_skill_repo_on_baby
         init_skill_repo_on_baby(str(target), name=slug, description=desc)
-        return f"created on baby branch: {target}  desc={desc[:60]!r}"
+        return (
+            f"created on baby branch: {target}  desc={desc[:60]!r}\n"
+            f"接下来 write_file 写正文，相对路径会落在 {slug}/ 下，"
+            f"写 SKILL.md 即写 {slug}/SKILL.md。"
+        )
 
     result = _run_cluster_mutation(mutate)
     if not str(result).startswith("error:"):
@@ -1482,7 +1604,14 @@ def new_skill_folder(skill_name: str, description: str) -> str:
 
 @tool(name="skill_read")
 def skill_read(skill_name: str) -> str:
-    """读 skill 的 SKILL.md 正文 + 目录内其余文件树（路径可直接喂 read_file）。"""
+    """读一个已有 skill 的现状：SKILL.md 全文，加目录里其余文件的清单。
+
+    改已有 skill 之前先调它看清现状；返回的文件路径可以直接喂给 read_file。
+    读过 SKILL.md 之后才允许对它 edit。
+
+    Args:
+        skill_name: skill 名。
+    """
     skill_dir = agent_tool_config.atom_skill_dir
     if skill_dir is None:
         return "error: atom task tool context not initialized"
@@ -1937,14 +2066,23 @@ def make_task_agent_tools(
 
 @tool(name="list_files")
 def list_files(path: str) -> str:
-    """列目录下的文件 / 子目录，返回可直接传给 read_file 的完整路径。
+    """列目录下的文件与子目录，返回可直接传给 read_file 的完整路径。
 
-    可列 skill 仓、~/.xskill、/tmp spill 三个只读根内的任意目录——摸清 skill
-    已有文件、轨迹 / atom 数据布局都用它。越界返回 error。
-    on hold 轨迹目录会被拦截，不出现在列表里。
-    目录条目过多时完整列表写入 spill 文件，请用 read_file 按行翻页。
+    可列 skill 仓、~/.xskill、临时 spill 三个只读根内的目录，越界报错。
+    条目太多时完整清单会落到 spill 文件，再用 read_file 按行翻页。
+    on hold 的轨迹目录不会出现在结果里。
+    找参考轨迹不要用它，用 traj_search。
+
+    Args:
+        path: 要列的目录路径。
     """
     target_directory = Path(path).resolve()
+    if _is_generate_traj_dir(target_directory):
+        return (
+            "error: 轨迹目录不用 list_files。找轨迹用 traj_search(query)，"
+            "看内容用 traj_cards，精读用 read_traj。"
+            "目录一长会 spill，把上下文撑爆。"
+        )
     roots = _allowed_read_roots()
     if not any(_is_relative_to(target_directory, root) for root in roots):
         allowed_block = ", ".join(str(root) for root in roots)
@@ -1966,20 +2104,85 @@ def list_files(path: str) -> str:
     return _maybe_spill_list_files(body, target_directory)
 
 
+_GREP_HIT = re.compile(r"^(.*?):(\d+):(.*)$")
+_GREP_SINGLE = re.compile(r"^(\d+):(.*)$")
+
+
+def _parse_grep_hit(line: str, search_root: Path) -> tuple[Path, int, str] | None:
+    match = _GREP_HIT.match(line)
+    if match:
+        path = Path(match.group(1))
+        if "/" in match.group(1) or path.suffix or path.exists():
+            return path, int(match.group(2)), match.group(3)
+    if search_root.is_file():
+        single = _GREP_SINGLE.match(line)
+        if single:
+            return search_root, int(single.group(1)), single.group(2)
+    if match:
+        return Path(match.group(1)), int(match.group(2)), match.group(3)
+    return None
+
+
+def _render_grep_hits(
+    hits: list[tuple[Path, int, str]],
+    *,
+    before: int,
+    after: int,
+) -> list[str]:
+    """命中行用 file:line:text；前后文用 file-line-text。max_results 按命中条数计。"""
+    if before <= 0 and after <= 0:
+        return [f"{path}:{line}:{text}" for path, line, text in hits]
+    cache: dict[str, list[str]] = {}
+    blocks: list[str] = []
+    for path, line, _text in hits:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key not in cache:
+            try:
+                cache[key] = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                cache[key] = []
+        lines = cache[key]
+        start = max(1, line - before)
+        end = min(len(lines), line + after) if lines else line
+        chunk: list[str] = []
+        for number in range(start, end + 1):
+            body = lines[number - 1] if 0 <= number - 1 < len(lines) else ""
+            mark = ":" if number == line else "-"
+            chunk.append(f"{path}{mark}{number}{mark}{body}")
+        blocks.append("\n".join(chunk))
+    return blocks
+
+
 @tool(name="grep_files")
 def grep_files(pattern: str, path: str = "", glob: str = "",
-               max_results: int = 100) -> str:
-    """在允许的只读根内全文检索，返回「文件:行号:内容」，路径可直接喂 read_file。
+               max_results: int = 100, before: int = 2, after: int = 2) -> str:
+    """在允许的只读根内全文检索。命中行是「文件:行号:内容」，前后文是「文件-行号-内容」。
+
+    找参考轨迹不要用它，用 traj_search。
 
     Args:
         pattern: 正则表达式（ripgrep / grep -E 语法）。
         path: 检索根目录，缺省为 skill 仓所在根；须在允许的只读根内。
         glob: 可选文件名过滤，如 "*.md"。
-        max_results: 命中行数上限（1-500）。
+        max_results: 命中条数上限（1-500），不含前后文行。
+        before: 每条命中往前带几行，默认 2，最大 10。
+        after: 每条命中往后带几行，默认 2，最大 10。
     """
     max_results = max(1, min(int(max_results), 500))
+    try:
+        before = max(0, min(int(before), 10))
+        after = max(0, min(int(after), 10))
+    except (TypeError, ValueError):
+        return "error: before/after 必须是整数"
     roots = _allowed_read_roots()
     search_root = (Path(path) if path else roots[0]).resolve()
+    if _is_generate_traj_dir(search_root) or (
+        _is_generate_wiki_job() and _traj_id_from_path(search_root)
+    ):
+        return (
+            "error: 轨迹不用 grep_files。找轨迹用 traj_search(query)，"
+            "看内容用 traj_cards，精读用 read_traj。"
+        )
     if not any(_is_relative_to(search_root, root) for root in roots):
         allowed_block = ", ".join(str(root) for root in roots)
         return f"error: grep_files restricted to {allowed_block} (tried: {path})"
@@ -2047,24 +2250,31 @@ def grep_files(pattern: str, path: str = "", glob: str = "",
                 if compiled_pattern.search(line_text):
                     output_lines.append(f"{file_path}:{line_number}:{line_text}")
 
-    hit_line_pattern = re.compile(r"^(.*?):(\d+):")
-    filtered_lines: list[str] = []
+    hits: list[tuple[Path, int, str]] = []
     for output_line in output_lines:
-        hit_match = hit_line_pattern.match(output_line)
-        # resolve() 后再判敏感：防符号链接用无害文件名包装密钥文件绕过过滤。
-        if hit_match and _is_sensitive_file(Path(hit_match.group(1)).resolve()):
+        parsed = _parse_grep_hit(output_line, search_root)
+        if parsed is None:
             continue
-        if hit_match and _is_blocked_read_path(Path(hit_match.group(1))):
+        hit_path, _line, _text = parsed
+        try:
+            resolved = hit_path.resolve()
+        except OSError:
+            resolved = hit_path
+        if _is_sensitive_file(resolved) or _is_blocked_read_path(resolved):
             continue
-        filtered_lines.append(output_line)
-        if len(filtered_lines) >= max_results:
+        hits.append(parsed)
+        if len(hits) >= max_results:
             break
-    header = f"engine: {engine}\nroot: {search_root}\n"
-    if not filtered_lines:
+    header = (
+        f"engine: {engine}\nroot: {search_root}\n"
+        f"context: before={before} after={after} hits={len(hits)}\n"
+    )
+    if not hits:
         return header + f"(no matches for {pattern!r})"
-    body = "\n".join(filtered_lines)
-    if len(body) > 10000:
-        body = body[:10000] + "\n... (truncated — narrow pattern/glob or lower max_results)"
+    blocks = _render_grep_hits(hits, before=before, after=after)
+    body = "\n--\n".join(blocks) if (before or after) else "\n".join(blocks)
+    if len(body) > 12000:
+        body = body[:12000] + "\n... (truncated — narrow pattern/glob or lower max_results)"
     return header + body
 
 

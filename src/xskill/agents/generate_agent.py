@@ -1,19 +1,29 @@
 """GenerateAgent —— 用户点名、直接写主干的 skill 生成代理。
 
 和 SkillEditAgent 同类（Agno + 同一套工具上下文），但由
-``xskill generate`` 启动，不靠候选缓冲攒分。读轨迹靠 list/grep/read；
-写完用 ``commit_generate_main`` 落到 main。
+``xskill generate`` 启动，不靠候选缓冲攒分。读轨迹走
+``traj_search`` → ``traj_cards`` → ``read_traj`` 这条链，写完用
+``commit_generate_main`` 落到 main。挂哪 16 个工具、各自干什么，见
+``xskill.agents.traj_tools`` 的模块头。
+
+提示词里不列工具清单：Agno 从每个 ``@tool`` 函数的 docstring 取工具描述、
+从 Args 段取参数描述，自动送进模型。清单写两遍只会两边不一致。
+提示词只讲任务、流程与红线。
 """
 from __future__ import annotations
 
 import logging
+import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 logger = logging.getLogger("xskill.generate_agent")
 
 ONHOLD_PROMPT_LINE = "不要参考 on hold 轨迹。"
+
+READ_TARGET_DEFAULT = 30
 
 SYSTEM_PROMPT = """你是 XSkill 的 GenerateAgent。用户通过 `xskill generate` 发来一条指令，
 要你立刻新建或改写一个 skill，并且提交到主干分支 main。
@@ -39,8 +49,26 @@ scripts/ 下放可执行脚本、在 references/ 下放长参考材料。价值�
 
 {read_roots_block}
 
-用 list_files 摸清结构，用 grep_files 按关键词搜索，用 read_file 按行精读。
-看某个已有 skill 的现状用 skill_read。
+# 怎么读轨迹
+
+库里通常有成百上千条轨迹，绝大多数和这次指令无关。不要挨着读，按这条链走：
+
+1. 从用户指令里抽出关键词、报错片段、命令名、模块名，用 traj_search 定向搜。
+   一组词只能捞出一类会话，换几组词多搜几轮，覆盖面才够。想摸清库里有什么
+   就不带 query 翻一页目录。关键词搜不准、或想按"这类事怎么做"整句描述时，
+   换 atom_search 语义搜，返回的行号区间可以直接精读。
+2. 对搜出来的候选批量调 traj_cards，一次最多 8 条，从卡片判断哪些真的相关。
+   卡片只是索引，不算读过。
+3. 对真正相关的，按卡片上的 L 行号 read_traj 精读。
+   {read_target_line}
+   常见做法要看够条数才敢下结论；只在少数几条里出现的坑、绕路、失败重试，
+   往往才是这个 skill 最值得写的部分，不要只挑最典型的读。
+4. 每精读五条左右，立刻用 wiki_edit（old_string 留空）把新行追加进
+   pages/survey.md，并用 wiki_log 记一行。只写真正 read_traj 过的 id，
+   不要 wiki_write 整页重写。
+5. 上下文可能被压缩。压缩之后先 wiki_status，再 wiki_read pages/survey.md，
+   只补表里还没有的 id，不要把已经读过的轨迹重扫一遍。
+   survey 还是空表就回到第 1 步。
 
 # 怎么改文件
 
@@ -76,19 +104,32 @@ edit 前必须先读过该文件，否则工具会报错。
   （staging）提交工具。
 - commit message 写清你新建还是改了哪个 skill、依据是什么。系统会自动在
   前面加上发起人 ID。
-- 轨迹里若有密钥、token、密码、内网地址，不要原样写进 skill，用占位符。
-
-# 可用工具
-
-- list_files(path)：目录条目过多时完整列表写入 spill 文件，用 read_file 按行翻页。
-- grep_files(pattern, path="", glob="", max_results=100)
-- read_file(path, offset=1, limit=200)
-- skill_read(skill_name)
-- write_file(path, content) — 仅新文件或 stub 整篇重写
-- edit(path, old_string, new_string) — 改已读过的已有文件（含本趟刚生成的）
-- new_skill_folder(skill_name, description)
-- commit_generate_main(skill_name, message)
+- 轨迹里若有密钥、token、密码、内网地址，不要原样写进 skill 或 wiki，用占位符。
+- SKILL.md 用一节列出真正 read_traj 精读过的 traj_id，不要列只看过卡片的 id。
 """
+
+
+_USER_TARGET = re.compile(
+    r"(?:至少|最少|不少于|读|看|参考|覆盖)\s*(\d{1,4})\s*(?:条|个|份)?\s*"
+    r"(?:不同)?\s*(?:轨迹|会话|session|traj)"
+)
+
+
+def _read_target_line(instruction: str) -> str:
+    """条数走提示保底加用户指定：指令里点了数就服从，没点就给默认目标。"""
+    matched = _USER_TARGET.search(instruction or "")
+    if matched:
+        wanted = int(matched.group(1))
+        return (
+            f"用户这次点了条数：至少精读 {wanted} 条不同轨迹，以用户的数为准。"
+            f"没到 {wanted} 条不要开始写 skill；"
+            "确实搜不到那么多相关轨迹，就在 SKILL.md 里写明只找到几条、搜了哪些词。"
+        )
+    return (
+        f"用户没点条数，目标是精读 {READ_TARGET_DEFAULT} 条上下不同轨迹："
+        "少于十条通常不足以分辨哪些做法是通例、哪些是个例；"
+        "相关的轨迹本来就不多时不必硬凑，但要在 SKILL.md 里写明搜了哪些词。"
+    )
 
 
 def _name_hint(preferred_names: list[str]) -> str:
@@ -96,6 +137,31 @@ def _name_hint(preferred_names: list[str]) -> str:
     if not names:
         return "未指定，可以看全部轨迹。"
     return "请优先看这些人的轨迹：" + "、".join(names)
+
+
+@contextmanager
+def generate_compact_nudge() -> Iterator[None]:
+    """Generate 专用：compact 成功后提示先读 wiki。其他 agent 不绑。"""
+    from xskill.agents.context_budget import _STATE, bind_context_hooks
+    from xskill.agents.llm_wiki import apply_after_compact_hint
+
+    previous = getattr(_STATE, "compact_wrapper", None)
+    previous_spill = getattr(_STATE, "spill_hook", None)
+
+    def wrapper(manager, messages, compact_fn, prefix_box) -> bool:
+        if previous is not None:
+            compacted = previous(manager, messages, compact_fn, prefix_box)
+        else:
+            compacted = manager._run_compact(messages, compact_fn, prefix_box)
+        if compacted:
+            apply_after_compact_hint(messages)
+        return compacted
+
+    bind_context_hooks(compact_wrapper=wrapper, spill_hook=previous_spill)
+    try:
+        yield
+    finally:
+        bind_context_hooks(compact_wrapper=previous, spill_hook=previous_spill)
 
 
 def _read_roots_block(roots: list[Path]) -> str:
@@ -132,6 +198,7 @@ class GenerateAgent:
         preferred_names: list[str] | None = None,
     ) -> str:
         from xskill.agents import agent_tools
+        from xskill.agents import llm_wiki, traj_tools
         from xskill.agents.agent_trace import trace_to
         from xskill.agents.context_budget import (
             DEFAULT_MAX_CONTEXT,
@@ -145,8 +212,19 @@ class GenerateAgent:
             instruction=instruction.strip(),
             name_hint=_name_hint(preferred_names),
             read_roots_block=_read_roots_block(list(self.extra_read_roots)),
+            read_target_line=_read_target_line(instruction),
         )
         tools = [
+            traj_tools.traj_search,
+            traj_tools.atom_search,
+            traj_tools.traj_cards,
+            traj_tools.read_traj,
+            llm_wiki.wiki_status,
+            llm_wiki.wiki_read,
+            llm_wiki.wiki_write,
+            llm_wiki.wiki_edit,
+            llm_wiki.wiki_search,
+            llm_wiki.wiki_log,
             agent_tools.list_files,
             agent_tools.grep_files,
             agent_tools.read_file,
@@ -184,6 +262,6 @@ class GenerateAgent:
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ):
+        ), generate_compact_nudge():
             result = agent.run(user_msg)
-        return getattr(result, "content", "") or ""
+            return getattr(result, "content", "") or ""

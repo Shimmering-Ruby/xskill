@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from xskill.ecosystems._shared import (
     EcosystemSpec,
@@ -105,14 +106,28 @@ def _cursor_session_id_from_path(jsonl_path: Path) -> str:
 
 
 def _read_cwd_from_cursor_jsonl(content: str) -> str:
-    """Cursor JSONL 每行只有 ``{role, message}``，**没有 cwd 字段**——cwd 被
-    encoded 进父目录名 ``<encoded-cwd>/agent-transcripts/``，content 看不到。
+    """Cursor JSONL 每行只有 ``{role, message}``，没有 cwd 字段。
 
-    返回空串让 traj_id 退化到 ``traj_cursor_unknown_<sid8>``。功能上不影响，
-    只是 traj_id 里 project 段不可读。如果以后要从 encoded slug 反解 cwd，
-    需要扩 spec 协议让 cwd_from_content 也接 path（暂不动）。
+    项目名在路径里，见 ``_cwd_from_cursor_path``。这里返回空串，ingester
+    会再问 ``cwd_from_path``。
     """
     del content  # EcosystemSpec callback signature compatibility.
+    return ""
+
+
+def _cwd_from_cursor_path(jsonl_path: Path) -> str:
+    """从 ``<encoded-cwd>/agent-transcripts/...`` 取出 Cursor 的项目 slug。
+
+    本机两种布局都是这个结构：
+      ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>.jsonl
+      ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>/<sid>.jsonl
+    encoded-cwd 就是工作目录把分隔符换成 ``-`` 再小写，例如
+    ``home-admin-xskill``。拿它当 project 段，traj_id 才分得出项目。
+    """
+    parts = jsonl_path.resolve().parts
+    for index, part in enumerate(parts):
+        if part == "agent-transcripts" and index > 0:
+            return parts[index - 1]
     return ""
 
 
@@ -124,14 +139,52 @@ CURSOR_SPEC = EcosystemSpec(
     name="cursor",
     source_kind="jsonl",
     sessions_path=_cursor_projects_path,
-    sessions_glob="*/agent-transcripts/*.jsonl",  # <encoded-cwd>/agent-transcripts/<sid>.jsonl
+    # 两种布局：<encoded-cwd>/agent-transcripts/<sid>.jsonl
+    # 以及本机 Cursor 实际用的 <encoded-cwd>/agent-transcripts/<sid>/<sid>.jsonl
+    sessions_glob="*/agent-transcripts/**/*.jsonl",
     session_id_from_path=_cursor_session_id_from_path,
     cwd_from_content=_read_cwd_from_cursor_jsonl,
+    cwd_from_path=_cwd_from_cursor_path,
     adapter_format="cursor_transcripts_jsonl",
     traj_id_prefix="traj_cursor_",
     skills_install_path=_cursor_skills_path,  # ~/.cursor/skills/ — Cursor 自己的 skill 目录
     label="cursor",
 )
+
+
+_CURSOR_TOOL_KEYS = (
+    "command", "file_path", "path", "pattern", "query", "glob", "url",
+    "target_file", "relative_workspace_path",
+)
+
+
+def _cursor_tool_snip(inp: dict[str, Any], limit: int = 160) -> str:
+    """把工具入参收成短串，写进 md / timeline，给后面的卡片用。"""
+    if not inp:
+        return ""
+    parts: list[str] = []
+    keys = [k for k in _CURSOR_TOOL_KEYS if k in inp and inp[k] not in (None, "")]
+    if not keys:
+        keys = [k for k in inp if not str(k).startswith("_")][:3]
+    for key in keys:
+        val = re.sub(r"\s+", " ", str(inp[key]).strip())
+        if len(val) > 80:
+            val = val[:79] + "…"
+        parts.append(f"{key}={val}")
+        if len(" ".join(parts)) >= limit:
+            break
+    text = " ".join(parts)
+    return text[:limit]
+
+
+def _clip_cursor_tool_input(inp: dict[str, Any], max_val: int = 300) -> dict[str, Any]:
+    clipped: dict[str, Any] = {}
+    for index, (key, value) in enumerate(inp.items()):
+        if index >= 8:
+            break
+        text = str(value)
+        clipped[key] = text if len(text) <= max_val else text[:max_val] + "…"
+    return clipped
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -178,6 +231,7 @@ def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, 
             continue
 
         text_chunks: list[str] = []
+        pending_tools: list[dict] = []
         for part in parts:
             if not isinstance(part, dict):
                 continue
@@ -190,7 +244,17 @@ def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, 
                 name = part.get("name", "tool")
                 if name not in tool_names:
                     tool_names.append(name)
-                text_chunks.append(f"[tool_use: {name}]")
+                inp = part.get("input") or part.get("arguments") or {}
+                if not isinstance(inp, dict):
+                    inp = {"value": inp}
+                snip = _cursor_tool_snip(inp)
+                text_chunks.append(
+                    f"[tool_use: {name} {snip}]" if snip else f"[tool_use: {name}]"
+                )
+                pending_tools.append({
+                    "tool": name,
+                    "input": _clip_cursor_tool_input(inp),
+                })
 
         body = "\n".join(text_chunks).strip()
         if not body:
@@ -199,9 +263,12 @@ def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, 
         if role == "user" and not first_user_query:
             first_user_query = body[:500]
 
-        timeline.append({
+        entry = {
             "t": t, "role": role, "content": body[:2000],
-        })
+        }
+        if pending_tools:
+            entry["tools"] = pending_tools
+        timeline.append(entry)
         t += 1
 
     lines: list[str] = ["# Cursor Agent Trajectory", ""]
