@@ -34,6 +34,18 @@ schema 是什么样，确认模型看到的和你想的一致：
 
 `SCHEMA.txt` 可以进 code review diff，reviewer 能直接看到模型侧的变化。
 
+## 上下文预算的流式陷阱
+
+`_wrap_with_context_mgmt` 只包 `model.invoke`。任何用 `stream=True` 跑 agent
+的路径都会走 `invoke_stream`，完全绕过 compact、spill 和超长兜底，模型跑在
+后端原生窗口里（DeepSeek 是 1M），而且日志里一条 CONTEXT 事件都不会有。
+产品 GenerateAgent 用非流式 `agent.run()` 所以没事；写实验脚本、demo、
+新 agent 入口时必须非流式，或先给 `invoke_stream` 补包装。判断预算机制
+是否真在跑，看 agent.log 里有没有 CONTEXT 事件（Compacted context、
+Spilled、Compact was not needed 任意一种）。
+
+llm_cfg 里开剪裁的键名是 `enable_spill`，不是 `spill`。
+
 ## 相关材料
 
 - 工具面设计与取舍：`docs/plans/2026-08-27-generate-tool-surface.md`
