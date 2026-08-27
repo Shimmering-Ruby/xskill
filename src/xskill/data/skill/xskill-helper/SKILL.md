@@ -3,8 +3,8 @@ name: xskill-helper
 description: >-
   How to run, connect, generate, upgrade, debug, and search with the xskill
   CLI. Use when a user asks how to join their team server, run
-  `xskill generate`, search trajectories with `xskill search traj`,
-  read lines with `xskill read traj` / `xskill read atom`,
+  `xskill generate`, search trajectories with `xskill traj search`,
+  read lines with `xskill traj read`,
   upgrade, debug a stuck install, or use xskill from Claude Code, Codex,
   Cursor, or another supported agent via `/xskill-helper`.
 ---
@@ -79,61 +79,53 @@ xskill import ./my-skill
 xskill import ./skills-parent --json
 ```
 
-## Searching trajectories and atoms
+## Searching and reading trajectories
 
-These are two commands. Do not mix them.
+The default human and agent entry is the trajectory, not Atom.
 
-`xskill search traj` searches the session index, not the raw `traj_*.md`
-files. Upload and the watcher extract `## Initial Query` / `## User`
-once and write the sidecar index. The query path only reads that index
-and ranks with BM25. It does not wait for the split agent and does not
+`xskill traj search` searches the session index, not the raw `traj_*.md`
+files. The query path does not wait for the split agent and does not
 open trajectory files. Cards show `traj_id`, user, and the first user
-query.
+query. Putting the word traj after `xskill search` searches skills,
+not trajectories. Use `xskill traj search`.
 
-`xskill search atom` searches atoms that the split agent already wrote
-(intent, summary, line range). Ranking is vector plus BM25. Sessions
-that have not been split do not appear. Cards add Atom id, offsets, and
-the atom summary.
-
-```bash
-xskill search traj 内存泄漏
-xskill search traj "alembic 半迁移" -k 8
-xskill search traj --name alice,bob 发票核对 --json
-xskill search atom 内存泄漏
-xskill search atom --name alice,bob 发票核对
-```
-
-`--name` only applies in team mode. Neither command downloads files or
-returns raw trajectory text. Paste a `traj_id` into `xskill generate`
-when you want the instruction to name the evidence.
-
-## Reading a trajectory or atom
-
-These are not search. `read traj` opens one uploaded `traj_*.md` by
-line number. `read atom` opens the same markdown, but only inside that
-atom's line range. Both take `--offset-start` and `--offset-end`
-(1-based, half-open). Each reply prints the current window and the
-total window. One call returns at most 200 lines; if truncated, the
-next page starts at the current end.
+`xskill traj read` opens one uploaded `traj_*.md` by line number
+(`--offset-start`, `--offset-end`, 1-based half-open). Each reply
+prints the current window and the total window. One call returns at
+most 200 lines. Team mode defaults to the caller's own employee
+directory; reading someone else's trajectory needs the server switch
+`team.server.allow_read_others`.
 
 ```bash
-xskill read traj traj_cc_alice_memleak
-xskill read traj traj_cc_alice_memleak --offset-start 12 --offset-end 88
-xskill read atom atom_t_0001
-xskill read atom atom_t_0001 --offset-start 40 --json
+xskill traj search 内存泄漏
+xskill traj search "alembic 半迁移" -k 8
+xskill traj search --name alice,bob 发票核对 --json
+xskill traj read traj_cc_alice_memleak
+xskill traj read traj_cc_alice_memleak --offset-start 12 --offset-end 88
 ```
 
-`--name` only applies in team mode. Do not print server paths. If the
-CLI says the server is too old, ask the operator to upgrade.
+`--name` only applies in team mode. Search does not download files or
+return raw text. Paste a `traj_id` into `xskill generate` when you
+want the instruction to name the evidence. Do not print server paths.
+
+## Advanced: atoms
+
+Atom is a split-agent product. Granularity may change across versions.
+Prefer `xskill traj search` unless a script already has an `atom_id`.
+
+```bash
+xskill atom search 内存泄漏
+xskill atom search --name alice,bob 发票核对
+xskill atom read atom_t_0001
+xskill atom read atom_t_0001 --offset-start 40 --json
+```
 
 ## Searching & sharing team skills
 
 ```bash
 xskill search <query...>       # search team skills; returns metadata only
-xskill search traj <query...>  # search session index (first user query, no split agent)
-xskill search atom <query...>  # search split atoms (intent / summary / offsets)
-xskill read traj <traj_id>     # read trajectory lines; prints current and total range
-xskill read atom <atom_id>     # read atom lines; prints current and total range
+xskill traj search <query...>  # search session index (first user query, no split agent)
+xskill traj read <traj_id>     # read trajectory lines; prints current and total range
 xskill search <query...> --download  # legacy 10-slot LRU download + auto-install
 xskill download <skill-id>     # persist one result; interactively select harnesses
 xskill download <skill-id> --agent claude-code --agent codex -y  # for agents/scripts

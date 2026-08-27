@@ -1,4 +1,4 @@
-"""`xskill read traj` 与 `xskill read atom`：按行号读原文。"""
+"""`xskill traj read` 与 `xskill atom read`：按行号读原文。"""
 from __future__ import annotations
 
 import json
@@ -24,16 +24,13 @@ TOKEN = "secret-token"
 
 def _args(**overrides) -> SimpleNamespace:
     base = {
-        "terms": ["traj", "traj_cc_alice_memleak"],
+        "target": "traj_cc_alice_memleak",
         "offset_start": None,
         "offset_end": None,
         "json": False,
         "team": False,
         "local": False,
         "name": "",
-        "eco": "ngagent",
-        "recursive": False,
-        "no_register": True,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -211,7 +208,7 @@ def test_cli_read_traj_local_prints_ranges(monkeypatch, capsys, tmp_path):
         "xskill.traj_read.watch_session_dirs",
         lambda: [("alice", sessions)],
     )
-    rc = cli.cmd_read(_args(local=True, offset_start=2, offset_end=4))
+    rc = cli.cmd_read_traj(_args(local=True, offset_start=2, offset_end=4))
     assert rc == 0
     out = capsys.readouterr().out
     assert "当前行号：L2-L4" in out
@@ -222,9 +219,9 @@ def test_cli_read_traj_local_prints_ranges(monkeypatch, capsys, tmp_path):
 
 
 def test_cli_read_atom_missing_id_errors(capsys):
-    rc = cli.cmd_read(_args(terms=["atom"]))
+    rc = cli.cmd_read_atom(_args(target=""))
     assert rc == 2
-    assert "xskill read atom <atom_id>" in capsys.readouterr().err
+    assert "xskill atom read <atom_id>" in capsys.readouterr().err
 
 
 def test_cli_read_traj_team_uses_read_path(capsys):
@@ -261,7 +258,7 @@ def test_cli_read_atom_team_uses_atoms_read(capsys):
         "meta": {"unknown_names": []},
     })
     rc = cli.cmd_read_atom(
-        _args(team=True, terms=["atom", "atom_t_0001"]),
+        _args(team=True, target="atom_t_0001"),
         http=http,
         headers={"X-Xskill-Token": TOKEN},
     )
@@ -357,3 +354,61 @@ def test_team_atom_read_returns_atom_total_range(tmp_path):
     assert payload["total_start"] == 4
     assert payload["total_end"] == 8
     assert payload["text"] == "L4\nL5\nL6\nL7\n"
+
+
+def test_team_traj_read_defaults_to_own_directory(tmp_path):
+    client, traj_root, registry = _make_team_app(tmp_path)
+    alice = _register(client, "alice")
+    bob = _register(client, "bob")
+    alice_id = registry.find_by_user_name("alice")
+    sessions = traj_root / "clients" / registry.dir_name_for(alice_id) / "sessions"
+    _write_lines(sessions / "traj_cc_alice_memleak.md", 5)
+    from xskill.api import app as app_mod
+
+    app_mod._config = {"team": {"server": {"allow_read_others": False}}}
+    denied = client.get(
+        "/api/v1/team/trajectories/read",
+        params={"traj_id": "traj_cc_alice_memleak"},
+        headers=bob,
+    )
+    assert denied.status_code == 404
+    allowed = client.get(
+        "/api/v1/team/trajectories/read",
+        params={"traj_id": "traj_cc_alice_memleak"},
+        headers=alice,
+    )
+    assert allowed.status_code == 200
+
+
+def test_team_traj_read_name_others_forbidden_until_switch(tmp_path):
+    client, traj_root, registry = _make_team_app(tmp_path)
+    _register(client, "alice")
+    bob = _register(client, "bob")
+    alice_id = registry.find_by_user_name("alice")
+    sessions = traj_root / "clients" / registry.dir_name_for(alice_id) / "sessions"
+    _write_lines(sessions / "traj_cc_alice_memleak.md", 5)
+    from xskill.api import app as app_mod
+
+    app_mod._config = {"team": {"server": {"allow_read_others": False}}}
+    denied = client.get(
+        "/api/v1/team/trajectories/read",
+        params={"traj_id": "traj_cc_alice_memleak", "names": "alice"},
+        headers=bob,
+    )
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "others_read_disabled"
+
+    app_mod._config["team"]["server"]["allow_read_others"] = True
+    opened = client.get(
+        "/api/v1/team/trajectories/read",
+        params={"traj_id": "traj_cc_alice_memleak", "names": "alice"},
+        headers=bob,
+    )
+    assert opened.status_code == 200
+
+
+def test_cli_read_traj_team_others_forbidden(capsys):
+    http = _ReadHttp(status_code=403, payload={"detail": "others_read_disabled"})
+    rc = cli.cmd_read_traj(_args(team=True), http=http, headers={})
+    assert rc == 1
+    assert "未开放阅读他人轨迹" in capsys.readouterr().err

@@ -1,11 +1,11 @@
 """轨迹检索与 Atom 检索的装配。
 
-``search traj`` 读每个 sessions 目录旁的会话索引（用户首问），做 BM25。
+``xskill traj search`` 读每个 sessions 目录旁的会话索引（用户首问），做 BM25。
 索引由上传写穿、watcher 增量补齐；查询路径不打开 ``traj_*.md``，
 避免海量扫盘把 team server 卡住。不经拆分代理，不打 embedding。
 
-``search atom`` 走现成 Atom 混合检索（向量 + BM25，字段是 intent 和
-summary）。没拆完的轨迹不会出现。
+``xskill atom search`` 走现成 Atom 混合检索（向量 + BM25，字段是 intent 和
+summary）。没拆完的轨迹不会出现。Atom 粒度可能随版本变化。
 
 两条路都按工号收窄 sessions 目录，对外字段不含路径和原文。
 """

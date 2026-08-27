@@ -283,6 +283,8 @@ team:
     ranked_slots: 80    # 其中按 UX 分排名占的槽位；剩余（100-80=20）留给向量推荐
     allow_anonymous_user: true   # false 时拒绝不带 --name 的匿名 connect（403）；
                                  # true（缺省）允许匿名，沿用既有 uuid/hashid 逻辑
+    allow_read_others: false     # false（缺省）时 traj/atom read 只能读自己工号目录；
+                                 # true 时允许读他人已上传轨迹
 
 # ===== Skill recommend engine =====
 # 用户画像 + skill 特征 + 推荐引擎参数。仅 team server 端生效。
@@ -1134,6 +1136,22 @@ def allow_anonymous_user(cfg: Optional[dict] = None) -> bool:
     if not isinstance(val, bool):
         raise ValueError(
             "team.server.allow_anonymous_user 必须是布尔，"
+            f"got {type(val).__name__}"
+        )
+    return val
+
+
+def allow_read_others(cfg: Optional[dict] = None) -> bool:
+    """读 ``team.server.allow_read_others``，缺省 False。
+
+    false 时 team 的 traj/atom read 只能读调用者自己工号目录。
+    检索卡片不受此开关限制。
+    """
+    section = _team_server_section(cfg)
+    val = section.get("allow_read_others", False)
+    if not isinstance(val, bool):
+        raise ValueError(
+            "team.server.allow_read_others 必须是布尔，"
             f"got {type(val).__name__}"
         )
     return val

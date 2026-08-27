@@ -1,4 +1,4 @@
-"""`xskill search traj` 与 `xskill search atom`：两条检索 + CLI / team 分流。
+"""`xskill traj search` 与 `xskill atom search`：两条检索 + CLI / team 分流。
 
 traj 读会话索引里的用户首问做 BM25。atom 走 Atom 混合检索。
 """
@@ -36,10 +36,9 @@ TOKEN = "secret-token"
 
 def _args(**overrides) -> SimpleNamespace:
     base = {
-        "terms": ["traj", "django", "migration"],
+        "terms": ["django", "migration"],
         "top_k": 5,
         "json": False,
-        "download": False,
         "team": False,
         "local": False,
         "name": "",
@@ -423,7 +422,7 @@ def test_cli_search_traj_local_prints_hits(monkeypatch, capsys):
     monkeypatch.setattr(
         "xskill.traj_search.session_corpus_empty", lambda dataset_dirs=None: False,
     )
-    rc = cli.cmd_search(_args())
+    rc = cli.cmd_search_traj(_args())
     assert rc == 0
     out = capsys.readouterr()
     assert "搜索：django migration" in out.out
@@ -443,7 +442,7 @@ def test_cli_search_traj_local_json(monkeypatch, capsys):
         "xskill.traj_search.search_session_trajectories",
         lambda query, **_kw: [_session_hit()],
     )
-    rc = cli.cmd_search(_args(json=True, terms=["traj", "alembic"]))
+    rc = cli.cmd_search_traj(_args(json=True, terms=["alembic"]))
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["traj_id"] == "traj_cc_alice_memleak"
@@ -462,7 +461,7 @@ def test_cli_search_traj_local_warns_and_ignores_name(monkeypatch, capsys):
         "xskill.traj_search.session_corpus_empty",
         lambda dataset_dirs=None: True,
     )
-    rc = cli.cmd_search(_args(name="alice", terms=["traj", "q"]))
+    rc = cli.cmd_search_traj(_args(name="alice", terms=["q"]))
     assert rc == 0
     captured = capsys.readouterr()
     assert "仅 team" in captured.err
@@ -470,15 +469,15 @@ def test_cli_search_traj_local_warns_and_ignores_name(monkeypatch, capsys):
 
 
 def test_cli_search_traj_missing_query_errors(capsys):
-    rc = cli.cmd_search(_args(terms=["traj"]))
+    rc = cli.cmd_search_traj(_args(terms=[]))
     assert rc == 2
-    assert "xskill search traj <query>" in capsys.readouterr().err
+    assert "xskill traj search <query>" in capsys.readouterr().err
 
 
 def test_cli_search_atom_missing_query_errors(capsys):
-    rc = cli.cmd_search(_args(terms=["atom"]))
+    rc = cli.cmd_search_atom(_args(terms=[]))
     assert rc == 2
-    assert "xskill search atom <query>" in capsys.readouterr().err
+    assert "xskill atom search <query>" in capsys.readouterr().err
 
 
 def test_cli_search_atom_local_prints_hits(monkeypatch, capsys):
@@ -490,7 +489,7 @@ def test_cli_search_atom_local_prints_hits(monkeypatch, capsys):
     monkeypatch.setattr(
         "xskill.pipeline.registry.all_index_paths", lambda: [Path("/x")],
     )
-    rc = cli.cmd_search(_args(terms=["atom", "django", "migration"]))
+    rc = cli.cmd_search_atom(_args(terms=["django", "migration"]))
     assert rc == 0
     out = capsys.readouterr().out
     assert "找到 1 个 Atom" in out
@@ -505,7 +504,7 @@ def test_cli_search_atom_team_uses_atoms_path(capsys):
         "meta": {"unknown_names": [], "corpus_empty": False},
     })
     rc = cli.cmd_search_atom(
-        _args(team=True, terms=["atom", "memory"]),
+        _args(team=True, terms=["memory"]),
         http=http,
         headers={"X-Xskill-Token": TOKEN},
     )
@@ -516,17 +515,43 @@ def test_cli_search_atom_team_uses_atoms_path(capsys):
     assert "行号：L12-L88" in out
 
 
-def test_cli_search_traj_ignores_download(monkeypatch, capsys):
-    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+def test_cli_search_word_traj_stays_on_skill_search(monkeypatch):
+    called = []
     monkeypatch.setattr(
-        "xskill.traj_search.search_session_trajectories",
-        lambda query, **_kw: [_session_hit()],
+        cli, "cmd_search_traj", lambda args: called.append("traj") or 0,
     )
-    rc = cli.cmd_search(_args(download=True, terms=["traj", "auth"]))
+    monkeypatch.setattr(
+        cli, "cmd_search_hub", lambda args: called.append("hub") or 0,
+    )
+    monkeypatch.setattr(
+        cli, "_cmd_search_local", lambda args: called.append("local") or 0,
+    )
+    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    rc = cli.cmd_search(_args(terms=["traj"]))
     assert rc == 0
-    captured = capsys.readouterr()
-    assert "轨迹和 Atom 检索忽略" in captured.err
-    assert "traj_cc_alice_memleak" in captured.out
+    assert called == ["local"]
+
+
+def test_parser_noun_first_and_search_keeps_traj_word():
+    parser = cli.build_parser()
+    skill = parser.parse_args(["search", "traj", "内存泄漏"])
+    assert skill.command == "search"
+    assert skill.terms == ["traj", "内存泄漏"]
+    traj = parser.parse_args(["traj", "search", "内存泄漏"])
+    assert traj.command == "traj"
+    assert traj.traj_action == "search"
+    assert traj.terms == ["内存泄漏"]
+    assert not hasattr(traj, "download")
+    atom = parser.parse_args(["atom", "search", "编辑器"])
+    assert atom.command == "atom"
+    assert atom.atom_action == "search"
+    read_db = parser.parse_args(["read", "/tmp/foo.db"])
+    assert read_db.command == "read"
+    assert read_db.path == "/tmp/foo.db"
+    traj_read = parser.parse_args(["traj", "read", "traj_cc_alice"])
+    assert traj_read.command == "traj"
+    assert traj_read.traj_action == "read"
+    assert traj_read.target == "traj_cc_alice"
 
 
 def test_cli_search_without_traj_prefix_stays_on_skill_search(monkeypatch):
@@ -559,7 +584,7 @@ def test_cli_search_traj_dispatches_team_when_client(monkeypatch):
         cli, "_cmd_search_kind_local",
         lambda query, **kw: called.append(("local", query)) or 0,
     )
-    rc = cli.cmd_search(_args(name="alice,bob", terms=["traj", "发票"]))
+    rc = cli.cmd_search_traj(_args(name="alice,bob", terms=["发票"]))
     assert rc == 0
     assert called == [("team", "发票", "traj", ["alice", "bob"])]
 
@@ -567,7 +592,7 @@ def test_cli_search_traj_dispatches_team_when_client(monkeypatch):
 def test_cli_search_traj_team_prints_and_forwards_names(capsys):
     http = _TrajHttp()
     rc = cli.cmd_search_traj(
-        _args(team=True, name="alice,ghost", terms=["traj", "memory"]),
+        _args(team=True, name="alice,ghost", terms=["memory"]),
         http=http,
         headers={"X-Xskill-Token": TOKEN},
     )
@@ -590,7 +615,7 @@ def test_cli_search_traj_team_unknown_names_warn(capsys):
         "meta": {"unknown_names": ["ghost"], "corpus_empty": False},
     })
     rc = cli.cmd_search_traj(
-        _args(team=True, terms=["traj", "q"]),
+        _args(team=True, terms=["q"]),
         http=http,
         headers={},
     )
@@ -603,7 +628,7 @@ def test_cli_search_traj_team_unknown_names_warn(capsys):
 def test_cli_search_traj_team_old_server(capsys):
     http = _TrajHttp(status_code=404)
     rc = cli.cmd_search_traj(
-        _args(team=True, terms=["traj", "q"]),
+        _args(team=True, terms=["q"]),
         http=http,
         headers={},
     )
@@ -614,7 +639,7 @@ def test_cli_search_traj_team_old_server(capsys):
 def test_cli_search_traj_team_network_error(capsys):
     http = _TrajHttp(error=httpx.ConnectError("refused"))
     rc = cli.cmd_search_traj(
-        _args(team=True, terms=["traj", "q"]),
+        _args(team=True, terms=["q"]),
         http=http,
         headers={},
     )
@@ -627,7 +652,7 @@ def test_cli_search_traj_unconnected_errors(monkeypatch, tmp_path, capsys):
         "xskill.config.get_team_client_state_path",
         lambda: tmp_path / "missing.json",
     )
-    rc = cli.cmd_search_traj(_args(team=True, terms=["traj", "q"]))
+    rc = cli.cmd_search_traj(_args(team=True, terms=["q"]))
     assert rc == 1
     assert "未连接 team server" in capsys.readouterr().err
 
@@ -820,10 +845,12 @@ def test_bundled_skill_documents_real_traj_search_not_mock():
     from xskill.ecosystems.bundled_guide import bundled_xskill_source
 
     skill_md = (bundled_xskill_source() / "SKILL.md").read_text(encoding="utf-8")
-    assert "xskill search traj" in skill_md
-    assert "xskill search atom" in skill_md
-    assert "xskill read traj" in skill_md
-    assert "xskill read atom" in skill_md
+    assert "xskill traj search" in skill_md
+    assert "xskill atom search" in skill_md
+    assert "xskill traj read" in skill_md
+    assert "xskill atom read" in skill_md
+    assert "xskill search traj" not in skill_md
+    assert "xskill read traj" not in skill_md
     assert "name: xskill-helper" in skill_md
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md

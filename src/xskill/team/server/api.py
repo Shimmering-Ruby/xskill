@@ -70,7 +70,8 @@ class _Ctx:
     """模块级上下文单例。init_team_context 填，端点读。
 
     这里**只放进程级资源/接线对象**（重启域）。纯配置开关（skill_slots /
-    ranked_slots / canary.probability / allow_anonymous_user）**刻意不放这里**
+    ranked_slots / canary.probability / allow_anonymous_user /
+    allow_read_others）**刻意不放这里**
     ——它们要热生效，由 ``live_manifest_tuning()`` / 端点内 ``config.*`` 每请求
     现取 live config，见 ``live_manifest_tuning`` 的 docstring。
     """
@@ -1060,6 +1061,35 @@ def _team_search_session_dirs(names: str) -> tuple[list[str], list[tuple[str, Pa
     return name_list, dataset_dirs, unknown
 
 
+def _team_read_session_dirs(
+    names: str, client_id: str,
+) -> tuple[list[str], list[tuple[str, Path]] | None, list[str]]:
+    """read 的目录范围：默认只给调用者自己；读他人需 allow_read_others。"""
+    from xskill.api import app as app_mod
+    from xskill.config import allow_read_others
+    from xskill.traj_search import parse_search_names
+
+    if allow_read_others(app_mod._config or {}):
+        return _team_search_session_dirs(names)
+    if _ctx.client_registry is None or _ctx.traj_root is None:
+        raise HTTPException(
+            status_code=503, detail="team context not initialized",
+        )
+    own_user = _ctx.client_registry.user_name_for(client_id)
+    own_dir = _ctx.client_registry.dir_name_for(client_id)
+    requested = parse_search_names(names)
+    for name in requested:
+        other_id = _ctx.client_registry.find_by_user_name(name)
+        if other_id == client_id:
+            continue
+        if name in (own_user, own_dir, client_id):
+            continue
+        raise HTTPException(status_code=403, detail="others_read_disabled")
+    sessions = _ctx.traj_root / "clients" / own_dir / "sessions"
+    label = own_user or own_dir
+    return requested, [(label, sessions)], []
+
+
 @router.get("/trajectories/search")
 def team_trajectories_search(
     query: str,
@@ -1169,6 +1199,7 @@ def _team_read_payload(
     offset_start: int | None,
     offset_end: int | None,
     names: str,
+    client_id: str,
 ) -> dict:
     from xskill.traj_read import (
         parse_read_offsets,
@@ -1179,7 +1210,7 @@ def _team_read_payload(
     start, end, offset_error = parse_read_offsets(offset_start, offset_end)
     if offset_error:
         raise HTTPException(status_code=400, detail=offset_error)
-    name_list, dataset_dirs, unknown = _team_search_session_dirs(names)
+    name_list, dataset_dirs, unknown = _team_read_session_dirs(names, client_id)
     if name_list and not dataset_dirs:
         raise HTTPException(status_code=404, detail="not found")
     try:
@@ -1225,7 +1256,7 @@ def team_trajectories_read(
     x_xskill_version: str | None = Header(default=None),
 ) -> dict:
     """按行号读已上传的 ``traj_*.md``。同步 def，只读当前页。"""
-    _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
     cleaned = (traj_id or "").strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="empty traj_id")
@@ -1235,6 +1266,7 @@ def team_trajectories_read(
         offset_start=offset_start,
         offset_end=offset_end,
         names=names,
+        client_id=client_id,
     )
 
 
@@ -1249,7 +1281,7 @@ def team_atoms_read(
     x_xskill_version: str | None = Header(default=None),
 ) -> dict:
     """按 Atom 行号窗口读对应轨迹原文。同步 def。"""
-    _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
     cleaned = (atom_id or "").strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="empty atom_id")
@@ -1259,6 +1291,7 @@ def team_atoms_read(
         offset_start=offset_start,
         offset_end=offset_end,
         names=names,
+        client_id=client_id,
     )
 
 

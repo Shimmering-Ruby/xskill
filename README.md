@@ -268,10 +268,10 @@ xskill generate --name alice,bob "根据这些用户的成功案例生成数据�
 除了 server 按画像推送的Skill,client 还可以主动搜索或下载 server 中的技能:
 ```bash
 xskill search <KEYWORDS>       
-xskill search traj <KEYWORDS>           # 搜会话索引（用户首问，不经拆分代理）
-xskill search atom <KEYWORDS>           # 搜已拆 Atom（intent、summary、行号）
-xskill read traj <TRAJ_ID>              # 按行号读轨迹原文（带当前与总行号）
-xskill read atom <ATOM_ID>              # 按行号读 Atom 原文（带当前与总行号）
+xskill traj search <KEYWORDS>           # 搜会话索引（用户首问，不经拆分代理）
+xskill traj read <TRAJ_ID>              # 按行号读轨迹原文（带当前与总行号）
+xskill atom search <KEYWORDS>           # 搜已拆 Atom（intent、summary、行号；粒度可能随版本变化）
+xskill atom read <ATOM_ID>              # 按行号读 Atom 原文（带当前与总行号）
 xskill search <KEYWORDS> --download     # 检索的同时下载到本地(老的搜索结果会被刷新掉，建议在临时使用场景触发）
 xskill download <skill-id>          # 交互多选安装 harness, 会持久化到本地, 会随云端更新
 xskill download <skill-id> --agent claude-code --agent codex -y   # 非交互式安装到指定harness

@@ -1,6 +1,6 @@
-"""按行号读轨迹原文：``read traj`` 与 ``read atom``。
+"""按行号读轨迹原文：``xskill traj read`` 与 ``xskill atom read``。
 
-行号是 1-based 半开区间 ``[start, end)``，和 Atom、search atom 卡片一致。
+行号是 1-based 半开区间 ``[start, end)``，和 Atom、atom search 卡片一致。
 每次最多 ``TRAJ_READ_MAX_LINES`` 行。返回里带当前窗口和总窗口，
 对外字段不含路径。
 """

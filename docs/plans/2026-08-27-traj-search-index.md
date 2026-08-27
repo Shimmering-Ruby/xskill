@@ -1,8 +1,8 @@
 # 海量轨迹索引系统设计（中心检索索引）
 
-日期：2026-08-27。关联 PR #357（search traj 与 search atom 命令面）。
+日期：2026-08-27。关联 PR #357（xskill traj search 与 xskill atom search 命令面）。
 本文只动 server 内部的索引与检索实现，#357 定下的命令、卡片、JSON 字段、
-错误话术全部保持不变。
+错误话术全部保持不变（命令拼法见 2026-08-27-traj-cli-naming.md）。
 
 ## 规模假设与目标
 
@@ -127,7 +127,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 ## 查询路径
 
-search traj 变成一条 SQL：
+xskill traj search 变成一条 SQL：
 
 ```sql
 SELECT d.traj_id, d.user, d.title, d.turns,
@@ -146,7 +146,7 @@ LIMIT :k;
   没有每人一库的扇出。
 - 并列时 mtime 新者在前。显式时间衰减打分放第二期。
 
-search atom 双通道：FTS5 关键词取 top-200 候选，向量通道取 top-200，
+xskill atom search 双通道：FTS5 关键词取 top-200 候选，向量通道取 top-200，
 RRF（倒数排名融合）合并后截 top-k。对外的 sources 字段照旧标
 vector 与 keyword，vector_similarity 与 bm25_score 照旧透出。
 说明：utils/search.py 现状是 union 加 dedup 不做融合排序，当时是
@@ -178,7 +178,7 @@ vector 与 keyword，vector_similarity 与 bm25_score 照旧透出。
 
 ## 与 #357 的关系
 
-- 用户面零变化：两条命令、卡片文案、--json 字段、七种错误话术照旧。
+- 用户面零变化：两条检索命令（拼法见命名 plan）、卡片文案、--json 字段、七种错误话术照旧。
 - server 内部：traj_search.py 的 load_session_docs 加纯 Python BM25
   路径退役，换成中心库查询；search_session_trajectories 与
   search_indexed_atoms 的函数签名可以保留，便于本机单机模式复用

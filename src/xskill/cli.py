@@ -1247,28 +1247,26 @@ def _render_search_kind_hits(
 
 
 def cmd_search_traj(args, http=None, headers=None) -> int:
-    """`xskill search traj <query>` —— 搜已上传轨迹文件，不经拆分代理。"""
+    """`xskill traj search <query>` —— 搜已上传轨迹文件，不经拆分代理。"""
     return _cmd_search_kind(args, kind="traj", http=http, headers=headers)
 
 
 def cmd_search_atom(args, http=None, headers=None) -> int:
-    """`xskill search atom <query>` —— 搜已拆好的 Atom。"""
+    """`xskill atom search <query>` —— 搜已拆好的 Atom。
+
+    Atom 是拆分代理的中间产物，粒度可能随版本变化。
+    """
     return _cmd_search_kind(args, kind="atom", http=http, headers=headers)
 
 
 def _cmd_search_kind(args, *, kind: str, http=None, headers=None) -> int:
     from xskill.traj_search import parse_search_names
 
-    query = " ".join(args.terms[1:]).strip()
-    usage = "xskill search atom <query>" if kind == "atom" else "xskill search traj <query>"
+    query = " ".join(getattr(args, "terms", None) or []).strip()
+    usage = "xskill atom search <query>" if kind == "atom" else "xskill traj search <query>"
     if not query:
         _write_search_output(f"error: 用法 {usage}", to_stderr=True)
         return 2
-    if getattr(args, "download", False):
-        _write_search_output(
-            "warning: --download 只对 skill 搜索有效，轨迹和 Atom 检索忽略",
-            to_stderr=True,
-        )
     names = parse_search_names(getattr(args, "name", "") or "")
     force_team = getattr(args, "team", False)
     force_local = getattr(args, "local", False)
@@ -1384,14 +1382,10 @@ def _cmd_search_kind_team(
 def cmd_search(args) -> int:
     """`xskill search` 部署模式自适应入口（#201）。
 
-    首词 ``traj`` 搜已上传轨迹文件；首词 ``atom`` 搜已拆 Atom。
-    其余词走 skill 搜索：``--team`` / ``--local`` 显式覆盖 >
+    只搜 skill。轨迹与 Atom 走 ``xskill traj search``、``xskill atom search``，
+    不再看查询词首词。``--team`` / ``--local`` 显式覆盖 >
     team client 状态文件（已 connect → SkillHub 路径）> 本地技能库路径。
     """
-    if args.terms and args.terms[0] == "traj":
-        return cmd_search_traj(args)
-    if args.terms and args.terms[0] == "atom":
-        return cmd_search_atom(args)
     if getattr(args, "team", False):
         return cmd_search_hub(args)
     if getattr(args, "local", False):
@@ -2032,27 +2026,17 @@ def _cmd_import_team(args, sources, *, http=None, headers=None) -> int:
     return 0
 
 
-def cmd_read(args, xskill=None, http=None, headers=None) -> int:
-    """`xskill read traj|atom <id>` 按行号读原文，其余仍是 db 桥接入库。"""
+def cmd_read(args, xskill=None) -> int:
+    """`xskill read <PATH>` —— 把 ngagent、opencode 的 db 桥接入库。"""
     del xskill
-    terms = [str(item) for item in (getattr(args, "terms", None) or [])]
-    if not terms and getattr(args, "path", None):
-        terms = [str(args.path)]
-    if terms and terms[0] == "traj":
-        return cmd_read_traj(args, http=http, headers=headers)
-    if terms and terms[0] == "atom":
-        return cmd_read_atom(args, http=http, headers=headers)
-    if not terms:
-        _write_search_output(
-            "error: 用法 xskill read traj <id> 或 xskill read atom <id> "
-            "或 xskill read <db路径>",
-            to_stderr=True,
-        )
+    path = getattr(args, "path", None)
+    if not path:
+        print("error: 用法 xskill read <db路径>", file=sys.stderr)
         return 2
     from xskill.pipeline.db_ingest import read_db_files
     try:
         summary = read_db_files(
-            terms[0],
+            path,
             eco=args.eco,
             register=not args.no_register,
             recursive=args.recursive,
@@ -2070,12 +2054,15 @@ def cmd_read(args, xskill=None, http=None, headers=None) -> int:
 
 
 def cmd_read_traj(args, http=None, headers=None) -> int:
-    """`xskill read traj <traj_id>` —— 按行号读轨迹原文。"""
+    """`xskill traj read <traj_id>` —— 按行号读轨迹原文。"""
     return _cmd_read_kind(args, kind="traj", http=http, headers=headers)
 
 
 def cmd_read_atom(args, http=None, headers=None) -> int:
-    """`xskill read atom <atom_id>` —— 按行号读 Atom 对应的轨迹原文。"""
+    """`xskill atom read <atom_id>` —— 按行号读 Atom 对应的轨迹原文。
+
+    Atom 是拆分代理的中间产物，粒度可能随版本变化。
+    """
     return _cmd_read_kind(args, kind="atom", http=http, headers=headers)
 
 
@@ -2116,9 +2103,8 @@ def _cmd_read_kind(args, *, kind: str, http=None, headers=None) -> int:
     from xskill.traj_read import parse_read_offsets
     from xskill.traj_search import parse_search_names
 
-    terms = [str(item) for item in (getattr(args, "terms", None) or [])]
-    target = " ".join(terms[1:]).strip()
-    usage = "xskill read atom <atom_id>" if kind == "atom" else "xskill read traj <traj_id>"
+    target = str(getattr(args, "target", "") or "").strip()
+    usage = "xskill atom read <atom_id>" if kind == "atom" else "xskill traj read <traj_id>"
     if not target:
         _write_search_output(f"error: 用法 {usage}", to_stderr=True)
         return 2
@@ -2235,6 +2221,20 @@ def _cmd_read_kind_team(
             "server 可能未响应，请检查网络或联系管理员",
             to_stderr=True,
         )
+        return 1
+    if resp.status_code == 403:
+        detail = ""
+        try:
+            detail = str((resp.json() or {}).get("detail") or "")
+        except Exception:
+            detail = ""
+        if detail == "others_read_disabled":
+            _write_search_output(
+                "error: server 未开放阅读他人轨迹",
+                to_stderr=True,
+            )
+        else:
+            _write_search_output(f"error: {label}读取被拒绝", to_stderr=True)
         return 1
     if resp.status_code == 404:
         detail = ""
@@ -2502,20 +2502,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--label", type=str, default="",
                        help="human-friendly label (for add)")
 
-    p_search = sub.add_parser(
-        "search",
-        help="搜索 skill，或 search traj / search atom 检索轨迹与 Atom",
-    )
+    p_search = sub.add_parser("search", help="搜索 skill")
     p_search.add_argument(
         "terms", nargs="+", metavar="QUERY",
-        help="搜索词。首词 traj 搜轨迹文件，atom 搜已拆 Atom；否则拼成 skill 查询",
+        help="技能搜索词。轨迹请用 xskill traj search，Atom 请用 xskill atom search",
     )
     p_search.add_argument("--top-k", "-k", type=int, default=5,
-                          help="返回条数（skillhub 搜索最多 10，轨迹检索最多 20）")
-    p_search.add_argument(
-        "--name", default="",
-        help="search traj 或 search atom 时限定工号，逗号分隔；仅 team 模式有效",
-    )
+                          help="返回条数（skillhub 搜索最多 10）")
     p_search.add_argument(
         "--download", action="store_true",
         help="兼容旧 search：下载命中到 10 槽 LRU 并安装到已检测 harness",
@@ -2529,6 +2522,115 @@ def build_parser() -> argparse.ArgumentParser:
     p_search_mode.add_argument(
         "--local", action="store_true",
         help="强制搜本地技能库（daemon 语义检索，不可用回退 BM25）",
+    )
+
+    p_traj = sub.add_parser("traj", help="检索或读取已上传轨迹")
+    traj_sub = p_traj.add_subparsers(dest="traj_action", required=True)
+    p_traj_search = traj_sub.add_parser(
+        "search", help="搜已上传轨迹（用户首问，不经拆分代理）",
+    )
+    p_traj_search.add_argument(
+        "terms", nargs="+", metavar="QUERY", help="轨迹检索词",
+    )
+    p_traj_search.add_argument(
+        "--top-k", "-k", type=int, default=5, help="返回条数（最多 20）",
+    )
+    p_traj_search.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效",
+    )
+    p_traj_search.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_traj_search_mode = p_traj_search.add_mutually_exclusive_group()
+    p_traj_search_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 检索（需先 xskill connect）",
+    )
+    p_traj_search_mode.add_argument(
+        "--local", action="store_true",
+        help="强制搜本机已登记轨迹目录",
+    )
+    p_traj_read = traj_sub.add_parser(
+        "read", help="按行号读一条已上传轨迹原文",
+    )
+    p_traj_read.add_argument("target", metavar="TRAJ_ID", help="轨迹 ID")
+    p_traj_read.add_argument(
+        "--offset-start", type=int, default=None,
+        help="起始行号，从 1 起，半开区间",
+    )
+    p_traj_read.add_argument(
+        "--offset-end", type=int, default=None,
+        help="结束行号（不含）。单次最多 200 行",
+    )
+    p_traj_read.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_traj_read.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效。读他人需 server 开放",
+    )
+    p_traj_read_mode = p_traj_read.add_mutually_exclusive_group()
+    p_traj_read_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 读取（需先 xskill connect）",
+    )
+    p_traj_read_mode.add_argument(
+        "--local", action="store_true",
+        help="强制读本机已登记轨迹目录",
+    )
+
+    p_atom = sub.add_parser(
+        "atom",
+        help="检索或读取系统拆分产物 Atom（粒度可能随版本变化）",
+    )
+    atom_sub = p_atom.add_subparsers(dest="atom_action", required=True)
+    p_atom_search = atom_sub.add_parser(
+        "search",
+        help="搜已拆 Atom。Atom 为系统拆分产物，粒度可能随版本变化",
+    )
+    p_atom_search.add_argument(
+        "terms", nargs="+", metavar="QUERY", help="Atom 检索词",
+    )
+    p_atom_search.add_argument(
+        "--top-k", "-k", type=int, default=5, help="返回条数（最多 20）",
+    )
+    p_atom_search.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效",
+    )
+    p_atom_search.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_atom_search_mode = p_atom_search.add_mutually_exclusive_group()
+    p_atom_search_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 检索（需先 xskill connect）",
+    )
+    p_atom_search_mode.add_argument(
+        "--local", action="store_true",
+        help="强制搜本机已拆 Atom",
+    )
+    p_atom_read = atom_sub.add_parser(
+        "read",
+        help="按行号读一个 Atom 对应的轨迹原文。粒度可能随版本变化",
+    )
+    p_atom_read.add_argument("target", metavar="ATOM_ID", help="Atom ID")
+    p_atom_read.add_argument(
+        "--offset-start", type=int, default=None,
+        help="起始行号，从 1 起，半开区间，且夹在该 Atom 区间内",
+    )
+    p_atom_read.add_argument(
+        "--offset-end", type=int, default=None,
+        help="结束行号（不含）。单次最多 200 行",
+    )
+    p_atom_read.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_atom_read.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效。读他人需 server 开放",
+    )
+    p_atom_read_mode = p_atom_read.add_mutually_exclusive_group()
+    p_atom_read_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 读取（需先 xskill connect）",
+    )
+    p_atom_read_mode.add_argument(
+        "--local", action="store_true",
+        help="强制读本机已拆 Atom",
     )
 
     p_download = sub.add_parser(
@@ -2673,34 +2775,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_read = sub.add_parser(
         "read",
-        help="read traj / read atom 按行号读原文，或把 db 桥接入库",
+        help="把 ngagent、opencode 的 db 桥接入库",
     )
-    p_read.add_argument(
-        "terms", nargs="+", metavar="TARGET",
-        help="read traj <traj_id>、read atom <atom_id>，或 db 文件/目录路径",
-    )
-    p_read.add_argument(
-        "--offset-start", type=int, default=None,
-        help="起始行号，从 1 起，半开区间",
-    )
-    p_read.add_argument(
-        "--offset-end", type=int, default=None,
-        help="结束行号（不含）。单次最多 200 行",
-    )
-    p_read.add_argument("--json", action="store_true", help="机读 JSON 输出")
-    p_read.add_argument(
-        "--name", default="",
-        help="read traj 或 read atom 时限定工号，逗号分隔；仅 team 模式有效",
-    )
-    p_read_mode = p_read.add_mutually_exclusive_group()
-    p_read_mode.add_argument(
-        "--team", action="store_true",
-        help="强制走 team 读取（需先 xskill connect）",
-    )
-    p_read_mode.add_argument(
-        "--local", action="store_true",
-        help="强制读本机已登记轨迹目录",
-    )
+    p_read.add_argument("path", help="db 文件或目录")
     p_read.add_argument("--eco", default="ngagent",
                         choices=sorted(SQLITE_SPEC_BY_ECO),
                         help="db 所属生态（默认 ngagent）")
@@ -2813,6 +2890,18 @@ def main() -> int:
     # skillhub 搜索/下载/上传是瘦客户端侧（走 team server），不碰 config.yaml。
     if args.command == "search":
         return cmd_search(args)
+    if args.command == "traj":
+        if args.traj_action == "search":
+            return cmd_search_traj(args)
+        if args.traj_action == "read":
+            return cmd_read_traj(args)
+        parser.error("traj 需要 search 或 read")
+    if args.command == "atom":
+        if args.atom_action == "search":
+            return cmd_search_atom(args)
+        if args.atom_action == "read":
+            return cmd_read_atom(args)
+        parser.error("atom 需要 search 或 read")
     if args.command == "download":
         return cmd_download(args)
     if args.command == "upload":

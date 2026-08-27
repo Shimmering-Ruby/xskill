@@ -35,7 +35,7 @@ the distilling.
 | `xskill serve --server` | Team server: owns all LLM calls + git; prints a join token |
 | `xskill connect <host:port> --token <t>` | Join a team server as a thin client |
 | `xskill registry add <path>` | Backfill / watch an extra trajectory directory |
-| `xskill search traj\|skill <query>` | Search trajectories or skills |
+| `xskill traj search <query>` / `xskill search <query>` | Search trajectories or skills |
 | `xskill read <path> --eco <eco>` | Batch-ingest db trajectories (ngagent/opencode) |
 | `xskill rebuild [--force]` | Re-distill from existing raw trajectories (see reference) |
 | `xskill stats` | Token usage & estimated cost |
