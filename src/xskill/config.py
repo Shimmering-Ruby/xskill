@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -94,6 +95,10 @@ llm:
   # compact_keep_recent_messages: 6 # optional; recent complete message blocks
                          # kept verbatim after compact. Default 6.
   # temperature: 0.0     # optional; default 0 (deterministic)
+  # extra_body:          # optional provider-specific OpenAI request fields;
+  #   chat_template_kwargs:  # e.g. llama.cpp/Qwen chat-template controls.
+  #     enable_thinking: false # changing reasoning can affect quality; replay
+                         # representative trajectories before disabling it.
   # request_timeout: 60  # optional; per-request wall-clock cap in seconds
                          # (default 60). Explicit so an unreachable endpoint
                          # fails loud instead of hanging forever.
@@ -108,6 +113,19 @@ llm:
     # tpm: 100000        # optional tokens per minute
     # token_burst: 20000 # optional token burst capacity (separate from requests)
   # See docs/adr/0001-rate-limit-diy-not-litellm.md for the design rationale.
+
+# Optional. Give split, cluster, or edit their own model or endpoint if you want.
+# Anything you leave out falls back to llm_skill, then llm. Leave this commented
+# and your existing config keeps working as before.
+# llm_agents:
+#   split:
+#     model: qwen-plus
+#   cluster:
+#     model: deepseek-v4-flash
+#   edit:
+#     base_url: http://localhost:8000/v1
+#     model: local-skill-editor
+#     api_key: local
 
 # ===== Embedding (vector retrieval) =====
 # Any OpenAI-compatible embeddings endpoint. dim: 0 auto-probes on first call.
@@ -198,12 +216,24 @@ server:
   profile_refresh_timeout: 1800    # 单轮画像子进程硬上限(秒;冷启动大量 client 兜底)
   ux_scores_sync_interval: 30      # 盘上 .ux_scores.jsonl → registry.db 同步周期(秒)
   ux_scores_sync_timeout: 300      # 单轮 UX 同步子进程硬上限(秒)
+  vector_sync_batch_limit: 256     # 向量对账单轮最多处理的 catalog_key 数(issue #328;万级目录靠这个拆成多轮)
+  recommend_heavy_memory_budget_mb: 1024 # recommend-heavy 单轮峰值 RSS 软上限(MiB);超了本轮提前中止,留给下一轮
 
 # ===== Watcher (scan scheduling only) =====
 watcher:
   poll_interval: 5              # seconds between scans of every watch_dir
   full_reconcile_interval: 60   # idle polls only stat the directory; this
                                 # periodic full scan catches in-place rewrites
+
+# ===== Logical Task Graph =====
+# Deterministic semantic branch above Session/Atom; it never changes Atom→Skill routing, and uncertain links remain proposed without consuming LLM tokens.
+task_graph:
+  enabled: false                 # enable after ADR/replay-baseline review
+  top_k: 8                      # hard bound on classified candidates per Atom
+  recent_k: 6                   # same-Session recent Task candidates
+  posting_cap: 64               # bounded inverted-index posting list
+  max_scopes_per_run: 4         # fairness bound for one background pass
+  source_cache_size: 128        # bounded in-memory cache for unchanged source evidence
 
 # ===== Persistent agent worker =====
 # Every pool has an automatic waiting capacity of workers * 2. Running plus
@@ -253,6 +283,8 @@ team:
     ranked_slots: 80    # 其中按 UX 分排名占的槽位；剩余（100-80=20）留给向量推荐
     allow_anonymous_user: true   # false 时拒绝不带 --name 的匿名 connect（403）；
                                  # true（缺省）允许匿名，沿用既有 uuid/hashid 逻辑
+    allow_read_others: false     # false（缺省）时 traj/atom read 只能读自己工号目录；
+                                 # true 时允许读他人已上传轨迹
 
 # ===== Skill recommend engine =====
 # 用户画像 + skill 特征 + 推荐引擎参数。仅 team server 端生效。
@@ -338,6 +370,26 @@ def normalize_runtime_config(config_data: dict) -> dict:
     watcher.pop("max_concurrent", None)
     watcher.pop("cluster_batch_size", None)
     runtime_config["watcher"] = watcher
+
+    task_graph = runtime_config.get("task_graph")
+    if task_graph is None:
+        task_graph = {}
+    if not isinstance(task_graph, dict):
+        raise ValueError("task_graph 必须是 mapping")
+    task_graph = dict(task_graph)
+    enabled = task_graph.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("task_graph.enabled 必须是布尔")
+    task_graph["enabled"] = enabled
+    for field_name, default in (
+        ("top_k", 8), ("recent_k", 6),
+        ("posting_cap", 64), ("max_scopes_per_run", 4),
+        ("source_cache_size", 128),
+    ):
+        task_graph[field_name] = _positive_int_or_default(
+            task_graph.get(field_name), f"task_graph.{field_name}", default,
+        )
+    runtime_config["task_graph"] = task_graph
 
     worker = runtime_config.get("agent_worker")
     if worker is None:
@@ -443,6 +495,42 @@ def normalize_runtime_config(config_data: dict) -> dict:
                     skill_rate.setdefault("token_burst", skill_burst)
             llm_skill["rate_limit"] = skill_rate
         runtime_config["llm_skill"] = llm_skill
+
+    llm_agents = runtime_config.get("llm_agents")
+    if llm_agents is not None:
+        if not isinstance(llm_agents, dict):
+            raise ValueError("llm_agents 必须是 mapping")
+        unknown_stages = set(llm_agents) - {"split", "cluster", "edit"}
+        if unknown_stages:
+            raise ValueError(
+                f"llm_agents 包含未知阶段: {sorted(unknown_stages)!r}"
+            )
+        normalized_agents: dict[str, dict] = {}
+        for stage, stage_value in llm_agents.items():
+            if not isinstance(stage_value, dict):
+                raise ValueError(f"llm_agents.{stage} 必须是 mapping")
+            stage_cfg = dict(stage_value)
+            if "rate_limit" in stage_cfg:
+                stage_rate = stage_cfg.get("rate_limit")
+                if stage_rate is None:
+                    stage_rate = {}
+                if not isinstance(stage_rate, dict):
+                    raise ValueError(
+                        f"llm_agents.{stage}.rate_limit 必须是 mapping"
+                    )
+                stage_rate = dict(stage_rate)
+                stage_burst = stage_rate.pop("burst", None)
+                if stage_burst is not None:
+                    stage_burst = _positive_int(
+                        stage_burst,
+                        f"llm_agents.{stage}.rate_limit.burst",
+                    )
+                    stage_rate.setdefault("request_burst", stage_burst)
+                    if "tpm" in stage_rate:
+                        stage_rate.setdefault("token_burst", stage_burst)
+                stage_cfg["rate_limit"] = stage_rate
+            normalized_agents[stage] = stage_cfg
+        runtime_config["llm_agents"] = normalized_agents
 
     embedding = runtime_config.get("embedding") or {}
     if not isinstance(embedding, dict):
@@ -939,6 +1027,39 @@ def profile_refresh_config(cfg: Optional[dict] = None) -> dict:
     }
 
 
+def recommend_heavy_config(cfg: Optional[dict] = None) -> dict:
+    """recommend-heavy 重活单轮的批大小与内存预算（issue #328）。
+
+    ``vector_sync_batch_limit``：全量/增量向量对账单次调用最多处理多少
+    ``catalog_key``——万级目录时全量重建会被这个上限拆成多轮，而不是
+    一轮吃掉整份 catalog。``memory_budget_mb``：单轮峰值 RSS 软上限，
+    超过就中止本轮剩余批次（已处理的部分正常生效），留给下一轮继续；
+    默认给一个对 16 GiB 主机安全、能跟 Docker/看板/客户端共存的值。
+    """
+    section = (cfg or {}).get("server") or {}
+    batch_limit = section.get("vector_sync_batch_limit", 256)
+    memory_budget_mb = section.get("recommend_heavy_memory_budget_mb", 1024)
+
+    if not isinstance(batch_limit, int) or isinstance(batch_limit, bool) or batch_limit < 1:
+        raise ValueError(
+            f"server.vector_sync_batch_limit 必须是正整数，got {batch_limit!r}"
+        )
+    if (
+        not isinstance(memory_budget_mb, (int, float))
+        or isinstance(memory_budget_mb, bool)
+        or not math.isfinite(memory_budget_mb)
+        or memory_budget_mb <= 0
+    ):
+        raise ValueError(
+            "server.recommend_heavy_memory_budget_mb 必须是正数，"
+            f"got {memory_budget_mb!r}"
+        )
+    return {
+        "batch_limit": batch_limit,
+        "memory_budget_mb": float(memory_budget_mb),
+    }
+
+
 def ux_scores_sync_config(cfg: Optional[dict] = None) -> dict:
     """盘上 UX jsonl → registry.db 定时同步配置。"""
     section = (cfg or {}).get("server") or {}
@@ -1020,6 +1141,22 @@ def allow_anonymous_user(cfg: Optional[dict] = None) -> bool:
     return val
 
 
+def allow_read_others(cfg: Optional[dict] = None) -> bool:
+    """读 ``team.server.allow_read_others``，缺省 False。
+
+    false 时 team 的 traj/atom read 只能读调用者自己工号目录。
+    检索卡片不受此开关限制。
+    """
+    section = _team_server_section(cfg)
+    val = section.get("allow_read_others", False)
+    if not isinstance(val, bool):
+        raise ValueError(
+            "team.server.allow_read_others 必须是布尔，"
+            f"got {type(val).__name__}"
+        )
+    return val
+
+
 def get_skill_dir(
     config_data: Optional[dict] = None,
     *,
@@ -1090,9 +1227,129 @@ def get_registry_db_path(
 # get_config() 会抛 KeyError。get_team_trajectories_dir() 是唯一例外
 # （只 server 调，server 一定有 key）。
 
-def get_team_server_state_path() -> Path:
-    """server join token 落盘位置（~/.xskill/team_server.json，0600）。"""
-    return XSKILL_HOME / "team_server.json"
+def get_team_server_state_path(*, xskill_home: Optional[Path] = None) -> Path:
+    """server join token 落盘位置（~/.xskill/team_server.json，0600）。
+
+    无 ``xskill_home`` 时保持历史行为：直接拼 ``XSKILL_HOME / team_server.json``，
+    不 ``resolve``，避免和现有路径断言漂移。
+    """
+    if xskill_home is None:
+        return XSKILL_HOME / "team_server.json"
+    return Path(xskill_home).expanduser().resolve() / "team_server.json"
+
+
+def _peek_state_config(
+    xskill_home: Optional[Path] = None,
+    *,
+    strict: bool = False,
+) -> dict:
+    """只读 state_root/config.yaml，不经 ``get_config()``。
+
+    瘦客户端没有 llm.api_key，``get_config()`` 会抛 KeyError。同机隔离只需要
+    ``skill_dir`` 字段，所以这里只做 YAML 窥视，再交给 ``get_skill_dir``。
+    """
+    state_root = (
+        Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    ).expanduser().resolve()
+    cfg_file = state_root / "config.yaml"
+    if not cfg_file.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+    except Exception as config_error:
+        if strict:
+            raise ValueError(
+                "state config cannot be read safely"
+            ) from config_error
+        return {}
+    if isinstance(data, dict):
+        return data
+    if strict:
+        raise ValueError("state config must be a mapping")
+    return {}
+
+
+def resolve_local_skill_dir(
+    *,
+    xskill_home: Optional[Path] = None,
+    strict_config: bool = False,
+) -> Path:
+    """本机 skill 仓路径：走 ``get_skill_dir``，不要求完整 config。"""
+    return get_skill_dir(
+        _peek_state_config(xskill_home, strict=strict_config),
+        xskill_home=xskill_home,
+    )
+
+
+def get_team_client_working_dir(*, xskill_home: Optional[Path] = None) -> Path:
+    """同机隔离后的 client 工作副本根（``<xskill_home>/client_skill``）。"""
+    root = Path(xskill_home) if xskill_home is not None else XSKILL_HOME
+    return root.expanduser() / "client_skill"
+
+
+def _norm_path_key(p: Path | str) -> str:
+    """内部路径规范化键（跨平台绝对路径 + Windows 大小写折叠 + UNC 剥离）。"""
+    resolved = str(Path(p).expanduser().resolve(strict=False))
+    if os.name == "nt":
+        if resolved.startswith("\\\\?\\UNC\\"):
+            resolved = "\\\\" + resolved[8:]
+        elif resolved.startswith("\\\\?\\"):
+            resolved = resolved[4:]
+    return os.path.normcase(os.path.abspath(resolved))
+
+
+def _canonical_server_skill_dir(xskill_home: Optional[Path] = None) -> Path:
+    """Server 端的标准自有仓目录。委托 ``get_skill_dir``，不手写 ``skill/``。"""
+    return resolve_local_skill_dir(xskill_home=xskill_home)
+
+
+def is_team_server_canonical_skill_dir(
+    skill_dir: Path | str,
+    *,
+    xskill_home: Optional[Path] = None,
+) -> bool:
+    """判断给定目录是否等于本机 team server 的标准自有仓。
+
+    本机既 ``serve --server`` 又 ``connect`` 时，client 默认也会指向
+    ``get_skill_dir()``。cleanup 会按派发清单删仓，把自有仓收成只剩
+    分给这个 client 的那几十上百个。
+
+    「这台机器是不是 team server」沿用仓库已有约定：
+    ``get_team_server_state_path()`` 对应的 join token 落盘文件。
+    """
+    if not get_team_server_state_path(xskill_home=xskill_home).is_file():
+        return False
+    try:
+        req_key = _norm_path_key(skill_dir)
+        canon_key = _norm_path_key(resolve_local_skill_dir(
+            xskill_home=xskill_home,
+            strict_config=True,
+        ))
+        return req_key == canon_key
+    except (OSError, RuntimeError, ValueError) as config_error:
+        logger.error(
+            "team server canonical skill dir is uncertain; failing closed "
+            "error_type=%s",
+            type(config_error).__name__,
+        )
+        return True
+
+
+def resolve_team_client_skill_dir(
+    skill_dir: Path | str,
+    *,
+    xskill_home: Optional[Path] = None,
+) -> Path:
+    """client 工作副本目录。与 server 自有仓撞车时改放到 ``client_skill/``。"""
+    requested = Path(skill_dir)
+    if not is_team_server_canonical_skill_dir(requested, xskill_home=xskill_home):
+        return requested
+    relocated = get_team_client_working_dir(xskill_home=xskill_home)
+    logger.warning(
+        "team client colocated with team server; using %s instead of %s",
+        relocated, requested,
+    )
+    return relocated
 
 
 def get_team_clients_db_path() -> Path:

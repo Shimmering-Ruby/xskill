@@ -70,13 +70,35 @@ scripts/ 下放可执行脚本、在 references/ 下放长参考材料。价值�
    只补表里还没有的 id，不要把已经读过的轨迹重扫一遍。
    survey 还是空表就回到第 1 步。
 
+# 怎么改文件
+
+THINK 里一旦想到要改某个已有文件，下一手不要整文件 write_file。本趟
+new_skill_folder 刚建出来的 stub SKILL.md、刚 write_file 过的脚本、磁盘上
+已有的 skill，都算已有文件。按这个顺序做：
+
+1. 用 list_files 或 skill_read 看目录里有哪些文件
+2. 用 read_file 或 skill_read 读到要改的原文（辅助文件必须单独 read_file；
+   skill_read 只算读过 SKILL.md）
+3. 用 edit(path, old_string, new_string) 只替换那一处；old_string 必须在
+   文件里唯一
+
+write_file 只用于：文件还不存在、SKILL.md 仍是 init stub、或现有正文必须
+整篇改写。已经有正式正文之后只 edit 有差异的段落，禁止无故全篇覆盖。
+edit 前必须先读过该文件，否则工具会报错。
+
+相对路径按当前 skill 仓解析：SKILL.md、scripts/foo.py。不要加 ./skill/
+或技能文件夹名当第一段。
+
 # 怎么写
 
-- 新建：先 new_skill_folder(name, description)，再用 write_file 写出完整
-  SKILL.md 和脚本。
-- 改已有文件：必须先 read_file 或 skill_read，再 edit(path, old_string, new_string)。
-  没读过会报错。新建尚不存在的文件用 write_file。看某个已有 skill 的现状用
-  skill_read。
+- 新建：先 new_skill_folder(name, description)，它会建目录并放下 stub
+  SKILL.md。填正文用 edit（stub 可一次 write_file 换成正式稿）。新脚本
+  还不存在时才 write_file。
+- 本趟已经 new_skill_folder 过的名字就是你自己的半成品，不是别人的 skill。
+  压缩上下文之后仍以「本趟已执行动作」为准：那个目录的 stub SKILL.md
+  只说明你还没写完，继续 edit，最后 commit_generate_main。
+  不要再调一次 new_skill_folder，也不要另开一个近义名字的新目录。
+- 改已有 skill：先 skill_read，再 edit。不要整篇 write_file 覆盖丢掉已有内容。
 - 写完必须调用 commit_generate_main(skill_name, message)。它会把结果提交到
   main：没有 main 就创建，目录几乎是空的也允许提交。不要调用任何灰度
   （staging）提交工具。
@@ -212,9 +234,7 @@ class GenerateAgent:
             agent_tools.new_skill_folder,
             agent_tools.commit_generate_main,
         ]
-        from xskill.obs.generate import observe_generate_run, wrap_generate_factory
-        factory = wrap_generate_factory(self.agno_agent_factory, self.llm_cfg)
-        agent = factory(instructions=[sysprompt], tools=tools)
+        agent = self.agno_agent_factory(instructions=[sysprompt], tools=tools)
         max_context = int(
             (self.llm_cfg or {}).get("max_context") or DEFAULT_MAX_CONTEXT
         )
@@ -234,26 +254,14 @@ class GenerateAgent:
             f"指令: {instruction.strip()}\n"
             f"{_name_hint(preferred_names)}"
         )
-        from xskill import obs
-        if obs.is_enabled():
-            obs.collector().note_budget(
-                max_context=max_context,
-                compact_token_limit=compact_limit,
-                enable_spill=enable_spill,
-            )
+        from xskill.obs.tracing import setup
+
+        setup()
         with trace_to(
             self._trace_path(user_id, job_id),
             append=True,
             spill_token_limit=spill_limit,
             compact_token_limit=compact_limit,
-        ), generate_compact_nudge(), observe_generate_run(
-            user_id=user_id,
-            job_id=job_id,
-            read_roots=len(self.extra_read_roots),
-            user_msg=user_msg,
-        ) as root:
+        ), generate_compact_nudge():
             result = agent.run(user_msg)
-            content = getattr(result, "content", "") or ""
-            if root is not None:
-                root.set_attribute("output.value", obs.clip(content))
-            return content
+            return getattr(result, "content", "") or ""

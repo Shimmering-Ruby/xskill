@@ -98,6 +98,92 @@ def test_edit_requires_prior_read(tmp_path: Path):
     assert "new line" in skill_md.read_text(encoding="utf-8")
 
 
+def test_generate_prompt_teaches_edit_not_full_rewrite():
+    from xskill.agents.generate_agent import SYSTEM_PROMPT
+
+    assert "怎么改文件" in SYSTEM_PROMPT
+    assert "edit(path, old_string, new_string)" in SYSTEM_PROMPT
+    assert "不要整文件 write_file" in SYSTEM_PROMPT
+    assert "刚 write_file 过的脚本" in SYSTEM_PROMPT
+    assert "write_file 只用于" in SYSTEM_PROMPT
+
+
+def test_generate_agent_registers_edit_tool(tmp_path: Path):
+    from xskill.agents.generate_agent import GenerateAgent
+
+    captured: dict[str, list[str]] = {}
+
+    def factory(*, instructions, tools):
+        captured["tools"] = [
+            getattr(tool, "name", None) or getattr(tool, "__name__", "")
+            for tool in tools
+        ]
+
+        class _Agent:
+            def run(self, *_args, **_kwargs):
+                class _Result:
+                    content = "ok"
+
+                return _Result()
+
+        return _Agent()
+
+    skill_dir, ctx = _bind_skill_ctx(tmp_path)
+    agent = GenerateAgent(
+        skill_dir=skill_dir,
+        agno_agent_factory=factory,
+        llm_cfg={},
+        logs_dir=None,
+    )
+    with agent_tools.use_agent_tool_context(ctx):
+        agent.run(instruction="改一下发票 skill", user_id="alice", job_id="j1")
+    assert "edit" in captured["tools"]
+    assert "write_file" in captured["tools"]
+
+
+def test_generate_new_folder_then_edit_relative_skill_md(tmp_path: Path):
+    skill_dir, ctx = _bind_skill_ctx(tmp_path)
+    with agent_tools.use_agent_tool_context(ctx):
+        created = _call_tool(
+            agent_tools.new_skill_folder, "demo", "发票核对流程",
+        )
+        assert not str(created).startswith("error:"), created
+        stub_path = skill_dir / "demo" / "SKILL.md"
+        assert stub_path.is_file()
+        _call_tool(agent_tools.read_file, "SKILL.md")
+        ok = _call_tool(
+            agent_tools.edit_file,
+            "SKILL.md",
+            "(placeholder — SkillEditAgent 在 candidates 攒满阈值后会用真实 atom 内容填充正文)",
+            "用 edit 填进去的正文",
+        )
+        assert str(ok).startswith("edited:"), ok
+        text = stub_path.read_text(encoding="utf-8")
+        assert "用 edit 填进去的正文" in text
+        assert not (skill_dir / "SKILL.md").exists()
+
+
+def test_generate_skill_read_then_edit_existing(tmp_path: Path):
+    skill_dir, ctx = _bind_skill_ctx(tmp_path)
+    target = skill_dir / "invoice"
+    target.mkdir()
+    (target / "SKILL.md").write_text(
+        "---\nname: invoice\ndescription: hello world\n---\n\n# Invoice\n\nold line\n",
+        encoding="utf-8",
+    )
+    with agent_tools.use_agent_tool_context(ctx):
+        _call_tool(agent_tools.skill_read, "invoice")
+        ok = _call_tool(
+            agent_tools.edit_file,
+            "SKILL.md",
+            "old line",
+            "new line",
+        )
+        assert str(ok).startswith("edited:"), ok
+    assert "new line" in (target / "SKILL.md").read_text(encoding="utf-8")
+    assert not (skill_dir / "SKILL.md").exists()
+
+
 def test_generate_read_roots_include_traj_not_parent_secrets(tmp_path: Path):
     skill_dir, ctx = _bind_skill_ctx(tmp_path)
     traj = tmp_path / "team_trajectories" / "clients" / "alice" / "sessions"
@@ -239,9 +325,10 @@ def test_generate_write_file_lands_in_active_skill(tmp_path: Path):
             agent_tools.write_file, "scripts/check.sh", "#!/bin/sh\necho ok\n"
         )
         assert str(skill_dir / "routed" / "scripts" / "check.sh") in wrote_script
-        # 点名了 skill 目录的路径不再二次加前缀
+        # 钉根之后相对路径以 skill 仓为根，再带 slug 前缀会被拒并给出示例
         explicit = _call_tool(agent_tools.write_file, "routed/notes.md", "n\n")
-        assert str(skill_dir / "routed" / "notes.md") in explicit
+        assert explicit.startswith("error:")
+        assert "do not prefix routed/" in explicit
     assert (skill_dir / "routed" / "SKILL.md").read_text(encoding="utf-8").count("Routed")
     assert not (skill_dir / "SKILL.md").exists()
 

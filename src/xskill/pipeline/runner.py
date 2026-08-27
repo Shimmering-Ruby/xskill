@@ -24,7 +24,7 @@ v2 (AtomTask) 流水线下，对一个 atom 的"cluster → 触发 SkillEdit"是
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import contextlib
 import logging
 import os
 import threading
@@ -70,6 +70,28 @@ _ACTION_STATUS = {
     "skip": "indexed",
     "error": "error",
 }
+
+def _agent_context_llm_config(
+    config: dict, stage: str, *, inherit_skill: bool,
+) -> dict:
+    """Resolve settings read by an Agent outside the model factory.
+
+    SkillEdit historically inherited non-empty ``llm_skill`` values, including
+    explicit ``False`` and ``0``; TaskCluster historically read only ``llm``.
+    Keep those contracts while applying the new explicit stage override last.
+    """
+    result = dict(config.get("llm", {}) or {})
+    sections = []
+    if inherit_skill:
+        sections.append(config.get("llm_skill", {}) or {})
+    sections.append(((config.get("llm_agents", {}) or {}).get(stage, {}) or {}))
+    for section in sections:
+        result.update({
+            key: value for key, value in section.items()
+            if value not in (None, "")
+        })
+    return result
+
 
 def _install_thread_event_loop() -> None:
     """给工作线程装一个事件循环（Python 3.9 兼容）。
@@ -133,6 +155,9 @@ class DirectoryWatcher:
             Path(install_history_path) if install_history_path
             else xskill_state_root / "install_history.jsonl"
         )
+        # 只保存当前仍未恢复的回流失败；用 copy-on-write 让状态上报线程读取
+        # 稳定快照，也避免每轮轮询向 install_history 重复追加同一故障。
+        self._reverse_sync_failures: dict[str, str] = {}
         # 冷启动批量 flush：rebuild 写 COLD_START 文件后，watcher 等流水线空闲再
         # 做一次 SkillEdit 扫描；这是 XSkill 状态，不能跟生态 home_root 混用。
         from xskill.pipeline.cold_start import ColdStartSignal
@@ -206,6 +231,16 @@ class DirectoryWatcher:
             name: BoundedExecutor(name, int(self.pool_config[name]["workers"]))
             for name in ("split", "cluster", "edit", "embed")
         }
+        # TaskScope writes are intentionally serialized: generation publication,
+        # override replay and SQLite projection share one transaction boundary.
+        self._task_graph_pool = BoundedExecutor("task_graph", 1)
+        from xskill.tasks.service import TaskGraphService
+        self._task_graph_service = TaskGraphService(
+            state_root=xskill_state_root,
+            db_path=Path(db_path) if db_path is not None else None,
+            server_mode=self.server_mode,
+            config=self.config,
+        )
         self.cluster_write_queue = ClusterWriteQueue()
         self._futures: dict[Future, dict] = {}
         # Only the watcher thread mutates these scheduling collections.
@@ -239,6 +274,7 @@ class DirectoryWatcher:
             "atoms_clustered": 0,    # v2: 累计 cluster 调用次数
             "skills_edited": 0,      # v2: 触发的 SkillEdit 次数
             "scores": 0, "errors": 0, "retries": 0,
+            "task_graph_generations": 0,
         }
         # generate 与 SkillEdit 共用 edit 池；完成/失败单独记，给流水线第四栏。
         self._generate_completed = 0
@@ -262,6 +298,7 @@ class DirectoryWatcher:
         # SHUTTING_DOWN 事件叫停（agno_factory 重试循环），不在这里等。
         for pool in self._pools.values():
             pool.shutdown(wait=False, cancel_futures=True)
+        self._task_graph_pool.shutdown(wait=False, cancel_futures=True)
         self.cluster_write_queue.shutdown(wait=False)
         logger.info("watcher stopped")
 
@@ -296,12 +333,17 @@ class DirectoryWatcher:
     def agent_worker_status(self):
         from xskill.utils.rate_limit import request_limiter_status
 
+        reverse_sync_failures = self._reverse_sync_failures
         return {
             "pid": os.getpid(),
             "started_at": self._started_at,
             "heartbeat_at": time.time(),
             "watcher": self.stats,
             "pools": {name: pool.status for name, pool in self._pools.items()},
+            "task_graph": {
+                "enabled": self._task_graph_service.enabled,
+                **self._task_graph_pool.status,
+            },
             # 看板「流水线」页配置 chip 的展示值（席位/配额比/批量）；
             # 配置键不变，热更在 P1 另行评审。
             "pool_config": {
@@ -321,6 +363,19 @@ class DirectoryWatcher:
                 "running_batches": len(self.cluster_futures),
             },
             "cluster_write_queue": self.cluster_write_queue.status,
+            "reverse_sync": {
+                "failed": len(reverse_sync_failures),
+                "failures": [
+                    {
+                        "skill": skill,
+                        "ecosystem": "openclaw",
+                        "error_type": error_type,
+                    }
+                    for skill, error_type in sorted(
+                        reverse_sync_failures.items(),
+                    )
+                ],
+            },
             "llm": request_limiter_status("llm"),
             "embedding": request_limiter_status("embedding"),
         }
@@ -464,6 +519,7 @@ class DirectoryWatcher:
         # 全部 watch_dir 共用一个 pending/claimed 队列；持续提交到 cluster 池满。
         # 最后不足 batch_size 的尾批也立即提交。
         self._submit_cluster_batches()
+        self._submit_task_graph()
 
         # ── Step 5a: 用户点名的 generate 入队到 SkillEdit 同一线程池 ──
         # 先于自动 SkillEdit 提交，避免后台整理把用户任务挤到池外。
@@ -501,6 +557,35 @@ class DirectoryWatcher:
         # CS 模式的分桶在 client 的 reconcile_skill_sides 里按 client_id 做。
         if not self.server_mode:
             self._reconcile_skill_sides()
+
+    def _submit_task_graph(self) -> None:
+        """Run the durable semantic branch without delaying Atom→Skill work."""
+        if not self._task_graph_service.enabled:
+            return
+        if any(info.get("stage") == "task_graph" for info in self._futures.values()):
+            return
+        try:
+            from xskill.tasks.projection import (
+                list_dirty_task_scopes,
+                list_dirty_sources,
+            )
+            self._task_graph_service.ensure_backfill_enqueued()
+            if (
+                not list_dirty_sources(limit=1, db_path=self.db_path)
+                and not list_dirty_task_scopes(
+                    limit=1, db_path=self.db_path,
+                )
+            ):
+                return
+        except Exception:
+            logger.warning("Task Graph dirty reconciliation failed", exc_info=True)
+            return
+        future = self._task_graph_pool.submit(
+            self._task_graph_service.process_dirty,
+            task={"kind": "task_graph_rebuild"},
+        )
+        if future is not None:
+            self._futures[future] = {"stage": "task_graph"}
 
     def _submit_generate_jobs(self):
         """把 web 进程入队的 generate 任务提交到 SkillEdit 同一线程池。
@@ -810,7 +895,7 @@ class DirectoryWatcher:
         if not actionable_skills:
             return
 
-        factory = self._factory()
+        factory = self._factory("edit")
         # store 选哪个：edit agent 工具 (atom_task_read/read_traj) 需要 store +
         # traj_root 才能读到 atom 原文。单机只有一个 watch_dir（cc_sessions）。
         # team-CS server 下有 N 个 watch_dir（每个 client 上传轨迹注册成一个 wd，
@@ -866,16 +951,9 @@ class DirectoryWatcher:
 
         actionable_skills.sort(key=_skill_edit_sort_key)
 
-        base_llm_cfg = self.config.get("llm", {}) or {}
-        skill_llm_override = self.config.get("llm_skill", {}) or {}
-        skill_llm_cfg = {
-            **base_llm_cfg,
-            **{
-                key: value
-                for key, value in skill_llm_override.items()
-                if value not in (None, "")
-            },
-        }
+        skill_llm_cfg = _agent_context_llm_config(
+            self.config, "edit", inherit_skill=True,
+        )
 
         def _run_one(d):
             """在 pool 工作线程里跑单个 skill 的 maybe_run；返回 (d, promoted)。
@@ -1304,6 +1382,25 @@ class DirectoryWatcher:
                 skill, agent,
             )
 
+    def _update_reverse_sync_failure(
+        self, *, skill: str, error_type: str | None,
+    ) -> bool:
+        """更新当前回流故障快照，返回故障是否发生了状态迁移。"""
+        current = self._reverse_sync_failures
+        if error_type is None:
+            if skill not in current:
+                return False
+            updated = dict(current)
+            updated.pop(skill, None)
+            self._reverse_sync_failures = updated
+            return True
+        if current.get(skill) == error_type:
+            return False
+        updated = dict(current)
+        updated[skill] = error_type
+        self._reverse_sync_failures = updated
+        return True
+
     def _install_skill_to_cc(self, skill_path):
         """Backward-compat thin wrapper for ``_install_skill_to_all_detected``.
 
@@ -1326,7 +1423,7 @@ class DirectoryWatcher:
             ReverseSyncStatus,
             UserEditAbsorbAgent,
             detect_user_edits,
-            reverse_sync_openclaw_dest,
+            reverse_sync_openclaw_dest_result,
         )
         from xskill.agents import agent_tools
         target_root = self._resolve_target_root()
@@ -1341,59 +1438,101 @@ class DirectoryWatcher:
             usage_ledger=self.usage_ledger,
             registry_db_path=self.db_path,
         )
-        for d in sorted(self.skill_dir.iterdir()):
-            if not d.is_dir() or d.name.startswith("."):
-                continue
+        skill_paths = [
+            d for d in sorted(self.skill_dir.iterdir())
+            if d.is_dir() and not d.name.startswith(".")
+        ]
+        active_skill_names = {d.name for d in skill_paths}
+        for stale_skill in (
+            set(self._reverse_sync_failures).difference(active_skill_names)
+        ):
+            self._update_reverse_sync_failure(
+                skill=stale_skill, error_type=None,
+            )
+        for d in skill_paths:
             try:
                 # openclaw 回流（dest → source）— 没装 openclaw / dest 不存在
-                # / dest 没改 → no-op。返回 True 意味着 source mtime 刚被 touch，
+                # / dest 没改 → no-op。返回 SYNCED 意味着 source 刚完成回流，
                 # 下面 detect_user_edits 会立刻看到 pending edit。
                 if target_root is not None:
                     dest_dir = target_root / ".agents" / "skills" / d.name
                     try:
-                        reverse_status = reverse_sync_openclaw_dest(
+                        reverse_result = reverse_sync_openclaw_dest_result(
                             dest_dir, d,
                         )
                     except Exception:
+                        error_type = "REVERSE_SYNC_UNEXPECTED"
                         logger.warning(
-                            "openclaw reverse sync stopped skill_id_hash=%s "
-                            "error_type=REVERSE_SYNC_UNEXPECTED",
-                            hashlib.sha256(
-                                d.name.encode("utf-8"),
-                            ).hexdigest()[:12],
+                            "reverse sync stopped skill=%r ecosystem=openclaw "
+                            "error_type=%s",
+                            d.name,
+                            error_type,
                         )
+                        if self._update_reverse_sync_failure(
+                            skill=d.name, error_type=error_type,
+                        ):
+                            self._record_install_fail(
+                                skill=d.name,
+                                agent="openclaw",
+                                reason=error_type,
+                            )
                         continue
+                    reverse_status = reverse_result.status
                     if reverse_status in {
                         ReverseSyncStatus.RECENT_EDIT,
                         ReverseSyncStatus.FAILED,
                     }:
-                        logger.warning(
-                            "openclaw reverse sync stopped "
-                            "skill_id_hash=%s error_type=%s",
-                            hashlib.sha256(
-                                d.name.encode("utf-8"),
-                            ).hexdigest()[:12],
-                            (
-                                "REVERSE_SYNC_RECENT_EDIT"
-                                if reverse_status
-                                == ReverseSyncStatus.RECENT_EDIT
-                                else "REVERSE_SYNC_FAILED"
-                            ),
+                        error_type = (
+                            "REVERSE_SYNC_RECENT_EDIT"
+                            if reverse_status == ReverseSyncStatus.RECENT_EDIT
+                            else (
+                                reverse_result.error_type
+                                or "REVERSE_SYNC_FAILED"
+                            )
                         )
+                        logger.warning(
+                            "reverse sync stopped skill=%r ecosystem=openclaw "
+                            "error_type=%s",
+                            d.name,
+                            error_type,
+                        )
+                        if reverse_status == ReverseSyncStatus.FAILED:
+                            if self._update_reverse_sync_failure(
+                                skill=d.name, error_type=error_type,
+                            ):
+                                self._record_install_fail(
+                                    skill=d.name,
+                                    agent="openclaw",
+                                    reason=error_type,
+                                )
+                        else:
+                            self._update_reverse_sync_failure(
+                                skill=d.name, error_type=None,
+                            )
                         continue
                     if reverse_status not in {
                         ReverseSyncStatus.NO_EDIT,
                         ReverseSyncStatus.SYNCED,
                     }:
+                        error_type = "REVERSE_SYNC_INVALID_STATUS"
                         logger.warning(
-                            "openclaw reverse sync stopped "
-                            "skill_id_hash=%s "
-                            "error_type=REVERSE_SYNC_INVALID_STATUS",
-                            hashlib.sha256(
-                                d.name.encode("utf-8"),
-                            ).hexdigest()[:12],
+                            "reverse sync stopped skill=%r ecosystem=openclaw "
+                            "error_type=%s",
+                            d.name,
+                            error_type,
                         )
+                        if self._update_reverse_sync_failure(
+                            skill=d.name, error_type=error_type,
+                        ):
+                            self._record_install_fail(
+                                skill=d.name,
+                                agent="openclaw",
+                                reason=error_type,
+                            )
                         continue
+                    self._update_reverse_sync_failure(
+                        skill=d.name, error_type=None,
+                    )
 
                 if not detect_user_edits(d):
                     continue
@@ -2562,6 +2701,21 @@ class DirectoryWatcher:
                     from xskill.team.server import generate_jobs as gen_jobs
                     gen_jobs.finish_claim(self.logs_dir, job_id)
                 continue
+            if stage == "task_graph":
+                try:
+                    result = fut.result(timeout=0)
+                    self._stats["task_graph_generations"] += int(
+                        result.get("scopes", 0)
+                    )
+                    self._stats["errors"] += len(
+                        result.get("failed_scopes") or ()
+                    )
+                except Exception:
+                    self._stats["errors"] += 1
+                    logger.exception(
+                        "Task Graph rebuild failed; durable dirty sources remain queued"
+                    )
+                continue
             if stage == "skill_edit":
                 # SkillEditAgent.maybe_run() 自己吞异常返回 (d, False)——正常
                 # 不会走到 except，这里兜底仅防池化层面的意外（cancel 等）。
@@ -2639,6 +2793,14 @@ class DirectoryWatcher:
         if new:
             self._stats["new_trajs"] += len(new)
             logger.info("[%s] discovered %d new", dir_path.name, len(new))
+        try:
+            from xskill.traj_search import refresh_session_index
+
+            refresh_session_index(dir_path)
+        except Exception:
+            logger.warning(
+                "session index refresh skipped for %s", dir_path, exc_info=True,
+            )
 
         # ── 提交 split 任务（discovered / updated → splitting）──
         # 需要 llm；缺则 traj 留在 discovered 等条件齐备。
@@ -2667,6 +2829,7 @@ class DirectoryWatcher:
                         self._do_split,
                         dir_path,
                         fname,
+                        wd_id,
                         task={
                             "kind": "traj",
                             "traj_id": (dir_path / fname).stem,
@@ -2775,18 +2938,21 @@ class DirectoryWatcher:
             self._store_cache[key] = AtomTaskStore(root=Path(dir_path))
         return self._store_cache[key]
 
-    def _factory(self):
+    def _factory(self, stage: str | None = None):
         """返回 agno agent 工厂；优先 inject 的，否则用默认 deepseek 工厂。"""
         if self.agno_agent_factory is not None:
             return self.agno_agent_factory
         from xskill.agents.agno_factory import make_default_factory
         if not hasattr(self, "_default_factory_cache"):
-            self._default_factory_cache = make_default_factory(
+            self._default_factory_cache = {}
+        if stage not in self._default_factory_cache:
+            self._default_factory_cache[stage] = make_default_factory(
                 self.config,
+                stage=stage,
                 usage_ledger=self.usage_ledger,
                 spill_root=self.spill_root,
             )
-        return self._default_factory_cache
+        return self._default_factory_cache[stage]
 
     # ───────────────────────────────────────────────────────────
     # 任务执行函数（在线程池中运行）
@@ -2794,7 +2960,7 @@ class DirectoryWatcher:
 
     # v2 流水线任务：split / atom_index / cluster
 
-    def _do_split(self, dir_path, fname):
+    def _do_split(self, dir_path, fname, wd_id=None):
         """跑 TaskAgent 拆 AtomTask。返回 (fname, num_atoms_added, last_offset, last_atom_id, err)。
 
         v2.3: TaskAgent 走 agentic 工具调用（submit_atom/readfile/grep），用
@@ -2836,16 +3002,43 @@ class DirectoryWatcher:
             usage_ledger=self.usage_ledger,
             registry_db_path=self.db_path,
         )
+        usage_scope = {}
+        if wd_id is not None and self._task_graph_service.enabled:
+            try:
+                from xskill.tasks.projection import live_source_row
+                source_row = live_source_row(
+                    int(wd_id), fname, db_path=self.db_path,
+                )
+                if source_row is not None:
+                    watch_dir, trajectory = source_row
+                    scope = self._task_graph_service.resolver.resolve(
+                        watch_dir=watch_dir, trajectory=trajectory,
+                    )
+                    usage_scope = {
+                        "tenant_id": scope.tenant_id,
+                        "task_scope_id": scope.task_scope_id,
+                        "source_scope_id": scope.source_scope_id,
+                        "traj_id": traj_id,
+                        "allocation_mode": "direct",
+                    }
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.debug("split usage scope unavailable", exc_info=True)
+        from xskill.usage import use_processing_scope
         try:
-            with agent_tools.use_agent_tool_context(tool_context):
-                atoms = TaskAgent(
-                    agno_agent_factory=self._factory(),
-                    store=store,
-                    traj_root=dir_path,
-                    skill_dir=self.skill_dir,
-                    interests=current_interests,
-                    logs_dir=self.logs_dir,
-                ).run(traj_id=traj_id, traj_path=md_path)
+            scope_context = (
+                use_processing_scope(**usage_scope)
+                if usage_scope else contextlib.nullcontext()
+            )
+            with scope_context:
+                with agent_tools.use_agent_tool_context(tool_context):
+                    atoms = TaskAgent(
+                        agno_agent_factory=self._factory("split"),
+                        store=store,
+                        traj_root=dir_path,
+                        skill_dir=self.skill_dir,
+                        interests=current_interests,
+                        logs_dir=self.logs_dir,
+                    ).run(traj_id=traj_id, traj_path=md_path)
         except TrajectoryNotFit as not_fit_error:
             logger.info(
                 "⊘ split not_fit %s（interest_fingerprint=%s）: %s",
@@ -3013,7 +3206,7 @@ class DirectoryWatcher:
         if not stores:
             raise RuntimeError("cluster batch has no active AtomTaskStore")
         store = stores[0] if len(stores) == 1 else MultiAtomTaskStore(stores)
-        factory = self._factory()
+        factory = self._factory("cluster")
         return process_atom_batch(
             atom_ids=atom_ids,
             config=self.config,
@@ -3073,6 +3266,16 @@ class DirectoryWatcher:
             tasks_extracted=total_atoms, **kw,
         )
         self._stats["atoms_extracted"] += n_atoms
+        if wd_id is not None:
+            try:
+                self._task_graph_service.mark_dirty(
+                    wd_id, fname, reason="atom_split",
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Task Graph dirty mark failed after split %s", fname,
+                    exc_info=True,
+                )
         if n_atoms:
             try:
                 from xskill.recommend.profile_dirty import (
@@ -3533,7 +3736,9 @@ def _process_atom_task_bound(*, atom_id: str, config: dict,
     cluster = TaskClusterAgent(
         skill_dir=skill_dir, store=store,
         agno_agent_factory=agno_agent_factory,
-        llm_cfg=config.get("llm", {}),
+        llm_cfg=_agent_context_llm_config(
+            config, "cluster", inherit_skill=False,
+        ),
         logs_dir=logs_dir,
         db_path=db_path,
         tools=[
@@ -3671,7 +3876,9 @@ def _process_atom_batch_bound(*, atom_ids: list[str], config: dict,
     cluster = TaskClusterAgent(
         skill_dir=skill_dir, store=store,
         agno_agent_factory=agno_agent_factory,
-        llm_cfg=config.get("llm", {}),
+        llm_cfg=_agent_context_llm_config(
+            config, "cluster", inherit_skill=False,
+        ),
         logs_dir=logs_dir,
         db_path=db_path,
         tools=[

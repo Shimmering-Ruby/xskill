@@ -215,13 +215,15 @@ def test_install_to_ngagent_user_edit_round_trips(tmp_path, monkeypatch):
 
     # 让 reverse_sync 跳 quiet 检查（测试免等 3 分钟）
     from xskill.agents import user_edit_absorb_agent as ua
-    _real = ua.reverse_sync_copy_dest
+    _real = ua.reverse_sync_copy_dest_result
 
     def _force_quiet_zero(d, s, **kw):
         kw["quiet_seconds"] = 0
         return _real(d, s, **kw)
 
-    monkeypatch.setattr(ua, "reverse_sync_copy_dest", _force_quiet_zero)
+    monkeypatch.setattr(
+        ua, "reverse_sync_copy_dest_result", _force_quiet_zero,
+    )
 
     # 用户改 dest（mtime 比 installed_at 至少大 1 秒）
     _t.sleep(1.1)

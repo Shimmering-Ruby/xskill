@@ -73,11 +73,63 @@ class SkillVectorIndex(Protocol):
 
 
 class MemorySkillVectorIndex:
-    """纯内存实现：单测不依赖 pymilvus。"""
+    """纯内存实现：单测不依赖 pymilvus，生产在装不上 Milvus Lite 时兜底。
 
-    def __init__(self, dim: int = DEFAULT_DIM) -> None:
+    向量存放在一块预分配的二维 numpy 矩阵里（按行索引），不是「字典套
+    Python list」——万级技能场景下这省两笔账：一是 Python float 装箱的
+    空间（每个元素一个独立对象，vs 数组里连续的 8 字节）；二是
+    ``search()`` 不再逐行把 list 转成 numpy 数组再算余弦，而是对整块
+    矩阵一次性做向量化的归一化和矩阵乘法（issue #328）。
+
+    删除的行位标记进空闲槽位表，之后 upsert 优先复用而不是让矩阵一直
+    增长；容量不够时才整体扩容一次（``reserve()`` 可以在批量写入前把
+    容量一次开够，避免边写边翻倍拷贝——问题同样出在「不知道最终大小、
+    靠 append 摸着石头过河」，只是发生在 numpy 矩阵而不是 Python list
+    上，道理一样）。
+    """
+
+    _GROWTH_FACTOR = 2
+    _MIN_CAPACITY = 16
+
+    def __init__(self, dim: int = DEFAULT_DIM, *, capacity: int = 0) -> None:
+        import numpy as np
+
         self.dim = dim
-        self._rows: dict[str, dict] = {}
+        self._capacity = max(int(capacity), 0)
+        self._matrix = np.empty((self._capacity, dim), dtype=np.float64)
+        self._size = 0  # 已分配（含空闲槽）的行数上界
+        self._key_to_row: dict[str, int] = {}
+        self._meta: dict[str, dict] = {}
+        self._free_rows: list[int] = []
+
+    def reserve(self, n: int) -> None:
+        """把容量一次性扩到至少 ``n`` 行；批量写入前调用可以避免边写边扩容。
+
+        不是必须调用——不调用时 upsert 仍会按需自动扩容（翻倍策略），
+        只是明知最终规模时提前 reserve 能省掉中途几次整体拷贝。
+        """
+        if n > self._capacity:
+            self._grow_to(int(n))
+
+    def _grow_to(self, capacity: int) -> None:
+        import numpy as np
+
+        new_matrix = np.empty((capacity, self.dim), dtype=np.float64)
+        if self._size:
+            new_matrix[: self._size] = self._matrix[: self._size]
+        self._matrix = new_matrix
+        self._capacity = capacity
+
+    def _allocate_row(self) -> int:
+        if self._free_rows:
+            return self._free_rows.pop()
+        if self._size >= self._capacity:
+            self._grow_to(
+                max(self._capacity * self._GROWTH_FACTOR, self._MIN_CAPACITY)
+            )
+        row = self._size
+        self._size += 1
+        return row
 
     def upsert(
         self,
@@ -88,23 +140,47 @@ class MemorySkillVectorIndex:
         source: str,
         name: str,
     ) -> None:
-        self._rows[catalog_key] = {
-            "catalog_key": catalog_key,
-            "vector": list(vector),
-            "content_sha": content_sha,
-            "source": source,
-            "name": name,
+        import numpy as np
+
+        vec = np.asarray(vector, dtype=np.float64)
+        if vec.shape != (self.dim,):
+            raise ValueError(
+                f"vector dim mismatch for {catalog_key!r}: "
+                f"expected ({self.dim},), got {vec.shape}"
+            )
+        row = self._key_to_row.get(catalog_key)
+        if row is None:
+            row = self._allocate_row()
+            self._key_to_row[catalog_key] = row
+        self._matrix[row] = vec
+        self._meta[catalog_key] = {
+            "content_sha": content_sha, "source": source, "name": name,
         }
 
     def delete(self, catalog_key: str) -> None:
-        self._rows.pop(catalog_key, None)
+        row = self._key_to_row.pop(catalog_key, None)
+        self._meta.pop(catalog_key, None)
+        if row is not None:
+            self._free_rows.append(row)
 
     def get(self, catalog_key: str) -> Optional[dict]:
-        row = self._rows.get(catalog_key)
-        return dict(row) if row else None
+        row = self._key_to_row.get(catalog_key)
+        if row is None:
+            return None
+        return {
+            "catalog_key": catalog_key,
+            "vector": self._matrix[row].tolist(),
+            **self._meta[catalog_key],
+        }
 
     def list_keys(self) -> set[str]:
-        return set(self._rows)
+        return set(self._key_to_row)
+
+    @property
+    def _rows(self) -> dict:
+        """只读兼容视图（``{key: get(key)}``），供既有测试按旧的
+        「字典套行」形状断言用；生产代码不读它。"""
+        return {key: self.get(key) for key in self._key_to_row}
 
     def search(
         self, vector: Sequence[float], *, top_k: int = 10,
@@ -112,19 +188,28 @@ class MemorySkillVectorIndex:
     ) -> list[tuple[str, float]]:
         import numpy as np
 
-        q = np.asarray(vector, dtype=float)
-        qn = float(np.linalg.norm(q)) or 1.0
-        q = q / qn
-        scored: list[tuple[str, float]] = []
         skip = exclude_keys or set()
-        for key, row in self._rows.items():
-            if key in skip:
-                continue
-            v = np.asarray(row["vector"], dtype=float)
-            vn = float(np.linalg.norm(v)) or 1.0
-            scored.append((key, float(q @ (v / vn))))
-        scored.sort(key=lambda x: -x[1])
-        return scored[:top_k]
+        keys = [key for key in self._key_to_row if key not in skip]
+        if not keys:
+            return []
+        rows = np.fromiter(
+            (self._key_to_row[key] for key in keys),
+            dtype=np.int64, count=len(keys),
+        )
+        # 一次性切片整块矩阵，不逐行 np.asarray 转换；归一化和打分都是
+        # 向量化操作，不是 Python 循环里一条条算。
+        candidates = self._matrix[rows]
+        norms = np.linalg.norm(candidates, axis=1)
+        norms[norms == 0] = 1.0
+        q = np.asarray(vector, dtype=np.float64)
+        qn = float(np.linalg.norm(q)) or 1.0
+        scores = (candidates / norms[:, None]) @ (q / qn)
+        k = min(top_k, len(keys))
+        # top_k 通常远小于候选数：先用 argpartition 圈出前 k 个（均摊
+        # O(n)），再对这一小撮排序，比对全量做一次 argsort 省时间。
+        top_indices = np.argpartition(-scores, k - 1)[:k] if k > 0 else np.array([], dtype=np.int64)
+        top_indices = top_indices[np.argsort(-scores[top_indices])]
+        return [(keys[i], float(scores[i])) for i in top_indices]
 
 
 class MilvusLiteSkillVectorIndex:
@@ -345,6 +430,11 @@ def reconcile_catalog_to_index(
         r["catalog_key"]: r for r in indexable_catalog_rows(catalog_rows)
     }
     existing_keys = index.list_keys()
+    # 已知这批最终最多写入多少行，提前把索引（若支持，如
+    # MemorySkillVectorIndex）预留够容量，避免逐条 upsert 时反复翻倍扩容。
+    reserve = getattr(index, "reserve", None)
+    if callable(reserve):
+        reserve(len(existing_keys) + len(wanted))
     upserted = deleted = skipped = deferred = 0
     for key, row in wanted.items():
         cur = index.get(key)

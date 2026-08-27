@@ -107,3 +107,17 @@ def test_paused_user_backlog_is_hidden_until_resume(tmp_path):
 def test_serves_index_html(tmp_path):
     r = _client(tmp_path).get("/")
     assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+
+
+def test_skill_dir_for_respects_config_yaml(tmp_path):
+    """独立只读实例按 registry 所在 home 读 skill_dir，不写死同级 skill/。"""
+    from xskill.dashboard.router import _skill_dir_for
+
+    db = tmp_path / "registry.db"
+    db.write_bytes(b"")
+    assert _skill_dir_for(db) == tmp_path / "skill"
+
+    custom = tmp_path / "company_skills"
+    custom.mkdir()
+    (tmp_path / "config.yaml").write_text(f"skill_dir: {custom}\n", encoding="utf-8")
+    assert _skill_dir_for(db) == custom

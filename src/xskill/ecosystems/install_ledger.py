@@ -177,6 +177,33 @@ class InstallLedger(_SqliteStore):
         finally:
             conn.close()
 
+    def list_active_install_targets(
+        self,
+        *,
+        mode: str | None = None,
+        skill_name: str | None = None,
+    ) -> list[dict[str, str]]:
+        """轻量返回稳定排序的 active 安装目标，不解析基线 JSON。"""
+        clauses = ["status='active'"]
+        parameters: list[str] = []
+        if mode is not None:
+            clauses.append("mode=?")
+            parameters.append(mode)
+        if skill_name is not None:
+            clauses.append("skill_name=?")
+            parameters.append(skill_name)
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT dest_key, skill_name FROM installations WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY skill_name, dest_key",
+                tuple(parameters),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
     def record_install(
         self,
         dest: Path | str,
@@ -280,6 +307,53 @@ class InstallLedger(_SqliteStore):
             )
             conn.commit()
             return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def compare_and_swap_copy_baseline(
+        self,
+        dest: Path | str,
+        *,
+        expected_generation: int,
+        expected_installation_id: str,
+        expected_baseline_identity: str,
+        file_fingerprints: dict[str, str],
+        baseline_identity: str,
+    ) -> bool:
+        """在安装世代与旧基线均未变化时更新 active copy 基线。"""
+        key = dest_key(dest)
+        fp_json = json.dumps(
+            file_fingerprints, ensure_ascii=False, sort_keys=True,
+        )
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                """
+                UPDATE installations
+                SET file_fingerprints_json=?, baseline_identity=?
+                WHERE dest_key=? AND status='active' AND mode='copy'
+                  AND generation=? AND installation_id=?
+                  AND baseline_identity=?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM removal_jobs
+                      WHERE removal_jobs.dest_key=installations.dest_key
+                        AND state IN ('pending', 'deleting')
+                  )
+                """,
+                (
+                    fp_json,
+                    baseline_identity,
+                    key,
+                    expected_generation,
+                    expected_installation_id,
+                    expected_baseline_identity,
+                ),
+            )
+            conn.commit()
+            return cur.rowcount == 1
         except Exception:
             conn.rollback()
             raise

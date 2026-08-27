@@ -1031,6 +1031,40 @@ def test_recent_auxiliary_edit_remains_safe_install_failure(
     ) == "USER EDIT IN PROGRESS\n"
 
 
+def test_reverse_sync_failure_reason_is_visible_in_install_result(
+    tmp_path, monkeypatch,
+):
+    from xskill.ecosystems.installation import InstallSafetyError
+    from xskill.skill.git import init_skill_repo_on_baby
+    from xskill.team.client.daemon import install_skill_to_ecosystems
+
+    repo_dir = tmp_path / "conflicted-skill"
+    init_skill_repo_on_baby(
+        str(repo_dir), "conflicted-skill", "reverse sync conflict test",
+    )
+    home = tmp_path / "home"
+
+    def fail_with_conflict(*_args, **_kwargs):
+        raise InstallSafetyError("REVERSE_SYNC_CONTENT_CONFLICT")
+
+    monkeypatch.setattr(
+        "xskill.ecosystems.install_to_openclaw",
+        fail_with_conflict,
+    )
+
+    records = install_skill_to_ecosystems(
+        repo_dir,
+        home_root=home,
+        ecosystems=["openclaw"],
+    )
+
+    assert records[0]["status"] == "failed"
+    assert records[0]["error_code"] == "REVERSE_SYNC_CONTENT_CONFLICT"
+    assert records[0]["error"] == (
+        "源目录与安装目录存在同文件双边修改，已保留现有安装目录"
+    )
+
+
 def test_damaged_metadata_is_not_reported_installed(
     tmp_path, monkeypatch, caplog,
 ):
@@ -1140,6 +1174,7 @@ def test_runner_stops_absorb_after_reverse_sync_failure(
     tmp_path, monkeypatch,
 ):
     from xskill.agents import user_edit_absorb_agent as user_absorb
+    from xskill.ecosystems._history import InstallHistory
     from xskill.pipeline.runner import DirectoryWatcher
 
     skill_dir = tmp_path / "skills"
@@ -1149,11 +1184,15 @@ def test_runner_stops_absorb_after_reverse_sync_failure(
     watcher = DirectoryWatcher(
         skill_dir=skill_dir,
         home_root=tmp_path / "home",
+        install_history_path=tmp_path / "install-history.jsonl",
     )
     monkeypatch.setattr(
         user_absorb,
-        "reverse_sync_openclaw_dest",
-        lambda *_args, **_kwargs: user_absorb.ReverseSyncStatus.FAILED,
+        "reverse_sync_openclaw_dest_result",
+        lambda *_args, **_kwargs: user_absorb.ReverseSyncResult(
+            user_absorb.ReverseSyncStatus.FAILED,
+            "REVERSE_SYNC_CONTENT_CONFLICT",
+        ),
     )
 
     def fail_if_detection_runs(*_args, **_kwargs):
@@ -1165,6 +1204,78 @@ def test_runner_stops_absorb_after_reverse_sync_failure(
     monkeypatch.setattr(watcher, "_factory", lambda: object())
 
     watcher._check_user_edits()
+
+    assert watcher.agent_worker_status["reverse_sync"] == {
+        "failed": 1,
+        "failures": [{
+            "skill": "failed-reverse",
+            "ecosystem": "openclaw",
+            "error_type": "REVERSE_SYNC_CONTENT_CONFLICT",
+        }],
+    }
+    failure = InstallHistory(watcher.install_history_path).fail_records()[-1]
+    assert {
+        key: failure[key]
+        for key in ("action", "skill", "agent", "reason")
+    } == {
+        "action": "fail",
+        "skill": "failed-reverse",
+        "agent": "openclaw",
+        "reason": "REVERSE_SYNC_CONTENT_CONFLICT",
+    }
+
+
+def test_runner_records_same_reverse_sync_failure_once_and_clears(
+    tmp_path, monkeypatch,
+):
+    from xskill.agents import user_edit_absorb_agent as user_absorb
+    from xskill.ecosystems._history import InstallHistory
+    from xskill.pipeline.runner import DirectoryWatcher
+
+    skill_dir = tmp_path / "skills"
+    skill_path = skill_dir / "failed-reverse"
+    skill_path.mkdir(parents=True)
+    (skill_path / "SKILL.md").write_text("body\n", encoding="utf-8")
+    watcher = DirectoryWatcher(
+        skill_dir=skill_dir,
+        home_root=tmp_path / "home",
+        install_history_path=tmp_path / "install-history.jsonl",
+    )
+    reverse_results = iter([
+        user_absorb.ReverseSyncResult(
+            user_absorb.ReverseSyncStatus.FAILED,
+            "REVERSE_SYNC_BASELINE_FAILED",
+        ),
+        user_absorb.ReverseSyncResult(
+            user_absorb.ReverseSyncStatus.FAILED,
+            "REVERSE_SYNC_BASELINE_FAILED",
+        ),
+        user_absorb.ReverseSyncResult(
+            user_absorb.ReverseSyncStatus.NO_EDIT,
+        ),
+    ])
+    monkeypatch.setattr(
+        user_absorb,
+        "reverse_sync_openclaw_dest_result",
+        lambda *_args, **_kwargs: next(reverse_results),
+    )
+    monkeypatch.setattr(
+        user_absorb, "detect_user_edits", lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(watcher, "_factory", lambda: object())
+
+    watcher._check_user_edits()
+    watcher._check_user_edits()
+    watcher._check_user_edits()
+
+    failures = InstallHistory(watcher.install_history_path).fail_records()
+    assert [record["reason"] for record in failures] == [
+        "REVERSE_SYNC_BASELINE_FAILED",
+    ]
+    assert watcher.agent_worker_status["reverse_sync"] == {
+        "failed": 0,
+        "failures": [],
+    }
 
 
 def test_link_modes_do_not_read_install_metadata(monkeypatch):

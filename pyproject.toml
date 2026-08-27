@@ -65,18 +65,11 @@ milvus = [
 dsh = [
     "zstandard>=0.21",
 ]
-# generate 行为观测。只给 server / 观测机：pip install 'xskill[obs]'。
-# 禁止写进 [project] dependencies——客户端自动更新只装 Requires-Dist，
-# 把 OpenTelemetry 放进主依赖会让全员更新去拉这几个包（见 milvus / #334）。
-# 缺包时 obs 层退回无埋点，产品 generate 仍照常跑。
+# Generate 观测。不进主依赖。观测机：pip install 'xskill[obs]'，再设
+# XSKILL_OTEL_ENDPOINT。LLM 对话走 OpenAIInstrumentor，不手包 invoke。
 obs = [
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp-proto-http>=1.20",
-]
-# Phoenix 面板，只装在观测机。不进主依赖，也不随客户端 wheel 安装。
-phoenix = [
-    "arize-phoenix>=7",
+    "arize-phoenix-otel>=0.16.0",
+    "openinference-instrumentation-openai",
 ]
 dev = [
     "pytest>=7",
@@ -113,8 +106,8 @@ xskill = [
     "data/*.json",            # vendored 价格表(Issue #43),随 wheel 发布
     "dashboard/static/*",     # 看板前端壳(index.html / app.js),随 wheel 发布
     "agents/prompts/*.txt",   # skill-creator 官方提示词(case生成/desc优化),随 wheel 发布
-    "data/skill/xskill/*",       # 捆绑的 xskill 使用指南 skill(xskill init 装到各生态)
-    "data/skill/xskill/**/*",    # 上者的子目录(references/scripts 等)一并打包
+    "data/skill/xskill-helper/*",    # 捆绑的 /xskill-helper 使用指南（connect 装到各生态）
+    "data/skill/xskill-helper/**/*", # 上者的子目录(references 等)一并打包
 ]
 
 [tool.setuptools.packages.find]
@@ -163,6 +156,7 @@ markers = [
     "nightly: load/platform-sensitive tests; excluded from PR matrix, run in nightly workflow",
 ]
 addopts = "--ignore=tests/live --ignore=tests/stress"
+pythonpath = ["src"]
 asyncio_mode = "strict"
 
 [tool.mutmut]
