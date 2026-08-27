@@ -1159,6 +1159,29 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
     return 0
 
 
+def _clip_search_description(text: str) -> str:
+    description = " ".join(str(text or "").split())
+    if len(description) > 180:
+        return f"{description[:177].rstrip()}..."
+    return description
+
+
+def _traj_match_line(hit: dict) -> str:
+    labels: list[str] = []
+    for item in hit.get("sources") or []:
+        name = str(item)
+        if name == "vector":
+            labels.append("语义")
+        elif name == "keyword":
+            labels.append("关键词")
+        elif name:
+            labels.append(name)
+    score = f"{float(hit.get('score') or 0.0):.3f}"
+    if labels:
+        return f"{score}（{'、'.join(labels)}）"
+    return score
+
+
 def _render_traj_hits(hits: list[dict], query: str, *, meta: dict | None = None) -> None:
     unknown = list((meta or {}).get("unknown_names") or [])
     if unknown:
@@ -1172,17 +1195,33 @@ def _render_traj_hits(hits: list[dict], query: str, *, meta: dict | None = None)
         else:
             _write_search_output(f"轨迹无匹配：{query}")
         return
-    _write_search_output(f"traj search  query={query!r}  {len(hits)} hits")
-    for hit in hits:
-        user = hit.get("user") or "-"
-        atom_id = hit.get("atom_id") or "-"
-        _write_search_output(
-            f"{float(hit.get('score') or 0.0):.3f}\t{user}\t"
-            f"{hit.get('traj_id')}\t{atom_id}"
+    output_lines = [
+        f"搜索：{query}",
+        f"找到 {len(hits)} 条轨迹",
+        "=" * 64,
+    ]
+    for index, hit in enumerate(hits, start=1):
+        if index > 1:
+            output_lines.append("-" * 64)
+        title = (
+            hit.get("intent")
+            or hit.get("summary")
+            or hit.get("traj_id")
+            or "(unnamed)"
         )
-        intent = hit.get("intent") or hit.get("summary") or ""
-        if intent:
-            _write_search_output(f"  {intent}")
+        output_lines.append(f"[{index}/{len(hits)}] {title}")
+        output_lines.append(f"ID：{hit.get('traj_id') or '-'}")
+        output_lines.append(f"工号：{hit.get('user') or '（未知）'}")
+        if hit.get("atom_id"):
+            output_lines.append(f"Atom：{hit['atom_id']}")
+        summary = _clip_search_description(hit.get("summary") or "")
+        output_lines.append(f"描述：{summary or '（无描述）'}")
+        output_lines.append(f"匹配：{_traj_match_line(hit)}")
+        used = [str(item) for item in (hit.get("used_skills") or []) if item]
+        if used:
+            output_lines.append("用过：" + "、".join(used))
+    output_lines.append("=" * 64)
+    _write_search_output("\n".join(output_lines))
 
 
 def cmd_search_traj(args, http=None, headers=None) -> int:

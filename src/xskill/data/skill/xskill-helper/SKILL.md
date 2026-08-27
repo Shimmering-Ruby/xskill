@@ -92,10 +92,12 @@ xskill search traj "alembic 半迁移" -k 8
 xskill search traj --name alice,bob 发票核对 --json
 ```
 
-Human output is `score<TAB>user<TAB>traj_id<TAB>atom_id` plus the intent.
-`--name` only applies in team mode. The command does not download files
-and does not return raw trajectory text. You can paste a `traj_id` into
-`xskill generate` when you want the instruction to name the evidence.
+Human output uses the same card layout as `xskill search`: a header,
+then one block per hit with ID, user, atom, description, and match
+score. `--name` only applies in team mode. The command does not
+download files and does not return raw trajectory text. You can paste
+a `traj_id` into `xskill generate` when you want the instruction to
+name the evidence.
 
 ## Searching & sharing team skills
 

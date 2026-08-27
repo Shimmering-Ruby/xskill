@@ -310,8 +310,14 @@ def test_cli_search_traj_local_prints_hits(monkeypatch, capsys):
     rc = cli.cmd_search(_args())
     assert rc == 0
     out = capsys.readouterr()
-    assert "traj_cc_alice_memleak" in out.out
-    assert "alice" in out.out
+    assert "搜索：django migration" in out.out
+    assert "找到 1 条轨迹" in out.out
+    assert "ID：traj_cc_alice_memleak" in out.out
+    assert "工号：alice" in out.out
+    assert "Atom：atom_t_0001" in out.out
+    assert "描述：tracemalloc found a cache" in out.out
+    assert "匹配：0.910（语义、关键词）" in out.out
+    assert "用过：python-memory-debug" in out.out
     assert "diagnose a python process" in out.out
     assert "MUST_NOT_LEAK" not in out.out
     assert "/secret/server" not in out.out
@@ -413,7 +419,10 @@ def test_cli_search_traj_team_prints_and_forwards_names(capsys):
         "query": "memory", "limit": 5, "names": "alice,ghost",
     }
     out = capsys.readouterr().out
-    assert "traj_cc_alice_memleak" in out
+    assert "搜索：memory" in out
+    assert "找到 1 条轨迹" in out
+    assert "ID：traj_cc_alice_memleak" in out
+    assert "工号：alice" in out
 
 
 def test_cli_search_traj_team_unknown_names_warn(capsys):
