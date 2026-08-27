@@ -1227,10 +1227,10 @@ def _render_search_kind_hits(
             title = hit.get("query") or hit.get("traj_id") or "(unnamed)"
             description = hit.get("query") or ""
         output_lines.append(f"[{index}/{len(hits)}] {title}")
-        output_lines.append(f"ID：{hit.get('traj_id') or '-'}")
+        output_lines.append(f"轨迹 ID：{hit.get('traj_id') or '-'}")
         output_lines.append(f"工号：{hit.get('user') or '（未知）'}")
         if kind == "atom" and hit.get("atom_id"):
-            output_lines.append(f"Atom：{hit['atom_id']}")
+            output_lines.append(f"Atom ID：{hit['atom_id']}")
         start = hit.get("offset_start")
         end = hit.get("offset_end")
         if kind == "atom" and (start is not None or end is not None):
@@ -2081,10 +2081,10 @@ def _render_read_payload(payload: dict, *, unknown_names: list[str] | None = Non
     ]
     if kind == "atom":
         if payload.get("atom_id"):
-            lines.append(f"Atom：{payload['atom_id']}")
-        lines.append(f"ID：{payload.get('traj_id') or '-'}")
+            lines.append(f"Atom ID：{payload['atom_id']}")
+        lines.append(f"轨迹 ID：{payload.get('traj_id') or '-'}")
     else:
-        lines.append(f"ID：{payload.get('traj_id') or '-'}")
+        lines.append(f"轨迹 ID：{payload.get('traj_id') or '-'}")
     if payload.get("user"):
         lines.append(f"工号：{payload['user']}")
     if payload.get("truncated"):

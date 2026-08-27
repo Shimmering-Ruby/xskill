@@ -427,7 +427,7 @@ def test_cli_search_traj_local_prints_hits(monkeypatch, capsys):
     out = capsys.readouterr()
     assert "搜索：django migration" in out.out
     assert "找到 1 条轨迹" in out.out
-    assert "ID：traj_cc_alice_memleak" in out.out
+    assert "轨迹 ID：traj_cc_alice_memleak" in out.out
     assert "工号：alice" in out.out
     assert "Atom：" not in out.out
     assert "行号：" not in out.out
@@ -493,7 +493,7 @@ def test_cli_search_atom_local_prints_hits(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "找到 1 个 Atom" in out
-    assert "Atom：atom_t_0001" in out
+    assert "Atom ID：atom_t_0001" in out
     assert "行号：L12-L88" in out
 
 
@@ -604,7 +604,7 @@ def test_cli_search_traj_team_prints_and_forwards_names(capsys):
     out = capsys.readouterr().out
     assert "搜索：memory" in out
     assert "找到 1 条轨迹" in out
-    assert "ID：traj_cc_alice_memleak" in out
+    assert "轨迹 ID：traj_cc_alice_memleak" in out
     assert "工号：alice" in out
 
 
