@@ -1182,7 +1182,9 @@ def _traj_match_line(hit: dict) -> str:
     return score
 
 
-def _render_traj_hits(hits: list[dict], query: str, *, meta: dict | None = None) -> None:
+def _render_search_kind_hits(
+    hits: list[dict], query: str, *, kind: str, meta: dict | None = None,
+) -> None:
     unknown = list((meta or {}).get("unknown_names") or [])
     if unknown:
         _write_search_output(
@@ -1191,35 +1193,51 @@ def _render_traj_hits(hits: list[dict], query: str, *, meta: dict | None = None)
         )
     if not hits:
         if (meta or {}).get("corpus_empty"):
-            _write_search_output("轨迹索引尚未建成，或指定工号还没有可搜目录")
+            if kind == "atom":
+                _write_search_output(
+                    "Atom 索引尚未建成，或指定工号还没有可搜目录",
+                )
+            else:
+                _write_search_output(
+                    "还没有已上传的轨迹，或指定工号还没有可搜目录",
+                )
+        elif kind == "atom":
+            _write_search_output(f"Atom 无匹配：{query}")
         else:
             _write_search_output(f"轨迹无匹配：{query}")
         return
+    count_label = f"找到 {len(hits)} 个 Atom" if kind == "atom" else f"找到 {len(hits)} 条轨迹"
     output_lines = [
         f"搜索：{query}",
-        f"找到 {len(hits)} 个 Atom",
+        count_label,
         "=" * 64,
     ]
     for index, hit in enumerate(hits, start=1):
         if index > 1:
             output_lines.append("-" * 64)
-        title = (
-            hit.get("intent")
-            or hit.get("summary")
-            or hit.get("traj_id")
-            or "(unnamed)"
-        )
+        if kind == "atom":
+            title = (
+                hit.get("intent")
+                or hit.get("summary")
+                or hit.get("traj_id")
+                or "(unnamed)"
+            )
+            description = hit.get("summary") or ""
+        else:
+            title = hit.get("query") or hit.get("traj_id") or "(unnamed)"
+            description = hit.get("query") or ""
         output_lines.append(f"[{index}/{len(hits)}] {title}")
         output_lines.append(f"ID：{hit.get('traj_id') or '-'}")
         output_lines.append(f"工号：{hit.get('user') or '（未知）'}")
-        if hit.get("atom_id"):
+        if kind == "atom" and hit.get("atom_id"):
             output_lines.append(f"Atom：{hit['atom_id']}")
         start = hit.get("offset_start")
         end = hit.get("offset_end")
-        if start is not None or end is not None:
+        if kind == "atom" and (start is not None or end is not None):
             output_lines.append(f"行号：L{start}-L{end}")
-        summary = _clip_search_description(hit.get("summary") or "")
-        output_lines.append(f"描述：{summary or '（无描述）'}")
+        output_lines.append(
+            f"描述：{_clip_search_description(description) or '（无描述）'}"
+        )
         output_lines.append(f"匹配：{_traj_match_line(hit)}")
         used = [str(item) for item in (hit.get("used_skills") or []) if item]
         if used:
@@ -1229,74 +1247,92 @@ def _render_traj_hits(hits: list[dict], query: str, *, meta: dict | None = None)
 
 
 def cmd_search_traj(args, http=None, headers=None) -> int:
-    """`xskill search traj <query>` —— 搜已入库轨迹（team 走 server，否则本机）。"""
+    """`xskill search traj <query>` —— 搜已上传轨迹文件，不经拆分代理。"""
+    return _cmd_search_kind(args, kind="traj", http=http, headers=headers)
+
+
+def cmd_search_atom(args, http=None, headers=None) -> int:
+    """`xskill search atom <query>` —— 搜已拆好的 Atom。"""
+    return _cmd_search_kind(args, kind="atom", http=http, headers=headers)
+
+
+def _cmd_search_kind(args, *, kind: str, http=None, headers=None) -> int:
     from xskill.traj_search import parse_search_names
 
     query = " ".join(args.terms[1:]).strip()
+    usage = "xskill search atom <query>" if kind == "atom" else "xskill search traj <query>"
     if not query:
-        _write_search_output(
-            "error: 用法 xskill search traj <query>",
-            to_stderr=True,
-        )
+        _write_search_output(f"error: 用法 {usage}", to_stderr=True)
         return 2
     if getattr(args, "download", False):
         _write_search_output(
-            "warning: --download 只对 skill 搜索有效，轨迹检索忽略",
+            "warning: --download 只对 skill 搜索有效，轨迹和 Atom 检索忽略",
             to_stderr=True,
         )
     names = parse_search_names(getattr(args, "name", "") or "")
     force_team = getattr(args, "team", False)
     force_local = getattr(args, "local", False)
     if force_local:
-        return _cmd_search_traj_local(
-            query, top_k=args.top_k, json_mode=args.json, names=names,
+        return _cmd_search_kind_local(
+            query, kind=kind, top_k=args.top_k, json_mode=args.json, names=names,
         )
     if force_team:
-        return _cmd_search_traj_team(
-            query, args=args, http=http, headers=headers, names=names,
+        return _cmd_search_kind_team(
+            query, kind=kind, args=args, http=http, headers=headers, names=names,
         )
     from xskill.runtime import role
     if role() == "client":
-        return _cmd_search_traj_team(
-            query, args=args, http=http, headers=headers, names=names,
+        return _cmd_search_kind_team(
+            query, kind=kind, args=args, http=http, headers=headers, names=names,
         )
-    return _cmd_search_traj_local(
-        query, top_k=args.top_k, json_mode=args.json, names=names,
+    return _cmd_search_kind_local(
+        query, kind=kind, top_k=args.top_k, json_mode=args.json, names=names,
     )
 
 
-def _cmd_search_traj_local(
-    query: str, *, top_k: int, json_mode: bool, names: list[str],
+def _cmd_search_kind_local(
+    query: str, *, kind: str, top_k: int, json_mode: bool, names: list[str],
 ) -> int:
     import json as _json
 
-    from xskill.traj_search import search_indexed_trajectories
+    from xskill.traj_search import (
+        search_indexed_atoms,
+        search_session_trajectories,
+        session_corpus_empty,
+    )
 
     if names:
         _write_search_output(
-            "warning: --name 仅 team 轨迹检索有效，本机检索忽略",
+            "warning: --name 仅 team 检索有效，本机检索忽略",
             to_stderr=True,
         )
     try:
-        hits = search_indexed_trajectories(query, top_k=top_k)
+        if kind == "atom":
+            hits = search_indexed_atoms(query, top_k=top_k)
+        else:
+            hits = search_session_trajectories(query, top_k=top_k)
     except Exception as search_error:
+        label = "Atom" if kind == "atom" else "轨迹"
         _write_search_output(
-            f"error: 本地轨迹检索失败（{type(search_error).__name__}）",
+            f"error: 本地{label}检索失败（{type(search_error).__name__}）",
             to_stderr=True,
         )
         return 1
     if json_mode:
         _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
         return 0
-    from xskill.pipeline.registry import all_index_paths
+    if kind == "atom":
+        from xskill.pipeline.registry import all_index_paths
 
-    meta = {"corpus_empty": not hits and not all_index_paths()}
-    _render_traj_hits(hits, query, meta=meta)
+        meta = {"corpus_empty": not hits and not all_index_paths()}
+    else:
+        meta = {"corpus_empty": not hits and session_corpus_empty()}
+    _render_search_kind_hits(hits, query, kind=kind, meta=meta)
     return 0
 
 
-def _cmd_search_traj_team(
-    query: str, *, args, http=None, headers=None, names: list[str],
+def _cmd_search_kind_team(
+    query: str, *, kind: str, args, http=None, headers=None, names: list[str],
 ) -> int:
     import json as _json
     import httpx
@@ -1308,12 +1344,14 @@ def _cmd_search_traj_team(
     params = {"query": query, "limit": args.top_k}
     if names:
         params["names"] = ",".join(names)
+    path = (
+        "/api/v1/team/atoms/search"
+        if kind == "atom"
+        else "/api/v1/team/trajectories/search"
+    )
+    label = "Atom" if kind == "atom" else "轨迹"
     try:
-        resp = http.get(
-            "/api/v1/team/trajectories/search",
-            params=params,
-            headers=headers,
-        )
+        resp = http.get(path, params=params, headers=headers)
     except (httpx.HTTPError, OSError) as network_error:
         _write_search_output(
             f"error: 无法连接 team server（{type(network_error).__name__}），"
@@ -1323,13 +1361,13 @@ def _cmd_search_traj_team(
         return 1
     if resp.status_code == 404:
         _write_search_output(
-            "error: server 版本过旧，不支持轨迹检索，请管理员先升级 server",
+            f"error: server 版本过旧，不支持{label}检索，请管理员先升级 server",
             to_stderr=True,
         )
         return 1
     if resp.status_code != 200:
         _write_search_output(
-            f"error: 轨迹检索失败 HTTP {resp.status_code}",
+            f"error: {label}检索失败 HTTP {resp.status_code}",
             to_stderr=True,
         )
         return 1
@@ -1339,19 +1377,21 @@ def _cmd_search_traj_team(
     if args.json:
         _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
         return 0
-    _render_traj_hits(hits, query, meta=meta)
+    _render_search_kind_hits(hits, query, kind=kind, meta=meta)
     return 0
 
 
 def cmd_search(args) -> int:
     """`xskill search` 部署模式自适应入口（#201）。
 
-    首词为 ``traj`` 时走轨迹检索（team 走 server 已入库轨迹，否则本机
-    Atom 索引）。其余词走 skill 搜索：``--team`` / ``--local`` 显式覆盖 >
+    首词 ``traj`` 搜已上传轨迹文件；首词 ``atom`` 搜已拆 Atom。
+    其余词走 skill 搜索：``--team`` / ``--local`` 显式覆盖 >
     team client 状态文件（已 connect → SkillHub 路径）> 本地技能库路径。
     """
     if args.terms and args.terms[0] == "traj":
         return cmd_search_traj(args)
+    if args.terms and args.terms[0] == "atom":
+        return cmd_search_atom(args)
     if getattr(args, "team", False):
         return cmd_search_hub(args)
     if getattr(args, "local", False):
@@ -2244,17 +2284,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_search = sub.add_parser(
         "search",
-        help="搜索 skill，或 `search traj <query>` 检索已入库轨迹",
+        help="搜索 skill，或 search traj / search atom 检索轨迹与 Atom",
     )
     p_search.add_argument(
         "terms", nargs="+", metavar="QUERY",
-        help="搜索词。首词为 traj 时其余词检索轨迹；否则拼成 skill 查询",
+        help="搜索词。首词 traj 搜轨迹文件，atom 搜已拆 Atom；否则拼成 skill 查询",
     )
     p_search.add_argument("--top-k", "-k", type=int, default=5,
                           help="返回条数（skillhub 搜索最多 10，轨迹检索最多 20）")
     p_search.add_argument(
         "--name", default="",
-        help="轨迹检索时限定工号，逗号分隔；仅 team 模式有效",
+        help="search traj 或 search atom 时限定工号，逗号分隔；仅 team 模式有效",
     )
     p_search.add_argument(
         "--download", action="store_true",

@@ -1024,6 +1024,32 @@ def _team_skill_entry(skill_id: str, client_id: str) -> dict:
     return {"result": results[0]}
 
 
+def _team_search_session_dirs(names: str) -> tuple[list[str], list[tuple[str, Path]] | None, list[str]]:
+    from xskill.traj_search import (
+        iter_client_session_dirs,
+        parse_search_names,
+        resolve_named_session_dirs,
+    )
+
+    name_list = parse_search_names(names)
+    unknown: list[str] = []
+    if not name_list:
+        if _ctx.traj_root is None:
+            return name_list, None, unknown
+        return name_list, iter_client_session_dirs(_ctx.traj_root), unknown
+    if _ctx.client_registry is None or _ctx.traj_root is None:
+        raise HTTPException(
+            status_code=503, detail="team context not initialized",
+        )
+    dataset_dirs, unknown = resolve_named_session_dirs(
+        name_list,
+        traj_root=_ctx.traj_root,
+        find_client_id=_ctx.client_registry.find_by_user_name,
+        dir_name_for=_ctx.client_registry.dir_name_for,
+    )
+    return name_list, dataset_dirs, unknown
+
+
 @router.get("/trajectories/search")
 def team_trajectories_search(
     query: str,
@@ -1033,36 +1059,22 @@ def team_trajectories_search(
     x_xskill_client: str | None = Header(default=None),
     x_xskill_version: str | None = Header(default=None),
 ) -> dict:
-    """搜已入库轨迹的 Atom 混合检索。同步 def：内部 embedding 是同步 HTTP。"""
+    """搜已上传的 ``traj_*.md``（BM25，不经拆分代理）。"""
     _auth(x_xskill_token, x_xskill_client, x_xskill_version)
     cleaned = (query or "").strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="empty query")
     bounded_limit = max(1, min(int(limit), 20))
-    from xskill.traj_search import (
-        parse_search_names,
-        resolve_named_session_dirs,
-        search_indexed_trajectories,
-    )
+    from xskill.traj_search import search_session_trajectories, session_corpus_empty
 
-    name_list = parse_search_names(names)
-    dataset_dirs = None
-    unknown: list[str] = []
-    if name_list:
-        if _ctx.client_registry is None or _ctx.traj_root is None:
-            raise HTTPException(
-                status_code=503, detail="team context not initialized",
-            )
-        dataset_dirs, unknown = resolve_named_session_dirs(
-            name_list,
-            traj_root=_ctx.traj_root,
-            find_client_id=_ctx.client_registry.find_by_user_name,
-            dir_name_for=_ctx.client_registry.dir_name_for,
-        )
+    name_list, dataset_dirs, unknown = _team_search_session_dirs(names)
     try:
-        results = search_indexed_trajectories(
-            cleaned, top_k=bounded_limit, dataset_dirs=dataset_dirs,
-        )
+        if name_list and not dataset_dirs:
+            results = []
+        else:
+            results = search_session_trajectories(
+                cleaned, top_k=bounded_limit, dataset_dirs=dataset_dirs,
+            )
     except Exception:
         request_id = f"traj-search-{secrets.token_hex(8)}"
         server_logger.exception(
@@ -1072,6 +1084,53 @@ def team_trajectories_search(
         raise HTTPException(
             status_code=500,
             detail="trajectory search failed",
+        ) from None
+    return {
+        "results": results,
+        "count": len(results),
+        "meta": {
+            "unknown_names": unknown,
+            "corpus_empty": (
+                False if unknown else session_corpus_empty(dataset_dirs)
+            ),
+        },
+    }
+
+
+@router.get("/atoms/search")
+def team_atoms_search(
+    query: str,
+    limit: int = 5,
+    names: str = "",
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> dict:
+    """搜已拆好的 Atom（向量 + BM25）。同步 def：内部 embedding 是同步 HTTP。"""
+    _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    cleaned = (query or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="empty query")
+    bounded_limit = max(1, min(int(limit), 20))
+    from xskill.traj_search import search_indexed_atoms
+
+    name_list, dataset_dirs, unknown = _team_search_session_dirs(names)
+    try:
+        if name_list and not dataset_dirs:
+            results = []
+        else:
+            results = search_indexed_atoms(
+                cleaned, top_k=bounded_limit, dataset_dirs=dataset_dirs,
+            )
+    except Exception:
+        request_id = f"atom-search-{secrets.token_hex(8)}"
+        server_logger.exception(
+            "team atom search failed request_id=%s query_length=%d",
+            request_id, len(cleaned),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="atom search failed",
         ) from None
     if name_list:
         corpus_empty = (

@@ -47,8 +47,13 @@ logger = logging.getLogger("xskill.search")
 _WORD_RE = re.compile(r"[\w]+", re.UNICODE)
 
 
+def tokenize_search_text(text: str) -> list[str]:
+    """BM25 用的分词：拉丁按词，中文整段一个 token。"""
+    return [token.lower() for token in _WORD_RE.findall(text or "")]
+
+
 def _tokenize(text: str) -> list[str]:
-    return [t.lower() for t in _WORD_RE.findall(text or "")]
+    return tokenize_search_text(text)
 
 
 @dataclass

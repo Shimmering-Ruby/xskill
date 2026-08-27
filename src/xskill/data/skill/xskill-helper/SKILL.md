@@ -78,34 +78,38 @@ xskill import ./my-skill
 xskill import ./skills-parent --json
 ```
 
-## Searching trajectories
+## Searching trajectories and atoms
 
-`xskill search traj` searches already-ingested trajectories. After
-`xskill connect`, the query goes to the team server and runs Atom hybrid
-search (vector + BM25) on uploaded sessions. On a standalone machine it
-searches local indexed watch directories. Hits are atoms, not whole sessions: each card names the parent
-`traj_id`, the atom id, the 1-based half-open line range, and the
-atom summary written by the split agent. Trajectories that have not
-been split yet do not appear.
+These are two commands. Do not mix them.
+
+`xskill search traj` searches uploaded `traj_*.md` files. It reads
+`## Initial Query` and `## User` and ranks with BM25. It does not wait
+for the split agent and does not need an Atom index. Cards show
+`traj_id`, user, and the first user query.
+
+`xskill search atom` searches atoms that the split agent already wrote
+(intent, summary, line range). Ranking is vector plus BM25. Sessions
+that have not been split do not appear. Cards add Atom id, offsets, and
+the atom summary.
 
 ```bash
 xskill search traj 内存泄漏
 xskill search traj "alembic 半迁移" -k 8
 xskill search traj --name alice,bob 发票核对 --json
+xskill search atom 内存泄漏
+xskill search atom --name alice,bob 发票核对
 ```
 
-Human output uses the same card layout as `xskill search`: a header,
-then one block per hit with ID, user, atom, description, and match
-score. `--name` only applies in team mode. The command does not
-download files and does not return raw trajectory text. You can paste
-a `traj_id` into `xskill generate` when you want the instruction to
-name the evidence.
+`--name` only applies in team mode. Neither command downloads files or
+returns raw trajectory text. Paste a `traj_id` into `xskill generate`
+when you want the instruction to name the evidence.
 
 ## Searching & sharing team skills
 
 ```bash
 xskill search <query...>       # search team skills; returns metadata only
-xskill search traj <query...>  # search ingested trajectories on the team server
+xskill search traj <query...>  # search uploaded trajectory files (no split agent)
+xskill search atom <query...>  # search split atoms (intent / summary / offsets)
 xskill search <query...> --download  # legacy 10-slot LRU download + auto-install
 xskill download <skill-id>     # persist one result; interactively select harnesses
 xskill download <skill-id> --agent claude-code --agent codex -y  # for agents/scripts

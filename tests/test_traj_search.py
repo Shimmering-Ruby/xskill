@@ -1,7 +1,6 @@
-"""`xskill search traj`：Atom 混合检索装配 + CLI / team 分流。
+"""`xskill search traj` 与 `xskill search atom`：两条检索 + CLI / team 分流。
 
-不读随包假目录。检索要么注入与生产同形的 search 命中，要么用
-AtomTaskStore + FakeEmbed 走真实 HybridSearch。
+traj 对着 ``traj_*.md`` 的用户首问做 BM25。atom 走 Atom 混合检索。
 """
 from __future__ import annotations
 
@@ -19,10 +18,12 @@ from xskill.pipeline.atom import AtomTask, AtomTaskStore
 from xskill.team.server import api as server_api
 from xskill.team.server.client_registry import ClientRegistry
 from xskill.traj_search import (
+    format_session_hit,
     format_traj_hit,
     parse_search_names,
     resolve_named_session_dirs,
     search_indexed_trajectories,
+    search_session_trajectories,
 )
 from xskill.utils.search import HybridSearch
 from tests.test_atom_task_store import _FakeEmbed
@@ -64,6 +65,28 @@ def _atom_hit(**overrides) -> dict:
     return row
 
 
+def _session_hit(**overrides) -> dict:
+    row = format_session_hit(
+        traj_id="traj_cc_alice_memleak",
+        user="alice",
+        query="diagnose a python process leaking memory",
+        turns=2,
+        score=2.4,
+    )
+    row.update(overrides)
+    return row
+
+
+def _write_traj_md(root: Path, *, traj_id: str, query: str) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{traj_id}.md"
+    path.write_text(
+        f"## Initial Query\n\n{query}\n\n## Assistant\n\nok\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 class _Response:
     def __init__(self, status_code: int, json_data=None):
         self.status_code = status_code
@@ -77,7 +100,7 @@ class _TrajHttp:
     def __init__(self, status_code=200, payload=None, error=None):
         self.status_code = status_code
         self.payload = payload if payload is not None else {
-            "results": [format_traj_hit(_atom_hit(), user="alice")],
+            "results": [_session_hit()],
             "count": 1,
             "meta": {"unknown_names": [], "corpus_empty": False},
         }
@@ -148,6 +171,7 @@ def test_format_traj_hit_drops_path_and_raw_text():
     assert hit["atom_id"] == "atom_t_0001"
     assert hit["user"] == "alice"
     assert hit["used_skills"] == ["python-memory-debug"]
+    assert hit["kind"] == "atom"
     assert hit["offset_start"] == 12
     assert hit["offset_end"] == 88
     assert hit["score"] == pytest.approx(0.91)
@@ -279,6 +303,35 @@ def test_resolve_named_session_dirs_dir_lookup_failure_is_unknown(tmp_path):
     assert unknown == ["alice"]
 
 
+def test_search_session_bm25_reads_user_query_not_atom(tmp_path):
+    alice = tmp_path / "alice" / "sessions"
+    bob = tmp_path / "bob" / "sessions"
+    _write_traj_md(
+        alice,
+        traj_id="traj_cc_alice_memleak",
+        query="diagnose a python process leaking memory",
+    )
+    _write_traj_md(
+        bob,
+        traj_id="traj_cc_bob_gc",
+        query="tighten the cache after rss climbed",
+    )
+    hits = search_session_trajectories(
+        "python process leaking",
+        top_k=5,
+        dataset_dirs=[("alice", alice), ("bob", bob)],
+    )
+    assert hits
+    assert hits[0]["kind"] == "traj"
+    assert hits[0]["traj_id"] == "traj_cc_alice_memleak"
+    assert hits[0]["user"] == "alice"
+    assert "memory" in hits[0]["query"]
+    assert "atom_id" not in hits[0]
+    assert "summary" not in hits[0]
+    dumped = json.dumps(hits)
+    assert str(tmp_path) not in dumped
+
+
 def test_hybrid_search_one_returns_atom_fields_not_raw(tmp_path):
     sessions = _seed_sessions(
         tmp_path / "sessions",
@@ -305,27 +358,24 @@ def test_cli_search_traj_local_prints_hits(monkeypatch, capsys):
     def fake_search(query, *, top_k=5, **_kwargs):
         assert query == "django migration"
         assert top_k == 5
-        return [format_traj_hit(_atom_hit(), user="alice")]
+        return [_session_hit()]
 
     monkeypatch.setattr(
-        "xskill.traj_search.search_indexed_trajectories", fake_search,
+        "xskill.traj_search.search_session_trajectories", fake_search,
     )
     monkeypatch.setattr(
-        "xskill.pipeline.registry.all_index_paths", lambda: [Path("/x")],
+        "xskill.traj_search.session_corpus_empty", lambda dataset_dirs=None: False,
     )
     rc = cli.cmd_search(_args())
     assert rc == 0
     out = capsys.readouterr()
     assert "搜索：django migration" in out.out
-    assert "找到 1 个 Atom" in out.out
+    assert "找到 1 条轨迹" in out.out
     assert "ID：traj_cc_alice_memleak" in out.out
     assert "工号：alice" in out.out
-    assert "Atom：atom_t_0001" in out.out
-    assert "行号：L12-L88" in out.out
-    assert "描述：tracemalloc found a cache" in out.out
-    assert "匹配：0.910（语义、关键词）" in out.out
-    assert "用过：python-memory-debug" in out.out
-    assert "diagnose a python process" in out.out
+    assert "Atom：" not in out.out
+    assert "行号：" not in out.out
+    assert "diagnose a python process leaking memory" in out.out
     assert "MUST_NOT_LEAK" not in out.out
     assert "/secret/server" not in out.out
 
@@ -333,13 +383,14 @@ def test_cli_search_traj_local_prints_hits(monkeypatch, capsys):
 def test_cli_search_traj_local_json(monkeypatch, capsys):
     monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
     monkeypatch.setattr(
-        "xskill.traj_search.search_indexed_trajectories",
-        lambda query, **_kw: [format_traj_hit(_atom_hit(), user="alice")],
+        "xskill.traj_search.search_session_trajectories",
+        lambda query, **_kw: [_session_hit()],
     )
     rc = cli.cmd_search(_args(json=True, terms=["traj", "alembic"]))
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["traj_id"] == "traj_cc_alice_memleak"
+    assert payload[0]["kind"] == "traj"
     assert "md_path" not in payload[0]
     assert "raw_segment" not in payload[0]
 
@@ -347,15 +398,18 @@ def test_cli_search_traj_local_json(monkeypatch, capsys):
 def test_cli_search_traj_local_warns_and_ignores_name(monkeypatch, capsys):
     monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
     monkeypatch.setattr(
-        "xskill.traj_search.search_indexed_trajectories",
+        "xskill.traj_search.search_session_trajectories",
         lambda query, **_kw: [],
     )
-    monkeypatch.setattr("xskill.pipeline.registry.all_index_paths", lambda: [])
+    monkeypatch.setattr(
+        "xskill.traj_search.session_corpus_empty",
+        lambda dataset_dirs=None: True,
+    )
     rc = cli.cmd_search(_args(name="alice", terms=["traj", "q"]))
     assert rc == 0
     captured = capsys.readouterr()
     assert "仅 team" in captured.err
-    assert "轨迹索引尚未建成" in captured.out
+    assert "还没有已上传的轨迹" in captured.out
 
 
 def test_cli_search_traj_missing_query_errors(capsys):
@@ -364,19 +418,57 @@ def test_cli_search_traj_missing_query_errors(capsys):
     assert "xskill search traj <query>" in capsys.readouterr().err
 
 
-def test_cli_search_traj_ignores_download(monkeypatch, capsys):
+def test_cli_search_atom_missing_query_errors(capsys):
+    rc = cli.cmd_search(_args(terms=["atom"]))
+    assert rc == 2
+    assert "xskill search atom <query>" in capsys.readouterr().err
+
+
+def test_cli_search_atom_local_prints_hits(monkeypatch, capsys):
     monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
     monkeypatch.setattr(
-        "xskill.traj_search.search_indexed_trajectories",
+        "xskill.traj_search.search_indexed_atoms",
         lambda query, **_kw: [format_traj_hit(_atom_hit(), user="alice")],
     )
     monkeypatch.setattr(
         "xskill.pipeline.registry.all_index_paths", lambda: [Path("/x")],
     )
+    rc = cli.cmd_search(_args(terms=["atom", "django", "migration"]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "找到 1 个 Atom" in out
+    assert "Atom：atom_t_0001" in out
+    assert "行号：L12-L88" in out
+
+
+def test_cli_search_atom_team_uses_atoms_path(capsys):
+    http = _TrajHttp(payload={
+        "results": [format_traj_hit(_atom_hit(), user="alice")],
+        "count": 1,
+        "meta": {"unknown_names": [], "corpus_empty": False},
+    })
+    rc = cli.cmd_search_atom(
+        _args(team=True, terms=["atom", "memory"]),
+        http=http,
+        headers={"X-Xskill-Token": TOKEN},
+    )
+    assert rc == 0
+    assert http.calls[0][0] == "/api/v1/team/atoms/search"
+    out = capsys.readouterr().out
+    assert "找到 1 个 Atom" in out
+    assert "行号：L12-L88" in out
+
+
+def test_cli_search_traj_ignores_download(monkeypatch, capsys):
+    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    monkeypatch.setattr(
+        "xskill.traj_search.search_session_trajectories",
+        lambda query, **_kw: [_session_hit()],
+    )
     rc = cli.cmd_search(_args(download=True, terms=["traj", "auth"]))
     assert rc == 0
     captured = capsys.readouterr()
-    assert "轨迹检索忽略" in captured.err
+    assert "轨迹和 Atom 检索忽略" in captured.err
     assert "traj_cc_alice_memleak" in captured.out
 
 
@@ -401,16 +493,18 @@ def test_cli_search_traj_dispatches_team_when_client(monkeypatch):
     called = []
     monkeypatch.setattr("xskill.runtime.role", lambda: "client")
     monkeypatch.setattr(
-        cli, "_cmd_search_traj_team",
-        lambda query, **kw: called.append(("team", query, kw.get("names"))) or 0,
+        cli, "_cmd_search_kind_team",
+        lambda query, **kw: called.append(
+            ("team", query, kw.get("kind"), kw.get("names"))
+        ) or 0,
     )
     monkeypatch.setattr(
-        cli, "_cmd_search_traj_local",
+        cli, "_cmd_search_kind_local",
         lambda query, **kw: called.append(("local", query)) or 0,
     )
     rc = cli.cmd_search(_args(name="alice,bob", terms=["traj", "发票"]))
     assert rc == 0
-    assert called == [("team", "发票", ["alice", "bob"])]
+    assert called == [("team", "发票", "traj", ["alice", "bob"])]
 
 
 def test_cli_search_traj_team_prints_and_forwards_names(capsys):
@@ -427,7 +521,7 @@ def test_cli_search_traj_team_prints_and_forwards_names(capsys):
     }
     out = capsys.readouterr().out
     assert "搜索：memory" in out
-    assert "找到 1 个 Atom" in out
+    assert "找到 1 条轨迹" in out
     assert "ID：traj_cc_alice_memleak" in out
     assert "工号：alice" in out
 
@@ -531,19 +625,15 @@ def test_team_traj_search_rejects_empty_query(tmp_path):
     assert response.status_code == 400
 
 
-def test_team_traj_search_named_dir_uses_real_hybrid_search(tmp_path, monkeypatch):
+def test_team_traj_search_named_dir_uses_md_bm25(tmp_path):
     client, traj_root, registry = _make_team_app(tmp_path)
     headers = _register(client, "alice")
     client_id = registry.find_by_user_name("alice")
     sessions = traj_root / "clients" / registry.dir_name_for(client_id) / "sessions"
-    _seed_sessions(
+    _write_traj_md(
         sessions,
         traj_id="traj_cc_alice_memleak",
-        intent="fix django migration conflict",
-        used_skills=["alembic-half"],
-    )
-    monkeypatch.setattr(
-        "xskill.utils.search.create_embed_client", lambda _cfg=None: _FakeEmbed(),
+        query="fix django migration conflict",
     )
     response = client.get(
         "/api/v1/team/trajectories/search",
@@ -555,13 +645,12 @@ def test_team_traj_search_named_dir_uses_real_hybrid_search(tmp_path, monkeypatc
     assert payload["meta"]["unknown_names"] == ["ghost"]
     assert payload["count"] >= 1
     hit = payload["results"][0]
+    assert hit["kind"] == "traj"
     assert hit["traj_id"] == "traj_cc_alice_memleak"
     assert hit["user"] == "alice"
-    assert hit["used_skills"] == ["alembic-half"]
+    assert "atom_id" not in hit
     assert "md_path" not in hit
-    assert "raw_segment" not in hit
     dumped = json.dumps(payload)
-    assert "raw session text" not in dumped
     assert str(traj_root) not in dumped
 
 
@@ -572,6 +661,7 @@ def test_team_traj_search_unknown_names_do_not_fail(tmp_path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise AssertionError("should not search when every name is unknown")
 
+    monkeypatch.setattr("xskill.traj_search.search_session_trajectories", boom)
     monkeypatch.setattr("xskill.utils.search.search", boom)
     monkeypatch.setattr("xskill.utils.search.search_all", boom)
     response = client.get(
@@ -586,17 +676,15 @@ def test_team_traj_search_unknown_names_do_not_fail(tmp_path, monkeypatch):
     assert payload["meta"]["corpus_empty"] is False
 
 
-def test_team_traj_search_all_uses_search_all(tmp_path, monkeypatch):
-    client, _traj_root, _reg = _make_team_app(tmp_path)
+def test_team_traj_search_all_scans_uploaded_md(tmp_path):
+    client, traj_root, registry = _make_team_app(tmp_path)
     headers = _register(client, "alice")
-
-    def search_all_fn(*, query_text, top_k, **_kwargs):
-        assert query_text == "auth retry"
-        return [_atom_hit(user="alice")]
-
-    monkeypatch.setattr("xskill.utils.search.search_all", search_all_fn)
-    monkeypatch.setattr(
-        "xskill.pipeline.registry.all_index_paths", lambda: [Path("/idx")],
+    client_id = registry.find_by_user_name("alice")
+    sessions = traj_root / "clients" / registry.dir_name_for(client_id) / "sessions"
+    _write_traj_md(
+        sessions,
+        traj_id="traj_cc_erin_auth_retry",
+        query="retry expired oauth token",
     )
     response = client.get(
         "/api/v1/team/trajectories/search",
@@ -605,8 +693,42 @@ def test_team_traj_search_all_uses_search_all(tmp_path, monkeypatch):
     )
     assert response.status_code == 200
     hit = response.json()["results"][0]
-    assert hit["traj_id"] == "traj_cc_alice_memleak"
+    assert hit["traj_id"] == "traj_cc_erin_auth_retry"
+    assert hit["kind"] == "traj"
     assert "md_path" not in hit
+
+
+def test_team_atom_search_named_dir_uses_real_hybrid_search(tmp_path, monkeypatch):
+    client, traj_root, registry = _make_team_app(tmp_path)
+    headers = _register(client, "alice")
+    client_id = registry.find_by_user_name("alice")
+    sessions = traj_root / "clients" / registry.dir_name_for(client_id) / "sessions"
+    _seed_sessions(
+        sessions,
+        traj_id="traj_cc_alice_memleak",
+        intent="fix django migration conflict",
+        used_skills=["alembic-half"],
+    )
+    monkeypatch.setattr(
+        "xskill.utils.search.create_embed_client", lambda _cfg=None: _FakeEmbed(),
+    )
+    response = client.get(
+        "/api/v1/team/atoms/search",
+        params={"query": "django migration", "limit": 5, "names": "alice,ghost"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meta"]["unknown_names"] == ["ghost"]
+    hit = payload["results"][0]
+    assert hit["kind"] == "atom"
+    assert hit["traj_id"] == "traj_cc_alice_memleak"
+    assert hit["user"] == "alice"
+    assert hit["used_skills"] == ["alembic-half"]
+    assert "md_path" not in hit
+    dumped = json.dumps(payload)
+    assert "raw session text" not in dumped
+    assert str(traj_root) not in dumped
 
 
 def test_bundled_skill_documents_real_traj_search_not_mock():
@@ -614,6 +736,7 @@ def test_bundled_skill_documents_real_traj_search_not_mock():
 
     skill_md = (bundled_xskill_source() / "SKILL.md").read_text(encoding="utf-8")
     assert "xskill search traj" in skill_md
+    assert "xskill search atom" in skill_md
     assert "name: xskill-helper" in skill_md
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md

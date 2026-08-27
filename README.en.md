@@ -182,14 +182,15 @@ On **macOS / Linux**, native persistence (launchd / systemd --user) is still on 
 
 ```bash
 xskill search docker compose   # return compact metadata and skill IDs only
-xskill search traj memory leak # search ingested trajectories (team server after connect)
+xskill search traj memory leak # search uploaded trajectory files (no split agent)
+xskill search atom memory leak # search split atoms (intent, summary, offsets)
 xskill search docker --download  # legacy 10-slot LRU download and auto-install
 xskill download <skill-id>     # interactively select target harnesses
 xskill download <skill-id> --agent claude-code --agent codex -y
 xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
 ```
 
-`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. `xskill search traj <query>` is back on the CLI. After connect it searches ingested team trajectories with Atom hybrid retrieval; standalone mode searches the local registry index. Results include traj_id, atom intent, and scores — not raw trajectory text. `--name` narrows the search to specific employee ids.
+`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. `xskill search traj` ranks uploaded `traj_*.md` files by the first user query (BM25, no split agent). `xskill search atom` searches atoms that already have an intent, summary, and line range. Neither command returns raw trajectory text. `--name` narrows either search to specific employee ids.
 
 * * *
 

@@ -1,12 +1,18 @@
-"""`xskill search traj` 的检索装配。
+"""轨迹检索与 Atom 检索的装配。
 
-真正搜的是 Atom 混合检索（`xskill.utils.search.search` / `search_all`）：
-向量 + BM25，命中带 traj_id。本模块只负责按工号收窄目录、把原始命中
-收成 CLI / team API 共用的精简字段。不读随包假数据，不读轨迹原文。
+``search traj`` 对着已上传的 ``traj_*.md`` 抽 ``## Initial Query`` /
+``## User``，做 BM25。不经拆分代理，不打 embedding。
+
+``search atom`` 走现成 Atom 混合检索（向量 + BM25，字段是 intent 和
+summary）。没拆完的轨迹不会出现。
+
+两条路都按工号收窄 sessions 目录，对外字段不含路径和原文。
 """
 from __future__ import annotations
 
 import logging
+import math
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +22,10 @@ SearchOne = Callable[..., list[dict[str, Any]]]
 SearchAll = Callable[..., list[dict[str, Any]]]
 FindClientId = Callable[[str], str | None]
 DirNameFor = Callable[[str], str]
+
+_TRAJ_MD_NAME = re.compile(r"^traj_[A-Za-z0-9_-]+\.md$")
+_TRAJ_READ_MAX_BYTES = 65_536
+_SESSION_TEXT_LIMIT = 2_000
 
 
 def parse_search_names(raw: str | None) -> list[str]:
@@ -29,6 +39,26 @@ def parse_search_names(raw: str | None) -> list[str]:
         seen.add(name)
         names.append(name)
     return names
+
+
+def format_session_hit(
+    *,
+    traj_id: str,
+    user: str,
+    query: str,
+    turns: int,
+    score: float,
+) -> dict[str, Any]:
+    """会话级命中：traj_id、首问、工号。没有 Atom、没有行号。"""
+    return {
+        "kind": "traj",
+        "traj_id": str(traj_id or ""),
+        "user": user,
+        "query": str(query or ""),
+        "turns": int(turns or 0),
+        "score": float(score),
+        "sources": ["keyword"],
+    }
 
 
 def format_traj_hit(raw: dict[str, Any], *, user: str = "") -> dict[str, Any]:
@@ -57,6 +87,7 @@ def format_traj_hit(raw: dict[str, Any], *, user: str = "") -> dict[str, Any]:
     if end is None and atom is not None:
         end = getattr(atom, "offset_end", None)
     return {
+        "kind": "atom",
         "traj_id": str(raw.get("traj_id") or ""),
         "atom_id": str(raw.get("atom_id") or ""),
         "intent": str(raw.get("intent") or ""),
@@ -89,6 +120,14 @@ def _hit_sort_key(hit: dict[str, Any]) -> tuple:
         -float(hit.get("score") or 0.0),
         str(hit.get("traj_id") or ""),
     )
+
+
+def _session_sort_key(hit: dict[str, Any]) -> tuple:
+    return (-float(hit.get("score") or 0.0), str(hit.get("traj_id") or ""))
+
+
+def _path_name(path: Path) -> str:
+    return path.name
 
 
 def user_label_for_dataset(dataset_dir: str | Path) -> str:
@@ -130,6 +169,165 @@ def resolve_named_session_dirs(
     return found, unknown
 
 
+def iter_client_session_dirs(traj_root: Path) -> list[tuple[str, Path]]:
+    """``<traj_root>/clients/<工号目录>/sessions``。"""
+    found: list[tuple[str, Path]] = []
+    clients = Path(traj_root) / "clients"
+    if not clients.is_dir():
+        return found
+    try:
+        children = list(clients.iterdir())
+    except OSError:
+        return found
+    children.sort(key=_path_name)
+    for child in children:
+        sessions = child / "sessions"
+        if sessions.is_dir():
+            found.append((child.name, sessions))
+    return found
+
+
+def watch_session_dirs() -> list[tuple[str, Path]]:
+    """本机 registry 里已登记的轨迹目录。"""
+    from xskill.pipeline.registry import list_watch_dirs
+
+    found: list[tuple[str, Path]] = []
+    for row in list_watch_dirs():
+        path = row.get("path")
+        if not path:
+            continue
+        directory = Path(path)
+        if directory.is_dir():
+            found.append((str(row.get("label") or directory.name), directory))
+    return found
+
+
+def _iter_traj_md(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    found: list[Path] = []
+    try:
+        children = list(directory.iterdir())
+    except OSError:
+        return []
+    for path in children:
+        if path.is_file() and _TRAJ_MD_NAME.match(path.name):
+            found.append(path)
+    found.sort(key=_path_name)
+    return found
+
+
+def _read_session_query(path: Path) -> tuple[str, int]:
+    from xskill.pipeline.trajectory import extract_user_sections
+
+    try:
+        raw = path.read_bytes()[:_TRAJ_READ_MAX_BYTES]
+        text = raw.decode("utf-8", errors="replace")
+    except OSError:
+        return "", 0
+    sections = extract_user_sections(text)
+    first = " ".join((sections[0] if sections else "").split())
+    if len(first) > _SESSION_TEXT_LIMIT:
+        first = first[:_SESSION_TEXT_LIMIT]
+    return first, len(sections)
+
+
+def session_corpus_empty(
+    dataset_dirs: list[tuple[str, Path]] | None = None,
+) -> bool:
+    dirs = dataset_dirs if dataset_dirs is not None else watch_session_dirs()
+    for _user, directory in dirs:
+        if _iter_traj_md(directory):
+            return False
+    return True
+
+
+def _session_bm25_scores(
+    query_tokens: list[str], corpus: list[list[str]],
+) -> list[float]:
+    """和 skillhub 一样用恒正 IDF，小语料不会整表打成 0。"""
+    k1 = 1.2
+    b = 0.75
+    doc_count = len(corpus)
+    if doc_count == 0:
+        return []
+    avg_len = sum(len(doc) for doc in corpus) / doc_count
+    if avg_len == 0:
+        return [0.0] * doc_count
+    query_set = set(query_tokens)
+    doc_freq = {
+        token: sum(1 for doc in corpus if token in set(doc))
+        for token in query_set
+    }
+    scores: list[float] = []
+    for doc in corpus:
+        length = len(doc)
+        tf: dict[str, int] = {}
+        for token in doc:
+            tf[token] = tf.get(token, 0) + 1
+        score = 0.0
+        for token in query_set:
+            freq = tf.get(token, 0)
+            if freq <= 0:
+                continue
+            idf = math.log(
+                1.0 + (doc_count - doc_freq[token] + 0.5) / (doc_freq[token] + 0.5)
+            )
+            denom = freq + k1 * (1.0 - b + b * length / avg_len)
+            score += idf * freq * (k1 + 1.0) / denom
+        scores.append(score)
+    return scores
+
+
+def _score_index_pair(item: tuple[int, float]) -> tuple:
+    return (-item[1], item[0])
+
+
+def search_session_trajectories(
+    query: str,
+    *,
+    top_k: int = 5,
+    dataset_dirs: list[tuple[str, Path]] | None = None,
+) -> list[dict[str, Any]]:
+    """对 ``traj_*.md`` 的用户首问做 BM25。不读 Atom，不打 embedding。"""
+    from xskill.utils.search import tokenize_search_text
+
+    dirs = dataset_dirs if dataset_dirs is not None else watch_session_dirs()
+    docs: list[dict[str, Any]] = []
+    for user, directory in dirs:
+        for path in _iter_traj_md(Path(directory)):
+            first_query, turns = _read_session_query(path)
+            text = f"{path.stem} {first_query}".strip()
+            docs.append({
+                "traj_id": path.stem,
+                "user": user,
+                "query": first_query,
+                "turns": turns,
+                "text": text,
+            })
+    tokens = tokenize_search_text(query)
+    if not docs or not tokens:
+        return []
+    corpus = [tokenize_search_text(str(doc["text"])) for doc in docs]
+    scores = _session_bm25_scores(tokens, corpus)
+    ranked = sorted(enumerate(scores), key=_score_index_pair)
+    limit = max(1, int(top_k))
+    hits: list[dict[str, Any]] = []
+    for index, score in ranked[:limit]:
+        if score <= 0:
+            continue
+        doc = docs[index]
+        hits.append(format_session_hit(
+            traj_id=str(doc["traj_id"]),
+            user=str(doc["user"]),
+            query=str(doc["query"]),
+            turns=int(doc["turns"]),
+            score=float(score),
+        ))
+    hits.sort(key=_session_sort_key)
+    return hits
+
+
 def search_indexed_trajectories(
     query: str,
     *,
@@ -167,9 +365,12 @@ def search_indexed_trajectories(
                 top_k=limit,
             )
         except Exception:
-            logger.warning("traj search skipped directory %s", directory, exc_info=True)
+            logger.warning("atom search skipped directory %s", directory, exc_info=True)
             continue
         for raw in raw_hits:
             merged.append(format_traj_hit(raw, user=user))
     merged.sort(key=_hit_sort_key)
     return merged[:limit]
+
+
+search_indexed_atoms = search_indexed_trajectories

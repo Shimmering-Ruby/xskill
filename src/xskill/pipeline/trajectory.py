@@ -137,6 +137,12 @@ def _read_trajectory_text(path: Path) -> tuple[str | None, str | None]:
         return None, f"{type(e).__name__}: {e}"
 
 
+def extract_user_sections(md_text: str) -> list[str]:
+    """公开：抽出非空的 ``## User`` / ``## Initial Query`` 正文。"""
+    sections, _malformed = _extract_user_sections(md_text)
+    return [part.strip() for part in sections if part.strip()]
+
+
 def _extract_user_sections(md_text: str) -> tuple[list[str], bool]:
     """从标准化 trajectory markdown 中提取 ``## User`` / ``## Initial Query`` 段落正文。
 
