@@ -49,11 +49,20 @@ def format_traj_hit(raw: dict[str, Any], *, user: str = "") -> dict[str, Any]:
     sources = raw.get("sources") or []
     if not isinstance(sources, list):
         sources = []
+    atom = raw.get("atom")
+    start = raw.get("offset_start")
+    end = raw.get("offset_end")
+    if start is None and atom is not None:
+        start = getattr(atom, "offset_start", None)
+    if end is None and atom is not None:
+        end = getattr(atom, "offset_end", None)
     return {
         "traj_id": str(raw.get("traj_id") or ""),
         "atom_id": str(raw.get("atom_id") or ""),
         "intent": str(raw.get("intent") or ""),
         "summary": str(raw.get("summary") or ""),
+        "offset_start": _as_line_offset(start),
+        "offset_end": _as_line_offset(end),
         "score": score,
         "vector_similarity": vector,
         "bm25_score": bm25,
@@ -61,6 +70,15 @@ def format_traj_hit(raw: dict[str, Any], *, user: str = "") -> dict[str, Any]:
         "user": user,
         "used_skills": [str(item) for item in used],
     }
+
+
+def _as_line_offset(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _hit_sort_key(hit: dict[str, Any]) -> tuple:

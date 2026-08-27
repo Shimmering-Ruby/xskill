@@ -1197,7 +1197,7 @@ def _render_traj_hits(hits: list[dict], query: str, *, meta: dict | None = None)
         return
     output_lines = [
         f"搜索：{query}",
-        f"找到 {len(hits)} 条轨迹",
+        f"找到 {len(hits)} 个 Atom",
         "=" * 64,
     ]
     for index, hit in enumerate(hits, start=1):
@@ -1214,6 +1214,10 @@ def _render_traj_hits(hits: list[dict], query: str, *, meta: dict | None = None)
         output_lines.append(f"工号：{hit.get('user') or '（未知）'}")
         if hit.get("atom_id"):
             output_lines.append(f"Atom：{hit['atom_id']}")
+        start = hit.get("offset_start")
+        end = hit.get("offset_end")
+        if start is not None or end is not None:
+            output_lines.append(f"行号：L{start}-L{end}")
         summary = _clip_search_description(hit.get("summary") or "")
         output_lines.append(f"描述：{summary or '（无描述）'}")
         output_lines.append(f"匹配：{_traj_match_line(hit)}")

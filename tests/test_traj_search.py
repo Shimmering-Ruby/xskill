@@ -54,6 +54,8 @@ def _atom_hit(**overrides) -> dict:
         "vector_similarity": 0.91,
         "bm25_score": 4.2,
         "used_skills": ["python-memory-debug"],
+        "offset_start": 12,
+        "offset_end": 88,
         "md_path": "/secret/server/traj_cc_alice_memleak.md",
         "dataset_dir": "/secret/server/clients/alice/sessions",
         "raw_segment": "MUST_NOT_LEAK",
@@ -124,6 +126,8 @@ def _hybrid_search_one(dataset_dir, query_text, top_k=5, **_kwargs):
         hit["md_path"] = str(Path(dataset_dir) / f"{atom.traj_id}.md")
         hit["intent"] = atom.intent
         hit["summary"] = atom.summary
+        hit["offset_start"] = atom.offset_start
+        hit["offset_end"] = atom.offset_end
         hit["used_skills"] = list(atom.used_skills or [])
         out.append(hit)
     return out
@@ -144,6 +148,8 @@ def test_format_traj_hit_drops_path_and_raw_text():
     assert hit["atom_id"] == "atom_t_0001"
     assert hit["user"] == "alice"
     assert hit["used_skills"] == ["python-memory-debug"]
+    assert hit["offset_start"] == 12
+    assert hit["offset_end"] == 88
     assert hit["score"] == pytest.approx(0.91)
     assert "md_path" not in hit
     assert "dataset_dir" not in hit
@@ -311,10 +317,11 @@ def test_cli_search_traj_local_prints_hits(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr()
     assert "搜索：django migration" in out.out
-    assert "找到 1 条轨迹" in out.out
+    assert "找到 1 个 Atom" in out.out
     assert "ID：traj_cc_alice_memleak" in out.out
     assert "工号：alice" in out.out
     assert "Atom：atom_t_0001" in out.out
+    assert "行号：L12-L88" in out.out
     assert "描述：tracemalloc found a cache" in out.out
     assert "匹配：0.910（语义、关键词）" in out.out
     assert "用过：python-memory-debug" in out.out
@@ -420,7 +427,7 @@ def test_cli_search_traj_team_prints_and_forwards_names(capsys):
     }
     out = capsys.readouterr().out
     assert "搜索：memory" in out
-    assert "找到 1 条轨迹" in out
+    assert "找到 1 个 Atom" in out
     assert "ID：traj_cc_alice_memleak" in out
     assert "工号：alice" in out
 

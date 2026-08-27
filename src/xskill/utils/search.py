@@ -127,6 +127,8 @@ def search(
         h["md_path"] = str(Path(dataset_dir) / f"{atom.traj_id}.md")
         h["intent"] = atom.intent
         h["summary"] = atom.summary
+        h["offset_start"] = atom.offset_start
+        h["offset_end"] = atom.offset_end
         h["used_skills"] = list(atom.used_skills or [])
         out.append(h)
     return out

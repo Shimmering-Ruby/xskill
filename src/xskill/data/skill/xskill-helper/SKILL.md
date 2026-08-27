@@ -83,8 +83,10 @@ xskill import ./skills-parent --json
 `xskill search traj` searches already-ingested trajectories. After
 `xskill connect`, the query goes to the team server and runs Atom hybrid
 search (vector + BM25) on uploaded sessions. On a standalone machine it
-searches local indexed watch directories. Hits are atoms: each row names
-the parent `traj_id` and a short intent.
+searches local indexed watch directories. Hits are atoms, not whole sessions: each card names the parent
+`traj_id`, the atom id, the 1-based half-open line range, and the
+atom summary written by the split agent. Trajectories that have not
+been split yet do not appear.
 
 ```bash
 xskill search traj 内存泄漏
