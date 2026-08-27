@@ -178,17 +178,34 @@ xskill stop / xskill start                    # stop / re-start (must have conne
 
 On **macOS / Linux**, native persistence (launchd / systemd --user) is still on the way; for now run the foreground form `xskill connect --foreground` under your own init system.
 
-#### Search / share skills on demand (skillhub)
+#### Search and share skills on demand (SkillHub)
+
+In addition to personalized recommendations from the server, you can search, download, and publish skills directly:
 
 ```bash
-xskill search docker compose   # return compact metadata and skill IDs only
-xskill search docker --download  # legacy 10-slot LRU download and auto-install
-xskill download <skill-id>     # interactively select target harnesses
-xskill download <skill-id> --agent claude-code --agent codex -y
-xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
+xskill search <keywords>                                      # search skills, returning metadata and IDs
+xskill download <skill-id>                                    # interactively select target agents to install
+xskill download <skill-id> --agent claude-code --agent codex -y  # non-interactive install to specified agents
+xskill upload ./my-skill                                      # package and share a local skill with your team
+xskill search <keywords> --download                           # temporary search and install into rotating slots
 ```
 
-`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. Semantic search for local trajectories/skills has been removed from the CLI (no more `xskill search traj|skill <query>`); use the dashboard or the API (`POST /api/v1/skills/search`) instead.
+`search` uses hybrid keyword and semantic-vector ranking. `download` persistently installs a skill to chosen harnesses. `upload` publishes a skill folder (containing `SKILL.md`) so the rest of the team can find and use it immediately.
+
+#### Search and inspect session trajectories
+
+When tackling challenging bugs or complex workflows, query team or local session histories (trajectories) and distilled atomic tasks (Atoms) to view proven solutions and diagnostic steps:
+
+```bash
+xskill traj search "memory leak"                               # search relevant session trajectories
+xskill traj search --name alice,bob "memory leak"              # narrow search to specific team members
+xskill traj read <traj_id> --offset-start 1 --offset-end 100   # read transcript lines within a specific range
+
+xskill atom search "oauth token refresh"                       # search distilled atomic task segments
+xskill atom read <atom_id>                                     # read transcript lines for a specific Atom
+```
+
+Standalone readiness: `xskill traj search` works out of the box after `pip install xskill` without requiring a server connection. The first search automatically scans local harnesses and builds an index, or you can run `xskill init` for guided setup. When connected to a team server, searches query the team catalog by default; pass `--local` to search this machine only.
 
 * * *
 

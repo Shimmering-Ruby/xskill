@@ -156,6 +156,7 @@ markers = [
     "nightly: load/platform-sensitive tests; excluded from PR matrix, run in nightly workflow",
 ]
 addopts = "--ignore=tests/live --ignore=tests/stress"
+pythonpath = ["src"]
 asyncio_mode = "strict"
 
 [tool.mutmut]

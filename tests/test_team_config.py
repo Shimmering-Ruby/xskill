@@ -57,6 +57,8 @@ def test_team_server_slots_bare_team_key_means_defaults():
     # allow_anonymous_user 同一个段,同样不能炸(否则校验放行的 config 会砖掉 startup)
     assert C.allow_anonymous_user({"team": None}) is True
     assert C.allow_anonymous_user({"team": {"server": None}}) is True
+    assert C.allow_read_others({"team": None}) is False
+    assert C.allow_read_others({"team": {"server": None}}) is False
 
 
 def test_team_server_section_malformed_raises_valueerror_not_attributeerror():

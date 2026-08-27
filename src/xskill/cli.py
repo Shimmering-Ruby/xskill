@@ -176,82 +176,117 @@ def cmd_registry_list_client() -> int:
     return 0
 
 
-def cmd_init(args) -> int:
-    """一站式引导：把 xskill 使用指南 skill 装进各 agent 生态 + 连上 team server。
+def _print_init_harnesses(detections: list[dict]) -> None:
+    if not detections:
+        print(
+            "未扫到已知 harness（Claude Code、Codex、Cursor、OpenCode、"
+            "Trae、DeepSeek Harness、ngagent）。"
+        )
+        return
+    print("本机扫到这些 harness：")
+    for index, detection in enumerate(detections, 1):
+        print(
+            f"  [{index}] {detection['ecosystem']}  "
+            f"源={detection['source']}  轨迹目录={detection['bridge']}"
+        )
 
-    交互式（默认）逐项询问缺失的 server/token/工号；带齐 flag 且 ``--yes`` 可无头执行。
+
+def _print_init_next_steps(connected: bool) -> None:
+    if connected:
+        print("已连接 team server。默认 xskill traj search 走团队；只看本机加 --local。")
+    else:
+        print("当前没有 team 连接。本机轨迹可以搜：")
+        print("  xskill traj search <词>")
+        print("  xskill traj read <traj_id>")
+    print("连远端团队拿共享 skill 和同事轨迹：")
+    print("  xskill connect <host:port> --token <token> --name <工号>")
+    print("也可以自己起一台团队服务：")
+    print("  xskill serve --server")
+
+
+def _choose_helper_ecosystems(args, detections: list[dict], interactive: bool) -> list[str]:
+    names = [str(row["ecosystem"]) for row in detections]
+    selected = [str(item) for item in (getattr(args, "harness", None) or []) if item]
+    if selected:
+        unknown = [name for name in selected if name not in names]
+        if unknown:
+            print("warning: 未扫到 " + "、".join(unknown), file=sys.stderr)
+        return [name for name in selected if name in names]
+    if not names:
+        return []
+    if (not interactive) or args.yes:
+        return names
+    print("要把 /xskill-helper 装进哪些 harness？")
+    print("  回车或 all：全部    none：不装    或输入编号，逗号分隔")
+    raw = input("选择：").strip().lower()
+    if raw in ("", "all", "y", "yes"):
+        return names
+    if raw in ("none", "n", "no", "skip"):
+        return []
+    picked: list[str] = []
+    for part in raw.replace("，", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.isdigit():
+            index = int(part)
+            if 1 <= index <= len(names):
+                picked.append(names[index - 1])
+        elif part in names:
+            picked.append(part)
+    return picked
+
+
+def cmd_init(args) -> int:
+    """本机引导：扫描 harness、转换轨迹、可选装 /xskill-helper。
+
+    不要求 connect。``--yes`` 无头：全量扫描并把 helper 装到已扫到的 harness。
     """
     from pathlib import Path
 
+    from xskill.config import get_team_client_state_path
+    from xskill.ecosystems import detect_known_ecosystems
+    from xskill.ecosystems.bundled_guide import install_bundled_xskill_guide
+    from xskill.ecosystems.local_bootstrap import ensure_local_sessions
+
     interactive = not args.yes
-    target_root = None
+    home = None
     if args.target_root:
-        target_root = Path(args.target_root).expanduser().resolve()
+        home = Path(args.target_root).expanduser().resolve()
 
-    if not args.no_skill:
-        from xskill.ecosystems.bundled_guide import install_bundled_xskill_guide
-        install_bundled_xskill_guide(target_root=target_root)
+    detections = detect_known_ecosystems(home_root=home)
+    _print_init_harnesses(detections)
+    connected = get_team_client_state_path().is_file()
+    if connected:
+        print("已有 team 连接，团队检索可用。")
+    else:
+        print("未连接 team server。先完成本机轨迹处理，不必先 connect。")
 
-    if args.skills_only:
+    if not args.skills_only:
+        print("轨迹处理：开启。正在扫描并转换本机会话…")
+        report = ensure_local_sessions(
+            home_root=home, force=args.force, skip_if_server=False,
+        )
+        if report.get("ran"):
+            for eco, count in (report.get("bridged") or {}).items():
+                print(f"  {eco}: 新转换 {count} 条")
+            for eco, err in (report.get("errors") or {}).items():
+                print(f"  warning: {eco} {err}", file=sys.stderr)
+        elif report.get("reason") == "already":
+            print("轨迹处理：本机索引已在，未重复全量扫描（加 --force 可重扫）。")
+        print("本机检索：xskill traj search <词>    读原文：xskill traj read <id>")
+
+    if args.no_skill:
+        _print_init_next_steps(connected)
         return 0
 
-    from xskill.team.client.service import read_daemon_state
-    daemon_state = read_daemon_state()
-    if daemon_state.get("running"):
-        current_server = "?"
-        try:
-            from xskill.config import get_team_client_state_path
-            from xskill.team.client.state import load_client_state
-            current_server = load_client_state(get_team_client_state_path()).server_url
-        except Exception:  # noqa: BLE001
-            logger.debug("读取当前 team server 地址失败", exc_info=True)
-        print(f"检测到常驻连接正在运行：server={current_server}  "
-              f"pid={daemon_state.get('pid')}  backend={daemon_state.get('backend')}")
-        should_stop = args.force
-        if not args.force:
-            if not interactive:
-                print("已保留现有连接（加 --force 可停掉重新配置）。")
-                return 0
-            should_stop = input("停掉并重新配置？[y/N] ").strip().lower() in ("y", "yes")
-            if not should_stop:
-                print("保留现有连接，未改动。")
-                return 0
-        from xskill.team.client.service import (
-            ServiceError, clear_daemon_state, get_backend,
-        )
-        try:
-            get_backend().stop()
-        except ServiceError as stop_error:
-            print(f"warning: 停止旧常驻失败：{stop_error}", file=sys.stderr)
-        clear_daemon_state()
-
-    address = args.address
-    if not address and interactive:
-        address = input("server 地址 (host:port): ").strip()
-    if not address:
-        print("error: 缺少 server 地址（位置参数或交互输入）", file=sys.stderr)
-        return 2
-    token = args.token
-    if not token and interactive:
-        token = input("join token (server 启动时打印的 token): ").strip()
-    if not token:
-        print("error: 缺少 --token（首次连接必填）", file=sys.stderr)
-        return 2
-    name = args.name
-    if not name and interactive:
-        name = input("工号/用户 ID (推荐填，直接回车留空): ").strip() or None
-
-    connect_args = argparse.Namespace(
-        address=address, token=token, label=args.label, name=name,
-        use_proxy=args.use_proxy, foreground=args.foreground,
-        no_auto_update=args.no_auto_update,
-        no_skill=True,
-    )
-    exit_code = cmd_connect(connect_args)
-    if exit_code == 0:
-        print("\n后续：`xskill status` 看状态 · `xskill search <词>` 搜技能 · "
-              "`xskill update`／`pip install -U xskill` 升级 · `xskill stop` 停。")
-    return exit_code
+    chosen = _choose_helper_ecosystems(args, detections, interactive)
+    if chosen:
+        install_bundled_xskill_guide(target_root=home, ecosystems=chosen)
+    elif detections:
+        print("未安装 /xskill-helper。以后可再跑 xskill init，或 xskill connect 后自动装。")
+    _print_init_next_steps(connected)
+    return 0
 
 
 def cmd_connect(args) -> int:
@@ -1159,12 +1194,392 @@ def cmd_search_hub(args, http=None, headers=None) -> int:
     return 0
 
 
+def _clip_search_description(text: str) -> str:
+    description = " ".join(str(text or "").split())
+    if len(description) > 180:
+        return f"{description[:177].rstrip()}..."
+    return description
+
+
+def _traj_search_extra_flags(args) -> str:
+    if getattr(args, "local", False):
+        return "--local"
+    return ""
+
+
+def _render_traj_search_lines(
+    hits: list[dict], query: str, *, meta: dict | None = None, extra_flags: str = "",
+) -> None:
+    from xskill.traj_browse import format_listing
+
+    info = meta or {}
+    total = int(info.get("total") if info.get("total") is not None else len(hits))
+    page = int(info.get("page") or 1)
+    page_size = int(info.get("page_size") or max(len(hits), 1))
+    _write_search_output(format_listing(
+        query, hits, total=total, page=page, page_size=page_size,
+        extra_flags=extra_flags,
+    ))
+
+
+def _traj_match_line(hit: dict) -> str:
+    labels: list[str] = []
+    for item in hit.get("sources") or []:
+        name = str(item)
+        if name == "vector":
+            labels.append("语义")
+        elif name == "keyword":
+            labels.append("关键词")
+        elif name:
+            labels.append(name)
+    score = f"{float(hit.get('score') or 0.0):.3f}"
+    if labels:
+        return f"{score}（{'、'.join(labels)}）"
+    return score
+
+
+def _render_search_kind_hits(
+    hits: list[dict], query: str, *, kind: str, meta: dict | None = None,
+) -> None:
+    unknown = list((meta or {}).get("unknown_names") or [])
+    if unknown:
+        _write_search_output(
+            "warning: 未识别工号 " + "、".join(unknown),
+            to_stderr=True,
+        )
+    if kind != "atom":
+        _render_traj_search_lines(
+            hits, query, meta=meta, extra_flags=str((meta or {}).get("extra_flags") or ""),
+        )
+        return
+    if not hits:
+        if (meta or {}).get("corpus_empty"):
+            _write_search_output(
+                "Atom 索引尚未建成，或指定工号还没有可搜目录",
+            )
+        else:
+            _write_search_output(f"Atom 无匹配：{query}")
+        return
+    count_label = f"找到 {len(hits)} 个 Atom"
+    output_lines = [
+        f"搜索：{query}",
+        count_label,
+        "=" * 64,
+    ]
+    for index, hit in enumerate(hits, start=1):
+        if index > 1:
+            output_lines.append("-" * 64)
+        title = (
+            hit.get("intent")
+            or hit.get("summary")
+            or hit.get("traj_id")
+            or "(unnamed)"
+        )
+        description = hit.get("summary") or ""
+        output_lines.append(f"[{index}/{len(hits)}] {title}")
+        output_lines.append(f"轨迹 ID：{hit.get('traj_id') or '-'}")
+        output_lines.append(f"工号：{hit.get('user') or '（未知）'}")
+        if hit.get("atom_id"):
+            output_lines.append(f"Atom ID：{hit['atom_id']}")
+        start = hit.get("offset_start")
+        end = hit.get("offset_end")
+        if start is not None or end is not None:
+            output_lines.append(f"行号：L{start}-L{end}")
+        output_lines.append(
+            f"描述：{_clip_search_description(description) or '（无描述）'}"
+        )
+        output_lines.append(f"匹配：{_traj_match_line(hit)}")
+        used = [str(item) for item in (hit.get("used_skills") or []) if item]
+        if used:
+            output_lines.append("用过：" + "、".join(used))
+    output_lines.append("=" * 64)
+    _write_search_output("\n".join(output_lines))
+
+
+def _local_traj_md_hint() -> str:
+    """``--local`` 时告诉 agent 本机 traj_*.md 在哪，方便用 harness 自带 grep。"""
+    from xskill.traj_search import iter_local_bridge_session_dirs
+
+    directories = [
+        str(path) for _label, path in iter_local_bridge_session_dirs()
+        if path.is_dir()
+    ]
+    if not directories:
+        return (
+            "本机还没有 ~/.xskill/*_sessions。"
+            "可先 xskill init，再用本 harness 的 grep 搜这些目录里的 traj_*.md。"
+        )
+    lines = [
+        "本机轨迹原文目录如下，可用本 harness 的 grep 直接搜里面的 traj_*.md：",
+    ]
+    lines.extend(f"  {directory}" for directory in directories)
+    return "\n".join(lines)
+
+
+def _write_local_traj_md_hint(*, json_mode: bool) -> None:
+    _write_search_output(_local_traj_md_hint(), to_stderr=json_mode)
+
+
+def _maybe_bootstrap_local_traj() -> None:
+    """standalone 或 --local 时，首次把本机 harness 会话转成可搜轨迹。
+
+    提示一律打 stderr，避免污染 ``--json`` 的 stdout。
+    """
+    from xskill.ecosystems.local_bootstrap import ensure_local_sessions
+
+    report = ensure_local_sessions()
+    if not report.get("ran"):
+        return
+    harnesses = [str(name) for name in (report.get("harnesses") or [])]
+    new_count = sum((report.get("bridged") or {}).values())
+    if harnesses:
+        message = (
+            f"已扫描本机 {('、'.join(harnesses))}，转换 {new_count} 条新会话。"
+            "之后可用 xskill traj search。"
+        )
+    else:
+        message = (
+            "未检测到 Claude Code、Codex、Cursor 等 harness。"
+            "装好其中之一后再跑 xskill init。"
+        )
+    _write_search_output(message, to_stderr=True)
+
+
+def cmd_search_traj(args, http=None, headers=None) -> int:
+    """`xskill traj search <query>` —— 搜已上传轨迹文件，不经拆分代理。"""
+    return _cmd_search_kind(args, kind="traj", http=http, headers=headers)
+
+
+def cmd_search_atom(args, http=None, headers=None) -> int:
+    """`xskill atom search <query>` —— 搜已拆好的 Atom。
+
+    Atom 是拆分代理的中间产物，粒度可能随版本变化。
+    """
+    return _cmd_search_kind(args, kind="atom", http=http, headers=headers)
+
+
+def _cmd_search_kind(args, *, kind: str, http=None, headers=None) -> int:
+    from xskill.traj_search import parse_search_names
+
+    terms = [str(item) for item in (getattr(args, "terms", None) or []) if item]
+    cards = bool(getattr(args, "cards", False)) if kind == "traj" else False
+    id_mode = bool(cards and terms and all(item.startswith("traj_") for item in terms))
+    query = "" if id_mode else " ".join(terms).strip()
+    usage = "xskill atom search <query>" if kind == "atom" else "xskill traj search <query>"
+    if not query and not id_mode:
+        _write_search_output(f"error: 用法 {usage}", to_stderr=True)
+        return 2
+    page = int(getattr(args, "page", 1) or 1)
+    if page < 1:
+        _write_search_output("error: --page 从 1 起", to_stderr=True)
+        return 2
+    names = parse_search_names(getattr(args, "name", "") or "")
+    force_team = getattr(args, "team", False)
+    force_local = getattr(args, "local", False)
+    extra = _traj_search_extra_flags(args) if kind == "traj" else ""
+    if force_local:
+        return _cmd_search_kind_local(
+            query, kind=kind, top_k=args.top_k, json_mode=args.json, names=names,
+            announce_local_dirs=True, cards=cards, page=page, card_ids=terms if id_mode else None,
+            extra_flags=extra,
+        )
+    if force_team:
+        return _cmd_search_kind_team(
+            query, kind=kind, args=args, http=http, headers=headers, names=names,
+            cards=cards, page=page, card_ids=terms if id_mode else None,
+        )
+    from xskill.runtime import role
+    if role() == "client":
+        return _cmd_search_kind_team(
+            query, kind=kind, args=args, http=http, headers=headers, names=names,
+            cards=cards, page=page, card_ids=terms if id_mode else None,
+        )
+    return _cmd_search_kind_local(
+        query, kind=kind, top_k=args.top_k, json_mode=args.json, names=names,
+        cards=cards, page=page, card_ids=terms if id_mode else None,
+        extra_flags=extra,
+    )
+
+
+def _cmd_search_kind_local(
+    query: str, *, kind: str, top_k: int, json_mode: bool, names: list[str],
+    announce_local_dirs: bool = False, cards: bool = False, page: int = 1,
+    card_ids: list[str] | None = None, extra_flags: str = "",
+) -> int:
+    import json as _json
+
+    from xskill.traj_search import search_indexed_atoms
+
+    if names:
+        _write_search_output(
+            "warning: --name 仅 team 检索有效，本机检索忽略",
+            to_stderr=True,
+        )
+    if kind == "traj":
+        _maybe_bootstrap_local_traj()
+        return _cmd_search_traj_local(
+            query, json_mode=json_mode, cards=cards, page=page,
+            card_ids=card_ids, extra_flags=extra_flags,
+            announce_local_dirs=announce_local_dirs, top_k=top_k,
+        )
+    try:
+        hits = search_indexed_atoms(query, top_k=top_k)
+    except Exception as search_error:
+        _write_search_output(
+            f"error: 本地Atom检索失败（{type(search_error).__name__}）",
+            to_stderr=True,
+        )
+        return 1
+    if json_mode:
+        _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
+        return 0
+    from xskill.pipeline.registry import all_index_paths
+
+    meta = {"corpus_empty": not hits and not all_index_paths()}
+    _render_search_kind_hits(hits, query, kind="atom", meta=meta)
+    return 0
+
+
+def _cmd_search_traj_local(
+    query: str, *, json_mode: bool, cards: bool, page: int,
+    card_ids: list[str] | None, extra_flags: str,
+    announce_local_dirs: bool, top_k: int,
+) -> int:
+    import json as _json
+
+    from xskill.traj_browse import (
+        CARDS_MAX,
+        LIST_PAGE,
+        find_query_hits,
+        format_cards,
+        listing_rows,
+        page_slice,
+        format_listing,
+    )
+
+    try:
+        if card_ids:
+            ordered_ids = list(card_ids)
+            matches = []
+        else:
+            matches = find_query_hits(query)
+            ordered_ids = [hit.traj_id for hit in matches]
+        if cards:
+            size = CARDS_MAX
+            shown_ids = page_slice(ordered_ids, page, size)
+            leftover = max(0, len(ordered_ids) - ((page - 1) * size + len(shown_ids)))
+            text = format_cards(
+                shown_ids, leftover=leftover, query=query,
+                page=page, extra_flags=extra_flags,
+            )
+            if json_mode:
+                _write_search_output(_json.dumps(
+                    {"text": text, "traj_ids": shown_ids, "page": page, "total": len(ordered_ids)},
+                    ensure_ascii=True, indent=2,
+                ))
+            else:
+                _write_search_output(text)
+        else:
+            if card_ids:
+                _write_search_output(
+                    "error: 指定 traj_id 时请加 --cards",
+                    to_stderr=True,
+                )
+                return 2
+            size = max(1, min(int(top_k or LIST_PAGE), LIST_PAGE))
+            shown = listing_rows(page_slice(matches, page, size))
+            if json_mode:
+                _write_search_output(_json.dumps(shown, ensure_ascii=True, indent=2))
+            else:
+                _write_search_output(format_listing(
+                    query, shown, total=len(matches), page=page, page_size=size,
+                    extra_flags=extra_flags,
+                ))
+    except Exception as search_error:
+        _write_search_output(
+            f"error: 本地轨迹检索失败（{type(search_error).__name__}）",
+            to_stderr=True,
+        )
+        return 1
+    if announce_local_dirs:
+        _write_local_traj_md_hint(json_mode=json_mode)
+    return 0
+
+
+def _cmd_search_kind_team(
+    query: str, *, kind: str, args, http=None, headers=None, names: list[str],
+    cards: bool = False, page: int = 1, card_ids: list[str] | None = None,
+) -> int:
+    import json as _json
+    import httpx
+
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+    params: dict[str, object] = {"query": query, "limit": args.top_k}
+    if kind == "traj":
+        params["page"] = page
+        if cards:
+            params["cards"] = "1"
+        if card_ids:
+            params["ids"] = ",".join(card_ids)
+    if names:
+        params["names"] = ",".join(names)
+    path = (
+        "/api/v1/team/atoms/search"
+        if kind == "atom"
+        else "/api/v1/team/trajectories/search"
+    )
+    label = "Atom" if kind == "atom" else "轨迹"
+    try:
+        resp = http.get(path, params=params, headers=headers)
+    except (httpx.HTTPError, OSError) as network_error:
+        _write_search_output(
+            f"error: 无法连接 team server（{type(network_error).__name__}），"
+            "server 可能未响应，请检查网络或联系管理员",
+            to_stderr=True,
+        )
+        return 1
+    if resp.status_code == 404:
+        _write_search_output(
+            f"error: server 版本过旧，不支持{label}检索，请管理员先升级 server",
+            to_stderr=True,
+        )
+        return 1
+    if resp.status_code != 200:
+        _write_search_output(
+            f"error: {label}检索失败 HTTP {resp.status_code}",
+            to_stderr=True,
+        )
+        return 1
+    payload = resp.json()
+    hits = payload.get("results") or []
+    meta = payload.get("meta") or {}
+    if args.json:
+        if kind == "traj" and payload.get("text"):
+            _write_search_output(_json.dumps(payload, ensure_ascii=True, indent=2))
+        else:
+            _write_search_output(_json.dumps(hits, ensure_ascii=True, indent=2))
+        return 0
+    if kind == "traj" and payload.get("text"):
+        _write_search_output(str(payload["text"]))
+        return 0
+    if kind == "traj":
+        meta = dict(meta)
+        meta["extra_flags"] = ""
+        _render_search_kind_hits(hits, query, kind=kind, meta=meta)
+        return 0
+    _render_search_kind_hits(hits, query, kind=kind, meta=meta)
+    return 0
+
+
 def cmd_search(args) -> int:
     """`xskill search` 部署模式自适应入口（#201）。
 
-    解析顺序：``--team`` / ``--local`` 显式覆盖 > team client 状态文件
-    （已 connect → SkillHub 路径）> 本地技能库路径。standalone 用户不再
-    被 "未连接 team server" 直接挡在门外（#46 的前向修复）。
+    只搜 skill。轨迹与 Atom 走 ``xskill traj search``、``xskill atom search``，
+    不再看查询词首词。``--team`` / ``--local`` 显式覆盖 >
+    team client 状态文件（已 connect → SkillHub 路径）> 本地技能库路径。
     """
     if getattr(args, "team", False):
         return cmd_search_hub(args)
@@ -1806,13 +2221,17 @@ def _cmd_import_team(args, sources, *, http=None, headers=None) -> int:
     return 0
 
 
-def cmd_read(args, xskill) -> int:
-    """`xskill read <PATH> --eco ngagent` —— 批量把 db 文件桥接入库。"""
-    del xskill  # CLI handler signature compatibility.
+def cmd_read(args, xskill=None) -> int:
+    """`xskill read <PATH>` —— 把 ngagent、opencode 的 db 桥接入库。"""
+    del xskill
+    path = getattr(args, "path", None)
+    if not path:
+        print("error: 用法 xskill read <db路径>", file=sys.stderr)
+        return 2
     from xskill.pipeline.db_ingest import read_db_files
     try:
         summary = read_db_files(
-            args.path,
+            path,
             eco=args.eco,
             register=not args.no_register,
             recursive=args.recursive,
@@ -1826,6 +2245,236 @@ def cmd_read(args, xskill) -> int:
     )
     if not args.no_register:
         print("已注册为 watch_dir —— 启动 `xskill serve` 后将自动拆分入库。")
+    return 0
+
+
+def cmd_read_traj(args, http=None, headers=None) -> int:
+    """`xskill traj read <traj_id>` —— 按行号读轨迹原文。"""
+    return _cmd_read_kind(args, kind="traj", http=http, headers=headers)
+
+
+def cmd_read_atom(args, http=None, headers=None) -> int:
+    """`xskill atom read <atom_id>` —— 按行号读 Atom 对应的轨迹原文。
+
+    Atom 是拆分代理的中间产物，粒度可能随版本变化。
+    """
+    return _cmd_read_kind(args, kind="atom", http=http, headers=headers)
+
+
+def _render_read_payload(payload: dict, *, unknown_names: list[str] | None = None) -> None:
+    if unknown_names:
+        _write_search_output(
+            "warning: 未识别工号 " + "、".join(unknown_names),
+            to_stderr=True,
+        )
+    kind = str(payload.get("kind") or "traj")
+    title = payload.get("traj_id") or payload.get("atom_id") or "(unnamed)"
+    lines = [
+        f"读取：{title}",
+        f"当前行号：L{payload.get('offset_start')}-L{payload.get('offset_end')}",
+        f"总行号：L{payload.get('total_start')}-L{payload.get('total_end')}",
+    ]
+    if kind == "atom":
+        if payload.get("atom_id"):
+            lines.append(f"Atom ID：{payload['atom_id']}")
+        lines.append(f"轨迹 ID：{payload.get('traj_id') or '-'}")
+    else:
+        lines.append(f"轨迹 ID：{payload.get('traj_id') or '-'}")
+    if payload.get("user"):
+        lines.append(f"工号：{payload['user']}")
+    if payload.get("truncated"):
+        nxt = payload.get("offset_end")
+        lines.append(f"warning: 单次最多 200 行，下一段从 L{nxt} 继续")
+    lines.append("=" * 64)
+    text = str(payload.get("text") or "")
+    if text.endswith("\n"):
+        text = text[:-1]
+    lines.append(text)
+    lines.append("=" * 64)
+    _write_search_output("\n".join(lines))
+
+
+def _cmd_read_kind(args, *, kind: str, http=None, headers=None) -> int:
+    from xskill.traj_read import parse_read_offsets
+    from xskill.traj_search import parse_search_names
+
+    target = str(getattr(args, "target", "") or "").strip()
+    usage = "xskill atom read <atom_id>" if kind == "atom" else "xskill traj read <traj_id>"
+    if not target:
+        _write_search_output(f"error: 用法 {usage}", to_stderr=True)
+        return 2
+    start, end, offset_error = parse_read_offsets(
+        getattr(args, "offset_start", None),
+        getattr(args, "offset_end", None),
+    )
+    if offset_error:
+        _write_search_output(f"error: {offset_error}", to_stderr=True)
+        return 2
+    names = parse_search_names(getattr(args, "name", "") or "")
+    force_team = getattr(args, "team", False)
+    force_local = getattr(args, "local", False)
+    if force_local:
+        return _cmd_read_kind_local(
+            target, kind=kind, offset_start=start, offset_end=end,
+            json_mode=bool(getattr(args, "json", False)), names=names,
+            announce_local_dirs=True,
+        )
+    if force_team:
+        return _cmd_read_kind_team(
+            target, kind=kind, args=args, offset_start=start, offset_end=end,
+            http=http, headers=headers, names=names,
+        )
+    from xskill.runtime import role
+    if role() == "client":
+        return _cmd_read_kind_team(
+            target, kind=kind, args=args, offset_start=start, offset_end=end,
+            http=http, headers=headers, names=names,
+        )
+    return _cmd_read_kind_local(
+        target, kind=kind, offset_start=start, offset_end=end,
+        json_mode=bool(getattr(args, "json", False)), names=names,
+    )
+
+
+def _cmd_read_kind_local(
+    target: str, *, kind: str, offset_start: int | None, offset_end: int | None,
+    json_mode: bool, names: list[str],
+    announce_local_dirs: bool = False,
+) -> int:
+    import json as _json
+
+    from xskill.traj_read import read_atom, read_trajectory
+
+    if names:
+        _write_search_output(
+            "warning: --name 仅 team 检索有效，本机读取忽略",
+            to_stderr=True,
+        )
+    if kind == "traj":
+        _maybe_bootstrap_local_traj()
+    try:
+        if kind == "atom":
+            payload = read_atom(
+                target, offset_start=offset_start, offset_end=offset_end,
+            )
+        else:
+            payload = read_trajectory(
+                target, offset_start=offset_start, offset_end=offset_end,
+            )
+    except Exception as read_error:
+        label = "Atom" if kind == "atom" else "轨迹"
+        _write_search_output(
+            f"error: 本地{label}读取失败（{type(read_error).__name__}）",
+            to_stderr=True,
+        )
+        return 1
+    if payload is None:
+        label = "Atom" if kind == "atom" else "轨迹"
+        _write_search_output(f"error: 未找到{label} {target}", to_stderr=True)
+        return 1
+    if payload["offset_start"] >= payload["total_end"] and payload["total_lines"] > 0:
+        _write_search_output(
+            "error: 行号超出总区间 "
+            f"L{payload['total_start']}-L{payload['total_end']}",
+            to_stderr=True,
+        )
+        return 2
+    if json_mode:
+        _write_search_output(_json.dumps(payload, ensure_ascii=True, indent=2))
+        if announce_local_dirs:
+            _write_local_traj_md_hint(json_mode=True)
+        return 0
+    _render_read_payload(payload)
+    if announce_local_dirs:
+        _write_local_traj_md_hint(json_mode=False)
+    return 0
+
+
+def _cmd_read_kind_team(
+    target: str, *, kind: str, args, offset_start: int | None, offset_end: int | None,
+    http=None, headers=None, names: list[str],
+) -> int:
+    import json as _json
+    import httpx
+
+    if http is None:
+        http, headers = _team_client_http_and_headers()
+        if http is None:
+            return 1
+    params: dict[str, object] = (
+        {"atom_id": target} if kind == "atom" else {"traj_id": target}
+    )
+    if offset_start is not None:
+        params["offset_start"] = offset_start
+    if offset_end is not None:
+        params["offset_end"] = offset_end
+    if names:
+        params["names"] = ",".join(names)
+    path = (
+        "/api/v1/team/atoms/read"
+        if kind == "atom"
+        else "/api/v1/team/trajectories/read"
+    )
+    label = "Atom" if kind == "atom" else "轨迹"
+    try:
+        resp = http.get(path, params=params, headers=headers)
+    except (httpx.HTTPError, OSError) as network_error:
+        _write_search_output(
+            f"error: 无法连接 team server（{type(network_error).__name__}），"
+            "server 可能未响应，请检查网络或联系管理员",
+            to_stderr=True,
+        )
+        return 1
+    if resp.status_code == 403:
+        detail = ""
+        try:
+            detail = str((resp.json() or {}).get("detail") or "")
+        except Exception:
+            detail = ""
+        if detail == "others_read_disabled":
+            _write_search_output(
+                "error: server 未开放阅读他人轨迹",
+                to_stderr=True,
+            )
+        else:
+            _write_search_output(f"error: {label}读取被拒绝", to_stderr=True)
+        return 1
+    if resp.status_code == 404:
+        detail = ""
+        try:
+            detail = str((resp.json() or {}).get("detail") or "")
+        except Exception:
+            detail = ""
+        if detail == "not found":
+            _write_search_output(f"error: 未找到{label} {target}", to_stderr=True)
+        else:
+            _write_search_output(
+                f"error: server 版本过旧，不支持{label}读取，请管理员先升级 server",
+                to_stderr=True,
+            )
+        return 1
+    if resp.status_code in (400, 422):
+        _write_search_output(
+            f"error: {label}读取参数不合法",
+            to_stderr=True,
+        )
+        return 2
+    if resp.status_code != 200:
+        _write_search_output(
+            f"error: {label}读取失败 HTTP {resp.status_code}",
+            to_stderr=True,
+        )
+        return 1
+    body = resp.json()
+    payload = body.get("result") if isinstance(body, dict) else None
+    if not isinstance(payload, dict):
+        _write_search_output(f"error: {label}读取失败，返回不是结果对象", to_stderr=True)
+        return 1
+    if getattr(args, "json", False):
+        _write_search_output(_json.dumps(payload, ensure_ascii=True, indent=2))
+        return 0
+    meta = body.get("meta") or {}
+    _render_read_payload(payload, unknown_names=list(meta.get("unknown_names") or []))
     return 0
 
 
@@ -2056,13 +2705,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--label", type=str, default="",
                        help="human-friendly label (for add)")
 
-    p_search = sub.add_parser(
-        "search",
-        help="搜索 skill（自动适配：已连 team 走 SkillHub，否则本地技能库）",
-    )
+    p_search = sub.add_parser("search", help="搜索 skill")
     p_search.add_argument(
         "terms", nargs="+", metavar="QUERY",
-        help="搜索词（可多个，拼成一个查询）",
+        help="技能搜索词。轨迹请用 xskill traj search，Atom 请用 xskill atom search",
     )
     p_search.add_argument("--top-k", "-k", type=int, default=5,
                           help="返回条数（skillhub 搜索最多 10）")
@@ -2079,6 +2725,123 @@ def build_parser() -> argparse.ArgumentParser:
     p_search_mode.add_argument(
         "--local", action="store_true",
         help="强制搜本地技能库（daemon 语义检索，不可用回退 BM25）",
+    )
+
+    p_traj = sub.add_parser("traj", help="检索或读取已上传轨迹")
+    traj_sub = p_traj.add_subparsers(dest="traj_action", required=True)
+    p_traj_search = traj_sub.add_parser(
+        "search", help="全文检索已上传轨迹，一行一条命中",
+    )
+    p_traj_search.add_argument(
+        "terms", nargs="*", metavar="QUERY",
+        help="检索词；加 --cards 时也可以直接跟 traj_id",
+    )
+    p_traj_search.add_argument(
+        "--top-k", "-k", type=int, default=30, help="列表每页条数（最多 30）",
+    )
+    p_traj_search.add_argument(
+        "--page", type=int, default=1, help="页码，从 1 起",
+    )
+    p_traj_search.add_argument(
+        "--cards", action="store_true",
+        help="返回轨迹卡片，每页最多 8 张",
+    )
+    p_traj_search.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效",
+    )
+    p_traj_search.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_traj_search_mode = p_traj_search.add_mutually_exclusive_group()
+    p_traj_search_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 检索（需先 xskill connect）",
+    )
+    p_traj_search_mode.add_argument(
+        "--local", action="store_true",
+        help="强制搜本机已登记轨迹目录",
+    )
+    p_traj_read = traj_sub.add_parser(
+        "read", help="按行号读一条已上传轨迹原文",
+    )
+    p_traj_read.add_argument("target", metavar="TRAJ_ID", help="轨迹 ID")
+    p_traj_read.add_argument(
+        "--offset-start", type=int, default=None,
+        help="起始行号，从 1 起，半开区间",
+    )
+    p_traj_read.add_argument(
+        "--offset-end", type=int, default=None,
+        help="结束行号（不含）。单次最多 200 行",
+    )
+    p_traj_read.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_traj_read.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效。读他人需 server 开放",
+    )
+    p_traj_read_mode = p_traj_read.add_mutually_exclusive_group()
+    p_traj_read_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 读取（需先 xskill connect）",
+    )
+    p_traj_read_mode.add_argument(
+        "--local", action="store_true",
+        help="强制读本机已登记轨迹目录",
+    )
+
+    p_atom = sub.add_parser(
+        "atom",
+        help="检索或读取系统拆分产物 Atom（粒度可能随版本变化）",
+    )
+    atom_sub = p_atom.add_subparsers(dest="atom_action", required=True)
+    p_atom_search = atom_sub.add_parser(
+        "search",
+        help="搜已拆 Atom。Atom 为系统拆分产物，粒度可能随版本变化",
+    )
+    p_atom_search.add_argument(
+        "terms", nargs="+", metavar="QUERY", help="Atom 检索词",
+    )
+    p_atom_search.add_argument(
+        "--top-k", "-k", type=int, default=5, help="返回条数（最多 20）",
+    )
+    p_atom_search.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效",
+    )
+    p_atom_search.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_atom_search_mode = p_atom_search.add_mutually_exclusive_group()
+    p_atom_search_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 检索（需先 xskill connect）",
+    )
+    p_atom_search_mode.add_argument(
+        "--local", action="store_true",
+        help="强制搜本机已拆 Atom",
+    )
+    p_atom_read = atom_sub.add_parser(
+        "read",
+        help="按行号读一个 Atom 对应的轨迹原文。粒度可能随版本变化",
+    )
+    p_atom_read.add_argument("target", metavar="ATOM_ID", help="Atom ID")
+    p_atom_read.add_argument(
+        "--offset-start", type=int, default=None,
+        help="起始行号，从 1 起，半开区间，且夹在该 Atom 区间内",
+    )
+    p_atom_read.add_argument(
+        "--offset-end", type=int, default=None,
+        help="结束行号（不含）。单次最多 200 行",
+    )
+    p_atom_read.add_argument("--json", action="store_true", help="机读 JSON 输出")
+    p_atom_read.add_argument(
+        "--name", default="",
+        help="限定工号，逗号分隔；仅 team 模式有效。读他人需 server 开放",
+    )
+    p_atom_read_mode = p_atom_read.add_mutually_exclusive_group()
+    p_atom_read_mode.add_argument(
+        "--team", action="store_true",
+        help="强制走 team 读取（需先 xskill connect）",
+    )
+    p_atom_read_mode.add_argument(
+        "--local", action="store_true",
+        help="强制读本机已拆 Atom",
     )
 
     p_download = sub.add_parser(
@@ -2125,30 +2888,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser(
         "init",
-        help="交互引导（日常请用 connect）：可顺带装 /xskill-helper",
+        help="本机引导：扫描 harness、转换轨迹、可选装 /xskill-helper",
     )
-    p_init.add_argument("address", nargs="?", default=None,
-                        help="server 地址 host:port（交互模式留空会询问）")
-    p_init.add_argument("--token", default=None,
-                        help="join token（server 启动时打印；交互模式留空会询问）")
-    p_init.add_argument("--name", default=None, metavar="EMPLOYEE_ID",
-                        help="工号/用户 ID（推荐填，跨设备保持身份一致）")
-    p_init.add_argument("--label", default="",
-                        help="本 client 可读标签（默认主机名）")
-    p_init.add_argument("--use-proxy", action="store_true",
-                        help="经系统/环境代理连 server（默认直连，绕开公司 SWG 代理）")
-    p_init.add_argument("--foreground", action="store_true",
-                        help="前台阻塞跑守护循环（默认交给操作系统后台常驻）")
-    p_init.add_argument("--no-auto-update", action="store_true", dest="no_auto_update",
-                        help="禁用自动更新检查")
-    p_init.add_argument("--skills-only", action="store_true", dest="skills_only",
-                        help="只装 /xskill-helper，不配置连接")
-    p_init.add_argument("--no-skill", action="store_true", dest="no_skill",
-                        help="只配置连接，不装 /xskill-helper")
-    p_init.add_argument("--force", action="store_true",
-                        help="已有常驻连接时停掉并重新配置")
     p_init.add_argument("-y", "--yes", action="store_true",
-                        help="非交互：缺必填项直接报错，不询问")
+                        help="非交互：扫描全部，并把 helper 装到已扫到的 harness")
+    p_init.add_argument("--skills-only", action="store_true", dest="skills_only",
+                        help="只装 /xskill-helper，不扫描转换轨迹")
+    p_init.add_argument("--no-skill", action="store_true", dest="no_skill",
+                        help="只扫描转换轨迹，不装 /xskill-helper")
+    p_init.add_argument("--force", action="store_true",
+                        help="已有本机索引时仍重新扫描转换")
+    p_init.add_argument("--harness", action="append", default=[],
+                        help="只把 /xskill-helper 装到这些生态（可重复）")
     p_init.add_argument("--target-root", default=None,
                         help="[测试/隔离] 安装与探测的 HOME 根（默认真实 HOME）")
 
@@ -2222,10 +2973,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="htop 式整屏刷新（每 2s）")
 
     p_read = sub.add_parser(
-        "read", help="批量从指定位置读取 db 文件并入库（ngagent/opencode）",
+        "read",
+        help="把 ngagent、opencode 的 db 桥接入库",
     )
-    p_read.add_argument("path", type=str,
-                        help="db 文件，或包含 db 文件的目录")
+    p_read.add_argument("path", help="db 文件或目录")
     p_read.add_argument("--eco", default="ngagent",
                         choices=sorted(SQLITE_SPEC_BY_ECO),
                         help="db 所属生态（默认 ngagent）")
@@ -2315,7 +3066,7 @@ def main() -> int:
         if not args.path:
             parser.error(f"path is required for 'registry {args.registry_action}'")
 
-    # init 一站式引导：装 skill + connect，同样是瘦客户端侧，不碰 config.yaml。
+    # init 本机引导：扫 harness、转轨迹、可选装 helper，不碰 config.yaml。
     if args.command == "init":
         return cmd_init(args)
 
@@ -2338,6 +3089,18 @@ def main() -> int:
     # skillhub 搜索/下载/上传是瘦客户端侧（走 team server），不碰 config.yaml。
     if args.command == "search":
         return cmd_search(args)
+    if args.command == "traj":
+        if args.traj_action == "search":
+            return cmd_search_traj(args)
+        if args.traj_action == "read":
+            return cmd_read_traj(args)
+        parser.error("traj 需要 search 或 read")
+    if args.command == "atom":
+        if args.atom_action == "search":
+            return cmd_search_atom(args)
+        if args.atom_action == "read":
+            return cmd_read_atom(args)
+        parser.error("atom 需要 search 或 read")
     if args.command == "download":
         return cmd_download(args)
     if args.command == "upload":

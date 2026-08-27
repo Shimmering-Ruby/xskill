@@ -105,6 +105,7 @@ def test_unknown_or_failing_ecosystem_does_not_abort(
 
 def test_bundled_skill_documents_generate():
     from xskill.ecosystems.bundled_guide import bundled_xskill_source
+    from xskill.skill.frontmatter import parse
 
     skill_md = (bundled_xskill_source() / "SKILL.md").read_text(encoding="utf-8")
     assert "xskill generate" in skill_md
@@ -112,9 +113,42 @@ def test_bundled_skill_documents_generate():
     assert "xskill connect" in skill_md
     assert "name: xskill-helper" in skill_md
     assert "/xskill-helper" in skill_md
+    assert "teammates" in skill_md
+    assert "xskill traj search" in skill_md
+    assert "--local" in skill_md
+    assert "xskill init" in skill_md
     assert "hub.xskill.wiki" not in skill_md
     assert "dd7f641c16ced6d1db43e754055fd2c8" not in skill_md
-    assert "xskill init" not in skill_md
+
+    fm, _body = parse(skill_md)
+    desc = " ".join(str(fm["description"]).split())
+    # DeepSeek Harness catalogDescriptionMaxLength is 500; a longer
+    # description is truncated and the tail never reaches the model.
+    assert len(desc) <= 500
+    for token in (
+        "init", "connect", "generate", "search", "download", "upload",
+        "import", "traj search", "traj read", "--local", "upgrade", "debug",
+    ):
+        assert token in desc, f"description missing trigger cue: {token}"
+
+
+def test_install_respects_ecosystem_filter(
+        bundled_skill, install_recorder, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: [
+            {"ecosystem": "claude_code", "source": "/x", "bridge": "/y"},
+            {"ecosystem": "cursor", "source": "/c", "bridge": "/d"},
+        ],
+    )
+
+    installed = install_bundled_xskill_guide(
+        target_root=home, ecosystems=["cursor"],
+    )
+
+    assert installed == ["cursor"]
+    assert [row[0] for row in install_recorder] == ["cursor"]
 
 
 def test_no_detected_ecosystems_prints_skip(

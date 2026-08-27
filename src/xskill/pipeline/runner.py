@@ -2793,6 +2793,14 @@ class DirectoryWatcher:
         if new:
             self._stats["new_trajs"] += len(new)
             logger.info("[%s] discovered %d new", dir_path.name, len(new))
+        try:
+            from xskill.traj_search import refresh_session_index
+
+            refresh_session_index(dir_path)
+        except Exception:
+            logger.warning(
+                "session index refresh skipped for %s", dir_path, exc_info=True,
+            )
 
         # ── 提交 split 任务（discovered / updated → splitting）──
         # 需要 llm；缺则 traj 留在 discovered 等条件齐备。

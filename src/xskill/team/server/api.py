@@ -70,7 +70,8 @@ class _Ctx:
     """模块级上下文单例。init_team_context 填，端点读。
 
     这里**只放进程级资源/接线对象**（重启域）。纯配置开关（skill_slots /
-    ranked_slots / canary.probability / allow_anonymous_user）**刻意不放这里**
+    ranked_slots / canary.probability / allow_anonymous_user /
+    allow_read_others）**刻意不放这里**
     ——它们要热生效，由 ``live_manifest_tuning()`` / 端点内 ``config.*`` 每请求
     现取 live config，见 ``live_manifest_tuning`` 的 docstring。
     """
@@ -719,7 +720,17 @@ async def team_upload(
         # sha256 完整性校验已过（上面），落盘前再做一遍内容清洗：客户端桥接常把
         # 终端 ANSI 码 / 控制字符灌进 .md，会让 splitlines 行号错位、污染模型输入。
         clean = sanitize_trajectory_text(t.content)
-        (sessions_dir / f"{t.traj_id}.md").write_text(clean, encoding="utf-8")
+        md_path = sessions_dir / f"{t.traj_id}.md"
+        md_path.write_text(clean, encoding="utf-8")
+        try:
+            from xskill.traj_search import upsert_session_file
+
+            upsert_session_file(sessions_dir, md_path)
+        except Exception:
+            logger.warning(
+                "session index upsert failed traj_id=%s dir=%s",
+                t.traj_id, sessions_dir, exc_info=True,
+            )
         accepted.append(t.traj_id)
     logger.info("team upload from %s: %d accepted, %d rejected",
                 client_id, len(accepted), len(rejected))
@@ -1022,6 +1033,316 @@ def _team_skill_entry(skill_id: str, client_id: str) -> dict:
             status_code=404, detail=f"skill not found: {skill_id}",
         )
     return {"result": results[0]}
+
+
+def _team_search_session_dirs(names: str) -> tuple[list[str], list[tuple[str, Path]] | None, list[str]]:
+    from xskill.traj_search import (
+        iter_client_session_dirs,
+        parse_search_names,
+        resolve_named_session_dirs,
+    )
+
+    name_list = parse_search_names(names)
+    unknown: list[str] = []
+    if not name_list:
+        if _ctx.traj_root is None:
+            return name_list, None, unknown
+        return name_list, iter_client_session_dirs(_ctx.traj_root), unknown
+    if _ctx.client_registry is None or _ctx.traj_root is None:
+        raise HTTPException(
+            status_code=503, detail="team context not initialized",
+        )
+    dataset_dirs, unknown = resolve_named_session_dirs(
+        name_list,
+        traj_root=_ctx.traj_root,
+        find_client_id=_ctx.client_registry.find_by_user_name,
+        dir_name_for=_ctx.client_registry.dir_name_for,
+    )
+    return name_list, dataset_dirs, unknown
+
+
+def _team_read_session_dirs(
+    names: str, client_id: str,
+) -> tuple[list[str], list[tuple[str, Path]] | None, list[str]]:
+    """read 的目录范围：默认只给调用者自己；读他人需 allow_read_others。"""
+    from xskill.api import app as app_mod
+    from xskill.config import allow_read_others
+    from xskill.traj_search import parse_search_names
+
+    if allow_read_others(app_mod._config or {}):
+        return _team_search_session_dirs(names)
+    if _ctx.client_registry is None or _ctx.traj_root is None:
+        raise HTTPException(
+            status_code=503, detail="team context not initialized",
+        )
+    own_user = _ctx.client_registry.user_name_for(client_id)
+    own_dir = _ctx.client_registry.dir_name_for(client_id)
+    requested = parse_search_names(names)
+    for name in requested:
+        other_id = _ctx.client_registry.find_by_user_name(name)
+        if other_id == client_id:
+            continue
+        if name in (own_user, own_dir, client_id):
+            continue
+        raise HTTPException(status_code=403, detail="others_read_disabled")
+    sessions = _ctx.traj_root / "clients" / own_dir / "sessions"
+    label = own_user or own_dir
+    return requested, [(label, sessions)], []
+
+
+@router.get("/trajectories/search")
+def team_trajectories_search(
+    query: str = "",
+    limit: int = 30,
+    page: int = 1,
+    names: str = "",
+    cards: str = "",
+    ids: str = "",
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> dict:
+    """全文检索已上传轨迹；cards=1 时返回卡片文本。"""
+    _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    cleaned = (query or "").strip()
+    id_list = [part for part in str(ids or "").replace(",", " ").split() if part]
+    want_cards = str(cards or "").strip().lower() in {"1", "true", "yes"}
+    if not cleaned and not id_list:
+        raise HTTPException(status_code=400, detail="empty query")
+    bounded_page = max(1, int(page or 1))
+    from xskill.traj_browse import (
+        CARDS_MAX,
+        LIST_PAGE,
+        find_query_hits,
+        format_cards,
+        iter_traj_md,
+        listing_rows,
+        page_slice,
+    )
+
+    name_list, dataset_dirs, unknown = _team_search_session_dirs(names)
+    dirs = dataset_dirs if dataset_dirs is not None else []
+    if id_list and not want_cards:
+        raise HTTPException(status_code=400, detail="ids requires cards=1")
+    try:
+        if id_list:
+            ordered_ids = id_list
+            matches = []
+        elif name_list and not dirs:
+            ordered_ids = []
+            matches = []
+        else:
+            matches = find_query_hits(cleaned, dataset_dirs=dirs)
+            ordered_ids = [hit.traj_id for hit in matches]
+        if want_cards:
+            size = CARDS_MAX
+            shown_ids = page_slice(ordered_ids, bounded_page, size)
+            leftover = max(
+                0, len(ordered_ids) - ((bounded_page - 1) * size + len(shown_ids)),
+            )
+            text = format_cards(
+                shown_ids, dataset_dirs=dirs, leftover=leftover,
+                query=cleaned, page=bounded_page,
+            )
+            return {
+                "text": text,
+                "results": [{"traj_id": item} for item in shown_ids],
+                "count": len(shown_ids),
+                "meta": {
+                    "unknown_names": unknown,
+                    "total": len(ordered_ids),
+                    "page": bounded_page,
+                    "page_size": size,
+                    "corpus_empty": (
+                        False if name_list and not dirs
+                        else not list(iter_traj_md(dirs))
+                    ),
+                },
+            }
+        size = max(1, min(int(limit or LIST_PAGE), LIST_PAGE))
+        shown = listing_rows(page_slice(matches, bounded_page, size))
+    except Exception:
+        request_id = f"traj-search-{secrets.token_hex(8)}"
+        server_logger.exception(
+            "team trajectory search failed request_id=%s query_length=%d",
+            request_id, len(cleaned),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="trajectory search failed",
+        ) from None
+    return {
+        "results": shown,
+        "count": len(shown),
+        "meta": {
+            "unknown_names": unknown,
+            "total": len(matches),
+            "page": bounded_page,
+            "page_size": size,
+            "corpus_empty": (
+                False if name_list and not dirs
+                else not list(iter_traj_md(dirs))
+            ),
+        },
+    }
+
+
+@router.get("/atoms/search")
+def team_atoms_search(
+    query: str,
+    limit: int = 5,
+    names: str = "",
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> dict:
+    """检索团队成员已提取的原子任务（向量与 BM25 混合检索）。"""
+    _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    cleaned = (query or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="empty query")
+    bounded_limit = max(1, min(int(limit), 20))
+    from xskill.traj_search import search_indexed_atoms
+
+    name_list, dataset_dirs, unknown = _team_search_session_dirs(names)
+    try:
+        if name_list and not dataset_dirs:
+            results = []
+        else:
+            results = search_indexed_atoms(
+                cleaned, top_k=bounded_limit, dataset_dirs=dataset_dirs,
+            )
+    except Exception:
+        request_id = f"atom-search-{secrets.token_hex(8)}"
+        server_logger.exception(
+            "team atom search failed request_id=%s query_length=%d",
+            request_id, len(cleaned),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="atom search failed",
+        ) from None
+    if name_list:
+        corpus_empty = (
+            not results
+            and not unknown
+            and not any(path.is_dir() for _user, path in (dataset_dirs or []))
+        )
+    else:
+        from xskill.pipeline.registry import all_index_paths
+
+        corpus_empty = not results and not all_index_paths()
+    return {
+        "results": results,
+        "count": len(results),
+        "meta": {
+            "unknown_names": unknown,
+            "corpus_empty": corpus_empty,
+        },
+    }
+
+
+def _team_read_payload(
+    *,
+    kind: str,
+    target: str,
+    offset_start: int | None,
+    offset_end: int | None,
+    names: str,
+    client_id: str,
+) -> dict:
+    from xskill.traj_read import (
+        parse_read_offsets,
+        read_atom,
+        read_trajectory,
+    )
+
+    start, end, offset_error = parse_read_offsets(offset_start, offset_end)
+    if offset_error:
+        raise HTTPException(status_code=400, detail=offset_error)
+    name_list, dataset_dirs, unknown = _team_read_session_dirs(names, client_id)
+    if name_list and not dataset_dirs:
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        if kind == "atom":
+            payload = read_atom(
+                target,
+                offset_start=start,
+                offset_end=end,
+                dataset_dirs=dataset_dirs,
+            )
+        else:
+            payload = read_trajectory(
+                target,
+                offset_start=start,
+                offset_end=end,
+                dataset_dirs=dataset_dirs,
+            )
+    except Exception:
+        request_id = f"{kind}-read-{secrets.token_hex(8)}"
+        server_logger.exception(
+            "team %s read failed request_id=%s target_length=%d",
+            kind, request_id, len(target),
+        )
+        raise HTTPException(status_code=500, detail=f"{kind} read failed") from None
+    if payload is None:
+        raise HTTPException(status_code=404, detail="not found")
+    if payload["offset_start"] >= payload["total_end"] and payload["total_lines"] > 0:
+        raise HTTPException(status_code=400, detail="offset out of range")
+    return {
+        "result": payload,
+        "meta": {"unknown_names": unknown},
+    }
+
+
+@router.get("/trajectories/read")
+def team_trajectories_read(
+    traj_id: str,
+    offset_start: int | None = None,
+    offset_end: int | None = None,
+    names: str = "",
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> dict:
+    """按行号范围读取已上传的会话轨迹 Markdown 原文内容。"""
+    client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    cleaned = (traj_id or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="empty traj_id")
+    return _team_read_payload(
+        kind="traj",
+        target=cleaned,
+        offset_start=offset_start,
+        offset_end=offset_end,
+        names=names,
+        client_id=client_id,
+    )
+
+
+@router.get("/atoms/read")
+def team_atoms_read(
+    atom_id: str,
+    offset_start: int | None = None,
+    offset_end: int | None = None,
+    names: str = "",
+    x_xskill_token: str | None = Header(default=None),
+    x_xskill_client: str | None = Header(default=None),
+    x_xskill_version: str | None = Header(default=None),
+) -> dict:
+    """按 Atom 对应的行号区间读取轨迹原文内容。"""
+    client_id = _auth(x_xskill_token, x_xskill_client, x_xskill_version)
+    cleaned = (atom_id or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="empty atom_id")
+    return _team_read_payload(
+        kind="atom",
+        target=cleaned,
+        offset_start=offset_start,
+        offset_end=offset_end,
+        names=names,
+        client_id=client_id,
+    )
 
 
 @router.get("/skill_hub/search")
