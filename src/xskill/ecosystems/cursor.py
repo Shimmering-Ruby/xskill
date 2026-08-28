@@ -157,6 +157,24 @@ _CURSOR_TOOL_KEYS = (
     "target_file", "relative_workspace_path",
 )
 
+_CURSOR_USER_QUERY_RE = re.compile(
+    r"<user_query>\s*(.*?)\s*</user_query>",
+    re.DOTALL,
+)
+
+
+def _cursor_visible_user_text(text: str, limit: int = 4000) -> str:
+    """Cursor Agent 常把整份 skill 内联在 user 消息前，真正的问话在
+    ``<user_query>`` 里。截断前先抽出这段，否则 ``traj search --local``
+    只能扫到 skill 正文。
+    """
+    match = _CURSOR_USER_QUERY_RE.search(text)
+    if match:
+        query = " ".join(match.group(1).split()).strip()
+        if query:
+            return query[:limit]
+    return text[:limit]
+
 
 def _cursor_tool_snip(inp: dict[str, Any], limit: int = 160) -> str:
     """把工具入参收成短串，写进 md / timeline，给后面的卡片用。"""
@@ -260,11 +278,15 @@ def _adapt_cursor_transcripts_jsonl(content: str, metadata: dict) -> tuple[str, 
         if not body:
             continue
 
-        if role == "user" and not first_user_query:
-            first_user_query = body[:500]
+        if role == "user":
+            visible = _cursor_visible_user_text(body)
+            if not first_user_query:
+                first_user_query = visible[:500]
+        else:
+            visible = body[:2000]
 
         entry = {
-            "t": t, "role": role, "content": body[:2000],
+            "t": t, "role": role, "content": visible,
         }
         if pending_tools:
             entry["tools"] = pending_tools

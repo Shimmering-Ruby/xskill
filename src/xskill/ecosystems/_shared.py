@@ -870,6 +870,8 @@ class JsonlIngester:
 
     def run_once(self) -> list[dict]:
         """单轮扫盘 + 桥接（常驻 worker 每轮调用，source 唯一）。"""
+        if self.target_traj_dir is not None and not self._seen:
+            self._seen = _scan_seen_sessions(self.target_traj_dir)
         submitted = self.scan_and_bridge(
             target_traj_dir=self.target_traj_dir,
             home_root=self.home_root,
@@ -1024,6 +1026,7 @@ class JsonlIngester:
             result = submit_trajectory(
                 content=content,
                 format=self.spec.adapter_format,
+                metadata={"session_id": sid},
                 traj_id=traj_id,
                 traj_dir=target_traj_dir,
             )

@@ -132,6 +132,22 @@ class TestCursorAdapter:
         assert meta["total_turns"] == 0
         assert meta["tool_names"] == []
 
+    def test_adapter_keeps_user_query_after_inlined_skill(self):
+        dump = "SKILL " + ("x" * 3000)
+        text = (
+            f"<manually_attached_skills>\n{dump}\n</manually_attached_skills>\n"
+            "<timestamp>Friday, Aug 28, 2026</timestamp>\n"
+            "<user_query>\n问题第215号给出这样一个问题单\n</user_query>"
+        )
+        raw = json.dumps({
+            "role": "user",
+            "message": {"content": [{"type": "text", "text": text}]},
+        })
+        md, meta = adapt_trajectory(raw + "\n", "cursor_transcripts_jsonl")
+        assert "问题第215号给出这样一个问题单" in md
+        assert meta["query"] == "问题第215号给出这样一个问题单"
+        assert "xxxxx" not in md
+
     def test_adapter_skips_malformed_lines(self):
         bad = "{not json\n" + json.dumps({
             "role": "user", "message": {"content": [{"type": "text", "text": "ok"}]},
@@ -197,6 +213,20 @@ class TestIngestCursorSessions:
             "traj_cursor_c-proj-A_aaaa1111",
             "traj_cursor_c-proj-B_bbbb2222",
         }
+
+    def test_run_once_restores_seen_and_is_idempotent(self, tmp_path, fixture_content):
+        _place_fixture_in_cursor_home(tmp_path, fixture_content)
+        target = tmp_path / "traj"
+        first = JsonlIngester(
+            CURSOR_SPEC, target_traj_dir=target, home_root=tmp_path,
+            settle_seconds=0.0,
+        ).run_once()
+        assert len(first) == 1
+        second = JsonlIngester(
+            CURSOR_SPEC, target_traj_dir=target, home_root=tmp_path,
+            settle_seconds=0.0,
+        ).run_once()
+        assert second == []
 
     def test_ingest_finds_nested_transcript_layout(self, tmp_path, fixture_content):
         transcripts = (
