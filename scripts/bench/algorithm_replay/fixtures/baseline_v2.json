@@ -1,0 +1,182 @@
+{
+  "schema_version": 2,
+  "suite_id": "atom-boundary-score-baseline-v2",
+  "metric_config": {
+    "routing_recall_k": 2,
+    "atom_alignment_min_iou": 0.5,
+    "boundary_score_thresholds": [0.0, 0.5, 0.8]
+  },
+  "run_manifest": {
+    "repository_revision": "0d7edff1ba136866badd00e06f0cb817dd7abb53",
+    "model": "recorded-fixture",
+    "harness": "offline-replay",
+    "prompt_fingerprint": "sha256:9e81d645fc03bcb0c1eed0a281f0032b2c16c79a2a99510b85910213107bd909",
+    "seed": 0,
+    "generation_config": {
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "max_output_tokens": 1024
+    },
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cost_usd": 0.0,
+    "generated_at": "2026-08-28T00:00:00Z"
+  },
+  "skill_catalog": [
+    "python-file-grouping",
+    "python-file-utility-scripts",
+    "sqlite-migration",
+    "sqlite-validation"
+  ],
+  "cases": [
+    {
+      "case_id": "zh-correct-boundary-and-routing",
+      "expected_language": "zh",
+      "line_count": 8,
+      "source_lines": [
+        "user: 请迁移 SQLite 表结构。",
+        "assistant: 我会先检查旧表。",
+        "tool: 旧表使用单列主键。",
+        "assistant: 字段和历史数据已经迁移。",
+        "user: 现在验证迁移结果。",
+        "assistant: 我会检查联合主键。",
+        "tool: 约束和索引符合预期。",
+        "assistant: 迁移结果验证完成。"
+      ],
+      "scorable_ranges": [[1, 9]],
+      "gold_atoms": [
+        {
+          "id": "gold-zh-migrate",
+          "start_line": 1,
+          "end_line": 5,
+          "intent": "迁移 SQLite 表结构",
+          "summary": "检查旧表并完成无损迁移。",
+          "skills": ["sqlite-migration"],
+          "candidates": ["sqlite-migration", "sqlite-validation"]
+        },
+        {
+          "id": "gold-zh-validate",
+          "start_line": 5,
+          "end_line": 9,
+          "intent": "验证 SQLite 迁移结果",
+          "summary": "检查迁移后的约束和索引。",
+          "skills": ["sqlite-validation"],
+          "candidates": ["sqlite-validation", "sqlite-migration"]
+        }
+      ],
+      "predicted_atoms": [
+        {
+          "id": "pred-zh-migrate",
+          "start_line": 1,
+          "end_line": 5,
+          "intent": "迁移 SQLite 表结构",
+          "summary": "先完成旧表的无损迁移。",
+          "skills": ["sqlite-migration"],
+          "candidates": ["sqlite-migration", "sqlite-validation"]
+        },
+        {
+          "id": "pred-zh-validate",
+          "start_line": 5,
+          "end_line": 9,
+          "intent": "验证 SQLite 迁移结果",
+          "summary": "随后检查联合主键和索引。",
+          "skills": ["sqlite-validation"],
+          "candidates": ["sqlite-validation", "sqlite-migration"]
+        }
+      ],
+      "boundary_candidates": [
+        {
+          "line": 3,
+          "boundary_score": 0.3,
+          "selected": false,
+          "predicted_atom_id": null,
+          "algorithm_version": "synthetic-boundary-ranker-v1"
+        },
+        {
+          "line": 5,
+          "boundary_score": 0.8,
+          "selected": true,
+          "predicted_atom_id": "pred-zh-validate",
+          "algorithm_version": "synthetic-boundary-ranker-v1"
+        },
+        {
+          "line": 7,
+          "boundary_score": 0.8,
+          "selected": false,
+          "predicted_atom_id": null,
+          "algorithm_version": "synthetic-boundary-ranker-v1"
+        }
+      ]
+    },
+    {
+      "case_id": "en-false-boundary-and-routing-error",
+      "expected_language": "en",
+      "line_count": 8,
+      "source_lines": [
+        "user: Group the Python files by purpose.",
+        "assistant: I will inspect the modules.",
+        "tool: The package contains API and CLI modules.",
+        "assistant: I will keep those categories separate.",
+        "user: Put tests beside the matching category.",
+        "assistant: I will include tests in the same grouping.",
+        "tool: All files now have a category.",
+        "assistant: The grouping task is complete."
+      ],
+      "scorable_ranges": [[1, 9]],
+      "gold_atoms": [
+        {
+          "id": "gold-en-group",
+          "start_line": 1,
+          "end_line": 9,
+          "intent": "Group Python files by purpose",
+          "summary": "All turns refine one file-grouping task.",
+          "skills": ["python-file-grouping"],
+          "candidates": ["python-file-grouping", "python-file-utility-scripts"]
+        }
+      ],
+      "predicted_atoms": [
+        {
+          "id": "pred-en-group",
+          "start_line": 1,
+          "end_line": 5,
+          "intent": "Group Python modules",
+          "summary": "Group the package modules by purpose.",
+          "skills": ["python-file-grouping"],
+          "candidates": ["python-file-grouping", "python-file-utility-scripts"]
+        },
+        {
+          "id": "pred-en-helper",
+          "start_line": 5,
+          "end_line": 9,
+          "intent": "Create a Python file helper",
+          "summary": "Treat the follow-up as a separate utility task.",
+          "skills": ["python-file-utility-scripts"],
+          "candidates": ["python-file-utility-scripts", "python-file-grouping"]
+        }
+      ],
+      "boundary_candidates": [
+        {
+          "line": 3,
+          "boundary_score": 0.3,
+          "selected": false,
+          "predicted_atom_id": null,
+          "algorithm_version": "synthetic-boundary-ranker-v1"
+        },
+        {
+          "line": 5,
+          "boundary_score": 0.3,
+          "selected": true,
+          "predicted_atom_id": "pred-en-helper",
+          "algorithm_version": "synthetic-boundary-ranker-v1"
+        },
+        {
+          "line": 7,
+          "boundary_score": 0.1,
+          "selected": false,
+          "predicted_atom_id": null,
+          "algorithm_version": "synthetic-boundary-ranker-v1"
+        }
+      ]
+    }
+  ]
+}

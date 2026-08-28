@@ -8,17 +8,19 @@ the fixture and scores that immutable prediction against human-authored gold dat
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from scripts.bench.evaluate import pk, prf, score_case, window_diff
 
-
-SCHEMA_VERSION = 1
+LATEST_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, LATEST_SCHEMA_VERSION}
 SUPPORTED_LANGUAGES = {"en", "zh"}
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CODE_SPAN_RE = re.compile(r"`[^`]*`")
@@ -122,14 +124,96 @@ def _validate_atoms(
                 )
 
 
+def _validate_boundary_candidates(
+    candidates: Any,
+    *,
+    predicted_atoms: list[dict[str, Any]],
+    scorable_ranges: list[tuple[int, int]],
+    context: str,
+) -> None:
+    if not isinstance(candidates, list):
+        raise ReplayValidationError(f"{context}: expected a list")
+    predicted_by_id = {atom["id"]: atom for atom in predicted_atoms}
+    expected_predicted_ids = {
+        atom["id"]
+        for atom in predicted_atoms
+        if any(start < atom["start_line"] < end for start, end in scorable_ranges)
+    }
+    seen_lines: set[int] = set()
+    selected_predicted_ids: set[str] = set()
+    for index, candidate in enumerate(candidates):
+        candidate_context = f"{context}[{index}]"
+        if not isinstance(candidate, dict):
+            raise ReplayValidationError(f"{candidate_context}: expected an object")
+        line = _require(candidate, "line", int, candidate_context)
+        if not any(start < line < end for start, end in scorable_ranges):
+            raise ReplayValidationError(
+                f"{candidate_context}.line: expected an internal scorable line"
+            )
+        if line in seen_lines:
+            raise ReplayValidationError(
+                f"{candidate_context}.line: duplicate candidate line {line}"
+            )
+        seen_lines.add(line)
+        score = candidate.get("boundary_score")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not 0 <= score <= 1
+        ):
+            raise ReplayValidationError(
+                f"{candidate_context}.boundary_score must satisfy 0 <= value <= 1"
+            )
+        algorithm_version = _require(
+            candidate, "algorithm_version", str, candidate_context
+        )
+        if not algorithm_version:
+            raise ReplayValidationError(
+                f"{candidate_context}.algorithm_version must not be empty"
+            )
+        selected = _require(candidate, "selected", bool, candidate_context)
+        predicted_atom_id = candidate.get("predicted_atom_id")
+        if not selected:
+            if predicted_atom_id is not None:
+                raise ReplayValidationError(
+                    f"{candidate_context}.predicted_atom_id must be null when rejected"
+                )
+            continue
+        if not isinstance(predicted_atom_id, str) or not predicted_atom_id:
+            raise ReplayValidationError(
+                f"{candidate_context}.predicted_atom_id must identify a selected Atom"
+            )
+        if predicted_atom_id not in predicted_by_id:
+            raise ReplayValidationError(
+                f"{candidate_context}.predicted_atom_id: unknown Atom {predicted_atom_id!r}"
+            )
+        if predicted_by_id[predicted_atom_id]["start_line"] != line:
+            raise ReplayValidationError(
+                f"{candidate_context}: selected line must equal the Atom start line"
+            )
+        if predicted_atom_id in selected_predicted_ids:
+            raise ReplayValidationError(
+                f"{candidate_context}.predicted_atom_id: duplicate selected Atom"
+            )
+        selected_predicted_ids.add(predicted_atom_id)
+    if selected_predicted_ids != expected_predicted_ids:
+        missing = sorted(expected_predicted_ids - selected_predicted_ids)
+        unexpected = sorted(selected_predicted_ids - expected_predicted_ids)
+        raise ReplayValidationError(
+            f"{context}: selected candidate mappings do not match internal predicted "
+            f"Atoms; missing={missing}, unexpected={unexpected}"
+        )
+
+
 def validate_suite(suite: Any) -> None:
     """Fail loudly on malformed or unsupported replay data."""
     if not isinstance(suite, dict):
         raise ReplayValidationError("suite: expected an object")
     version = _require(suite, "schema_version", int, "suite")
-    if version != SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ReplayValidationError(
-            f"suite.schema_version: supported={SCHEMA_VERSION}, got={version}"
+            "suite.schema_version: "
+            f"supported={sorted(SUPPORTED_SCHEMA_VERSIONS)}, got={version}"
         )
     _require(suite, "suite_id", str, "suite")
     config = _require(suite, "metric_config", dict, "suite")
@@ -145,6 +229,28 @@ def validate_suite(suite: Any) -> None:
         raise ReplayValidationError(
             "suite.metric_config.atom_alignment_min_iou must satisfy 0 < value <= 1"
         )
+    if version >= 2:
+        thresholds = _require(
+            config, "boundary_score_thresholds", list, "suite.metric_config"
+        )
+        if not thresholds:
+            raise ReplayValidationError(
+                "suite.metric_config.boundary_score_thresholds must not be empty"
+            )
+        if any(
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, float))
+            or not 0 <= threshold <= 1
+            for threshold in thresholds
+        ):
+            raise ReplayValidationError(
+                "suite.metric_config.boundary_score_thresholds must contain numbers "
+                "satisfying 0 <= value <= 1"
+            )
+        if any(left >= right for left, right in zip(thresholds, thresholds[1:])):
+            raise ReplayValidationError(
+                "suite.metric_config.boundary_score_thresholds must be strictly increasing"
+            )
 
     manifest = _require(suite, "run_manifest", dict, "suite")
     for key in (
@@ -208,6 +314,7 @@ def validate_suite(suite: Any) -> None:
     if not cases:
         raise ReplayValidationError("suite.cases must not be empty")
     seen_case_ids: set[str] = set()
+    boundary_algorithm_versions: set[str] = set()
     for index, case in enumerate(cases):
         context = f"suite.cases[{index}]"
         if not isinstance(case, dict):
@@ -253,12 +360,30 @@ def validate_suite(suite: Any) -> None:
             context=f"{context}.gold_atoms",
             require_non_overlapping=True,
         )
+        predicted_atoms = _require(case, "predicted_atoms", list, context)
         _validate_atoms(
-            _require(case, "predicted_atoms", list, context),
+            predicted_atoms,
             line_count=line_count,
             skill_catalog=skill_catalog,
             context=f"{context}.predicted_atoms",
             require_non_overlapping=False,
+        )
+        if version >= 2:
+            boundary_candidates = _require(
+                case, "boundary_candidates", list, context
+            )
+            _validate_boundary_candidates(
+                boundary_candidates,
+                predicted_atoms=predicted_atoms,
+                scorable_ranges=parsed_ranges,
+                context=f"{context}.boundary_candidates",
+            )
+            boundary_algorithm_versions.update(
+                candidate["algorithm_version"] for candidate in boundary_candidates
+            )
+    if version >= 2 and len(boundary_algorithm_versions) != 1:
+        raise ReplayValidationError(
+            "suite.boundary_candidates must contain exactly one algorithm_version"
         )
 
 
@@ -324,6 +449,57 @@ def _prf(gold: set[Any], predicted: set[Any]) -> dict[str, float | int]:
     }
 
 
+def _binary_auroc(examples: list[tuple[float, bool]]) -> float | None:
+    positive_count = sum(label for _score, label in examples)
+    negative_count = len(examples) - positive_count
+    if not positive_count or not negative_count:
+        return None
+    ranked = sorted(examples, key=lambda item: item[0])
+    positive_rank_sum = 0.0
+    index = 0
+    while index < len(ranked):
+        group_end = index + 1
+        while group_end < len(ranked) and ranked[group_end][0] == ranked[index][0]:
+            group_end += 1
+        average_rank = ((index + 1) + group_end) / 2
+        positive_rank_sum += average_rank * sum(
+            label for _score, label in ranked[index:group_end]
+        )
+        index = group_end
+    area = positive_rank_sum - positive_count * (positive_count + 1) / 2
+    return round(area / (positive_count * negative_count), 6)
+
+
+def _routing_error_thresholds(
+    examples: list[tuple[float, bool]], thresholds: list[float]
+) -> list[dict[str, Any]]:
+    ordered = sorted(examples, key=lambda item: item[0])
+    scores = [score for score, _error in ordered]
+    prefix_errors = [0]
+    for _score, error in ordered:
+        prefix_errors.append(prefix_errors[-1] + int(error))
+    total = len(ordered)
+    total_errors = prefix_errors[-1]
+    results = []
+    for threshold in thresholds:
+        retained_start = bisect.bisect_left(scores, threshold)
+        retained = total - retained_start
+        errors = total_errors - prefix_errors[retained_start]
+        results.append(
+            {
+                "minimum_score": threshold,
+                "eligible": total,
+                "retained": retained,
+                "coverage": round(retained / total, 6) if total else None,
+                "routing_errors": errors,
+                "routing_error_rate": round(errors / retained, 6)
+                if retained
+                else None,
+            }
+        )
+    return results
+
+
 def detect_language(text: str) -> str:
     """Detect the dominant natural-language script for English/Chinese fixtures.
 
@@ -343,7 +519,11 @@ def detect_language(text: str) -> str:
 
 
 def _case_counts(
-    case: dict[str, Any], recall_k: int, alignment_min_iou: float
+    case: dict[str, Any],
+    recall_k: int,
+    alignment_min_iou: float,
+    *,
+    include_boundary_scores: bool,
 ) -> dict[str, Any]:
     gold_atoms = case["gold_atoms"]
     predicted_atoms = case["predicted_atoms"]
@@ -399,7 +579,7 @@ def _case_counts(
         for skill in atom["skills"]
     }
 
-    return {
+    counts = {
         "boundary_true_positive": boundary["tp"],
         "boundary_false_positive": boundary["fp"],
         "boundary_false_negative": boundary["fn"],
@@ -427,6 +607,27 @@ def _case_counts(
         "candidate_relations": candidate_relations,
         "multi_skill_gold": multi_skill_gold,
     }
+    if include_boundary_scores:
+        gold_by_id = {atom["id"]: atom for atom in gold_atoms}
+        predicted_by_id = {atom["id"]: atom for atom in predicted_atoms}
+        boundary_score_examples = []
+        routing_error_examples = []
+        for candidate in case["boundary_candidates"]:
+            score = float(candidate["boundary_score"])
+            boundary_score_examples.append(
+                (score, candidate["line"] in gold_boundaries)
+            )
+            if not candidate["selected"]:
+                continue
+            predicted = predicted_by_id[candidate["predicted_atom_id"]]
+            gold_id = alignment[predicted["id"]]
+            routing_error = gold_id is None or set(predicted["skills"]) != set(
+                gold_by_id[gold_id]["skills"]
+            )
+            routing_error_examples.append((score, routing_error))
+        counts["boundary_score_examples"] = boundary_score_examples
+        counts["routing_error_examples"] = routing_error_examples
+    return counts
 
 
 def _safe_ratio(numerator: int, denominator: int, *, empty: float = 1.0) -> float:
@@ -444,7 +645,9 @@ def _macro_prf(case_counts: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def _public_metrics(counts: dict[str, Any]) -> dict[str, Any]:
+def _public_metrics(
+    counts: dict[str, Any], boundary_score_thresholds: list[float] | None = None
+) -> dict[str, Any]:
     precision, recall, f1 = prf(
         counts["boundary_true_positive"],
         counts["boundary_false_positive"],
@@ -462,7 +665,7 @@ def _public_metrics(counts: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     routing = _prf(counts["gold_relations"], counts["predicted_relations"])
-    return {
+    metrics = {
         "boundary": boundary,
         "segmentation": {
             "pk": round(
@@ -492,9 +695,33 @@ def _public_metrics(counts: dict[str, Any]) -> dict[str, Any]:
             len(counts["multi_skill_gold"]),
         ),
     }
+    if boundary_score_thresholds is not None:
+        boundary_examples = counts["boundary_score_examples"]
+        routing_examples = counts["routing_error_examples"]
+        positive_count = sum(label for _score, label in boundary_examples)
+        routing_error_count = sum(error for _score, error in routing_examples)
+        metrics["boundary_score"] = {
+            "candidates": len(boundary_examples),
+            "positive": positive_count,
+            "negative": len(boundary_examples) - positive_count,
+            "auroc": _binary_auroc(boundary_examples),
+        }
+        metrics["routing_error_association"] = {
+            "selected_candidates": len(routing_examples),
+            "routing_errors": routing_error_count,
+            "low_score_error_auroc": _binary_auroc(
+                [(1 - score, error) for score, error in routing_examples]
+            ),
+            "thresholds": _routing_error_thresholds(
+                routing_examples, boundary_score_thresholds
+            ),
+        }
+    return metrics
 
 
-def _merge_counts(all_counts: list[dict[str, Any]]) -> dict[str, Any]:
+def _merge_counts(
+    all_counts: list[dict[str, Any]], *, include_boundary_scores: bool
+) -> dict[str, Any]:
     merged: dict[str, Any] = {
         "boundary_true_positive": 0,
         "boundary_false_positive": 0,
@@ -521,11 +748,17 @@ def _merge_counts(all_counts: list[dict[str, Any]]) -> dict[str, Any]:
         "candidate_relations",
         "multi_skill_gold",
     }
+    if include_boundary_scores:
+        merged["boundary_score_examples"] = []
+        merged["routing_error_examples"] = []
+    list_keys = {"boundary_score_examples", "routing_error_examples"}
     for index, counts in enumerate(all_counts):
         prefix = f"case-{index}:"
         for key, value in counts.items():
             if key in set_keys:
                 merged[key].update((prefix, item) for item in value)
+            elif key in list_keys:
+                merged[key].extend(value)
             else:
                 merged[key] += value
     return merged
@@ -536,28 +769,55 @@ def evaluate_suite(suite: dict[str, Any]) -> dict[str, Any]:
     validate_suite(suite)
     recall_k = suite["metric_config"]["routing_recall_k"]
     alignment_min_iou = suite["metric_config"]["atom_alignment_min_iou"]
+    include_boundary_scores = suite["schema_version"] >= 2
+    boundary_score_thresholds = (
+        suite["metric_config"]["boundary_score_thresholds"]
+        if include_boundary_scores
+        else None
+    )
     case_counts = [
-        _case_counts(case, recall_k, alignment_min_iou) for case in suite["cases"]
+        _case_counts(
+            case,
+            recall_k,
+            alignment_min_iou,
+            include_boundary_scores=include_boundary_scores,
+        )
+        for case in suite["cases"]
     ]
     cases = [
         {
             "case_id": case["case_id"],
             "expected_language": case["expected_language"],
-            "metrics": _public_metrics(counts),
+            "metrics": _public_metrics(counts, boundary_score_thresholds),
         }
         for case, counts in zip(suite["cases"], case_counts)
     ]
     report = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": suite["schema_version"],
         "suite_id": suite["suite_id"],
         "run_manifest": suite["run_manifest"],
         "metric_config": suite["metric_config"],
         "metrics": {
-            **_public_metrics(_merge_counts(case_counts)),
+            **_public_metrics(
+                _merge_counts(
+                    case_counts, include_boundary_scores=include_boundary_scores
+                ),
+                boundary_score_thresholds,
+            ),
             "routing_macro": _macro_prf(case_counts),
         },
         "cases": cases,
     }
+    if include_boundary_scores:
+        report["boundary_algorithm_version"] = next(
+            iter(
+                {
+                    candidate["algorithm_version"]
+                    for case in suite["cases"]
+                    for candidate in case["boundary_candidates"]
+                }
+            )
+        )
     canonical = json.dumps(report, ensure_ascii=False, sort_keys=True).encode("utf-8")
     report["report_sha256"] = hashlib.sha256(canonical).hexdigest()
     return report
@@ -568,35 +828,51 @@ def render_text(report: dict[str, Any]) -> str:
     metrics = report["metrics"]
     boundary = metrics["boundary"]
     routing = metrics["routing_micro"]
-    return "\n".join(
+    lines = [
+        f"suite: {report['suite_id']}",
+        f"revision: {report['run_manifest']['repository_revision']}",
         (
-            f"suite: {report['suite_id']}",
-            f"revision: {report['run_manifest']['repository_revision']}",
+            "boundary: "
+            f"P={boundary['precision']:.3f} "
+            f"R={boundary['recall']:.3f} F1={boundary['f1']:.3f}"
+        ),
+        (
+            f"coverage={metrics['coverage']:.3f} "
+            f"overlap={metrics['overlap_rate']:.3f} "
+            f"duplicates={metrics['duplicate_rate']:.3f}"
+        ),
+        f"language_consistency={metrics['language_consistency']:.3f}",
+        (
+            "routing: "
+            f"P={routing['precision']:.3f} "
+            f"R={routing['recall']:.3f} F1={routing['f1']:.3f}"
+        ),
+        (
+            f"routing_recall@{report['metric_config']['routing_recall_k']}="
+            f"{metrics['routing_recall_at_k']:.3f} "
+            f"multi_skill_retention="
+            f"{metrics['multi_skill_relation_retention']:.3f}"
+        ),
+    ]
+    if "boundary_score" in metrics:
+        score = metrics["boundary_score"]
+        association = metrics["routing_error_association"]
+        lines.extend(
             (
-                "boundary: "
-                f"P={boundary['precision']:.3f} "
-                f"R={boundary['recall']:.3f} F1={boundary['f1']:.3f}"
-            ),
-            (
-                f"coverage={metrics['coverage']:.3f} "
-                f"overlap={metrics['overlap_rate']:.3f} "
-                f"duplicates={metrics['duplicate_rate']:.3f}"
-            ),
-            f"language_consistency={metrics['language_consistency']:.3f}",
-            (
-                "routing: "
-                f"P={routing['precision']:.3f} "
-                f"R={routing['recall']:.3f} F1={routing['f1']:.3f}"
-            ),
-            (
-                f"routing_recall@{report['metric_config']['routing_recall_k']}="
-                f"{metrics['routing_recall_at_k']:.3f} "
-                f"multi_skill_retention="
-                f"{metrics['multi_skill_relation_retention']:.3f}"
-            ),
-            f"report_sha256={report['report_sha256']}",
+                (
+                    f"boundary_score: candidates={score['candidates']} "
+                    f"AUROC={score['auroc']}"
+                ),
+                (
+                    "routing_error_association: "
+                    f"selected={association['selected_candidates']} "
+                    f"errors={association['routing_errors']} "
+                    f"low_score_AUROC={association['low_score_error_auroc']}"
+                ),
+            )
         )
-    )
+    lines.append(f"report_sha256={report['report_sha256']}")
+    return "\n".join(lines)
 
 
 def _parser() -> argparse.ArgumentParser:
