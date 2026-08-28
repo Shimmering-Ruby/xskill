@@ -196,7 +196,9 @@ _KNOWN_ECOSYSTEMS: list[dict] = [
     },
     {
         "id": "cursor",
-        # Cursor 写 <home>/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>.jsonl
+        # Cursor Agent 写
+        # <home>/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>/<sid>.jsonl
+        # （旧布局是同目录下扁平的 <sid>.jsonl）
         "source_subpath": ".cursor/projects",
         "bridge_subpath": ".xskill/cursor_sessions",
         "source_kind": "dir",

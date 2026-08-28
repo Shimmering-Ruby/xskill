@@ -315,8 +315,9 @@ def ingest_cursor_sessions(
 ) -> list[dict]:
     """Bridge Cursor agent-transcripts JSONLs into xskill's trajectory directory.
 
-    Scans ``<home_root>/.cursor/projects/<encoded-cwd>/agent-transcripts/*.jsonl``
-    and submits any session whose stem is not in ``seen_sessions`` as a new
+    Scans ``<home_root>/.cursor/projects/<encoded-cwd>/agent-transcripts/``
+    for both ``<sid>.jsonl`` and ``<sid>/<sid>.jsonl``, and submits any
+    session whose stem is not in ``seen_sessions`` as a new
     trajectory under ``target_traj_dir`` using the
     ``cursor_transcripts_jsonl`` adapter.
     """

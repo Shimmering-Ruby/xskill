@@ -126,6 +126,92 @@ def _local_corpus_empty(home_root: Path) -> bool:
     return True
 
 
+def _jsonl_spec_for(eco: str):
+    from xskill.ecosystems import (
+        CC_SPEC,
+        CODEX_SPEC,
+        CURSOR_SPEC,
+        DSH_SPEC,
+        NGA3_SPEC,
+        OPENCLAW_SPEC,
+    )
+
+    specs = {
+        "claude_code": CC_SPEC,
+        "codex": CODEX_SPEC,
+        "nga3": NGA3_SPEC,
+        "cursor": CURSOR_SPEC,
+        "openclaw": OPENCLAW_SPEC,
+        "deepseek_harness": DSH_SPEC,
+    }
+    return specs.get(eco)
+
+
+def _bridge_index_empty(bridge: Path) -> bool:
+    from xskill.traj_search import session_index_count
+
+    return session_index_count(Path(bridge)) <= 0
+
+
+def _jsonl_needs_ingest(eco: str, home_root: Path, bridge: Path) -> bool:
+    spec = _jsonl_spec_for(eco)
+    if spec is None:
+        return _bridge_index_empty(bridge)
+    glob = spec.sessions_glob
+    root = spec.sessions_path(home_root)
+    if not glob or not root.is_dir():
+        return False
+    source_n = 0
+    for _path in root.glob(glob):
+        source_n += 1
+        if source_n == 1 and _bridge_index_empty(bridge):
+            return True
+    if source_n == 0:
+        return False
+    from xskill.traj_search import session_index_count
+
+    return session_index_count(Path(bridge)) < source_n
+
+
+def pending_local_ingest_ecosystems(home_root: Path) -> list[str]:
+    """源里已有会话、对应 ``*_sessions`` 还缺可检索条目的 harness。"""
+    from xskill.ecosystems import detect_known_ecosystems
+
+    pending: list[str] = []
+    for detection in detect_known_ecosystems(home_root=home_root):
+        eco = str(detection["ecosystem"])
+        if not _jsonl_needs_ingest(eco, home_root, Path(detection["bridge"])):
+            continue
+        pending.append(eco)
+    return pending
+
+
+def _merge_harness_names(old: list | None, new: list | None) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw in list(old or []) + list(new or []):
+        name = str(raw)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        merged.append(name)
+    return merged
+
+
+def _merge_init_state(old: dict | None, report: dict) -> dict:
+    bridged = dict((old or {}).get("bridged") or {})
+    bridged.update(report.get("bridged") or {})
+    return {
+        "version": 1,
+        "harnesses": _merge_harness_names(
+            (old or {}).get("harnesses"),
+            report.get("harnesses"),
+        ),
+        "bridged": bridged,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def ingest_detected_sessions_once(
     home_root: Path | str | None = None,
     ecosystems: list[str] | None = None,
@@ -176,7 +262,9 @@ def ensure_local_sessions(
 ) -> dict[str, Any]:
     """确保本机具备可检索的会话数据与索引。
 
-    若已完成初始化且索引有效则自动跳过；在首次运行或强制指定 force 时重新扫描并生成。
+    已初始化且每个已探测到的 harness 都有索引时跳过。某个 harness 的源
+    目录里已经有会话、对应 ``*_sessions`` 仍是空的（例如 Cursor Agent
+    嵌套 JSONL 第一次被旧 glob 漏掉），只补扫这些空档，不必 ``--force``。
     """
     if skip_if_server:
         from xskill.runtime import role
@@ -185,20 +273,22 @@ def ensure_local_sessions(
 
     root = Path(home_root).expanduser().resolve() if home_root else Path.home()
     state = load_local_init_state(root)
-    if state is not None and not force and not _local_corpus_empty(root):
-        return {
-            "ran": False,
-            "reason": "already",
-            "harnesses": list(state.get("harnesses") or []),
-        }
+    ecosystems: list[str] | None = None
+    reason = "scanned"
+    if state is not None and not force:
+        pending = pending_local_ingest_ecosystems(root)
+        if pending:
+            ecosystems = pending
+            reason = "filled_empty"
+        elif not _local_corpus_empty(root):
+            return {
+                "ran": False,
+                "reason": "already",
+                "harnesses": list(state.get("harnesses") or []),
+            }
 
-    report = ingest_detected_sessions_once(home_root=root)
-    payload = {
-        "version": 1,
-        "harnesses": report["harnesses"],
-        "bridged": report["bridged"],
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    report = ingest_detected_sessions_once(home_root=root, ecosystems=ecosystems)
+    payload = _merge_init_state(state, report)
     state_path = local_init_state_path(root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
@@ -206,6 +296,6 @@ def ensure_local_sessions(
         encoding="utf-8",
     )
     report["ran"] = True
-    report["reason"] = "scanned"
+    report["reason"] = reason
     report["state_path"] = str(state_path)
     return report

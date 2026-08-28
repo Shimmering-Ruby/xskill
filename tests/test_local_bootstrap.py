@@ -1,8 +1,37 @@
 """本机未 connect 时扫描 harness、转轨迹、建索引。"""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from xskill.ecosystems import local_bootstrap as lb
 from xskill.traj_search import upsert_session_file
+
+_CURSOR_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "cursor" / "sample_transcript.jsonl"
+)
+
+
+def _write_nested_cursor_transcript(home: Path, body: str | None = None) -> Path:
+    nested = (
+        home / ".cursor" / "projects" / "home-admin"
+        / "agent-transcripts" / "sid-aaaa-bbbb"
+    )
+    nested.mkdir(parents=True)
+    path = nested / "sid-aaaa-bbbb.jsonl"
+    path.write_text(
+        body if body is not None else _CURSOR_FIXTURE.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _index_existing_cc(home: Path) -> None:
+    sessions = home / ".xskill" / "cc_sessions"
+    sessions.mkdir(parents=True)
+    md = sessions / "traj_cc_demo.md"
+    md.write_text("# t\n\n## User\n\nhello cc\n", encoding="utf-8")
+    upsert_session_file(sessions, md)
 
 
 def test_ensure_skips_on_server_role(tmp_path, monkeypatch):
@@ -126,3 +155,65 @@ def test_local_traj_search_bootstraps_once(monkeypatch):
 
     assert code == 0
     assert boot == [True]
+
+
+def test_pending_skips_cursor_without_transcripts(tmp_path):
+    (tmp_path / ".cursor" / "projects").mkdir(parents=True)
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == []
+
+
+def test_pending_includes_nested_cursor_when_bridge_empty(tmp_path):
+    _write_nested_cursor_transcript(tmp_path)
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == ["cursor"]
+
+
+def test_pending_includes_cursor_when_source_outnumbers_index(tmp_path):
+    _write_nested_cursor_transcript(tmp_path)
+    extra = (
+        tmp_path / ".cursor" / "projects" / "home-admin"
+        / "agent-transcripts" / "sid-cccc-dddd"
+    )
+    extra.mkdir(parents=True)
+    (extra / "sid-cccc-dddd.jsonl").write_text(
+        _CURSOR_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    sessions = tmp_path / ".xskill" / "cursor_sessions"
+    sessions.mkdir(parents=True)
+    md = sessions / "traj_cursor_home-admin_sid-aaaa.md"
+    md.write_text("# Cursor Agent Trajectory\n\n## User\n\nhello\n", encoding="utf-8")
+    upsert_session_file(sessions, md)
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == ["cursor"]
+
+
+def test_ensure_fills_empty_cursor_when_other_harness_indexed(tmp_path):
+    _write_nested_cursor_transcript(tmp_path)
+    _index_existing_cc(tmp_path)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        json.dumps({
+            "version": 1,
+            "harnesses": ["claude_code", "cursor"],
+            "bridged": {"claude_code": 1, "cursor": 0},
+        }),
+        encoding="utf-8",
+    )
+
+    report = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+
+    assert report["ran"] is True
+    assert report["reason"] == "filled_empty"
+    assert report["bridged"].get("cursor", 0) >= 1
+    assert "claude_code" not in report["bridged"]
+    cursor_mds = list((tmp_path / ".xskill" / "cursor_sessions").glob("traj_cursor_*.md"))
+    assert cursor_mds
+    assert "Fix the bug in foo.py" in cursor_mds[0].read_text(encoding="utf-8")
+
+    state = lb.load_local_init_state(tmp_path)
+    assert state is not None
+    assert "claude_code" in state["harnesses"]
+    assert "cursor" in state["harnesses"]
+    assert state["bridged"]["claude_code"] == 1
+    assert state["bridged"]["cursor"] >= 1
+
+    second = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert second["ran"] is False
+    assert second["reason"] == "already"
