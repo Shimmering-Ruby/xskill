@@ -39,29 +39,32 @@ hf download databricks/officeqa --repo-type dataset --revision "$OFFICEQA_REVISI
 
 ## 使用官方评分器
 
-评分必须从固定 commit 加载官方 `reward.py`，不能在 xskill 中复制一份并逐渐产生语义分叉：
+[`scripts/bench/officeqa/vendor/reward.py`](../../scripts/bench/officeqa/vendor/reward.py) 是固定 commit 的原样副本，并附带上游 `LICENSE-APACHE`、`NOTICE` 和来源说明。校验工具会在加载评分器之前验证 SHA-256，任何本地修改都会立即失败；升级评分器必须固定新的上游 commit、更新哈希并重新审查语义。
+
+## 校验输入和聚合结果
+
+后续 runner 生成的 JSONL 结果可以独立校验和聚合，命令不会调用模型，也不会访问网络：
 
 ```bash
-git clone https://github.com/databricks/officeqa.git
-cd officeqa
-git checkout 7b9a3c154ef9fb40215bb67934afc43e6799de16
-sha256sum reward.py
+python -m scripts.bench.officeqa.evaluate --csv "$OFFICEQA_DATA_DIR/officeqa_full.csv" --corpus-dir "$OFFICEQA_DATA_DIR/treasury_bulletins_parsed/transformed" --manifest benchmarks/officeqa/manifests/officeqa_full.json --results "$OFFICEQA_OUTPUT_DIR/results.jsonl" --output "$OFFICEQA_OUTPUT_DIR/summary.json"
 ```
 
-每条结果至少记录 scorer commit、`reward.py` SHA-256 和显式 tolerance。未来 runner 应通过文件路径加载该评分器，并拒绝校验和不匹配的版本。
+校验器会验证 gated CSV、公开 UID、难度分布、引用语料、评分器哈希和逐题结果 schema，并用固定评分器重新计算所有已有预测。只有 manifest 中的 246 个 UID 全部具有可评分预测时才会产生 `official_full_accuracy`；子集、不完整结果以及含 `invalid`、`timeout`、`infra_error` 或 `skipped` 的结果都不会被标记为官方 Full 成绩。
 
 ## Full manifest
 
 [`manifests/officeqa_full.json`](manifests/officeqa_full.json) 只包含 UID 和 difficulty，并记录完整来源链。它可以用来检查 gated CSV 是否缺题、重复或混入 Pro V2，但本身不能执行评测，也不能还原问题和答案。
 
-一次可发布的 Full 结果还必须记录：
+一次可发布的 Full 结果应记录：
 
 - xskill、SkillOpt、skill、harness 和 scorer 的精确 commit；
 - 模型完整标识、prompt/config/seed、并发、超时、重试和缓存策略；
-- 每个 UID 的终态、请求次数、输入/输出/缓存 token、费用与延迟；
+- 每个 UID 的终态、请求次数、输入/输出/缓存 token、延迟，以及计费 endpoint 可提供的费用；
 - gated CSV SHA-256、manifest SHA-256 和原始结果 SHA-256；
 - `pass`、`fail`、`invalid`、`timeout`、`infra_error`、`skipped` 的明确分类。
 
 ## 后续阶段
 
-本阶段只解决来源固定、Full UID 清单和 README 口径问题。固定版本评分器与结果完整性校验、通用可续跑 runner 以及真实 OfficeQA Full 运行结果应分别由后续 PR 提交。
+`run.json`、`results.jsonl`、`summary.json` 和 spill 文件都必须留在仓库外；对外只分享经过复核且不包含 gated 问题、答案、预测或私有 endpoint 的聚合摘要。
+
+通用可续跑 runner 和真实 OfficeQA Full 运行结果仍应由后续独立 PR 提交。
