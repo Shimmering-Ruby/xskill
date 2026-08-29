@@ -84,6 +84,8 @@ python -m scripts.bench.officeqa.run --csv "$OFFICEQA_DATA_DIR/officeqa_full.csv
 
 Runner 会修复进程中断留下的最后一条不完整 JSONL 记录，再从最后一个确定终态继续。默认遇到 `invalid`、耗尽重试的超时或不可重试基础设施错误就写出诊断摘要并返回非零，不继续消耗剩余样本；`--continue-on-nonscorable` 只用于显式诊断。只有选中 246 题、每题都有 `pass` 或 `fail` 终态时，独立校验器才生成 `official_full_accuracy`。
 
+断点目录采用单写者日志，同一个 `--output-dir` 不得同时启动多个 Runner 进程；需要并行比较模型或配置时必须使用不同目录，避免交错追加 attempt 和 result 记录。
+
 ## Full manifest
 
 [`manifests/officeqa_full.json`](manifests/officeqa_full.json) 只包含 UID 和 difficulty，并记录完整来源链。它可以用来检查 gated CSV 是否缺题、重复或混入 Pro V2，但本身不能执行评测，也不能还原问题和答案。
