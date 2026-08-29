@@ -18,12 +18,13 @@ from scripts.bench.algorithm_replay.evaluate import (
     validate_suite,
 )
 
-
 FIXTURE_DIR = (
     Path(__file__).parent.parent / "scripts" / "bench" / "algorithm_replay" / "fixtures"
 )
 BASELINE_PATH = FIXTURE_DIR / "baseline_v1.json"
 REPORT_PATH = FIXTURE_DIR / "baseline_v1.report.json"
+BOUNDARY_SCORE_PATH = FIXTURE_DIR / "baseline_v2.json"
+BOUNDARY_SCORE_REPORT_PATH = FIXTURE_DIR / "baseline_v2.report.json"
 
 
 pytestmark = pytest.mark.algorithm_replay
@@ -33,6 +34,71 @@ def test_baseline_report_matches_checked_in_snapshot():
     report = evaluate_suite(load_suite(BASELINE_PATH))
 
     assert report == json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+
+
+def test_boundary_score_report_matches_checked_in_snapshot():
+    report = evaluate_suite(load_suite(BOUNDARY_SCORE_PATH))
+
+    assert report == json.loads(
+        BOUNDARY_SCORE_REPORT_PATH.read_text(encoding="utf-8")
+    )
+
+
+def test_boundary_scores_expose_routing_error_association():
+    report = evaluate_suite(load_suite(BOUNDARY_SCORE_PATH))
+    boundary_score = report["metrics"]["boundary_score"]
+    association = report["metrics"]["routing_error_association"]
+
+    assert report["boundary_algorithm_version"] == "synthetic-boundary-ranker-v1"
+    # The one positive boundary outranks four negatives and ties the fifth.
+    assert boundary_score == {
+        "candidates": 6,
+        "positive": 1,
+        "negative": 5,
+        "auroc": 0.9,
+    }
+    assert association["low_score_error_auroc"] == 1.0
+    assert association["thresholds"] == [
+        {
+            "minimum_score": 0.0,
+            "eligible": 2,
+            "retained": 2,
+            "coverage": 1.0,
+            "routing_errors": 1,
+            "routing_error_rate": 0.5,
+        },
+        {
+            "minimum_score": 0.5,
+            "eligible": 2,
+            "retained": 1,
+            "coverage": 0.5,
+            "routing_errors": 0,
+            "routing_error_rate": 0.0,
+        },
+        {
+            "minimum_score": 0.8,
+            "eligible": 2,
+            "retained": 1,
+            "coverage": 0.5,
+            "routing_errors": 0,
+            "routing_error_rate": 0.0,
+        },
+    ]
+    text_report = render_text(report)
+    assert "boundary_score: candidates=6 AUROC=0.9" in text_report
+    assert "selected=2 errors=1 low_score_AUROC=1.0" in text_report
+
+
+def test_one_class_boundary_or_routing_samples_have_no_auroc():
+    report = evaluate_suite(load_suite(BOUNDARY_SCORE_PATH))
+
+    assert report["cases"][1]["metrics"]["boundary_score"]["auroc"] is None
+    assert (
+        report["cases"][0]["metrics"]["routing_error_association"][
+            "low_score_error_auroc"
+        ]
+        is None
+    )
 
 
 def test_baseline_exposes_expected_regression_signals():
@@ -124,9 +190,65 @@ def test_source_line_count_mismatch_fails_loudly():
 
 def test_unsupported_schema_version_fails_loudly():
     suite = load_suite(BASELINE_PATH)
-    suite["schema_version"] = 2
+    suite["schema_version"] = 3
 
-    with pytest.raises(ReplayValidationError, match="supported=1, got=2"):
+    with pytest.raises(ReplayValidationError, match=r"supported=\[1, 2\], got=3"):
+        validate_suite(suite)
+
+
+@pytest.mark.parametrize("score", [True, -0.1, 1.1, "0.8"])
+def test_invalid_boundary_score_fails_loudly(score):
+    suite = load_suite(BOUNDARY_SCORE_PATH)
+    suite["cases"][0]["boundary_candidates"][0]["boundary_score"] = score
+
+    with pytest.raises(ReplayValidationError, match="boundary_score must satisfy"):
+        validate_suite(suite)
+
+
+def test_boundary_score_thresholds_must_be_strictly_increasing():
+    suite = load_suite(BOUNDARY_SCORE_PATH)
+    suite["metric_config"]["boundary_score_thresholds"] = [0.5, 0.5]
+
+    with pytest.raises(ReplayValidationError, match="strictly increasing"):
+        validate_suite(suite)
+
+
+def test_selected_boundary_must_map_to_matching_predicted_atom():
+    suite = load_suite(BOUNDARY_SCORE_PATH)
+    suite["cases"][0]["boundary_candidates"][1]["predicted_atom_id"] = (
+        "pred-zh-migrate"
+    )
+
+    with pytest.raises(ReplayValidationError, match="selected line must equal"):
+        validate_suite(suite)
+
+
+def test_every_internal_predicted_atom_requires_selected_candidate():
+    suite = load_suite(BOUNDARY_SCORE_PATH)
+    suite["cases"][0]["boundary_candidates"][1]["selected"] = False
+    suite["cases"][0]["boundary_candidates"][1]["predicted_atom_id"] = None
+
+    with pytest.raises(
+        ReplayValidationError, match=r"missing=\['pred-zh-validate'\]"
+    ):
+        validate_suite(suite)
+
+
+def test_rejected_boundary_cannot_map_to_predicted_atom():
+    suite = load_suite(BOUNDARY_SCORE_PATH)
+    suite["cases"][0]["boundary_candidates"][0]["predicted_atom_id"] = (
+        "pred-zh-migrate"
+    )
+
+    with pytest.raises(ReplayValidationError, match="must be null when rejected"):
+        validate_suite(suite)
+
+
+def test_boundary_scores_from_different_algorithm_versions_cannot_be_aggregated():
+    suite = load_suite(BOUNDARY_SCORE_PATH)
+    suite["cases"][1]["boundary_candidates"][0]["algorithm_version"] = "other-v2"
+
+    with pytest.raises(ReplayValidationError, match="exactly one algorithm_version"):
         validate_suite(suite)
 
 
