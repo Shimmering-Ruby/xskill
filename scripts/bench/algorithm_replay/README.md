@@ -1,95 +1,95 @@
-# Atom splitting and routing replay
+# Atom 拆分与路由离线回放
 
-This suite evaluates immutable, recorded algorithm outputs.
+这套基线评估已经录好、不可变的算法输出。常规测试不会调用 LLM、Embedding 服务、Milvus 或 coding-agent CLI。
 
-It does not call an LLM, an embedding endpoint, Milvus, or a coding-agent CLI during normal tests.
+运行入仓 v1 基线：
 
-Run the checked-in v1 baseline with `python -m scripts.bench.algorithm_replay.evaluate scripts/bench/algorithm_replay/fixtures/baseline_v1.json`.
+```bash
+python -m scripts.bench.algorithm_replay.evaluate \
+  scripts/bench/algorithm_replay/fixtures/baseline_v1.json
+```
 
-Run the candidate-boundary v2 baseline with `python -m scripts.bench.algorithm_replay.evaluate scripts/bench/algorithm_replay/fixtures/baseline_v2.json`.
+运行候选边界 v2 基线：
 
-Use `--format json` for a machine-readable report.
+```bash
+python -m scripts.bench.algorithm_replay.evaluate \
+  scripts/bench/algorithm_replay/fixtures/baseline_v2.json
+```
 
-The test suite compares both reports with their checked-in `*.report.json` snapshots, so schema and metric-definition changes are explicit and reviewable.
+使用 `--format json` 可以输出机器可读报告。测试会把两份报告与入仓的 `*.report.json` 快照比较，因此 schema 和指标定义的变化必须作为可见 diff 接受 review。
 
-## Fixture contract
+## Fixture 契约
 
-- `schema_version`: versions `1` and `2` are supported, while unknown versions fail loudly.
-- `metric_config.routing_recall_k`: the candidate cutoff used by Recall@K.
-- `metric_config.atom_alignment_min_iou`: the minimum interval IoU used to align a prediction with a gold Atom for duplicate and routing metrics.
-- `run_manifest`: the repository revision, model, harness, prompt fingerprint, seed, generation parameters, token counts, cost, and generation time for the recorded predictions.
-- `skill_catalog`: the only valid routing labels in the suite.
-- `cases`: line-addressable synthetic trajectories, human-authored gold Atoms, and immutable predicted Atoms whose `line_count` exactly matches `source_lines`.
+- `schema_version`：支持 `1` 和 `2`，未知版本会直接失败。
+- `metric_config.routing_recall_k`：Recall@K 使用的候选截断。
+- `metric_config.atom_alignment_min_iou`：把预测对齐到 gold Atom 时，重复和路由指标要求的最小区间 IoU。
+- `run_manifest`：这份录制预测对应的仓库 revision、模型、Harness、prompt fingerprint、seed、生成参数、token 数、费用和生成时间。
+- `skill_catalog`：本套件里唯一合法的路由标签。
+- `cases`：可按行寻址的合成轨迹、人工标注的 gold Atom，以及不可变的预测 Atom；`line_count` 必须与 `source_lines` 完全一致。
 
-Atom ranges are 1-based half-open intervals `[start_line, end_line)`.
+Atom 区间是 1-based 半开区间 `[start_line, end_line)`。
 
-Gold ranges must not overlap, while predicted ranges may overlap because overlap is a measured failure mode.
+gold 区间不得重叠；预测区间可以重叠，因为重叠本身就是被度量的失败模式。
 
-`scorable_ranges` identifies the source lines used by coverage and overlap metrics.
+`scorable_ranges` 标出覆盖率和重叠率使用的源行。
 
-The checked-in fixtures are synthetic and privacy-safe.
+入仓 fixture 都是合成数据，满足隐私约束。模型名是 `recorded-fixture`：它们只校验评测器契约，不代表当前线上模型效果。
 
-Their model name is `recorded-fixture`; they validate evaluator contracts and do not claim current online model quality.
+prompt fingerprint 哈希的是字面哨兵串，因为这份合成预测没有使用模型 prompt。
 
-The prompt fingerprints hash literal sentinel strings because no model prompt was used.
+真实离线实验应替换运行清单和 prediction，并保持所选 schema。
 
-A real offline run must replace the run manifest and prediction sections while preserving the selected schema.
+## Version 2 候选边界契约
 
-## Version 2 candidate-boundary contract
+schema v2 保留全部 v1 字段，并增加 `metric_config.boundary_score_thresholds`，以及每个 case 的 `boundary_candidates` 列表。
 
-Schema v2 retains every v1 field and adds `metric_config.boundary_score_thresholds` plus a `boundary_candidates` list to each case.
+每条候选记录一个内部可评分的 `line`、`[0, 1]` 内的数值 `boundary_score`、非空的 `algorithm_version`、布尔值 `selected`，以及被采用时的 `predicted_atom_id`。
 
-Each candidate records an internal scorable `line`, a numeric `boundary_score` in `[0, 1]`, a non-empty `algorithm_version`, a `selected` boolean, and a `predicted_atom_id` when selected.
+一份 v2 套件必须只有一个 `algorithm_version`。报告会把它抄到 `boundary_algorithm_version`，避免不同 ranker 的聚合分数被悄悄混在一起。
 
-A v2 suite must contain exactly one `algorithm_version`, and the report copies it to `boundary_algorithm_version` so aggregate scores from different rankers cannot be mixed silently.
+同一 case 里候选行号唯一，且不能使用可评分区间的被迫起点。
 
-Candidate lines are unique within a case and cannot use the forced start of a scorable range.
+每条被采用的候选必须映射到从同一行开始的预测 Atom；每个从可评分区间内起笔的预测 Atom 也必须恰好对应一条被采用的候选。
 
-Every selected candidate must map to a predicted Atom that starts on the same line, and every predicted Atom that starts inside a scorable range must have exactly one selected candidate.
+被拒绝的候选没有产出 Atom，因此 `predicted_atom_id` 为 `null`。
 
-A rejected candidate has `predicted_atom_id: null` because it did not produce an Atom.
+`boundary_score` 是录下来做离线分析的未校准排序信号。它不是概率，也不是生产置信度、`ux_score`，更不是 `(atom_id, skill)` 的 `weightscore`。
 
-`boundary_score` is an uncalibrated ranking signal recorded for offline analysis.
+## 指标定义
 
-It is not a probability, production confidence field, `ux_score`, or `(atom_id, skill)` `weightscore`.
+- 边界 precision/recall/F1 比较精确的内部 Atom 起始行，并排除每个可评分区间的被迫起点。
+- Pk 和 WindowDiff 复用 `scripts/bench/evaluate.py` 里已独立测试的实现，用来暴露近失以及过切、欠切。
+- Coverage 是至少被一个预测 Atom 覆盖的可评分行比例；overlap rate 用同一分母统计被重复覆盖的部分。
+- Duplicate rate 先按不低于 `atom_alignment_min_iou` 的最大区间 IoU，把每条预测对齐到 gold Atom，再统计对齐到已匹配 gold Atom 的额外预测。
+- Language consistency 在去掉行内代码和路径类 token 后，检测 `intent + summary` 的主导文字；没有可检测自然语言的输出算 mismatch。
+- 路由 micro precision/recall/F1 在区间对齐后比较 `(gold_atom_id, skill)` 关系；macro precision/recall/F1 是各 case 分数的不加权平均。
+- Recall@K 使用每条预测里排好序的 `candidates` 列表。
+- Multi-Skill relation retention 度量属于多个期望 Skill 的 gold 关系，避免合法的一对多关系被悄悄压成一个标签。
 
-## Metric definitions
+两边都没有内部边界时，边界 precision、recall、F1 为 `1.0`。
 
-- Boundary precision/recall/F1 compares exact internal Atom start lines and excludes the forced start of each scorable range.
-- Pk and WindowDiff reuse the independently tested implementations in `scripts/bench/evaluate.py` to expose near-miss and over/under-segmentation behavior.
-- Coverage is the fraction of scorable lines covered by at least one predicted Atom, while overlap rate counts repeated predicted coverage over the same denominator.
-- Duplicate rate aligns each prediction to the gold Atom with maximum interval IoU at or above `atom_alignment_min_iou`, then counts additional predictions aligned to an already matched gold Atom.
-- Language consistency detects the dominant script of `intent + summary` after removing inline code and path-like tokens, and an output with no detectable natural language is a mismatch.
-- Routing micro precision/recall/F1 compares `(gold_atom_id, skill)` relations after interval alignment, while macro precision/recall/F1 is the unweighted mean of per-case scores.
-- Recall@K uses each prediction's ordered `candidates` list.
-- Multi-Skill relation retention measures gold relations belonging to Atoms with more than one expected Skill so a valid one-to-many relation cannot silently collapse to one label.
+其余空集行为沿用现有 benchmark：只有 true-positive、false-positive、false-negative 都是零时，precision、recall、F1 才是 `1.0`；没有可用分母时，duplicate 和 overlap rate 为 `0.0`；其他平凡成立的比率是 `1.0`。
 
-When both sides have no internal boundary, boundary precision, recall, and F1 are `1.0`.
+## Version 2 分数分析
 
-Other empty-set behavior follows the existing benchmark: precision, recall, and F1 are `1.0` only when true-positive, false-positive, and false-negative counts are all zero; duplicate and overlap rates are `0.0` without an applicable denominator; other vacuously satisfied ratios are `1.0`.
+候选边界 AUROC 把落在精确内部 gold 边界上的候选标为正例，用排序判别力计分，并列分数记一半。
 
-## Version 2 score analysis
+从未被提出的 gold 边界不能进入候选 AUROC，仍会作为现有边界 recall 的假阴性出现。
 
-Candidate-boundary AUROC labels a candidate positive when its line is an exact internal gold boundary and computes rank discrimination with half credit for tied scores.
+某个 case 或聚合结果只有一个类别时，判别无定义，AUROC 为 `null`。
 
-A gold boundary that was never proposed cannot enter candidate AUROC and remains visible as a false negative in the existing boundary recall metric.
+路由错误分析只看被采用的候选，因为被拒绝的候选没有下游 Atom 可路由。
 
-AUROC is `null` when a case or aggregate contains only one label class because discrimination is undefined.
+被采用候选的预测 Atom 按现有 IoU 规则对齐。Atom 对不齐，或其最终 `skills` 集合与对齐后 gold Atom 的完整 `skills` 集合不同，就算路由错误。
 
-Routing-error analysis includes only selected candidates because rejected candidates have no downstream Atom to route.
+`low_score_error_auroc` 用 `1 - boundary_score` 做排序信号。大于 `0.5` 表示更低的边界分数倾向于把路由错误排在正确路由前面。
 
-The selected candidate's predicted Atom is aligned with the existing IoU rule, and routing is erroneous when the Atom is unmatched or its final `skills` set differs from the aligned gold Atom's complete `skills` set.
+对每个固定的 `boundary_score_thresholds` 值，报告给出合格样本、保留样本、保留覆盖率、路由错误数和路由错误率。
 
-`low_score_error_auroc` uses `1 - boundary_score` as the ranking signal, so a value above `0.5` means lower boundary scores tend to rank routing errors ahead of correct routes.
+没有合格样本或没有保留样本时，覆盖率和路由错误率为 `null`，不把空集写成成功。
 
-For each fixed `boundary_score_thresholds` value, the report includes eligible and retained samples, retained coverage, routing errors, and routing error rate.
+候选 AUROC 和路由 AUROC 各是 `O(n log n)`；阈值表是 `O(n log n + t log n)`，其中 `n` 是被采用的候选数，`t` 是阈值个数。
 
-Coverage and routing error rate are `null` when there are no eligible or retained samples, rather than claiming vacuous success.
+这些指标表示关联，不是因果，也不是概率校准。
 
-Candidate and routing AUROC each run in `O(n log n)`, and the threshold table runs in `O(n log n + t log n)` for `n` selected candidates and `t` thresholds.
-
-These metrics show association, not causation or probability calibration.
-
-Do not turn a score or metric into a blocking quality threshold until a maintainer has reviewed a representative recorded baseline.
-
-Deterministic schema and metric tests remain blocking regardless of model quality.
+在维护者评审过代表性录制基线之前，不要把某个分数或指标设成阻塞质量阈值。确定性的 schema 测试和指标测试无论模型质量如何都应保持阻塞。
