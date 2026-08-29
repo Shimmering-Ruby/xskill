@@ -1,0 +1,290 @@
+"""本机未 connect 时扫描 harness、转轨迹、建索引。"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+from xskill.ecosystems import local_bootstrap as lb
+from xskill.traj_search import upsert_session_file
+
+_CURSOR_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "cursor" / "sample_transcript.jsonl"
+)
+
+
+def _write_nested_cursor_transcript(home: Path, body: str | None = None) -> Path:
+    nested = (
+        home / ".cursor" / "projects" / "home-admin"
+        / "agent-transcripts" / "sid-aaaa-bbbb"
+    )
+    nested.mkdir(parents=True)
+    path = nested / "sid-aaaa-bbbb.jsonl"
+    path.write_text(
+        body if body is not None else _CURSOR_FIXTURE.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_flat_and_nested_cursor_same_sid(home: Path) -> None:
+    body = _CURSOR_FIXTURE.read_text(encoding="utf-8")
+    transcripts = (
+        home / ".cursor" / "projects" / "home-admin" / "agent-transcripts"
+    )
+    transcripts.mkdir(parents=True)
+    (transcripts / "sid-aaaa-bbbb.jsonl").write_text(body, encoding="utf-8")
+    nested = transcripts / "sid-aaaa-bbbb"
+    nested.mkdir()
+    (nested / "sid-aaaa-bbbb.jsonl").write_text(body, encoding="utf-8")
+
+
+def _write_empty_opencode_db(home: Path) -> None:
+    db = home / ".local" / "share" / "opencode" / "opencode.db"
+    db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, time_updated INTEGER)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _index_existing_cc(home: Path) -> None:
+    sessions = home / ".xskill" / "cc_sessions"
+    sessions.mkdir(parents=True)
+    md = sessions / "traj_cc_demo.md"
+    md.write_text("# t\n\n## User\n\nhello cc\n", encoding="utf-8")
+    upsert_session_file(sessions, md)
+
+
+def test_ensure_skips_on_server_role(tmp_path, monkeypatch):
+    monkeypatch.setattr("xskill.runtime.role", lambda: "server")
+    called = []
+    monkeypatch.setattr(
+        lb, "ingest_detected_sessions_once",
+        lambda **kwargs: called.append(True),
+    )
+
+    report = lb.ensure_local_sessions(home_root=tmp_path)
+
+    assert report == {"ran": False, "reason": "server"}
+    assert called == []
+
+
+def test_first_ensure_scans_and_writes_state(tmp_path, monkeypatch):
+    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    monkeypatch.setattr(
+        lb, "ingest_detected_sessions_once",
+        lambda home_root=None, ecosystems=None: {
+            "harnesses": ["cursor"],
+            "bridged": {"cursor": 3},
+            "errors": {},
+        },
+    )
+
+    report = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+
+    assert report["ran"] is True
+    state = lb.load_local_init_state(tmp_path)
+    assert state["harnesses"] == ["cursor"]
+    assert state["bridged"] == {"cursor": 3}
+
+
+def test_second_ensure_skips_when_index_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    sessions = tmp_path / ".xskill" / "cursor_sessions"
+    sessions.mkdir(parents=True)
+    md = sessions / "traj_cursor_demo.md"
+    md.write_text("# t\n\n## User\n\nhello\n", encoding="utf-8")
+    upsert_session_file(sessions, md)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        '{"version": 1, "harnesses": ["cursor"]}\n', encoding="utf-8",
+    )
+    called = []
+    monkeypatch.setattr(
+        lb, "ingest_detected_sessions_once",
+        lambda **kwargs: called.append(True),
+    )
+
+    report = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+
+    assert report["ran"] is False
+    assert report["reason"] == "already"
+    assert called == []
+
+
+def test_empty_index_rescans(tmp_path, monkeypatch):
+    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    (tmp_path / ".xskill").mkdir()
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        '{"version": 1, "harnesses": []}\n', encoding="utf-8",
+    )
+    called = []
+    monkeypatch.setattr(
+        lb, "ingest_detected_sessions_once",
+        lambda **kwargs: called.append(True) or {
+            "harnesses": ["claude_code"], "bridged": {}, "errors": {},
+        },
+    )
+
+    report = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+
+    assert report["ran"] is True
+    assert called == [True]
+
+
+def test_force_rescans(tmp_path, monkeypatch):
+    monkeypatch.setattr("xskill.runtime.role", lambda: "standalone")
+    sessions = tmp_path / ".xskill" / "cc_sessions"
+    sessions.mkdir(parents=True)
+    md = sessions / "traj_cc_demo.md"
+    md.write_text("# t\n\n## User\n\nhi\n", encoding="utf-8")
+    upsert_session_file(sessions, md)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        '{"version": 1, "harnesses": ["claude_code"]}\n', encoding="utf-8",
+    )
+    called = []
+    monkeypatch.setattr(
+        lb, "ingest_detected_sessions_once",
+        lambda **kwargs: called.append(True) or {
+            "harnesses": ["claude_code"], "bridged": {}, "errors": {},
+        },
+    )
+
+    report = lb.ensure_local_sessions(
+        home_root=tmp_path, force=True, skip_if_server=False,
+    )
+
+    assert report["ran"] is True
+    assert called == [True]
+
+
+def test_local_traj_search_bootstraps_once(monkeypatch):
+    import xskill.cli as cli
+
+    boot = []
+    monkeypatch.setattr(
+        cli, "_maybe_bootstrap_local_traj",
+        lambda: boot.append(True),
+    )
+    monkeypatch.setattr(
+        "xskill.traj_browse.find_query_hits",
+        lambda query, **kwargs: [],
+    )
+    monkeypatch.setattr(cli, "_write_search_output", lambda *a, **k: None)
+
+    code = cli._cmd_search_kind_local("内存", kind="traj", top_k=5,
+                                      json_mode=False, names=[])
+
+    assert code == 0
+    assert boot == [True]
+
+
+def test_pending_skips_cursor_without_transcripts(tmp_path):
+    (tmp_path / ".cursor" / "projects").mkdir(parents=True)
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == []
+
+
+def test_pending_includes_nested_cursor_when_bridge_empty(tmp_path):
+    _write_nested_cursor_transcript(tmp_path)
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == ["cursor"]
+
+
+def test_pending_includes_cursor_when_source_outnumbers_index(tmp_path):
+    _write_nested_cursor_transcript(tmp_path)
+    extra = (
+        tmp_path / ".cursor" / "projects" / "home-admin"
+        / "agent-transcripts" / "sid-cccc-dddd"
+    )
+    extra.mkdir(parents=True)
+    (extra / "sid-cccc-dddd.jsonl").write_text(
+        _CURSOR_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    sessions = tmp_path / ".xskill" / "cursor_sessions"
+    sessions.mkdir(parents=True)
+    md = sessions / "traj_cursor_home-admin_sid-aaaa.md"
+    md.write_text("# Cursor Agent Trajectory\n\n## User\n\nhello\n", encoding="utf-8")
+    upsert_session_file(sessions, md)
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == ["cursor"]
+
+
+def test_ensure_fills_empty_cursor_when_other_harness_indexed(tmp_path):
+    _write_nested_cursor_transcript(tmp_path)
+    _index_existing_cc(tmp_path)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        json.dumps({
+            "version": 1,
+            "harnesses": ["claude_code", "cursor"],
+            "bridged": {"claude_code": 1, "cursor": 0},
+        }),
+        encoding="utf-8",
+    )
+
+    report = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+
+    assert report["ran"] is True
+    assert report["reason"] == "filled_empty"
+    assert report["bridged"].get("cursor", 0) >= 1
+    assert "claude_code" not in report["bridged"]
+    cursor_mds = list((tmp_path / ".xskill" / "cursor_sessions").glob("traj_cursor_*.md"))
+    assert cursor_mds
+    assert "Fix the bug in foo.py" in cursor_mds[0].read_text(encoding="utf-8")
+
+    state = lb.load_local_init_state(tmp_path)
+    assert state is not None
+    assert "claude_code" in state["harnesses"]
+    assert "cursor" in state["harnesses"]
+    assert state["bridged"]["claude_code"] == 1
+    assert state["bridged"]["cursor"] >= 1
+
+    second = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert second["ran"] is False
+    assert second["reason"] == "already"
+
+
+def test_same_cursor_sid_flat_and_nested_is_not_pending_after_one_bridge(tmp_path):
+    _write_flat_and_nested_cursor_same_sid(tmp_path)
+    _index_existing_cc(tmp_path)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        json.dumps({
+            "version": 1,
+            "harnesses": ["claude_code", "cursor"],
+            "bridged": {"claude_code": 1, "cursor": 0},
+        }),
+        encoding="utf-8",
+    )
+
+    first = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert first["ran"] is True
+    assert first["reason"] == "filled_empty"
+    assert first["bridged"].get("cursor", 0) == 1
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == []
+
+    second = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert second["ran"] is False
+    assert second["reason"] == "already"
+    assert second.get("bridged") is None
+
+
+def test_empty_opencode_db_does_not_repeat_ingest(tmp_path):
+    _write_empty_opencode_db(tmp_path)
+    _index_existing_cc(tmp_path)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        json.dumps({
+            "version": 1,
+            "harnesses": ["claude_code", "opencode"],
+            "bridged": {"claude_code": 1, "opencode": 0},
+        }),
+        encoding="utf-8",
+    )
+
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == []
+    first = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert first["ran"] is False
+    assert first["reason"] == "already"
+    second = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert second["ran"] is False
+    assert second["reason"] == "already"

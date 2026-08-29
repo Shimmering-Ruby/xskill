@@ -102,6 +102,13 @@ class TestOpenClawAdapter:
         assert meta["source"] == "openclaw_trajectory_jsonl"
         assert meta["category"] == "openclaw_session"
         assert meta["final_status"] == "success"
+        assert meta["source_harness"] == "openclaw"
+        assert meta["harness_version"] == "2026.5.7"
+        assert len(meta["execution_usage_events"]) == 8
+        assert len({
+            event["source_event_id"]
+            for event in meta["execution_usage_events"]
+        }) == 8
         assert meta["total_turns"] > 0
 
     def test_adapter_handles_empty_input(self):
@@ -421,10 +428,10 @@ class TestInstallToOpenClawProtectsPendingDestEdits:
         dest_md = install_to_openclaw(sk, target_root=home)
 
         # 让 reverse_sync 跳过静默检查（测试用，免等 3 分钟）
-        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest as _orig
+        from xskill.agents.user_edit_absorb_agent import reverse_sync_openclaw_dest_result as _orig
         monkeypatch.setattr(
-            "xskill.agents.user_edit_absorb_agent.reverse_sync_openclaw_dest",
-            lambda d, s, **k: _orig(d, s, quiet_seconds=0),
+            "xskill.agents.user_edit_absorb_agent.reverse_sync_openclaw_dest_result",
+            lambda d, s, **_k: _orig(d, s, quiet_seconds=0),
         )
 
         # user 改 dest

@@ -9,6 +9,7 @@ import pytest
 from xskill.config import (
     CONFIG_TEMPLATE,
     allow_anonymous_user,
+    allow_read_others,
     profile_refresh_config,
     recommend_config,
     skillhub_config,
@@ -184,3 +185,21 @@ class TestAllowAnonymousUser:
 
     def test_template_contains_allow_anonymous(self):
         assert "allow_anonymous_user" in CONFIG_TEMPLATE
+
+
+class TestAllowReadOthers:
+    def test_default_false_when_missing(self):
+        assert allow_read_others({}) is False
+        assert allow_read_others({"team": {}}) is False
+        assert allow_read_others({"team": {"server": {}}}) is False
+
+    def test_true_when_configured(self):
+        cfg = {"team": {"server": {"allow_read_others": True}}}
+        assert allow_read_others(cfg) is True
+
+    def test_bad_type_fails_loud(self):
+        with pytest.raises(ValueError, match="allow_read_others"):
+            allow_read_others({"team": {"server": {"allow_read_others": "yes"}}})
+
+    def test_template_contains_allow_read_others(self):
+        assert "allow_read_others" in CONFIG_TEMPLATE

@@ -91,6 +91,8 @@ class EcosystemSpec:
             codex 用文件名里的 uuid 段
         cwd_from_content: ``(jsonl_content) -> cwd``。CC 扫每条事件找首个 ``cwd``
             字段；codex 只读首行 ``session_meta.payload.cwd``
+        cwd_from_path: 可选 ``(jsonl_path) -> cwd``。内容里没有 cwd 时用路径
+            补（Cursor 把工作目录编进 ``projects/<encoded-cwd>/``）
         adapter_format: 喂给 ``adapt_trajectory`` 的 format 字符串
         traj_id_prefix: 桥过来的 ``traj_*.md`` 文件名 ID 前缀（``traj_cc_`` /
             ``traj_codex_``）
@@ -109,6 +111,7 @@ class EcosystemSpec:
     skills_install_path: Callable[[Path], Path]
     label: str
     is_session_complete: Optional[Callable[[str], bool]] = None
+    cwd_from_path: Optional[Callable[[Path], str]] = None
     # 可选：自定义「文件 → 文本」读取。默认 None = ``read_text``。给需要先
     # 解码再解析的生态用（DeepSeek Harness 默认写 zstd 帧序列的
     # ``session.jsonl.zstd``）。返回 None 表示本轮读不了（例如缺解码依赖），
@@ -193,7 +196,9 @@ _KNOWN_ECOSYSTEMS: list[dict] = [
     },
     {
         "id": "cursor",
-        # Cursor 写 <home>/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>.jsonl
+        # Cursor Agent 写
+        # <home>/.cursor/projects/<encoded-cwd>/agent-transcripts/<sid>/<sid>.jsonl
+        # （旧布局是同目录下扁平的 <sid>.jsonl）
         "source_subpath": ".cursor/projects",
         "bridge_subpath": ".xskill/cursor_sessions",
         "source_kind": "dir",
@@ -865,6 +870,8 @@ class JsonlIngester:
 
     def run_once(self) -> list[dict]:
         """单轮扫盘 + 桥接（常驻 worker 每轮调用，source 唯一）。"""
+        if self.target_traj_dir is not None and not self._seen:
+            self._seen = _scan_seen_sessions(self.target_traj_dir)
         submitted = self.scan_and_bridge(
             target_traj_dir=self.target_traj_dir,
             home_root=self.home_root,
@@ -1015,10 +1022,11 @@ class JsonlIngester:
                     content,
                     session_start_t,
                 )
-            traj_id = self._make_traj_id(content, sid)
+            traj_id = self._make_traj_id(content, sid, source_path=jsonl_path)
             result = submit_trajectory(
                 content=content,
                 format=self.spec.adapter_format,
+                metadata={"session_id": sid},
                 traj_id=traj_id,
                 traj_dir=target_traj_dir,
             )
@@ -1072,9 +1080,16 @@ class JsonlIngester:
             out[md.stem.rsplit("_", 1)[-1]] = md
         return out
 
-    def _make_traj_id(self, content: str, sid: str) -> str:
+    def _make_traj_id(
+        self,
+        content: str,
+        sid: str,
+        source_path: Path | None = None,
+    ) -> str:
         """``<prefix><project>_<sid8>``——project = cwd basename，sid8 = sid 前 8 字符。"""
         cwd = self.spec.cwd_from_content(content)
+        if not cwd and source_path is not None and self.spec.cwd_from_path is not None:
+            cwd = self.spec.cwd_from_path(source_path) or ""
         project = _sanitize_for_filename(Path(cwd).name if cwd else "", maxlen=32) or "unknown"
         sid_short = _sanitize_for_filename(sid, maxlen=8) or "nosid"
         return f"{self.spec.traj_id_prefix}{project}_{sid_short}"

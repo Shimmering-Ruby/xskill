@@ -21,6 +21,7 @@
 
 ## 动态
 
+- **2026-08-27** — `v0.7.0`：Generate 读轨迹改为 traj_search、traj_cards、atom_search、read_traj，wiki 可增量记进度；`xskill init` 可跳过连接，已连接用户再跑不会断连。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.7.0)。
 - **2026-08-17** — `v0.6.32a1`：流水线按新轨迹先拆先归；看板可热改席位和配额比；generate 等大模型时硬优先；已达触发条件的 import 技能优先占编辑座。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.32a1)。
 - **2026-08-14** — `v0.6.31`：`xskill rebuild --force` 不再因 `.git/objects` 非空中断；全量 rebuild 会留下 `xskill import` 纳入的技能。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.31)。
 - **2026-08-14** — `v0.6.30`：team `xskill import` 后钉到发起人推荐列表；技能库登录后可点空心星 pin 进自己的推荐流，并标出推给我、已钉状态。详见 [Release notes](https://github.com/SkillNerds/xskill/releases/tag/v0.6.30)。
@@ -67,6 +68,23 @@ embedding:
   dim:      0
 ```
 
+上面这一段 `llm` 就是大家共用的默认模型。已经在用的配置不用改，继续这样写完全没问题。
+
+如果你想给流水线里的拆分、聚类、编辑各自换一个模型或地址，可以再加一段可选的 `llm_agents`。不写也没关系。某个阶段或某个字段没写的话，会先看看有没有 `llm_skill`，再回到 `llm`。`xskill generate` 还是用 `llm` 和 `llm_skill`，不会去读 `llm_agents`。改完这几段之后重启一下 `xskill serve` 就好。
+
+```yaml
+# 可选。不写这段的话，三个阶段都继续用上面的 llm
+llm_agents:
+  split:
+    model: qwen-plus
+  cluster:
+    model: deepseek-v4-flash
+  edit:
+    base_url: http://localhost:8000/v1
+    model: local-skill-editor
+    api_key: local
+```
+
 再跑一次 `xskill serve`，它会自动扫机器上装好的所有 agent（Claude Code、Codex、OpenCode、OpenClaw、Cursor、Trae）开始监听。如果还有一份历史轨迹归档想一起吃进来：
 
 ```bash
@@ -78,9 +96,11 @@ xskill registry add /path/to/trajectories
 xskill 真正想在组织里铺开的形态是团队模式：一台机器当 server，其他人作为瘦客户端接入，共用 server 上长出来的同一份 Skill 库。
 
 ```bash
-xskill serve --server                        # 启动后打印 join token
-xskill connect <host:port> --token <token>
+xskill serve --server                                          # 启动后打印 join token
+xskill connect <host:port> --token <token> --name <user-id>
 ```
+
+connect 成功后，在 Claude Code、Codex、Cursor 等已探测到的 agent 里输入 `/xskill-helper`，即可查 generate、search 等用法。没有地址和 token 时，把上面的 connect 当示例，向自己的 server 管理员要参数，不要连外网公开实例。
 
 - **无感蒸馏大佬员工** 一个人在自己工作里跑通的解法，自动可以让全团队复用，不需要任何人做任何事。（能力民主化）
 - **兼容各种 coding 方式** 用 codex、clade 还是 cursor IDE？ 都能加入，多端同步。
@@ -102,17 +122,34 @@ xskill stop / xskill start                     # 停止 / 重新拉起(需先 co
 
 macOS / Linux 的原生常驻（launchd / systemd --user）仍在路上，当前用自己的 init 系统托管 `xskill connect --foreground` 即可。
 
-### 按需搜索 / 分享技能（skillhub）
+### 技能检索与共享（SkillHub）
+
+除了由服务端按画像自动推荐，也可以主动检索、下载或发布技能：
 
 ```bash
-xskill search docker compose        # 只返回精简元信息和 skill ID
-xskill search docker --download     # 命中写入 10 槽 LRU 并自动安装
-xskill download <skill-id>          # 交互多选安装 harness
-xskill download <skill-id> --agent claude-code --agent codex -y
-xskill upload ./my-skill            # 打包上传一个 skill 目录(含 SKILL.md),全队立即可搜到
+xskill search <关键词>                                        # 检索技能库，返回匹配技能与 ID
+xskill download <skill-id>                                  # 交互式多选目标 agent 进行安装
+xskill download <skill-id> --agent claude-code --agent codex -y  # 非交互安装至指定 agent
+xskill upload ./my-skill                                    # 打包上传技能目录，团队立即可见
+xskill search <关键词> --download                            # 临时试用：下载至本地轮转槽位并自动安装
 ```
 
-`search` 使用 BM25 关键词+语义向量混合检索、与推荐画像无关；语义服务不可用时自动退化为 BM25。默认只输出精简元信息、排名和 ID，不修改本机；`search --download` 保留原来的 **10 个槽位**滚动淘汰逻辑。`download` 按 ID 持久下载，人类可交互多选 harness，agent/脚本应重复传 `--agent` 并加 `-y`。`upload` 在 server 端落到 `skillhub/user_skill_hub/<你的用户名>/` 下。本机轨迹/技能的语义搜索已从 CLI 移除（不再有 `xskill search traj|skill <query>`），改用 dashboard 或 API（`POST /api/v1/skills/search`）。
+`search` 默认采用关键词与语义向量混合检索；`download` 会将指定技能持久化安装并跟随更新；`upload` 支持将本地编写的 `SKILL.md` 目录一键分享给团队。
+
+### 历史会话与轨迹检索
+
+遇到复杂问题时，可直接检索团队或本机的历史 coding 会话（轨迹）与原子任务（Atom），快速找到相关解决过程与排查命令：
+
+```bash
+xskill traj search "内存泄漏"                                # 检索相关历史会话轨迹
+xskill traj search --name alice,bob "内存泄漏"                # 限定检索特定成员的轨迹
+xskill traj read <traj_id> --offset-start 1 --offset-end 100 # 按行号分段阅读会话原文
+
+xskill atom search "OAuth token 刷新"                       # 检索提炼出的原子任务片段
+xskill atom read <atom_id>                                  # 按行号阅读指定 Atom 的会话片段
+```
+
+单机开箱即用：`pip install xskill` 之后无需连接 server 即可通过 `xskill traj search` 检索本机各 agent 会话，首次使用会自动扫描已支持的 agent 并建立本地索引，也可以执行 `xskill init` 进行交互式环境扫描与引导。已连接团队服务时，默认检索团队库，添加 `--local` 可强制检索本机。
 
 ## 架构图
 

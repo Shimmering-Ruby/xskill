@@ -71,10 +71,14 @@ CJK_TOKENS_PER_CHAR_BY_FAMILY = {
 _TRIMMABLE_TOOLS = (
     "look", "readfile", "read_file", "atom_task_read", "read_traj", "skill_read",
     "grep_files", "list_files", "edit",
+    "traj_search", "traj_cards", "atom_search",
+    "wiki_read", "wiki_search", "wiki_status",
 )
 _SPILLABLE_TOOLS = (
     "readfile", "read_file", "atom_task_read", "read_traj", "skill_read",
     "grep_files", "edit",
+    "traj_search", "traj_cards", "atom_search",
+    "wiki_read", "wiki_search", "wiki_status",
 )
 _TRIM_MARK = "[…look 旧结果已剪裁,需要可重新 look…]"
 _COMPACT_MARK = "[compacted_agent_memory]"
@@ -91,6 +95,9 @@ _COMPACT_ACTION_TOOLS = (
     "commit_baby_to_main",
     "commit_to_staging",
     "commit_update_main",
+    "wiki_write",
+    "wiki_edit",
+    "wiki_log",
 )
 _COMPACT_SUCCESS_PREFIXES = {
     "new_skill_folder": ("created on baby branch:",),
@@ -101,6 +108,9 @@ _COMPACT_SUCCESS_PREFIXES = {
     "commit_baby_to_main": ("graduated baby → main:",),
     "commit_to_staging": ("committed to staging:",),
     "commit_update_main": ("updated on main:",),
+    "wiki_write": ("ok created", "ok updated"),
+    "wiki_edit": ("ok appended", "ok edited"),
+    "wiki_log": ("ok appended",),
 }
 
 # Handoff prompt: Pi's structured checkpoint + Codex's "another LLM resumes"
@@ -180,6 +190,24 @@ def set_used_tokens(used: int) -> None:
 def get_used_tokens() -> int:
     """读本线程最近一次请求后端真实 prompt_tokens；未发过请求则 0。"""
     return int(getattr(_STATE, "used_tokens", 0))
+
+
+def bind_context_hooks(
+    *,
+    compact_wrapper: Callable[..., bool] | None = None,
+    spill_hook: Callable[[], None] | None = None,
+) -> None:
+    """本线程 compact/spill 旁路。Generate 观测用，其他 agent 不绑。"""
+    if compact_wrapper is None:
+        if hasattr(_STATE, "compact_wrapper"):
+            delattr(_STATE, "compact_wrapper")
+    else:
+        _STATE.compact_wrapper = compact_wrapper
+    if spill_hook is None:
+        if hasattr(_STATE, "spill_hook"):
+            delattr(_STATE, "spill_hook")
+    else:
+        _STATE.spill_hook = spill_hook
 
 
 def resolve_max_context(llm_cfg: dict) -> int:
@@ -1214,7 +1242,7 @@ class ContextManager:
 
         return invoke
 
-    def _compact_until_success(
+    def _run_compact(
         self,
         messages: list,
         compact_fn: Callable[[str], str],
@@ -1289,6 +1317,28 @@ class ContextManager:
             ) from last_exc
         return False
 
+    def _compact_until_success(
+        self,
+        messages: list,
+        compact_fn: Callable[[str], str],
+        prefix_box: dict,
+    ) -> bool:
+        """Retry compact. Do not swallow the last failure.
+
+        Compact is inside context_mgmt, so it does not inherit the outer LLM
+        retry wrapper. First failure used to dump a full OpenAI traceback and
+        look like a crash; intermediate attempts now log one line. Exhaustion
+        raises CompactFailedError (not the raw timeout) so the outer retry
+        wrapper does not multiply 8×8 timed-out compact calls.
+
+        本线程若绑了 ``compact_wrapper``（只有 Generate 观测会绑），把整次
+        compact 交给它包一层。其他 agent 不绑，路径与主线相同。
+        """
+        wrapper = getattr(_STATE, "compact_wrapper", None)
+        if wrapper is not None:
+            return wrapper(self, messages, compact_fn, prefix_box)
+        return self._run_compact(messages, compact_fn, prefix_box)
+
     def wrap(self, original_invoke, invoke_stream=None):
         """返回包好上下文自管理的 invoke。
 
@@ -1326,6 +1376,9 @@ class ContextManager:
                     cache=self._est_cache,
                 )
                 if trimmed:
+                    spill_hook = getattr(_STATE, "spill_hook", None)
+                    if spill_hook is not None:
+                        spill_hook()
                     after_spill = _estimate_history_tokens(
                         messages,
                         cjk_rate=self.cjk_rate,
@@ -1470,7 +1523,7 @@ class ContextManager:
                 )
                 resp = original_invoke(messages, **kwargs)
             usage = extract_usage(resp)
-            if usage.prompt > 0 and est_raw > 0:
+            if usage.prompt is not None and usage.prompt > 0 and est_raw > 0:
                 ratio = usage.prompt / est_raw
                 ratio = max(0.3, min(3.0, ratio))
                 self._calibration = 0.5 * self._calibration + 0.5 * ratio

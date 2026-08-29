@@ -47,8 +47,13 @@ logger = logging.getLogger("xskill.search")
 _WORD_RE = re.compile(r"[\w]+", re.UNICODE)
 
 
+def tokenize_search_text(text: str) -> list[str]:
+    """BM25 用的分词：拉丁按词，中文整段一个 token。"""
+    return [token.lower() for token in _WORD_RE.findall(text or "")]
+
+
 def _tokenize(text: str) -> list[str]:
-    return [t.lower() for t in _WORD_RE.findall(text or "")]
+    return tokenize_search_text(text)
 
 
 @dataclass
@@ -105,7 +110,7 @@ def search(
     """AtomTask 检索（HybridSearch union+dedup）。
 
     返回每条 ``{atom_id, sources, vector_similarity?, bm25_score?, md_path,
-    traj_id, atom (load 的字段)}``。
+    traj_id, intent, summary, used_skills}``。
 
     ``min_similarity`` 仅对向量分数生效；BM25 命中没有归一化分，不过滤。
     ``success_filter`` 在 atom 层无意义（atom 没有 success 字段），保留参数
@@ -127,6 +132,9 @@ def search(
         h["md_path"] = str(Path(dataset_dir) / f"{atom.traj_id}.md")
         h["intent"] = atom.intent
         h["summary"] = atom.summary
+        h["offset_start"] = atom.offset_start
+        h["offset_end"] = atom.offset_end
+        h["used_skills"] = list(atom.used_skills or [])
         out.append(h)
     return out
 

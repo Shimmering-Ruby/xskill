@@ -129,55 +129,17 @@ class TeamCollector:
     # ── ingester 生命周期 ────────────────────────────────────────
     def start_ingesters(self) -> None:
         """探测本机生态，对每个起一个纯镜像 ingester 写进标准 bridge 目录。"""
-        from xskill.ecosystems import (
-            detect_known_ecosystems, JsonlIngester, SqliteIngester,
-            TraeIngester,
-            CC_SPEC, CODEX_SPEC, DSH_SPEC, NGA3_SPEC, OPENCODE_SPEC,
-            NGAGENT_SPEC,
-        )
+        from xskill.ecosystems import detect_known_ecosystems
+        from xskill.ecosystems.local_bootstrap import make_session_ingester
+
         for det in detect_known_ecosystems(home_root=self.home_root):
             eco = det["ecosystem"]
-            bridge = det["bridge"]   # 标准路径 ~/.xskill/<eco>_sessions
+            bridge = det["bridge"]
             bridge.mkdir(parents=True, exist_ok=True)
-            if eco == "claude_code":
-                ing = JsonlIngester(CC_SPEC, target_traj_dir=bridge,
-                                    home_root=self.home_root,
-                                    poll_interval=self.poll_interval)
-            elif eco == "codex":
-                ing = JsonlIngester(CODEX_SPEC, target_traj_dir=bridge,
-                                    home_root=self.home_root,
-                                    poll_interval=self.poll_interval)
-            elif eco == "nga3":
-                # nga3 / CodeAgent3（~/.cac/projects）。daemon 侧
-                # （api/app.py）一直有这条分支，collector 这条平行分发链
-                # 漏掉了它——.cac 用户的轨迹从未被采集。
-                ing = JsonlIngester(NGA3_SPEC, target_traj_dir=bridge,
-                                    home_root=self.home_root,
-                                    poll_interval=self.poll_interval)
-            elif eco == "opencode":
-                ing = SqliteIngester(target_traj_dir=bridge,
-                                     home_root=self.home_root,
-                                     spec=OPENCODE_SPEC,
-                                     poll_interval=self.poll_interval)
-            elif eco == "ngagent":
-                # ngagent = opencode 企业分支，复用 SqliteIngester，只换 spec
-                ing = SqliteIngester(target_traj_dir=bridge,
-                                     home_root=self.home_root,
-                                     spec=NGAGENT_SPEC,
-                                     poll_interval=self.poll_interval)
-            elif eco == "trae":
-                ing = TraeIngester(target_traj_dir=bridge,
-                                   home_root=self.home_root,
-                                   poll_interval=self.poll_interval)
-            elif eco == "deepseek_harness":
-                # DeepSeek Harness（~/.dsh/sessions）。与 nga3 同一教训：
-                # daemon 侧 watcher_factory 有这条分支，collector 这条
-                # 平行分发链也必须接上，否则 connect 后 dsh 会话不会被
-                # 镜像进 bridge，团队模式下永远采不到（PR #243 评审发现）。
-                ing = JsonlIngester(DSH_SPEC, target_traj_dir=bridge,
-                                    home_root=self.home_root,
-                                    poll_interval=self.poll_interval)
-            else:
+            ing = make_session_ingester(
+                det, home_root=self.home_root, poll_interval=self.poll_interval,
+            )
+            if ing is None:
                 continue
             ing.start()
             self._ingesters.append(ing)

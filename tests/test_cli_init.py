@@ -1,8 +1,4 @@
-"""`xskill init` 一站式引导命令的单元测试。
-
-装 skill 与 connect 都靠 monkeypatch 打桩——不真跑生态安装、不真握手 server，
-只验证 cmd_init 的分支（skills-only / no-skill / 已有常驻 / force / 缺必填项）。
-"""
+"""`xskill init` 本机引导：扫描 harness、转换轨迹、可选装 helper。"""
 from __future__ import annotations
 
 import argparse
@@ -20,133 +16,268 @@ import xskill.cli as cli  # noqa: E402
 
 def _args(**overrides) -> argparse.Namespace:
     base = dict(
-        address=None, token=None, name=None, label="", use_proxy=False,
-        foreground=False, no_auto_update=False, skills_only=False,
-        no_skill=False, force=False, yes=False, target_root=None,
+        yes=False, skills_only=False, no_skill=False, force=False,
+        harness=[], target_root=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
 
 
 @pytest.fixture
-def bundled_skill(tmp_path, monkeypatch):
-    """让 ``files('xskill')`` 指向一个带 SKILL.md 的临时目录。"""
-    root = tmp_path / "pkgroot"
-    skill = root / "data" / "skill" / "xskill"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("# xskill\n", encoding="utf-8")
-    monkeypatch.setattr("importlib.resources.files", lambda pkg: root)
-    return skill
+def detections():
+    return [{"ecosystem": "claude_code", "source": "/x", "bridge": "/y"},
+            {"ecosystem": "cursor", "source": "/c", "bridge": "/d"}]
 
 
 @pytest.fixture
 def install_recorder(monkeypatch):
-    """把所有 install_to_* 换成记录调用的桩，返回被安装到的生态列表。"""
     installed = []
-    for eco in ("claude_code", "codex", "nga3", "opencode", "ngagent",
-                "openclaw", "cursor", "trae"):
-        def _make(eco_name):
-            def _fake(skill_path, target_root=None, side="main"):
-                installed.append(eco_name)
-                return Path(skill_path) / "SKILL.md"
-            return _fake
-        monkeypatch.setattr(f"xskill.ecosystems.install_to_{eco}", _make(eco))
+    monkeypatch.setattr(
+        "xskill.ecosystems.bundled_guide.install_bundled_xskill_guide",
+        lambda target_root=None, ecosystems=None: installed.extend(
+            ecosystems or [],
+        ) or list(ecosystems or []),
+    )
     return installed
 
 
-def test_skills_only_installs_without_connecting(
-        bundled_skill, install_recorder, monkeypatch):
+def test_yes_scans_and_installs_all_detected(
+        detections, install_recorder, monkeypatch, capsys):
     monkeypatch.setattr(
         "xskill.ecosystems.detect_known_ecosystems",
-        lambda home_root=None: [{"ecosystem": "claude_code",
-                                 "source": "/x", "bridge": "/y"}],
+        lambda home_root=None: detections,
     )
-    connect_called = []
-    monkeypatch.setattr(cli, "cmd_connect",
-                        lambda a: connect_called.append(a) or 0)
-
-    code = cli.cmd_init(_args(skills_only=True))
-
-    assert code == 0
-    assert install_recorder == ["claude_code"]
-    assert connect_called == []
-
-
-def test_no_skill_connects_without_installing(
-        bundled_skill, install_recorder, monkeypatch):
-    monkeypatch.setattr("xskill.team.client.service.read_daemon_state",
-                        lambda: {"running": False})
-    captured = {}
-    monkeypatch.setattr(cli, "cmd_connect",
-                        lambda a: captured.update(vars(a)) or 0)
-
-    code = cli.cmd_init(_args(no_skill=True, yes=True,
-                              address="1.2.3.4:8000", token="TOK", name="007"))
-
-    assert code == 0
-    assert install_recorder == []          # --no-skill：一个生态都没装
-    assert captured["address"] == "1.2.3.4:8000"
-    assert captured["token"] == "TOK"
-    assert captured["name"] == "007"
-
-
-def test_existing_daemon_kept_when_no_force_noninteractive(monkeypatch):
-    monkeypatch.setattr("xskill.team.client.service.read_daemon_state",
-                        lambda: {"running": True, "pid": 4321, "backend": "schtasks"})
     monkeypatch.setattr(
         "xskill.config.get_team_client_state_path",
         lambda: Path("/nonexistent/team_client.json"),
     )
-    connect_called = []
-    monkeypatch.setattr(cli, "cmd_connect",
-                        lambda a: connect_called.append(a) or 0)
+    scanned = []
+    monkeypatch.setattr(
+        "xskill.ecosystems.local_bootstrap.ensure_local_sessions",
+        lambda home_root=None, force=False, skip_if_server=True: (
+            scanned.append({"force": force, "home": home_root})
+            or {"ran": True, "bridged": {"claude_code": 2, "cursor": 1},
+                "errors": {}}
+        ),
+    )
 
-    code = cli.cmd_init(_args(no_skill=True, yes=True, force=False,
-                              address="h:1", token="T"))
+    code = cli.cmd_init(_args(yes=True))
 
     assert code == 0
-    assert connect_called == []            # 保留现有，不重连
+    assert scanned == [{"force": False, "home": None}]
+    assert install_recorder == ["claude_code", "cursor"]
+    out = capsys.readouterr().out
+    assert "claude_code" in out
+    assert "xskill connect" in out
+    assert "xskill serve --server" in out
+    assert "xskill traj search" in out
 
 
-def test_existing_daemon_force_stops_then_connects(monkeypatch):
-    monkeypatch.setattr("xskill.team.client.service.read_daemon_state",
-                        lambda: {"running": True, "pid": 4321, "backend": "systemd"})
+def test_skills_only_installs_without_scanning(
+        detections, install_recorder, monkeypatch):
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: detections,
+    )
     monkeypatch.setattr(
         "xskill.config.get_team_client_state_path",
         lambda: Path("/nonexistent/team_client.json"),
     )
-    stopped = []
-    cleared = []
+    scanned = []
+    monkeypatch.setattr(
+        "xskill.ecosystems.local_bootstrap.ensure_local_sessions",
+        lambda **kwargs: scanned.append(kwargs) or {"ran": False},
+    )
 
-    class _Backend:
-        def stop(self):
-            stopped.append(True)
-            return {}
-    monkeypatch.setattr("xskill.team.client.service.get_backend",
-                        lambda: _Backend())
-    monkeypatch.setattr("xskill.team.client.service.clear_daemon_state",
-                        lambda: cleared.append(True))
-    connect_called = []
-    monkeypatch.setattr(cli, "cmd_connect",
-                        lambda a: connect_called.append(a) or 0)
-
-    code = cli.cmd_init(_args(no_skill=True, yes=True, force=True,
-                              address="h:1", token="T"))
+    code = cli.cmd_init(_args(yes=True, skills_only=True))
 
     assert code == 0
-    assert stopped == [True]
-    assert cleared == [True]
-    assert len(connect_called) == 1        # 停掉旧的后照常重连
+    assert scanned == []
+    assert install_recorder == ["claude_code", "cursor"]
 
 
-def test_noninteractive_missing_token_errors(monkeypatch):
-    monkeypatch.setattr("xskill.team.client.service.read_daemon_state",
-                        lambda: {"running": False})
-    connect_called = []
-    monkeypatch.setattr(cli, "cmd_connect",
-                        lambda a: connect_called.append(a) or 0)
+def test_no_skill_scans_without_installing(
+        detections, install_recorder, monkeypatch):
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: detections,
+    )
+    monkeypatch.setattr(
+        "xskill.config.get_team_client_state_path",
+        lambda: Path("/nonexistent/team_client.json"),
+    )
+    scanned = []
+    monkeypatch.setattr(
+        "xskill.ecosystems.local_bootstrap.ensure_local_sessions",
+        lambda **kwargs: scanned.append(True) or {"ran": True, "bridged": {}},
+    )
 
-    code = cli.cmd_init(_args(no_skill=True, yes=True, address="h:1", token=None))
+    code = cli.cmd_init(_args(yes=True, no_skill=True))
 
-    assert code == 2                       # 缺 token，非交互直接报错
-    assert connect_called == []
+    assert code == 0
+    assert scanned == [True]
+    assert install_recorder == []
+
+
+def test_harness_flag_installs_subset(
+        detections, install_recorder, monkeypatch):
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: detections,
+    )
+    monkeypatch.setattr(
+        "xskill.config.get_team_client_state_path",
+        lambda: Path("/nonexistent/team_client.json"),
+    )
+    monkeypatch.setattr(
+        "xskill.ecosystems.local_bootstrap.ensure_local_sessions",
+        lambda **kwargs: {"ran": False, "reason": "already"},
+    )
+
+    code = cli.cmd_init(_args(yes=True, harness=["cursor"]))
+
+    assert code == 0
+    assert install_recorder == ["cursor"]
+
+
+def test_force_passed_to_ensure(detections, install_recorder, monkeypatch):
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: detections,
+    )
+    monkeypatch.setattr(
+        "xskill.config.get_team_client_state_path",
+        lambda: Path("/nonexistent/team_client.json"),
+    )
+    seen = []
+    monkeypatch.setattr(
+        "xskill.ecosystems.local_bootstrap.ensure_local_sessions",
+        lambda **kwargs: seen.append(kwargs) or {"ran": True, "bridged": {}},
+    )
+
+    code = cli.cmd_init(_args(yes=True, force=True, no_skill=True))
+
+    assert code == 0
+    assert seen[0]["force"] is True
+
+
+def _patch_init_common(monkeypatch, detections):
+    monkeypatch.setattr(
+        "xskill.ecosystems.detect_known_ecosystems",
+        lambda home_root=None: detections,
+    )
+    monkeypatch.setattr(
+        "xskill.config.get_team_client_state_path",
+        lambda: Path("/nonexistent/team_client.json"),
+    )
+    monkeypatch.setattr(
+        "xskill.ecosystems.local_bootstrap.ensure_local_sessions",
+        lambda **kwargs: {"ran": False, "reason": "already"},
+    )
+
+
+def test_interactive_skip_connect_is_success(
+        detections, install_recorder, monkeypatch, capsys):
+    _patch_init_common(monkeypatch, detections)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+
+    code = cli.cmd_init(_args(yes=False, no_skill=True))
+
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "已跳过连接" in captured.out
+    assert "xskill traj search" in captured.out
+    assert "xskill connect" in captured.out
+    assert "xskill serve --server" in captured.out
+    assert "缺少" not in captured.err
+    assert "必须带 --token" not in captured.err
+
+
+def test_interactive_empty_token_skips_connect(
+        detections, install_recorder, monkeypatch, capsys):
+    _patch_init_common(monkeypatch, detections)
+    answers = iter(["1", "hub.example.invalid", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    called = []
+    monkeypatch.setattr(
+        "xskill.cli.cmd_connect",
+        lambda args: called.append(args) or 0,
+    )
+
+    code = cli.cmd_init(_args(yes=False, no_skill=True))
+
+    assert code == 0
+    assert called == []
+    out = capsys.readouterr().out
+    assert "没有填写 token，已跳过连接" in out
+    assert "xskill connect hub.example.invalid --token <token>" in out
+
+
+def test_interactive_empty_address_skips_connect(
+        detections, install_recorder, monkeypatch, capsys):
+    _patch_init_common(monkeypatch, detections)
+    answers = iter(["1", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    called = []
+    monkeypatch.setattr(
+        "xskill.cli.cmd_connect",
+        lambda args: called.append(args) or 0,
+    )
+
+    code = cli.cmd_init(_args(yes=False, no_skill=True))
+
+    assert code == 0
+    assert called == []
+    assert "没有填写地址，已跳过连接" in capsys.readouterr().out
+
+
+def test_interactive_serve_option_does_not_connect(
+        detections, install_recorder, monkeypatch, capsys):
+    _patch_init_common(monkeypatch, detections)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "2")
+    called = []
+    monkeypatch.setattr(
+        "xskill.cli.cmd_connect",
+        lambda args: called.append(args) or 0,
+    )
+
+    code = cli.cmd_init(_args(yes=False, no_skill=True))
+
+    assert code == 0
+    assert called == []
+    out = capsys.readouterr().out
+    assert "xskill serve --server" in out
+    assert "不要用网上搜到的公共地址" in out
+
+
+def test_interactive_connect_when_both_filled(
+        detections, install_recorder, monkeypatch):
+    _patch_init_common(monkeypatch, detections)
+    answers = iter(["1", "10.0.0.2:8000", "tok-1", "u42"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    called = []
+    monkeypatch.setattr(
+        "xskill.cli.cmd_connect",
+        lambda args: called.append(args) or 0,
+    )
+
+    code = cli.cmd_init(_args(yes=False, no_skill=True))
+
+    assert code == 0
+    assert len(called) == 1
+    assert called[0].address == "10.0.0.2:8000"
+    assert called[0].token == "tok-1"
+    assert called[0].name == "u42"
+
+
+def test_interactive_failed_connect_still_succeeds_init(
+        detections, install_recorder, monkeypatch, capsys):
+    _patch_init_common(monkeypatch, detections)
+    answers = iter(["1", "10.0.0.2:8000", "bad", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr("xskill.cli.cmd_connect", lambda args: 2)
+
+    code = cli.cmd_init(_args(yes=False, no_skill=True))
+
+    assert code == 0
+    assert "本机引导已经完成" in capsys.readouterr().out

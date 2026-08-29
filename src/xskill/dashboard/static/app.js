@@ -1294,6 +1294,12 @@ function pmRenderBubbles() {
   html += `<div class="pm-bubble ring-1 ring-slate-200"><span class="k">模型请求</span><span class="v">${llm.inflight || 0}</span></div>`;
   if (quotaWait > 0) html += `<div class="pm-bubble warn ring-1 ring-slate-200"><span class="pm-dot"></span><span class="k">配额排队</span><span class="v">${quotaWait}</span></div>`;
   html += `<div class="pm-bubble ring-1 ring-slate-200"><span class="k">未归类原子</span><span class="v">${d.pending_atoms || 0}</span></div>`;
+  const reverseSync = d.reverse_sync || {};
+  const reverseFailures = Array.isArray(reverseSync.failures) ? reverseSync.failures : [];
+  if (reverseFailures.length > 0) {
+    const detail = reverseFailures.map(f => `${f.skill || '未知技能'} · ${f.ecosystem || '未知生态'} · ${f.error_type || 'REVERSE_SYNC_FAILED'}`).join('\n');
+    html += `<div class="pm-bubble bad ring-1 ring-slate-200" title="${esc(detail)}"><span class="pm-dot"></span><span class="k">回流受阻</span><span class="v">${reverseFailures.length}</span></div>`;
+  }
   if (failed > 0) html += `<div class="pm-bubble bad ring-1 ring-slate-200"><span class="pm-dot"></span><span class="k">异常</span><span class="v">${failed}</span></div>`;
   for (const p of PM_POOLS) {
     const pool = d.pools[p.key] || {};

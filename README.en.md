@@ -102,6 +102,23 @@ embedding:
   dim:      0
 ```
 
+The `llm` block is the shared default. If you already have a config, you can leave it as-is.
+
+Want a different model or endpoint for split, cluster, or edit? Add an optional `llm_agents` block. You can skip it entirely. Any stage or field you leave out falls back to `llm_skill` (if you have one), then to `llm`. `xskill generate` still uses `llm` and `llm_skill` only. After changing these, just restart `xskill serve`.
+
+```yaml
+# optional — leave this out and all three stages keep using `llm` above
+llm_agents:
+  split:
+    model: qwen-plus
+  cluster:
+    model: deepseek-v4-flash
+  edit:
+    base_url: http://localhost:8000/v1
+    model: local-skill-editor
+    api_key: local
+```
+
 Run `xskill serve` again — it auto-detects every supported agent on your machine and starts watching. To backfill an archive of older trajectories:
 
 ```bash
@@ -114,8 +131,10 @@ One machine is the server; everyone else joins as a thin client and works agains
 
 ```bash
 xskill serve --server                          # prints a join token
-xskill connect <host:port> --token <token>     # on each teammate's machine
+xskill connect <host:port> --token <token> --name <user-id>
 ```
+
+After connect succeeds, type `/xskill-helper` in Claude Code, Codex, Cursor, or another detected agent to see generate, search, and upgrade. If you do not have a host and token yet, treat the command above as the example and ask your own server operator. Do not connect to a public instance.
 
 - **Silently distill your top performers** — one person's solution reaches the whole team automatically.
 - **Any workflow plugs in** — Codex, Claude Code, Cursor IDE; everyone joins the same library, synced across tools.
@@ -159,17 +178,34 @@ xskill stop / xskill start                    # stop / re-start (must have conne
 
 On **macOS / Linux**, native persistence (launchd / systemd --user) is still on the way; for now run the foreground form `xskill connect --foreground` under your own init system.
 
-#### Search / share skills on demand (skillhub)
+#### Search and share skills on demand (SkillHub)
+
+In addition to personalized recommendations from the server, you can search, download, and publish skills directly:
 
 ```bash
-xskill search docker compose   # return compact metadata and skill IDs only
-xskill search docker --download  # legacy 10-slot LRU download and auto-install
-xskill download <skill-id>     # interactively select target harnesses
-xskill download <skill-id> --agent claude-code --agent codex -y
-xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md); instantly searchable by the team
+xskill search <keywords>                                      # search skills, returning metadata and IDs
+xskill download <skill-id>                                    # interactively select target agents to install
+xskill download <skill-id> --agent claude-code --agent codex -y  # non-interactive install to specified agents
+xskill upload ./my-skill                                      # package and share a local skill with your team
+xskill search <keywords> --download                           # temporary search and install into rotating slots
 ```
 
-`search` combines BM25 keyword and semantic-vector ranking, independently of the recommendation profile. If embeddings are unavailable it falls back to BM25. By default it returns compact metadata, ranks, and IDs without changing the local machine. `search --download` preserves the original `~/.xskill/search_skills/` **10-slot** rolling LRU behavior. `download` persistently downloads one ID: humans can interactively select harnesses, while agents and scripts should repeat `--agent` and add `-y`; `-y` alone selects all detected harnesses. `upload` lands under `skillhub/user_skill_hub/<your-username>/` on the server. Semantic search for local trajectories/skills has been removed from the CLI (no more `xskill search traj|skill <query>`); use the dashboard or the API (`POST /api/v1/skills/search`) instead.
+`search` uses hybrid keyword and semantic-vector ranking. `download` persistently installs a skill to chosen harnesses. `upload` publishes a skill folder (containing `SKILL.md`) so the rest of the team can find and use it immediately.
+
+#### Search and inspect session trajectories
+
+When tackling challenging bugs or complex workflows, query team or local session histories (trajectories) and distilled atomic tasks (Atoms) to view proven solutions and diagnostic steps:
+
+```bash
+xskill traj search "memory leak"                               # search relevant session trajectories
+xskill traj search --name alice,bob "memory leak"              # narrow search to specific team members
+xskill traj read <traj_id> --offset-start 1 --offset-end 100   # read transcript lines within a specific range
+
+xskill atom search "oauth token refresh"                       # search distilled atomic task segments
+xskill atom read <atom_id>                                     # read transcript lines for a specific Atom
+```
+
+Standalone readiness: `xskill traj search` works out of the box after `pip install xskill` without requiring a server connection. The first search automatically scans local harnesses and builds an index, or you can run `xskill init` for guided setup. When connected to a team server, searches query the team catalog by default; pass `--local` to search this machine only.
 
 * * *
 
@@ -208,6 +244,7 @@ xskill upload ./my-skill       # package & upload a skill folder (with SKILL.md)
 
 ## 📰 News
 
+- **2026-08-27** `v0.7.0`: Generate reads trajectories with traj_search, traj_cards, atom_search, and read_traj, and can append to the wiki incrementally; `xskill init` can skip joining a team and will not disconnect an existing client.
 - **2026-08-17** `v0.6.32a1`: Newest trajectories are split and clustered first; admins can hot-change pool seats and LLM weights; generate waiting for an LLM slot always goes first; imported skills that already meet SkillEdit triggers take an edit seat before distilled ones.
 - **2026-08-14** `v0.6.31`: `xskill rebuild --force` no longer dies on a non-empty `.git/objects` directory; a full rebuild keeps skills brought in with `xskill import` and only wipes distilled ones.
 - **2026-08-14** `v0.6.30`: Team `xskill import` pins the skill onto the initiator's recommendation list; the skills library shows a hollow star to pin into your feed, plus whether a skill is already pushed or pinned; imported skills appear in the library list immediately.

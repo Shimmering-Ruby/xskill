@@ -19,7 +19,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 
@@ -152,6 +151,58 @@ def test_reverse_sync_rejects_three_way_content_conflict(tmp_path):
     ) == "dest v2\n"
 
 
+def test_reverse_sync_keeps_binary_newline_differences_as_conflict(tmp_path):
+    """二进制内容即使只差 CRLF，也不能绕过逐字节三方冲突。"""
+    from xskill.agents import user_edit_absorb_agent as user_absorb
+
+    src = _build_real_skill_repo(tmp_path)
+    binary_source = src / "references" / "sample.bin"
+    binary_source.parent.mkdir()
+    binary_source.write_bytes(b"baseline\n\x00payload")
+    dest = tmp_path / "out" / "demo-skill"
+    dest.parent.mkdir(parents=True)
+    install_dir(src, dest, force_mode="copy")
+    binary_source.write_bytes(b"baseline\r\n\x00payload")
+    (dest / "references" / "sample.bin").write_bytes(
+        b"dest-edit\r\n\x00payload",
+    )
+
+    assert user_absorb.reverse_sync_copy_dest(
+        dest, src, quiet_seconds=0,
+    ) == user_absorb.ReverseSyncStatus.FAILED
+    assert binary_source.read_bytes() == b"baseline\r\n\x00payload"
+
+
+def test_reverse_sync_skips_newline_fallback_on_normal_dest_edit(
+    tmp_path, monkeypatch,
+):
+    """源文件仍精确匹配基线时，不增加换行规范化读取。"""
+    from xskill.agents import user_edit_absorb_agent as user_absorb
+
+    src = _build_real_skill_repo(tmp_path)
+    dest = tmp_path / "out" / "demo-skill"
+    dest.parent.mkdir(parents=True)
+    install_dir(src, dest, force_mode="copy")
+    (dest / "SKILL.md").write_text("dest edit\n", encoding="utf-8")
+    original_hash = user_absorb._hash_verified_file
+    normalized_hash_calls = 0
+
+    def count_normalized_hash(*args, **kwargs):
+        nonlocal normalized_hash_calls
+        if kwargs.get("normalize_utf8_newlines"):
+            normalized_hash_calls += 1
+        return original_hash(*args, **kwargs)
+
+    monkeypatch.setattr(
+        user_absorb, "_hash_verified_file", count_normalized_hash,
+    )
+
+    assert user_absorb.reverse_sync_copy_dest(
+        dest, src, quiet_seconds=0,
+    ) == user_absorb.ReverseSyncStatus.SYNCED
+    assert normalized_hash_calls == 0
+
+
 def test_reverse_sync_detects_edit_with_restored_mtime(tmp_path):
     from xskill.agents import user_edit_absorb_agent as user_absorb
 
@@ -230,7 +281,7 @@ def test_auto_reset_reverse_sync_failure_preserves_destination(
     (dest / "SKILL.md").write_text(
         "UNSYNCED USER EDIT\n", encoding="utf-8",
     )
-    real_reverse_sync = user_absorb.reverse_sync_copy_dest
+    real_reverse_sync = user_absorb.reverse_sync_copy_dest_result
 
     def reverse_without_quiet_period(dest_dir, source_dir):
         return real_reverse_sync(
@@ -244,7 +295,7 @@ def test_auto_reset_reverse_sync_failure_preserves_destination(
 
     monkeypatch.setattr(
         user_absorb,
-        "reverse_sync_copy_dest",
+        "reverse_sync_copy_dest_result",
         reverse_without_quiet_period,
     )
     monkeypatch.setattr(
@@ -255,7 +306,7 @@ def test_auto_reset_reverse_sync_failure_preserves_destination(
         with pytest.raises(InstallSafetyError) as raised:
             install_dir(src, dest, force_mode="copy", auto_reset=True)
 
-    assert raised.value.error_type == "REVERSE_SYNC_FAILED"
+    assert raised.value.error_type == "REVERSE_SYNC_STAGE_FAILED"
     assert (dest / "SKILL.md").read_text(
         encoding="utf-8",
     ) == "UNSYNCED USER EDIT\n"
@@ -263,6 +314,26 @@ def test_auto_reset_reverse_sync_failure_preserves_destination(
     assert "reverse-secret" not in caplog.text
     assert "/root/private/reverse" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_reverse_sync_result_preserves_content_conflict_reason(tmp_path):
+    """详细 API 透传底层原因，旧状态 API 仍保持兼容。"""
+    from xskill.agents import user_edit_absorb_agent as user_absorb
+
+    src = _build_real_skill_repo(tmp_path)
+    dest = tmp_path / "out" / "demo-skill"
+    dest.parent.mkdir(parents=True)
+    install_dir(src, dest, force_mode="copy")
+    time.sleep(1.1)
+    (src / "SKILL.md").write_text("SOURCE EDIT\n", encoding="utf-8")
+    (dest / "SKILL.md").write_text("DEST EDIT\n", encoding="utf-8")
+
+    result = user_absorb.reverse_sync_copy_dest_result(
+        dest, src, quiet_seconds=0,
+    )
+
+    assert result.status == user_absorb.ReverseSyncStatus.FAILED
+    assert result.error_type == "REVERSE_SYNC_CONTENT_CONFLICT"
 
 
 @pytest.mark.skipif(
