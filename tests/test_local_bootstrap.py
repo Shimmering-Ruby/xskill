@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from xskill.ecosystems import local_bootstrap as lb
@@ -24,6 +25,31 @@ def _write_nested_cursor_transcript(home: Path, body: str | None = None) -> Path
         encoding="utf-8",
     )
     return path
+
+
+def _write_flat_and_nested_cursor_same_sid(home: Path) -> None:
+    body = _CURSOR_FIXTURE.read_text(encoding="utf-8")
+    transcripts = (
+        home / ".cursor" / "projects" / "home-admin" / "agent-transcripts"
+    )
+    transcripts.mkdir(parents=True)
+    (transcripts / "sid-aaaa-bbbb.jsonl").write_text(body, encoding="utf-8")
+    nested = transcripts / "sid-aaaa-bbbb"
+    nested.mkdir()
+    (nested / "sid-aaaa-bbbb.jsonl").write_text(body, encoding="utf-8")
+
+
+def _write_empty_opencode_db(home: Path) -> None:
+    db = home / ".local" / "share" / "opencode" / "opencode.db"
+    db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, time_updated INTEGER)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _index_existing_cc(home: Path) -> None:
@@ -214,6 +240,51 @@ def test_ensure_fills_empty_cursor_when_other_harness_indexed(tmp_path):
     assert state["bridged"]["claude_code"] == 1
     assert state["bridged"]["cursor"] >= 1
 
+    second = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert second["ran"] is False
+    assert second["reason"] == "already"
+
+
+def test_same_cursor_sid_flat_and_nested_is_not_pending_after_one_bridge(tmp_path):
+    _write_flat_and_nested_cursor_same_sid(tmp_path)
+    _index_existing_cc(tmp_path)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        json.dumps({
+            "version": 1,
+            "harnesses": ["claude_code", "cursor"],
+            "bridged": {"claude_code": 1, "cursor": 0},
+        }),
+        encoding="utf-8",
+    )
+
+    first = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert first["ran"] is True
+    assert first["reason"] == "filled_empty"
+    assert first["bridged"].get("cursor", 0) == 1
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == []
+
+    second = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert second["ran"] is False
+    assert second["reason"] == "already"
+    assert second.get("bridged") is None
+
+
+def test_empty_opencode_db_does_not_repeat_ingest(tmp_path):
+    _write_empty_opencode_db(tmp_path)
+    _index_existing_cc(tmp_path)
+    (tmp_path / ".xskill" / "local_init.json").write_text(
+        json.dumps({
+            "version": 1,
+            "harnesses": ["claude_code", "opencode"],
+            "bridged": {"claude_code": 1, "opencode": 0},
+        }),
+        encoding="utf-8",
+    )
+
+    assert lb.pending_local_ingest_ecosystems(tmp_path) == []
+    first = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
+    assert first["ran"] is False
+    assert first["reason"] == "already"
     second = lb.ensure_local_sessions(home_root=tmp_path, skip_if_server=False)
     assert second["ran"] is False
     assert second["reason"] == "already"

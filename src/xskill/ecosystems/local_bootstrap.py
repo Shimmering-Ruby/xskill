@@ -156,21 +156,26 @@ def _bridge_index_empty(bridge: Path) -> bool:
 def _jsonl_needs_ingest(eco: str, home_root: Path, bridge: Path) -> bool:
     spec = _jsonl_spec_for(eco)
     if spec is None:
-        return _bridge_index_empty(bridge)
+        # OpenCode / ngagent / Trae 不是 JSONL。空库也会被探测到，
+        # 不能只看 bridge 空就 pending，否则 --local 每次重扫。
+        return False
     glob = spec.sessions_glob
     root = spec.sessions_path(home_root)
     if not glob or not root.is_dir():
         return False
-    source_n = 0
-    for _path in root.glob(glob):
-        source_n += 1
-        if source_n == 1 and _bridge_index_empty(bridge):
+    source_ids: set[str] = set()
+    for path in root.glob(glob):
+        sid = spec.session_id_from_path(path)
+        if not sid:
+            continue
+        source_ids.add(sid)
+        if len(source_ids) == 1 and _bridge_index_empty(bridge):
             return True
-    if source_n == 0:
+    if not source_ids:
         return False
     from xskill.traj_search import session_index_count
 
-    return session_index_count(Path(bridge)) < source_n
+    return session_index_count(Path(bridge)) < len(source_ids)
 
 
 def pending_local_ingest_ecosystems(home_root: Path) -> list[str]:
