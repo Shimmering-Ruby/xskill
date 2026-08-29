@@ -9,8 +9,8 @@
     "file": "officeqa_full.csv",
     "file_size_bytes": 154868,
     "git_blob_sha1": "b9edb082f3143783634b5efc8c6258055a281b1e",
-    "sha256": null,
-    "sha256_status": "must be recorded after authorized gated download"
+    "sha256": "b0b270d15acdd04dcdc6ca389f089010ffe2b8453dbb400343229ea73b66c6d7",
+    "sha256_status": "verified from an authorized gated download"
   },
   "scorer": {
     "repository": "databricks/officeqa",

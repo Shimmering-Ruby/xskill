@@ -38,7 +38,9 @@ def test_officeqa_full_manifest_provenance_is_pinned():
     assert source["revision"] == "8ecbf18d3833daf4750a903d14963e4c4c1d4cd8"
     assert source["file"] == "officeqa_full.csv"
     assert source["git_blob_sha1"] == "b9edb082f3143783634b5efc8c6258055a281b1e"
-    assert source["sha256"] is None
+    assert source["sha256"] == (
+        "b0b270d15acdd04dcdc6ca389f089010ffe2b8453dbb400343229ea73b66c6d7"
+    )
     assert scorer["commit"] == "7b9a3c154ef9fb40215bb67934afc43e6799de16"
     assert scorer["sha256"] == (
         "0d91698c87df6d889339aac36f63ae0966607f169890b0bf8b472b26bfe8138f"
