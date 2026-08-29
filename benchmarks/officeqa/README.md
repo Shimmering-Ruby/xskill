@@ -16,6 +16,7 @@ Microsoft SkillOpt 另行发布了基于 OfficeQA Full 的 ID-only manifest，tr
 |---|---|---|
 | OfficeQA 数据集 | `databricks/officeqa@8ecbf18d3833daf4750a903d14963e4c4c1d4cd8` | SkillOpt manifest 固定的 revision，HF API 可核验 |
 | Full 数据文件 | `officeqa_full.csv`，154868 bytes，Git blob `b9edb082f3143783634b5efc8c6258055a281b1e` | gated 文件不入库；授权下载 SHA-256 为 `b0b270d15acdd04dcdc6ca389f089010ffe2b8453dbb400343229ea73b66c6d7` |
+| Full 文档语料 | `treasury_bulletins_parsed/transformed` 根目录下 697 个 TXT，共 383162413 bytes | 按文件名排序后，对 `UTF-8 文件名 + NUL + 小写文件 SHA-256 + LF` 串联值计算的树 SHA-256 为 `851bfc5dbf2fc42abb1cc5aa4a4b5de872cf1f3b473d8cf6dd8f7c637d0c7d24` |
 | 官方评分代码 | `databricks/officeqa@7b9a3c154ef9fb40215bb67934afc43e6799de16:reward.py` | SHA-256 `0d91698c87df6d889339aac36f63ae0966607f169890b0bf8b472b26bfe8138f` |
 | 数值容差 | `0.0` | 上述 `score_answer()` 的默认值；每次运行仍须显式记录 |
 | UID 来源 | `microsoft/SkillOpt@da06b157cb9878e378663ee1ecf429c83fe1a8f9:data/officeqa_id_split` | 仅用于公开 UID/difficulty 清单 |
@@ -34,7 +35,7 @@ hf download databricks/officeqa officeqa_full.csv README.md --repo-type dataset 
 hf download databricks/officeqa --repo-type dataset --revision "$OFFICEQA_REVISION" --include 'treasury_bulletins_parsed/transformed/*.txt' --exclude 'treasury_bulletins_parsed/transformed/*.zip' --local-dir "$OFFICEQA_DATA_DIR"
 ```
 
-固定 revision 的 `treasury_bulletins_transformed.zip` 只有 696 个 TXT，并缺少 Full CSV 引用的 `treasury_bulletin_2025_09.txt`；因此复现命令直接下载 697 个独立 TXT。对 CSV 执行 `sha256sum`（Windows 可用 `Get-FileHash -Algorithm SHA256`），并确认 SHA-256、246 个唯一 UID、113 个 `easy`、133 个 `hard` 以及全部引用文件都符合 manifest。不要把 CSV、问题、答案、语料、逐题预测或完整模型轨迹提交到 Git。
+固定 revision 的 `treasury_bulletins_transformed.zip` 只有 696 个 TXT，并缺少 Full CSV 引用的 `treasury_bulletin_2025_09.txt`；因此复现命令直接下载根目录下 697 个独立 TXT。不要把 ZIP 解压产物或 `__MACOSX` 目录混进该目录，因为递归检索会把额外的 `.txt` 也带入模型工作区。对 CSV 执行 `sha256sum`（Windows 可用 `Get-FileHash -Algorithm SHA256`），并确认 CSV 哈希、完整语料树哈希、246 个唯一 UID、113 个 `easy`、133 个 `hard` 以及全部引用文件都符合 manifest。不要把 CSV、问题、答案、语料、逐题预测或完整模型轨迹提交到 Git。
 
 ## 使用官方评分器
 

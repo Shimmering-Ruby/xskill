@@ -33,6 +33,7 @@ def test_officeqa_full_manifest_is_complete_and_contains_no_gated_payload():
 def test_officeqa_full_manifest_provenance_is_pinned():
     manifest = _load_manifest()
     source = manifest["source"]
+    corpus = manifest["corpus"]
     scorer = manifest["scorer"]
 
     assert source["revision"] == "8ecbf18d3833daf4750a903d14963e4c4c1d4cd8"
@@ -41,6 +42,17 @@ def test_officeqa_full_manifest_provenance_is_pinned():
     assert source["sha256"] == (
         "b0b270d15acdd04dcdc6ca389f089010ffe2b8453dbb400343229ea73b66c6d7"
     )
+    assert corpus == {
+        "relative_dir": "treasury_bulletins_parsed/transformed",
+        "file_glob": "*.txt",
+        "file_count": 697,
+        "total_size_bytes": 383162413,
+        "tree_sha256": "851bfc5dbf2fc42abb1cc5aa4a4b5de872cf1f3b473d8cf6dd8f7c637d0c7d24",
+        "tree_hash_format": (
+            "SHA-256 over root-level files sorted by name; each entry is UTF-8 "
+            "filename, NUL, lowercase file SHA-256, LF"
+        ),
+    }
     assert scorer["commit"] == "7b9a3c154ef9fb40215bb67934afc43e6799de16"
     assert scorer["sha256"] == (
         "0d91698c87df6d889339aac36f63ae0966607f169890b0bf8b472b26bfe8138f"

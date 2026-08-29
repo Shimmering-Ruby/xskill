@@ -12,6 +12,14 @@
     "sha256": "b0b270d15acdd04dcdc6ca389f089010ffe2b8453dbb400343229ea73b66c6d7",
     "sha256_status": "verified from an authorized gated download"
   },
+  "corpus": {
+    "relative_dir": "treasury_bulletins_parsed/transformed",
+    "file_glob": "*.txt",
+    "file_count": 697,
+    "total_size_bytes": 383162413,
+    "tree_sha256": "851bfc5dbf2fc42abb1cc5aa4a4b5de872cf1f3b473d8cf6dd8f7c637d0c7d24",
+    "tree_hash_format": "SHA-256 over root-level files sorted by name; each entry is UTF-8 filename, NUL, lowercase file SHA-256, LF"
+  },
   "scorer": {
     "repository": "databricks/officeqa",
     "repository_url": "https://github.com/databricks/officeqa",
