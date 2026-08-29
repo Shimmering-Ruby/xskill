@@ -51,6 +51,39 @@ python -m scripts.bench.officeqa.evaluate --csv "$OFFICEQA_DATA_DIR/officeqa_ful
 
 校验器会验证 gated CSV、公开 UID、难度分布、引用语料、评分器哈希和逐题结果 schema，并用固定评分器重新计算所有已有预测。只有 manifest 中的 246 个 UID 全部具有可评分预测时才会产生 `official_full_accuracy`；子集、不完整结果以及含 `invalid`、`timeout`、`infra_error` 或 `skipped` 的结果都不会被标记为官方 Full 成绩。
 
+## 执行 smoke
+
+Runner 面向通用 OpenAI-compatible Chat Completions endpoint，API key 只从指定环境变量读取，真实 endpoint 和密钥都不会写入运行元数据：
+
+```bash
+export OFFICEQA_API_KEY='从本机密钥环境安全加载'
+export OFFICEQA_BASE_URL='http://127.0.0.1:18080/v1'
+export OFFICEQA_MODEL='your-model-id'
+export OFFICEQA_OUTPUT_DIR="$HOME/.cache/xskill/officeqa/runs/model-smoke"
+python -m scripts.bench.officeqa.run --csv "$OFFICEQA_DATA_DIR/officeqa_full.csv" --corpus-dir "$OFFICEQA_DATA_DIR/treasury_bulletins_parsed/transformed" --manifest benchmarks/officeqa/manifests/officeqa_full.json --output-dir "$OFFICEQA_OUTPUT_DIR" --base-url "$OFFICEQA_BASE_URL" --api-key-env OFFICEQA_API_KEY --model "$OFFICEQA_MODEL" --endpoint-label local-openai-compatible --context-window 131072 --uid UID0002 --max-output-tokens 1024 --final-output-tokens 512 --tool-call-limit 18 --max-rounds 12 --seed 0
+```
+
+状态机只允许有限的 `grep_files`、`read_file` 和 `calculate` 研究步骤，完全相同的工具调用只执行一次，研究轮次结束后只暴露 `submit_answer`，最后还保留一次无工具、低预算的直接答案请求。`--context-window` 只记录 endpoint 已配置的上下文窗口；seed、采样参数、工具预算、重试、reasoning 和最终提交配置都进入 run fingerprint，因此不同配置不能误用同一断点目录。
+
+默认请求不发送任何 thinking 专用字段。需要 chat-template thinking 的 endpoint 可以显式使用 `--enable-thinking`、`--preserve-thinking` 和 `--preserve-reasoning-content`；使用 `thinking.type` 协议的 endpoint 可以显式使用 `--thinking-type enabled --final-thinking-type disabled --preserve-reasoning-content`。不支持 `tool_choice` 的 endpoint 应使用 `--no-send-tool-choice`，Runner 不根据模型名猜测协议，也不会根据一条错误字符串暗中改变配置。
+
+`--request-retries` 在同一消息和工具历史上重试 408、409、429、5xx、连接错误和请求超时，并在上限内遵循 `Retry-After`；`--case-retries` 是请求级恢复仍失败后的外层保护。所有 case attempt 都写入 `attempts.jsonl` 并累计 Token、请求次数、重试次数与延迟。
+
+需要可复核成本时，应同时传入 `--price-label`、`--input-price-per-million-usd`、`--cached-input-price-per-million-usd` 和 `--output-price-per-million-usd`。Runner 会按每次响应报告的 cache miss、cache read 和 output Token 计算 USD 估值，并明确标记为 `estimated_from_reported_tokens`；没有完整价格快照时成本保持 `unavailable`，不会伪装成 Provider 账单。
+
+模型运行前会确认 `xskill` 实际导入自 Runner 所在 checkout，并要求 Git worktree 干净；代码 SHA、Python 版本和关键依赖版本写入 `run.json`。这避免从一个 worktree 启动脚本，却意外执行另一个 editable install 的工具实现。
+
+## 执行 Full
+
+移除 `--uid` 即按公开 manifest 顺序运行全部 246 题；`results.jsonl` 和 `attempts.jsonl` 支持 UID 级断点续跑，同一个输出目录只接受完全相同的 run fingerprint：
+
+```bash
+export OFFICEQA_OUTPUT_DIR="$HOME/.cache/xskill/officeqa/runs/model-full"
+python -m scripts.bench.officeqa.run --csv "$OFFICEQA_DATA_DIR/officeqa_full.csv" --corpus-dir "$OFFICEQA_DATA_DIR/treasury_bulletins_parsed/transformed" --manifest benchmarks/officeqa/manifests/officeqa_full.json --output-dir "$OFFICEQA_OUTPUT_DIR" --base-url "$OFFICEQA_BASE_URL" --api-key-env OFFICEQA_API_KEY --model "$OFFICEQA_MODEL" --endpoint-label local-openai-compatible --context-window 131072 --max-output-tokens 512 --tool-call-limit 16 --max-rounds 10
+```
+
+Runner 会修复进程中断留下的最后一条不完整 JSONL 记录，再从最后一个确定终态继续。默认遇到 `invalid`、耗尽重试的超时或不可重试基础设施错误就写出诊断摘要并返回非零，不继续消耗剩余样本；`--continue-on-nonscorable` 只用于显式诊断。只有选中 246 题、每题都有 `pass` 或 `fail` 终态时，独立校验器才生成 `official_full_accuracy`。
+
 ## Full manifest
 
 [`manifests/officeqa_full.json`](manifests/officeqa_full.json) 只包含 UID 和 difficulty，并记录完整来源链。它可以用来检查 gated CSV 是否缺题、重复或混入 Pro V2，但本身不能执行评测，也不能还原问题和答案。
@@ -67,4 +100,4 @@ python -m scripts.bench.officeqa.evaluate --csv "$OFFICEQA_DATA_DIR/officeqa_ful
 
 `run.json`、`results.jsonl`、`summary.json` 和 spill 文件都必须留在仓库外；对外只分享经过复核且不包含 gated 问题、答案、预测或私有 endpoint 的聚合摘要。
 
-通用可续跑 runner 和真实 OfficeQA Full 运行结果仍应由后续独立 PR 提交。
+真实 OfficeQA Full 运行结果仍应由后续独立 PR 提交。
