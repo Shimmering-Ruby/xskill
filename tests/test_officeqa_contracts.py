@@ -1,8 +1,7 @@
-"""SkillOpt 划分与实验约定文件的测试。"""
+"""SkillOpt 数据划分与实验规范测试。"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from scripts.bench.officeqa.contracts import (

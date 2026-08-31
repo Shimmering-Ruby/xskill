@@ -1,15 +1,15 @@
-# 实验产出放哪里
+# 实验产出存放说明
 
-真实跑分不要默认提交进 Git。可以放在本目录，或放在 `~/.cache/xskill/officeqa/runs/<run_id>/`。
+真实的实验跑分数据请勿直接提交到 Git 仓库中。建议存放在本目录，或保存在本地缓存路径 `~/.cache/xskill/officeqa/runs/<run_id>/` 下。
 
-每次实验通常会有（一次实验 = 一个算法设定 + 一个做题模型）：
+每次实验通常包含以下文件（一次实验对应一个算法设定与一个做题模型）：
 
-- `run_config.json`（或 runner 写的 `run.json`）：这一次怎么跑（含 `model`）
-- 若是训练：`train_provenance.json`
-- 冻结技能：`skill/` 及其 SHA-256
-- `results.jsonl`：逐题结果
-- `summary.json`：汇总数字
+- `run_config.json`（或评测程序输出的 `run.json`）：记录本次实验的具体配置（包含 `model`）
+- `train_provenance.json`（若包含训练流程）：记录训练来源与数据设定
+- `skill/` 目录及其 SHA-256 哈希值：训练完成后固定并用于评测的技能包
+- `results.jsonl`：逐题评测明细
+- `summary.json`：汇总统计指标
 
-要测多个模型：每个模型单独一个目录或 `run_id`，不要混在同一份 `results.jsonl` 里。
+如果需要测试多个模型，请为每个模型建立独立的目录或配置独立的 `run_id`，不要将不同模型的结果混在同一个 `results.jsonl` 中。
 
-每趟具体要统计哪些字段，见上级目录 `what-these-files-are.md` 文首清单。
+每次实验具体需要记录的字段清单，请参考上级目录中的 `what-these-files-are.md`。

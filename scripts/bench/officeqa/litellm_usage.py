@@ -1,6 +1,6 @@
-"""从 LiteLLM 代理的 spend 日志里补 token / 费用。
+"""从 LiteLLM 代理的用量日志中提取 token 消耗与费用统计。
 
-不做判分。只根据请求里带的 metadata（如 run_id、uid）把用量填回结果。
+本模块仅负责用量回填，不参与题目判定与评分。
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ def aggregate_spend_logs_by_uid(
     *,
     run_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """按 metadata.uid 汇总 LiteLLM spend 日志。
+    """按 metadata.uid 聚合 LiteLLM 的费用与 token 消耗日志。
 
-    每条日志常见字段（不同版本名字可能略有差别，这里多认几种）：
-    - metadata.run_id / metadata.uid（或 spend_logs_metadata）
+    日志中支持识别的字段包括：
+    - metadata.run_id 与 metadata.uid（或 spend_logs_metadata）
     - prompt_tokens / completion_tokens / total_tokens
-    - spend（美元）
+    - spend（美元费用）
     - request_id
     """
     by_uid: dict[str, dict[str, Any]] = {}
@@ -65,7 +65,7 @@ def merge_usage_into_results(
     results: list[dict[str, Any]],
     usage_by_uid: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """把按 uid 汇总好的用量写回结果列表（浅拷贝每一行）。"""
+    """将按 uid 汇总的用量信息回填到逐题结果列表中（浅拷贝每一行）。"""
     out: list[dict[str, Any]] = []
     for row in results:
         item = dict(row)
@@ -89,9 +89,9 @@ def fetch_spend_logs(
     end_date: str,
     timeout_s: float = 60.0,
 ) -> list[dict[str, Any]]:
-    """向 LiteLLM 代理请求 /spend/logs?summarize=false。
+    """从 LiteLLM 代理接口获取用量日志（/spend/logs?summarize=false）。
 
-    api_key 从环境变量传入，不要写进仓库。
+    api_key 从环境变量传入，请勿写进代码或提交到仓库。
     """
     query = urlencode(
         {

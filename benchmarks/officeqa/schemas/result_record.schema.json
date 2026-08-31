@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/SkillNerds/xskill/benchmarks/officeqa/schemas/result_record.schema.json",
-  "title": "OfficeQA 单题结果",
-  "description": "results.jsonl 里的一行，表示一题的最终结果。不要把受控题目原文提交进 Git。",
+  "title": "OfficeQA 单题评测结果",
+  "description": "results.jsonl 中记录的单题结果明细。请勿将受保护的题目正文或私有数据提交至 Git 仓库。",
   "type": "object",
   "required": ["schema_version", "run_id", "uid", "status"],
   "properties": {
@@ -12,26 +12,26 @@
     "status": {
       "type": "string",
       "enum": ["pass", "fail", "invalid", "timeout", "infra_error", "skipped"],
-      "description": "pass=答对；fail=答错；timeout=超时（计分时与 fail 一样算未通过）；invalid=输出无法判分（计分也算未通过）；infra_error=基础设施错误；skipped=跳过。status 区分原因；准确率只有 pass 算对"
+      "description": "pass 表示答对；fail 表示答错；timeout 表示超时；invalid 表示输出无法解析；infra_error 表示基础设施异常；skipped 表示跳过。计算准确率时只有 pass 计为正确，其他均计为未通过。"
     },
     "difficulty": { "type": "string", "enum": ["easy", "hard"] },
     "is_correct": {
       "type": ["boolean", "null"],
-      "description": "是否答对；不可判分时可为 null"
+      "description": "是否判定为正确；无法判分时可为 null"
     },
     "pred_answer": {
       "type": ["string", "null"],
-      "description": "模型预测答案；对外分享前按数据许可决定是否删除"
+      "description": "模型输出的预测答案；对外分享前根据数据许可决定是否脱敏"
     },
-    "latency_ms": { "type": ["number", "null"], "description": "耗时（毫秒）" },
+    "latency_ms": { "type": ["number", "null"], "description": "单题耗时（毫秒）" },
     "usage": {
       "type": "object",
-      "description": "本题的 token 与费用",
+      "description": "单题的 token 消耗与费用统计",
       "properties": {
         "source": {
           "type": "string",
           "enum": ["litellm", "runner_reported", "missing"],
-          "description": "litellm=从 LiteLLM 补；runner_reported=runner 自己记；missing=没有采到"
+          "description": "litellm 表示从 LiteLLM 日志补充；runner_reported 表示评测程序自行记录；missing 表示未采集到"
         },
         "input_tokens": { "type": ["integer", "null"] },
         "output_tokens": { "type": ["integer", "null"] },
@@ -41,13 +41,13 @@
         "request_ids": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "相关请求 id，便于去 LiteLLM 对账"
+          "description": "关联的请求 ID 列表，便于在网关中对账"
         }
       }
     },
     "skill_sha256": { "type": "string" },
     "scorer_commit": { "type": "string" },
-    "attempts": { "type": "integer", "description": "本题尝试次数" }
+    "attempts": { "type": "integer", "description": "本题的尝试次数" }
   },
   "additionalProperties": true
 }

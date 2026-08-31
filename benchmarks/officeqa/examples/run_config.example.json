@@ -15,7 +15,7 @@
   "harness": {
     "id": "claude_code_native_skills",
     "tools": ["Read", "Write", "Edit", "Bash", "Skill"],
-    "notes": "示例只用 deepseek-v4-flash。换模型时新建 run_id，改 model 字段，不要和别的模型共用一份 results.jsonl。现成的 scripts/bench/officeqa/run.py 是另一套 OpenAI 兼容工具环境；实际用哪套就把 harness.id 写成哪套。"
+    "notes": "示例模型为 deepseek-v4-flash。测试不同模型时需新建 run_id 并修改 model 字段，不要与其它模型共用一份 results.jsonl。scripts/bench/officeqa/run.py 是另一套 OpenAI 兼容工具环境，实际使用哪套环境请在 harness.id 中如实记录。"
   },
   "scorer": {
     "commit": "7b9a3c154ef9fb40215bb67934afc43e6799de16",
@@ -35,7 +35,7 @@
     "case_retries": 1
   },
   "seed": 0,
-  "failure_policy": "timeout 在结果里单独标成 timeout（方便区分原因），计分时与 fail 一样算未通过；和榜单一致。准确率 = pass 数 / 全部应考题数（含 timeout）",
+  "failure_policy": "timeout 状态单独记录便于排查原因，在计算准确率时与 fail 同样计为未通过（准确率 = pass 数量 / 总题数，分母包含 timeout）",
   "usage": {
     "provider": "litellm",
     "metadata_keys": ["run_id", "uid", "phase", "algo"]

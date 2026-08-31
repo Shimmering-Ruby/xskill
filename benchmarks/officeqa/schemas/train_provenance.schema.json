@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/SkillNerds/xskill/benchmarks/officeqa/schemas/train_provenance.schema.json",
   "title": "OfficeQA 训练来源说明",
-  "description": "这个技能是怎么训出来的。论文主表分数应另用冻结技能做评测，不要用训练中的中间分。",
+  "description": "记录技能的训练来源与过程配置。论文中的最终成绩应使用训练完成后的冻结技能另行评测，不建议直接使用训练过程中的中间成绩。",
   "type": "object",
   "required": [
     "schema_version",
@@ -20,27 +20,27 @@
     "split_manifest_sha256": { "type": "string" },
     "train_uids_sha256": {
       "type": "string",
-      "description": "对本趟实际用于训练的题号（UID）名单计算的 SHA-256。先把 UID 按固定顺序排好再哈希。用来证明训了哪几道题；与仓库里的 SkillOpt 标准 train 划分不是同一个概念（例如 val 并进 train 后，这里对应合并后的那一子集）"
+      "description": "对本趟实际用于训练的题号（UID）名单计算的 SHA-256 哈希值。计算方式为将参与训练的 UID 按固定顺序排好后取哈希，用于核验训练使用的确切题目范围。注意：若将验证集合并入训练集，此处应为合并后子集的哈希值。"
     },
     "merge_val_into_train": {
       "type": "boolean",
-      "description": "是否把 val 并进 train。xskill 常见为 true；SkillOpt 常见为 false（val 用于 gate）"
+      "description": "是否将验证集（val）合并入训练集（train）。xskill 常见设定为 true；SkillOpt 常见设定为 false（保留 val 用于门禁筛选）"
     },
     "selection_split": {
       "type": ["string", "null"],
-      "description": "若用某一段数据做 gate / 选技能，填 val；否则填 null"
+      "description": "若使用某部分数据作为门禁或筛选技能，填写 val；否则填写 null"
     },
     "hyperparameters": {
       "type": "object",
-      "description": "训练超参，按算法自己填"
+      "description": "训练超参数，按具体算法记录"
     },
     "optimizer_backend": {
       "type": "string",
-      "description": "改技能文案用的后端，例如 openai_chat。不去做题。"
+      "description": "改写技能说明所用的后端，例如 openai_chat。该模块仅修改技能文本，不直接参与答题。"
     },
     "target_harness": {
       "type": "string",
-      "description": "训练时真正做题的环境，例如 claude_code_native_skills；应与正式评测一致。"
+      "description": "训练时模型做题所用的环境，例如 claude_code_native_skills，应与正式评测环境保持一致。"
     },
     "code": {
       "type": "object",
@@ -51,7 +51,7 @@
     },
     "skill_sha256": {
       "type": "string",
-      "description": "训练结束冻结技能的 SHA-256"
+      "description": "训练完成后交付并冻结的技能文件 SHA-256 哈希值"
     },
     "notes": { "type": "string" }
   },
